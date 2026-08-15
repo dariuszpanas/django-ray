@@ -798,7 +798,10 @@ def test_review_policy_workflows_execute_only_trusted_default_branch_code(
     workflow = _workflow(path)
     job = _jobs(path)[job_id]
 
-    assert workflow["permissions"] == {"contents": "read", "pull-requests": "read"}
+    expected_permissions = {"contents": "read", "pull-requests": "read"}
+    if workflow_name == "codex-review.yml":
+        expected_permissions["actions"] = "read"
+    assert workflow["permissions"] == expected_permissions
     assert set(_jobs(path)) == {job_id}
     assert job["timeout-minutes"] == timeout_minutes
     assert "if" not in job
@@ -847,7 +850,6 @@ def test_codex_review_has_bounded_exact_head_polling_and_draft_failure() -> None
 
     assert step["env"] == {
         "ACTION": "${{ github.event.action }}",
-        "BASE_CHANGED": "${{ github.event.changes.base != null }}",
         "BASE_REF": "${{ github.event.pull_request.base.ref }}",
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "BASELINE_TIME": "${{ github.event.pull_request.updated_at }}",
@@ -855,20 +857,20 @@ def test_codex_review_has_bounded_exact_head_polling_and_draft_failure() -> None
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
         "PR_NUMBER": "${{ github.event.pull_request.number }}",
         "RUN_ATTEMPT": "${{ github.run_attempt }}",
+        "RUN_ID": "${{ github.run_id }}",
     }
     assert "--mode codex" in step["run"]
     assert '--expected-base-ref "$BASE_REF"' in step["run"]
     assert '--expected-base-sha "$BASE_SHA"' in step["run"]
     assert '--expected-head "$HEAD_SHA"' in step["run"]
     assert '--action "$ACTION"' in step["run"]
-    assert "base_change_args=()" in step["run"]
-    assert 'if [ "$ACTION" = "edited" ]; then' in step["run"]
-    assert 'base_change_args=(--base-changed "$BASE_CHANGED")' in step["run"]
-    assert '"${base_change_args[@]}"' in step["run"]
     assert '--baseline-time "$BASELINE_TIME"' in step["run"]
+    assert '--workflow-run-id "$RUN_ID"' in step["run"]
     assert '--run-attempt "$RUN_ATTEMPT"' in step["run"]
     assert "--poll-timeout 900" in step["run"]
     assert "--poll-interval 60" in step["run"]
+    assert "BASE_CHANGED" not in step["run"]
+    assert "--base-changed" not in step["run"]
     assert "eval " not in step["run"]
 
 
@@ -988,6 +990,7 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
     combined = "".join(documents)
 
     for documentation in documents:
+        normalized_documentation = " ".join(documentation.split())
         for check_name in REQUIRED_CHECK_NAMES:
             assert f"`{check_name}`" in documentation
         assert "native required review-conversation resolution" in documentation
@@ -995,12 +998,14 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
         assert "django-ray:codex-review-head=<full current head SHA>" in documentation
         assert "current-head approval for every other author" in documentation
         assert "trusted event base ref, base SHA, and head SHA" in documentation
-        assert "base change requires a new Codex outcome" in documentation
-        assert "preserves only an existing" in documentation
-        assert "exact-head connector review" in documentation
+        assert (
+            "base change, or title- or body-only edit requires a new Codex outcome" in documentation
+        )
+        assert "existing exact-head connector review is not reusable" in normalized_documentation
         assert "pull-request root clean reaction" in documentation
         assert "deliberately not reusable" in documentation
-        assert "requires a new `+1` on a SHA-bound" in documentation
+        assert "new `+1` on a" in documentation
+        assert "SHA-bound maintainer request comment" in documentation
         assert "a pull-request root reaction never counts" in documentation
         assert "first automatic opened or ready run" in documentation
         assert "Every rerun ignores pull-request root reactions" in documentation

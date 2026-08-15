@@ -38,6 +38,10 @@ MAX_POLL_TIMEOUT_SECONDS = 900.0
 MAX_POLL_INTERVAL_SECONDS = 60.0
 MAX_REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_REQUEST_COMMENT_CANDIDATES = 20
+MAX_WORKFLOW_RUN_RECORDS = 100
+
+CODEX_WORKFLOW_FILE = "codex-review.yml"
+CODEX_WORKFLOW_PATH = f".github/workflows/{CODEX_WORKFLOW_FILE}"
 
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}\Z")
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -161,6 +165,17 @@ class PullRequest:
     author_id: int
     draft: bool
     state: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkflowRun:
+    """Trusted identity of the executing Codex review workflow run."""
+
+    run_id: int
+    run_number: int
+    run_attempt: int
+    created_at: datetime
 
 
 def _record(value: object, label: str) -> dict[str, Any]:
@@ -236,6 +251,7 @@ def _load_pull_request(api: RestApi, repository: str, number: int) -> PullReques
     author_id = _positive_int(author.get("id"), "pull request author ID")
     draft = payload.get("draft")
     state = payload.get("state")
+    updated_at = _timestamp(payload.get("updated_at"), "pull request update")
     if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
         raise ReviewPolicyError("pull request head is not a full lowercase commit SHA")
     if not isinstance(base_sha, str) or not SHA_RE.fullmatch(base_sha):
@@ -252,6 +268,7 @@ def _load_pull_request(api: RestApi, repository: str, number: int) -> PullReques
         author_id=author_id,
         draft=draft,
         state=state,
+        updated_at=updated_at,
     )
 
 
@@ -284,9 +301,9 @@ def _confirm_live_candidate(
     expected_head: str,
     expected_base_ref: str,
     expected_base_sha: str,
-) -> None:
+) -> PullRequest:
     """Close head/base races between observing a signal and returning success."""
-    _eligible_pull_request(
+    return _eligible_pull_request(
         api,
         repository,
         number,
@@ -294,6 +311,170 @@ def _confirm_live_candidate(
         expected_base_ref,
         expected_base_sha,
     )
+
+
+def _workflow_run_pull_request(
+    payload: dict[str, Any],
+    *,
+    pull_request_number: int,
+    expected_head: str,
+    expected_base_ref: str | None = None,
+    expected_base_sha: str | None = None,
+) -> bool:
+    pull_requests = payload.get("pull_requests")
+    if not isinstance(pull_requests, list) or len(pull_requests) > MAX_REQUEST_COMMENT_CANDIDATES:
+        raise ReviewPolicyError("Codex workflow run pull request associations are invalid")
+    matches: list[dict[str, Any]] = []
+    for value in pull_requests:
+        pull_request = _record(value, "Codex workflow run pull request")
+        number = _positive_int(pull_request.get("number"), "workflow run pull request number")
+        head = _record(pull_request.get("head"), "Codex workflow run pull request head")
+        head_sha = _commit_sha(head.get("sha"), "workflow run pull request head")
+        if number != pull_request_number:
+            continue
+        if head_sha != expected_head:
+            raise ReviewPolicyError(
+                "Codex workflow run identifies the pull request with a different head"
+            )
+        matches.append(pull_request)
+    if len(matches) > 1:
+        raise ReviewPolicyError("Codex workflow run repeats the pull request association")
+    if not matches:
+        return False
+    if expected_base_ref is None and expected_base_sha is None:
+        return True
+    if expected_base_ref is None or expected_base_sha is None:
+        raise ReviewPolicyError("Codex workflow run base expectation is incomplete")
+    pull_request = matches[0]
+    base = _record(pull_request.get("base"), "Codex workflow run pull request base")
+    if _base_ref(base.get("ref")) != expected_base_ref:
+        raise ReviewPolicyError("Codex workflow run identifies a different pull request base ref")
+    if _commit_sha(base.get("sha"), "workflow run pull request base") != expected_base_sha:
+        raise ReviewPolicyError("Codex workflow run identifies a different pull request base SHA")
+    return True
+
+
+def _workflow_run_identity(
+    payload: dict[str, Any],
+    *,
+    expected_head: str,
+) -> WorkflowRun:
+    run_id = _positive_int(payload.get("id"), "Codex workflow run ID")
+    run_number = _positive_int(payload.get("run_number"), "Codex workflow run number")
+    run_attempt = _positive_int(payload.get("run_attempt"), "Codex workflow run attempt")
+    if run_attempt > MAX_RUN_ATTEMPT:
+        raise ReviewPolicyError(f"workflow run attempt must be between 1 and {MAX_RUN_ATTEMPT}")
+    if payload.get("event") != "pull_request_target":
+        raise ReviewPolicyError("Codex workflow run has an unexpected event")
+    if payload.get("path") != CODEX_WORKFLOW_PATH:
+        raise ReviewPolicyError("Codex workflow run has an unexpected workflow path")
+    if _commit_sha(payload.get("head_sha"), "Codex workflow run head") != expected_head:
+        raise ReviewPolicyError("Codex workflow run identifies a different head")
+    return WorkflowRun(
+        run_id=run_id,
+        run_number=run_number,
+        run_attempt=run_attempt,
+        created_at=_timestamp(payload.get("created_at"), "Codex workflow run creation"),
+    )
+
+
+def _load_current_codex_workflow_run(
+    api: RestApi,
+    *,
+    repository: str,
+    pull_request_number: int,
+    expected_head: str,
+    expected_base_ref: str,
+    expected_base_sha: str,
+    workflow_run_id: int,
+    run_attempt: int,
+) -> WorkflowRun:
+    payload = _record(
+        api.get(f"/repos/{repository}/actions/runs/{workflow_run_id}"),
+        "current Codex workflow run",
+    )
+    workflow_run = _workflow_run_identity(
+        payload,
+        expected_head=expected_head,
+    )
+    if workflow_run.run_id != workflow_run_id:
+        raise ReviewPolicyError("GitHub returned a different Codex workflow run")
+    if workflow_run.run_attempt != run_attempt:
+        raise ReviewPolicyError("Codex workflow run attempt does not match the current attempt")
+    if not _workflow_run_pull_request(
+        payload,
+        pull_request_number=pull_request_number,
+        expected_head=expected_head,
+        expected_base_ref=expected_base_ref,
+        expected_base_sha=expected_base_sha,
+    ):
+        raise ReviewPolicyError("Codex workflow run does not identify this pull request")
+    return workflow_run
+
+
+def _confirm_codex_workflow_run_is_current(
+    api: RestApi,
+    *,
+    repository: str,
+    pull_request_number: int,
+    expected_head: str,
+    workflow_run: WorkflowRun,
+) -> bool:
+    created_bound = workflow_run.created_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+    query = urllib.parse.urlencode(
+        {
+            "event": "pull_request_target",
+            "head_sha": expected_head,
+            "created": f">={created_bound}",
+            "per_page": str(MAX_WORKFLOW_RUN_RECORDS),
+        }
+    )
+    payload = _record(
+        api.get(f"/repos/{repository}/actions/workflows/{CODEX_WORKFLOW_FILE}/runs?{query}"),
+        "Codex workflow runs",
+    )
+    total_count = payload.get("total_count")
+    records = payload.get("workflow_runs")
+    if (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count < 0
+        or total_count > MAX_WORKFLOW_RUN_RECORDS
+        or not isinstance(records, list)
+        or len(records) != total_count
+    ):
+        raise ReviewPolicyError("Codex workflow run history is incomplete or unbounded")
+
+    current_matches = 0
+    for value in records:
+        record = _record(value, "Codex workflow run history record")
+        candidate = _workflow_run_identity(
+            record,
+            expected_head=expected_head,
+        )
+        if candidate.created_at < workflow_run.created_at:
+            raise ReviewPolicyError("Codex workflow run history ignored its creation bound")
+        if not _workflow_run_pull_request(
+            record,
+            pull_request_number=pull_request_number,
+            expected_head=expected_head,
+        ):
+            continue
+        if candidate.run_id == workflow_run.run_id:
+            current_matches += 1
+            if (
+                candidate.run_number != workflow_run.run_number
+                or candidate.run_attempt != workflow_run.run_attempt
+                or candidate.created_at != workflow_run.created_at
+            ):
+                raise ReviewPolicyError("current Codex workflow run identity changed")
+        elif candidate.run_number >= workflow_run.run_number:
+            raise ReviewPolicyError(
+                "Codex workflow run was superseded by a newer pull request event"
+            )
+    if current_matches > 1:
+        raise ReviewPolicyError("current Codex workflow run is duplicated in bounded history")
+    return current_matches == 1
 
 
 def _reviews(api: RestApi, repository: str, number: int) -> list[dict[str, Any]]:
@@ -386,8 +567,9 @@ def _codex_review_signal(
     reviews: list[dict[str, Any]],
     *,
     expected_head: str,
-    not_before: datetime | None,
-) -> bool:
+    not_before: datetime,
+) -> datetime | None:
+    candidates: list[tuple[datetime, int]] = []
     for review in reviews:
         if not _is_actor(
             review,
@@ -399,14 +581,17 @@ def _codex_review_signal(
             review.get("commit_id") == expected_head
             and review.get("state") in ACCEPTED_CODEX_REVIEW_STATES
         ):
-            _positive_int(review.get("id"), "Codex review ID")
+            review_id = _positive_int(review.get("id"), "Codex review ID")
             submitted_at = _timestamp(review.get("submitted_at"), "Codex review timestamp")
-            if not_before is None or submitted_at > not_before:
-                return True
-    return False
+            if submitted_at > not_before:
+                candidates.append((submitted_at, review_id))
+    return max(candidates)[0] if candidates else None
 
 
-def _clean_codex_reaction(records: list[dict[str, Any]], *, not_before: datetime) -> bool:
+def _clean_codex_reaction(
+    records: list[dict[str, Any]], *, not_before: datetime
+) -> datetime | None:
+    candidates: list[tuple[datetime, int]] = []
     for reaction in records:
         if (
             not _is_actor(
@@ -417,10 +602,11 @@ def _clean_codex_reaction(records: list[dict[str, Any]], *, not_before: datetime
             or reaction.get("content") != "+1"
         ):
             continue
+        reaction_id = _positive_int(reaction.get("id"), "Codex reaction ID")
         created_at = _timestamp(reaction.get("created_at"), "Codex reaction timestamp")
         if created_at > not_before:
-            return True
-    return False
+            candidates.append((created_at, reaction_id))
+    return max(candidates)[0] if candidates else None
 
 
 def _root_reaction_signal(
@@ -429,7 +615,7 @@ def _root_reaction_signal(
     repository: str,
     pull_request_number: int,
     baseline_time: datetime,
-) -> bool:
+) -> datetime | None:
     reactions = api.paginate(f"/repos/{repository}/issues/{pull_request_number}/reactions")
     return _clean_codex_reaction(reactions, not_before=baseline_time)
 
@@ -490,7 +676,7 @@ def _request_comment_has_reaction(
     baseline_time: datetime,
     comment: dict[str, Any],
     require_match: bool,
-) -> bool:
+) -> datetime | None:
     updated_at = _request_comment_update(
         comment,
         repository=repository,
@@ -500,7 +686,7 @@ def _request_comment_has_reaction(
         require_match=require_match,
     )
     if updated_at is None:
-        return False
+        return None
     comment_id = _positive_int(comment.get("id"), "Codex request comment ID")
     reactions = api.paginate(f"/repos/{repository}/issues/comments/{comment_id}/reactions")
     not_before = max(baseline_time, updated_at)
@@ -515,7 +701,7 @@ def _comment_reaction_signal(
     expected_head: str,
     baseline_time: datetime,
     request_comment_id: int | None,
-) -> bool:
+) -> datetime | None:
     if request_comment_id is not None:
         comment = _record(
             api.get(f"/repos/{repository}/issues/comments/{request_comment_id}"),
@@ -551,7 +737,7 @@ def _comment_reaction_signal(
     if len(candidates) > MAX_REQUEST_COMMENT_CANDIDATES:
         raise ReviewPolicyError("too many matching Codex request comments")
     for _updated_at, _comment_id, comment in sorted(candidates, reverse=True):
-        if _request_comment_has_reaction(
+        signal = _request_comment_has_reaction(
             api,
             repository=repository,
             pull_request_number=pull_request_number,
@@ -559,9 +745,10 @@ def _comment_reaction_signal(
             baseline_time=baseline_time,
             comment=comment,
             require_match=True,
-        ):
-            return True
-    return False
+        )
+        if signal is not None:
+            return signal
+    return None
 
 
 def _bounded_poll_values(timeout: float, interval: float) -> tuple[float, float]:
@@ -586,8 +773,8 @@ def check_codex_policy(
     expected_base_sha: str,
     action: str,
     baseline_time: str | datetime,
+    workflow_run_id: int,
     run_attempt: int,
-    base_changed: bool | None = None,
     request_comment_id: int | None = None,
     poll_timeout: float = 600.0,
     poll_interval: float = 60.0,
@@ -600,6 +787,7 @@ def check_codex_policy(
     expected_head = _commit_sha(expected_head, "expected head")
     expected_base_ref = _base_ref(expected_base_ref)
     expected_base_sha = _commit_sha(expected_base_sha, "expected base SHA")
+    workflow_run_id = _positive_int(workflow_run_id, "Codex workflow run ID")
     if (
         isinstance(run_attempt, bool)
         or not isinstance(run_attempt, int)
@@ -608,11 +796,6 @@ def check_codex_policy(
         raise ReviewPolicyError(f"workflow run attempt must be between 1 and {MAX_RUN_ATTEMPT}")
     if action not in CODEX_ACTIONS:
         raise ReviewPolicyError("unsupported pull request action")
-    if action == "edited":
-        if not isinstance(base_changed, bool):
-            raise ReviewPolicyError("edited action requires an explicit base-changed value")
-    elif base_changed is not None:
-        raise ReviewPolicyError("base-changed is only valid for the edited action")
     parsed_baseline = (
         baseline_time.astimezone(UTC)
         if isinstance(baseline_time, datetime)
@@ -639,6 +822,16 @@ def check_codex_policy(
     )
     if action == "converted_to_draft":
         raise ReviewPolicyError("converted-to-draft pull requests cannot satisfy review policy")
+    workflow_run = _load_current_codex_workflow_run(
+        api,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        expected_head=expected_head,
+        expected_base_ref=expected_base_ref,
+        expected_base_sha=expected_base_sha,
+        workflow_run_id=workflow_run_id,
+        run_attempt=run_attempt,
+    )
     deadline = monotonic() + poll_timeout
     while True:
         _eligible_pull_request(
@@ -650,10 +843,13 @@ def check_codex_policy(
             expected_base_sha,
         )
         current_reviews = _reviews(api, repository, pull_request_number)
+        # GitHub review records bind the head SHA but not the base SHA. Always
+        # enforce the frozen event baseline so an edit cannot replay a review
+        # from an older same-head candidate after the base advances.
         signal = _codex_review_signal(
             current_reviews,
             expected_head=expected_head,
-            not_before=(None if action == "edited" and base_changed is False else parsed_baseline),
+            not_before=parsed_baseline,
         )
         if not signal and action in ROOT_REACTION_ACTIONS and run_attempt == 1:
             signal = _root_reaction_signal(
@@ -673,8 +869,14 @@ def check_codex_policy(
                 baseline_time=parsed_baseline,
                 request_comment_id=request_comment_id,
             )
-        if signal:
-            _confirm_live_candidate(
+        if signal and _confirm_codex_workflow_run_is_current(
+            api,
+            repository=repository,
+            pull_request_number=pull_request_number,
+            expected_head=expected_head,
+            workflow_run=workflow_run,
+        ):
+            live_pull_request = _confirm_live_candidate(
                 api,
                 repository,
                 pull_request_number,
@@ -682,6 +884,10 @@ def check_codex_policy(
                 expected_base_ref,
                 expected_base_sha,
             )
+            if live_pull_request.updated_at > signal:
+                raise ReviewPolicyError(
+                    "pull request was updated after the accepted Codex review signal"
+                )
             return "eligible exact-head Codex review signal observed"
 
         remaining = deadline - monotonic()
@@ -701,8 +907,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-base-sha", required=True)
     parser.add_argument("--action", choices=CODEX_ACTIONS)
     parser.add_argument("--baseline-time")
+    parser.add_argument("--workflow-run-id", type=int)
     parser.add_argument("--run-attempt", type=int)
-    parser.add_argument("--base-changed", choices=("true", "false"))
     parser.add_argument("--request-comment-id", type=int)
     parser.add_argument("--poll-timeout", type=float, default=600.0)
     parser.add_argument("--poll-interval", type=float, default=60.0)
@@ -732,24 +938,30 @@ def main(argv: list[str] | None = None) -> int:
             if (
                 args.action is not None
                 or args.baseline_time is not None
+                or args.workflow_run_id is not None
                 or args.run_attempt is not None
-                or args.base_changed is not None
                 or args.request_comment_id is not None
             ):
                 raise ReviewPolicyError("Codex-only arguments cannot be used in maintainer mode")
             result = check_maintainer_policy(api, **common)
         else:
-            if args.action is None or args.baseline_time is None or args.run_attempt is None:
+            if (
+                args.action is None
+                or args.baseline_time is None
+                or args.workflow_run_id is None
+                or args.run_attempt is None
+            ):
                 raise ReviewPolicyError(
-                    "Codex mode requires --action, --baseline-time, and --run-attempt"
+                    "Codex mode requires --action, --baseline-time, "
+                    "--workflow-run-id, and --run-attempt"
                 )
             result = check_codex_policy(
                 api,
                 **common,
                 action=args.action,
                 baseline_time=args.baseline_time,
+                workflow_run_id=args.workflow_run_id,
                 run_attempt=args.run_attempt,
-                base_changed=(None if args.base_changed is None else args.base_changed == "true"),
                 request_comment_id=args.request_comment_id,
                 poll_timeout=args.poll_timeout,
                 poll_interval=args.poll_interval,

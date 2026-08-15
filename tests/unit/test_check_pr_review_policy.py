@@ -15,9 +15,13 @@ OTHER_HEAD = "b" * 40
 BASE_REF = "main"
 BASE_SHA = "c" * 40
 OTHER_BASE_SHA = "d" * 40
+PRIOR_BASELINE = "2026-08-15T18:00:00Z"
+PRE_EDIT_REVIEW = "2026-08-15T18:30:00Z"
 BASELINE = "2026-08-15T19:00:00Z"
 FRESH = "2026-08-15T19:00:01Z"
 LATER = "2026-08-15T19:00:02Z"
+WORKFLOW_RUN_ID = 31_915_185_903
+WORKFLOW_RUN_NUMBER = 3
 
 
 def _actor(user_id: int, login: str) -> dict[str, object]:
@@ -32,6 +36,7 @@ def _pull_request(
     author_id: int = 42,
     draft: bool = False,
     state: str = "open",
+    updated_at: str = BASELINE,
 ) -> dict[str, object]:
     return {
         "number": PULL_REQUEST,
@@ -40,6 +45,7 @@ def _pull_request(
         "user": {"id": author_id, "login": "contributor"},
         "draft": draft,
         "state": state,
+        "updated_at": updated_at,
     }
 
 
@@ -106,6 +112,52 @@ def _request_comment(
     }
 
 
+def _workflow_run(
+    *,
+    run_id: int = WORKFLOW_RUN_ID,
+    run_number: int = WORKFLOW_RUN_NUMBER,
+    run_attempt: int = 1,
+    pull_request_number: int = PULL_REQUEST,
+    head: str = HEAD,
+    base_ref: str = BASE_REF,
+    base_sha: str = BASE_SHA,
+    event: str = "pull_request_target",
+    path: str = review_policy.CODEX_WORKFLOW_PATH,
+    created_at: str = BASELINE,
+) -> dict[str, object]:
+    return {
+        "id": run_id,
+        "run_number": run_number,
+        "run_attempt": run_attempt,
+        "event": event,
+        "path": path,
+        "head_sha": head,
+        "created_at": created_at,
+        "pull_requests": [
+            {
+                "number": pull_request_number,
+                "head": {"sha": head},
+                "base": {"ref": base_ref, "sha": base_sha},
+            }
+        ],
+    }
+
+
+CURRENT_WORKFLOW_RUN_PATH = f"/repos/{REPOSITORY}/actions/runs/{WORKFLOW_RUN_ID}"
+WORKFLOW_RUNS_QUERY = review_policy.urllib.parse.urlencode(
+    {
+        "event": "pull_request_target",
+        "head_sha": HEAD,
+        "created": f">={BASELINE}",
+        "per_page": str(review_policy.MAX_WORKFLOW_RUN_RECORDS),
+    }
+)
+WORKFLOW_RUNS_PATH = (
+    f"/repos/{REPOSITORY}/actions/workflows/{review_policy.CODEX_WORKFLOW_FILE}/runs"
+    f"?{WORKFLOW_RUNS_QUERY}"
+)
+
+
 class FakeApi:
     def __init__(
         self,
@@ -113,10 +165,23 @@ class FakeApi:
         pull_requests: list[dict[str, object]] | None = None,
         pages: dict[str, list[dict[str, object]]] | None = None,
         records: dict[str, dict[str, object]] | None = None,
+        workflow_run: dict[str, object] | None = None,
+        record_sequences: dict[str, list[dict[str, object]]] | None = None,
     ) -> None:
         self.pull_requests = pull_requests or [_pull_request()]
         self.pages = pages or {}
-        self.records = records or {}
+        workflow_run = workflow_run or _workflow_run()
+        self.records = {
+            CURRENT_WORKFLOW_RUN_PATH: workflow_run,
+            WORKFLOW_RUNS_PATH: {
+                "total_count": 1,
+                "workflow_runs": [workflow_run],
+            },
+        }
+        if records:
+            self.records.update(records)
+        self.record_sequences = record_sequences or {}
+        self.record_reads: dict[str, int] = {}
         self.pull_request_reads = 0
         self.calls: list[tuple[str, str]] = []
 
@@ -126,6 +191,11 @@ class FakeApi:
             index = min(self.pull_request_reads, len(self.pull_requests) - 1)
             self.pull_request_reads += 1
             return self.pull_requests[index]
+        if path in self.record_sequences:
+            sequence = self.record_sequences[path]
+            index = min(self.record_reads.get(path, 0), len(sequence) - 1)
+            self.record_reads[path] = index + 1
+            return sequence[index]
         try:
             return self.records[path]
         except KeyError as error:
@@ -157,8 +227,10 @@ def _codex_check(
     api: FakeApi,
     *,
     action: str = "opened",
+    baseline_time: str = BASELINE,
+    expected_base_sha: str = BASE_SHA,
+    workflow_run_id: int = WORKFLOW_RUN_ID,
     run_attempt: int = 1,
-    base_changed: bool | None = None,
     request_comment_id: int | None = None,
 ) -> str:
     return review_policy.check_codex_policy(
@@ -167,11 +239,11 @@ def _codex_check(
         pull_request_number=PULL_REQUEST,
         expected_head=HEAD,
         expected_base_ref=BASE_REF,
-        expected_base_sha=BASE_SHA,
+        expected_base_sha=expected_base_sha,
         action=action,
-        baseline_time=BASELINE,
+        baseline_time=baseline_time,
+        workflow_run_id=workflow_run_id,
         run_attempt=run_attempt,
-        base_changed=base_changed,
         request_comment_id=request_comment_id,
         poll_timeout=0,
         poll_interval=1,
@@ -326,6 +398,143 @@ def test_exact_head_codex_review_that_arrived_before_runner_start_passes() -> No
     assert api.pull_request_reads == 3
 
 
+def test_superseded_workflow_rerun_cannot_accept_an_exact_head_review() -> None:
+    old_run_id = 31_915_167_864
+    old_run = _workflow_run(
+        run_id=old_run_id,
+        run_number=WORKFLOW_RUN_NUMBER - 1,
+        run_attempt=2,
+    )
+    newer_run = _workflow_run(created_at=FRESH)
+    api = FakeApi(
+        pages={REVIEWS_PATH: [_codex_review()]},
+        records={
+            f"/repos/{REPOSITORY}/actions/runs/{old_run_id}": old_run,
+            WORKFLOW_RUNS_PATH: {
+                "total_count": 2,
+                "workflow_runs": [newer_run, old_run],
+            },
+        },
+    )
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="superseded"):
+        _codex_check(api, workflow_run_id=old_run_id, run_attempt=2)
+
+
+def test_workflow_history_index_lag_is_retried_before_success() -> None:
+    current_run = _workflow_run()
+    api = FakeApi(
+        pages={REVIEWS_PATH: [_codex_review()]},
+        record_sequences={
+            WORKFLOW_RUNS_PATH: [
+                {"total_count": 0, "workflow_runs": []},
+                {"total_count": 1, "workflow_runs": [current_run]},
+            ]
+        },
+    )
+    clock = iter([0.0, 0.0])
+
+    result = review_policy.check_codex_policy(
+        api,
+        repository=REPOSITORY,
+        pull_request_number=PULL_REQUEST,
+        expected_head=HEAD,
+        expected_base_ref=BASE_REF,
+        expected_base_sha=BASE_SHA,
+        action="opened",
+        baseline_time=BASELINE,
+        workflow_run_id=WORKFLOW_RUN_ID,
+        run_attempt=1,
+        poll_timeout=1,
+        poll_interval=1,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: next(clock),
+    )
+
+    assert "Codex review signal" in result
+    assert api.record_reads[WORKFLOW_RUNS_PATH] == 2
+
+
+def test_workflow_history_ignores_a_newer_run_for_another_pull_request() -> None:
+    current_run = _workflow_run()
+    other_pull_request_run = _workflow_run(
+        run_id=WORKFLOW_RUN_ID + 1,
+        run_number=WORKFLOW_RUN_NUMBER + 1,
+        pull_request_number=PULL_REQUEST + 1,
+        created_at=FRESH,
+    )
+    api = FakeApi(
+        pages={REVIEWS_PATH: [_codex_review()]},
+        records={
+            WORKFLOW_RUNS_PATH: {
+                "total_count": 2,
+                "workflow_runs": [other_pull_request_run, current_run],
+            }
+        },
+    )
+
+    assert "Codex review signal" in _codex_check(api)
+
+
+def test_pr_update_after_signal_closes_workflow_history_index_race() -> None:
+    api = FakeApi(
+        pull_requests=[
+            _pull_request(),
+            _pull_request(),
+            _pull_request(updated_at=LATER),
+        ],
+        pages={REVIEWS_PATH: [_codex_review(submitted_at=FRESH)]},
+    )
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="updated after"):
+        _codex_check(api)
+    history_index = api.calls.index(("get", WORKFLOW_RUNS_PATH))
+    final_pr_index = len(api.calls) - 1
+    assert api.calls[final_pr_index] == (
+        "get",
+        f"/repos/{REPOSITORY}/pulls/{PULL_REQUEST}",
+    )
+    assert history_index < final_pr_index
+
+
+def test_latest_exact_head_review_is_used_as_the_update_watermark() -> None:
+    api = FakeApi(
+        pull_requests=[
+            _pull_request(),
+            _pull_request(),
+            _pull_request(updated_at=LATER),
+        ],
+        pages={
+            REVIEWS_PATH: [
+                _codex_review(review_id=101, submitted_at=FRESH),
+                _codex_review(review_id=102, submitted_at=LATER),
+            ]
+        },
+    )
+
+    assert "Codex review signal" in _codex_check(api)
+
+
+@pytest.mark.parametrize(
+    "workflow_run",
+    [
+        _workflow_run(event="pull_request"),
+        _workflow_run(path=".github/workflows/lookalike.yml"),
+        _workflow_run(base_sha=OTHER_BASE_SHA),
+    ],
+)
+def test_current_workflow_run_identity_is_fail_closed(
+    workflow_run: dict[str, object],
+) -> None:
+    api = FakeApi(
+        pages={REVIEWS_PATH: [_codex_review()]},
+        workflow_run=workflow_run,
+    )
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="workflow run"):
+        _codex_check(api)
+
+
 def test_pre_baseline_or_stale_head_codex_review_does_not_pass() -> None:
     reviews = [
         _codex_review(review_id=1, submitted_at="2026-08-15T18:59:59Z"),
@@ -359,7 +568,10 @@ def test_opened_rejects_root_reaction_equal_to_frozen_baseline() -> None:
 
 
 def test_opened_retry_rejects_old_root_reaction() -> None:
-    api = FakeApi(pages={ROOT_REACTIONS_PATH: [_reaction(created_at=FRESH)]})
+    api = FakeApi(
+        pages={ROOT_REACTIONS_PATH: [_reaction(created_at=FRESH)]},
+        workflow_run=_workflow_run(run_attempt=2),
+    )
 
     with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
         _codex_check(api, run_attempt=2)
@@ -373,7 +585,8 @@ def test_opened_retry_accepts_sha_bound_request_comment_reaction() -> None:
         pages={
             COMMENTS_PATH: [comment],
             comment_reactions: [_reaction(created_at=LATER)],
-        }
+        },
+        workflow_run=_workflow_run(run_attempt=2),
     )
 
     assert "Codex review signal" in _codex_check(api, run_attempt=2)
@@ -518,30 +731,47 @@ def test_final_live_base_check_closes_signal_race(
         _codex_check(api)
 
 
-def test_metadata_only_edit_accepts_prior_exact_head_review() -> None:
-    api = FakeApi(pages={REVIEWS_PATH: [_codex_review(submitted_at="2026-08-15T18:00:00Z")]})
-
-    assert "Codex review signal" in _codex_check(
-        api,
-        action="edited",
-        base_changed=False,
+def test_base_advancement_then_metadata_edit_rejects_pre_edit_same_head_review() -> None:
+    review = _codex_review(submitted_at=PRE_EDIT_REVIEW)
+    old_candidate_api = FakeApi(
+        pull_requests=[_pull_request(base_sha=OTHER_BASE_SHA, updated_at=PRE_EDIT_REVIEW)],
+        pages={REVIEWS_PATH: [review]},
+        workflow_run=_workflow_run(base_sha=OTHER_BASE_SHA),
     )
-    assert api.pull_request_reads == 3
+    assert "Codex review signal" in _codex_check(
+        old_candidate_api,
+        baseline_time=PRIOR_BASELINE,
+        expected_base_sha=OTHER_BASE_SHA,
+    )
+
+    # The same review still names the unchanged head, but it cannot prove that
+    # Codex reviewed the candidate containing the newly advanced base.
+    current_candidate_api = FakeApi(pages={REVIEWS_PATH: [review]})
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
+        _codex_check(current_candidate_api, action="edited")
+
+
+def test_ordinary_metadata_edit_rejects_pre_edit_exact_head_review() -> None:
+    api = FakeApi(pages={REVIEWS_PATH: [_codex_review(submitted_at=PRE_EDIT_REVIEW)]})
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
+        _codex_check(api, action="edited")
 
 
 def test_unreviewed_metadata_edit_times_out() -> None:
     with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
-        _codex_check(FakeApi(), action="edited", base_changed=False)
+        _codex_check(FakeApi(), action="edited")
 
 
 def test_metadata_edit_does_not_accept_old_root_reaction() -> None:
     api = FakeApi(pages={ROOT_REACTIONS_PATH: [_reaction(created_at="2026-08-15T18:00:00Z")]})
 
     with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
-        _codex_check(api, action="edited", base_changed=False)
+        _codex_check(api, action="edited")
 
 
-def test_base_edit_requires_fresh_comment_bound_signal() -> None:
+def test_metadata_edit_accepts_fresh_comment_bound_signal() -> None:
     comment = _request_comment()
     comment_reactions = f"/repos/{REPOSITORY}/issues/comments/{comment['id']}/reactions"
     api = FakeApi(
@@ -551,25 +781,41 @@ def test_base_edit_requires_fresh_comment_bound_signal() -> None:
         }
     )
 
-    assert "Codex review signal" in _codex_check(
-        api,
-        action="edited",
-        base_changed=True,
-    )
+    assert "Codex review signal" in _codex_check(api, action="edited")
 
 
-def test_base_edit_rejects_pre_edit_exact_head_review() -> None:
-    api = FakeApi(pages={REVIEWS_PATH: [_codex_review(submitted_at="2026-08-15T18:00:00Z")]})
+def test_metadata_edit_accepts_fresh_exact_head_review() -> None:
+    api = FakeApi(pages={REVIEWS_PATH: [_codex_review(submitted_at=FRESH)]})
 
-    with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
-        _codex_check(api, action="edited", base_changed=True)
+    assert "Codex review signal" in _codex_check(api, action="edited")
+    assert api.pull_request_reads == 3
 
 
-def test_base_edit_rejects_exact_head_review_equal_to_event_baseline() -> None:
+def test_metadata_edit_rejects_exact_head_review_equal_to_event_baseline() -> None:
     api = FakeApi(pages={REVIEWS_PATH: [_codex_review(submitted_at=BASELINE)]})
 
     with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
-        _codex_check(api, action="edited", base_changed=True)
+        _codex_check(api, action="edited")
+
+
+def test_metadata_edit_rerun_rejects_same_head_review_from_before_event() -> None:
+    api = FakeApi(
+        pages={REVIEWS_PATH: [_codex_review(submitted_at=PRE_EDIT_REVIEW)]},
+        workflow_run=_workflow_run(run_attempt=2),
+    )
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="timed out"):
+        _codex_check(api, action="edited", run_attempt=2)
+
+
+def test_metadata_edit_rerun_accepts_review_after_same_frozen_event() -> None:
+    api = FakeApi(
+        pages={REVIEWS_PATH: [_codex_review(submitted_at=FRESH)]},
+        workflow_run=_workflow_run(run_attempt=2),
+    )
+
+    assert "Codex review signal" in _codex_check(api, action="edited", run_attempt=2)
+    assert api.pull_request_reads == 3
 
 
 def test_request_comment_must_be_created_strictly_after_event_baseline() -> None:
@@ -600,13 +846,6 @@ def test_comment_reaction_must_be_strictly_after_comment_update() -> None:
         _codex_check(api, action="synchronize")
 
 
-def test_edited_requires_base_changed_and_other_actions_reject_it() -> None:
-    with pytest.raises(review_policy.ReviewPolicyError, match="requires an explicit"):
-        _codex_check(FakeApi(), action="edited")
-    with pytest.raises(review_policy.ReviewPolicyError, match="only valid for the edited"):
-        _codex_check(FakeApi(), action="opened", base_changed=False)
-
-
 def test_converted_to_draft_action_fails_even_if_api_has_not_caught_up() -> None:
     with pytest.raises(review_policy.ReviewPolicyError, match="converted-to-draft"):
         _codex_check(FakeApi(), action="converted_to_draft")
@@ -627,6 +866,7 @@ def test_polling_inputs_are_bounded(timeout: float, interval: float) -> None:
             expected_base_sha=BASE_SHA,
             action="opened",
             baseline_time=BASELINE,
+            workflow_run_id=WORKFLOW_RUN_ID,
             run_attempt=1,
             poll_timeout=timeout,
             poll_interval=interval,

@@ -130,13 +130,17 @@ The two required review checks apply conditional policy without forcing the repo
 self-approve. `Maintainer Approval` passes a pull request authored by `dariuszpanas`; every other
 author needs an `APPROVED` review from `dariuszpanas` on the current head commit. Both gates validate
 the live pull request against the trusted event base ref, base SHA, and head SHA before passing. A
-push or base change requires a new Codex outcome. A title- or body-only edit
-preserves only an existing exact-head connector review. A prior pull-request root clean reaction is
-deliberately not reusable;
-while no exact-head connector review exists, the edit requires a new `+1` on a SHA-bound maintainer
-request comment. `Codex Review` otherwise waits up to 15 minutes for a fresh exact-head connector
-review or a clean reaction bound to the new candidate. After every push or base change, post a fresh
-`@codex review` request with the current full head SHA marker and wait for the resulting check:
+push, base change, or title- or body-only edit requires a new Codex outcome after that event. GitHub
+review records do not bind the base SHA, so even an existing exact-head connector review is not
+reusable after an edit. The Codex gate also verifies that its Actions run is the newest run for this
+pull request and head; manually rerunning an older lifecycle event cannot supersede a later edit.
+Before success, it rejects evidence when the live pull request was updated after the accepted
+connector signal, closing any workflow-history indexing lag. A prior pull-request root clean
+reaction is also deliberately not reusable. For an edited pull request, wait for a fresh exact-head
+connector review or a new `+1` on a SHA-bound maintainer request comment. `Codex Review` otherwise
+waits up to 15 minutes for a fresh exact-head connector review or a clean reaction bound to the new
+candidate. After every push, base change, or edit, post a fresh `@codex review` request with the
+current full head SHA marker and wait for the resulting check:
 
 ```text
 @codex review
@@ -144,16 +148,18 @@ review or a clean reaction bound to the new candidate. After every push or base 
 <!-- django-ray:codex-review-head=<full current head SHA> -->
 ```
 
-After a push, only a fresh exact-head Codex review or the connector's `+1` on that SHA-bound
+After a push or edit, only a fresh exact-head Codex review or the connector's `+1` on that SHA-bound
 maintainer request comment counts; a pull-request root reaction never counts. Requests and reviews
-from an older base and head do not count, and draft pull requests fail both review checks. GitHub's
+from an older event candidate do not count, and draft pull requests fail both review checks. GitHub's
 native required review-conversation resolution remains a separate merge condition, so resolve every
-actionable review thread as well.
+actionable review thread as well. Reply to each actionable thread with the implemented fix and its
+validation, or with the explicit reason for declining it, before resolving the conversation.
 
 Only the first automatic opened or ready run may accept a fresh pull-request root clean reaction.
 Every rerun ignores pull-request root reactions and requires either an exact-head review or the
 connector's `+1` on the SHA-bound maintainer request comment. If the bounded Codex poll times out on
-an unchanged candidate, post that request and rerun the failed `Codex Review` check.
+an unchanged candidate, post that request and rerun the latest failed `Codex Review` check. A rerun
+of a workflow event superseded by a later pull-request event fails closed.
 
 For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs
 enough body context to explain the retained change. Invalid titles or commit headers fail with the

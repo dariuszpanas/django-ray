@@ -151,6 +151,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `django-unfold` handling now keeps its exact sample/dev and lockfile pin synchronized
   with the installed-version RuntimeEnv requirement and minimum-dependency CI, without
   stale duplicate literals.
+- Required Codex review evidence is now fresh after every pull-request edit as well as every push or
+  base change. Superseded workflow reruns and connector signals followed by later pull-request
+  activity fail closed, preventing an older same-head review from being reused for a later event
+  candidate.
 
 ### Added
 
