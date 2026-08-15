@@ -58,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A Django-free, versioned target-attestation contract now defines bounded canonical
+  target expectations, exact Ray/Python runtime tuples, per-node observations, and a
+  before/after resource-state boundary. Its dormant Ray 2.56.0 probe hard-pins one
+  zero-CPU observation to every live schedulable node and requires the exact cluster
+  session and node set to remain stable while resource-state counters do not regress.
+  The counters are recorded as an observation interval because ordinary heartbeats
+  advance them; they are not claimed as a membership epoch. This slice does not add
+  persistence, worker capability, claim or routing changes, and it does not claim a
+  Ray Job response channel or activate blue/green handoff.
+
 - The guarded local KubeRay final gate now certifies the supported task-manager rolling
   boundary with a manager built from the pinned released `v0.4.0` tree and the exact current
   candidate. A released capability-schema-`0` manager submits one slow protocol-`1` Ray

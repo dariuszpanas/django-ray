@@ -26,9 +26,15 @@ Upgrade the task managers, Ray head, and Ray workers together before installing
 django-ray 0.4; do not use a mixed Ray minor-version cluster as a rolling-upgrade
 shortcut.
 
-Ray Client and cluster execution are most predictable when the task manager and Ray
-cluster use the same Ray version and Python minor version. Patch-version differences
-may produce a warning; different minor versions should not be treated as compatible.
+The package dependency range is a resolver boundary, not permission to mix remote
+runtime tuples. A target-attested task-manager cohort must match the configured Ray
+version and the Python implementation plus `major.minor.patch` exactly across the
+manager and every live schedulable cluster node. Ray's connection-time warning or
+`RAY_IGNORE_VERSION_MISMATCH` does not weaken that django-ray rule. The initial bounded
+attestation codec and Ray 2.56.0 probe are dormant infrastructure: current workers do
+not yet advertise target capacity or fence claims with their output. Until that later
+activation lands, upgrade task managers and every cluster node together and treat any
+Ray or Python patch difference as unsupported.
 
 The general version range and base `ray[default]` dependency do not install or promise
 every optional Ray component. See the

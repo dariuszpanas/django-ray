@@ -106,6 +106,12 @@
         "rationale": "Redaction, bounded status projection, and Ray identifier handling are deterministic observability contracts that should be covered with exact payload assertions."
       }
     },
+    "src/django_ray/ray_target_probe.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Version-pinned cluster snapshots, hard-affinity node observations, deadline handling, fixed rejections, and portable Ray bootstrap behavior are deterministic probe contracts that should be covered with provider doubles and serial real-Ray evidence."
+      }
+    },
     "src/django_ray/result_storage.py": {
       "default": {
         "category": "testable-behavior",
@@ -231,6 +237,12 @@
       "default": {
         "category": "testable-behavior",
         "rationale": "Envelope validation, key selection, authentication failure, and rotation compatibility are deterministic cryptographic-boundary contracts suited to fixed-key tests."
+      }
+    },
+    "src/django_ray/target_attestation.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Canonical target expectations, exact runtime tuples, observation boundaries, digest verification, validity windows, and mismatch classifications are deterministic trust-boundary contracts suited to exhaustive codec tests."
       }
     },
     "src/django_ray/workflow_output_previews.py": {

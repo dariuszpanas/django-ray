@@ -552,10 +552,25 @@ def test_live_cluster_scenarios_are_process_isolated_bounded_and_visible() -> No
         for index, step in enumerate(live_cluster["steps"])
         if isinstance(step, dict)
     }
+    python_pin_index, python_pin_step = indexed_steps["Pin exact cluster Python"]
+    python_setup_index, python_setup_step = indexed_steps["Set up Python"]
     install_index = indexed_steps["Install dependencies"][0]
     readiness_index, readiness_step = indexed_steps["Verify Ray Client readiness"]
     scenario_index, step = indexed_steps["Run isolated live cluster fault scenarios"]
-    assert install_index < readiness_index < scenario_index
+    assert python_pin_index < python_setup_index < install_index < readiness_index < scenario_index
+
+    python_pin = python_pin_step["run"]
+    assert "docker exec ray-head python" in python_pin
+    assert "docker exec ray-worker python" in python_pin
+    assert "^3\\.12\\.[0-9]+$" in python_pin
+    assert '"$head_python" != "$worker_python"' in python_pin
+    assert "DJANGO_RAY_LIVE_PYTHON=$head_python" in python_pin
+    assert '>> "$GITHUB_ENV"' in python_pin
+    assert python_setup_step["run"] == 'uv python install "$DJANGO_RAY_LIVE_PYTHON"'
+    install_dependencies = indexed_steps["Install dependencies"][1]["run"]
+    assert 'uv sync --frozen --python "$DJANGO_RAY_LIVE_PYTHON"' in install_dependencies
+    assert ".venv/bin/python -c" in install_dependencies
+    assert '"$client_python" != "$DJANGO_RAY_LIVE_PYTHON"' in install_dependencies
 
     readiness = readiness_step["run"]
     assert readiness_step["timeout-minutes"] == "3"
@@ -587,6 +602,9 @@ def test_live_cluster_scenarios_are_process_isolated_bounded_and_visible() -> No
 
     command = step["run"]
     scenarios = (
+        "tests/integration/test_live_failure_injection.py::"
+        "TestLiveFailureInjection::"
+        "test_target_attestation_probes_every_package_free_ray_client_node",
         "tests/integration/test_live_failure_injection.py::"
         "TestLiveFailureInjection::"
         "test_ray_core_runner_submits_project_code_to_generic_cluster",

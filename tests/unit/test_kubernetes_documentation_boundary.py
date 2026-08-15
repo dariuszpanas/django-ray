@@ -194,3 +194,23 @@ def test_docs_keep_the_sample_hazards_and_production_checklist_explicit() -> Non
     testproject_app = _read(Path("testproject/apps/cluster_tasks/__init__.py")).lower()
     assert "trusted local kubernetes evaluation" in testproject_app
     assert "not a production-ready deployment" in testproject_app
+
+
+def test_dormant_target_attestation_has_an_explicit_gate_boundary() -> None:
+    guide = _read(Path("docs/deployment/local-kuberay-gate.md"))
+    row = next(
+        line for line in guide.splitlines() if "A Django-free target-attestation codec" in line
+    )
+
+    assert "KubeRay not applicable" in row
+    assert "mandatory serial local-Ray plus package-free two-node Ray Client evidence" in row
+    assert "unreachable from settings, enqueue, worker, runner, transport, persistence" in row
+    assert "narrow exception" in row
+    assert "Once a production path consumes the proof" in row
+    assert "two-cluster handoff extension" in row
+
+    assert "remote bootstrap/import behavior other than the narrow dormant-attestation" in guide
+    assert (
+        "For the dormant-attestation exception, retain the exact serial local-Ray result" in guide
+    )
+    assert "explicit guarded-KubeRay-not-applicable decision" in guide
