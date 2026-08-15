@@ -24,6 +24,7 @@ EXPECTED_FILES = {
     "django_ray/protocol_coordination.py",
     "django_ray/protocol_status.py",
     "django_ray/target_attestation.py",
+    "django_ray/target_capabilities.py",
     "django_ray/target_coordination.py",
     "django_ray/target_routing.py",
     "django_ray/models.py",
@@ -50,6 +51,7 @@ EXPECTED_FILES = {
     "django_ray/migrations/0022_ray_target_persistence.py",
     "django_ray/migrations/0023_ray_task_target_binding.py",
     "django_ray/migrations/0024_ray_target_routes.py",
+    "django_ray/migrations/0025_ray_worker_target_capabilities.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/runner/ray_job.py",
@@ -57,7 +59,7 @@ EXPECTED_FILES = {
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0024_ray_target_routes",
+    "0025_ray_worker_target_capabilities",
 )
 
 

@@ -43,7 +43,7 @@ from django_ray.target_attestation import (
 
 MIGRATE_FROM = [("django_ray", "0021_ray_job_request_reference")]
 MIGRATE_TO = [("django_ray", "0022_ray_target_persistence")]
-LATEST = [("django_ray", "0024_ray_target_routes")]
+LATEST = [("django_ray", "0025_ray_worker_target_capabilities")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _TARGET_TRIGGER_NAMES = {

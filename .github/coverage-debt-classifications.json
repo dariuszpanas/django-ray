@@ -106,6 +106,12 @@
         "rationale": "Backend-alias bounds, immutable route history, exact binding-policy provenance, protected parents, maintenance deletion, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
       }
     },
+    "src/django_ray/migrations/0025_ray_worker_target_capabilities.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Exact lease-incarnation snapshots, bounded current-capability rows, parent equality, lease-cascade withdrawal, CAS revisions, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
+      }
+    },
     "src/django_ray/migrations/__init__.py": {
       "default": {
         "category": "dead-or-non-behavioral-code",
@@ -255,6 +261,12 @@
       "default": {
         "category": "testable-behavior",
         "rationale": "Canonical target expectations, exact runtime tuples, observation boundaries, digest verification, validity windows, and mismatch classifications are deterministic trust-boundary contracts suited to exhaustive codec tests."
+      }
+    },
+    "src/django_ray/target_capabilities.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Lease-incarnation validation, current-policy and proof freshness, CAS advertise/renew/withdraw behavior, fixed refusals, and SQLite/PostgreSQL serialization are deterministic coordination contracts suited to exact database and race tests."
       }
     },
     "src/django_ray/target_coordination.py": {

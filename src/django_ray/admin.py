@@ -3896,13 +3896,15 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
                     .order_by("worker_id")
                     .values_list("worker_id", flat=True)
                 )
-                deleted_count, _ = TaskWorkerLease.objects.filter(
+                _total_deleted, deleted_by_model = TaskWorkerLease.objects.filter(
                     worker_id__in=worker_ids,
                     is_active=False,
                 ).delete()
             else:
                 # SQLite's write transaction is already database-wide.
-                deleted_count, _ = inactive.delete()
+                _total_deleted, deleted_by_model = inactive.delete()
+
+            deleted_count = deleted_by_model.get(TaskWorkerLease._meta.label, 0)
 
         if deleted_count > 0:
             self.message_user(

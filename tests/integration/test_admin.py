@@ -4978,6 +4978,34 @@ class TestTaskWorkerLeaseAdmin:
         assert not TaskWorkerLease.objects.filter(worker_id=inactive.worker_id).exists()
         assert messages[-1] == "Deleted 2 inactive worker lease(s)."
 
+    def test_delete_inactive_reports_only_deleted_lease_rows(self, monkeypatch) -> None:
+        admin_obj = _lease_admin()
+        messages: list[str] = []
+
+        class _CascadingDeletion:
+            def filter(self, **_filters):
+                return self
+
+            def delete(self):
+                return (
+                    2,
+                    {
+                        TaskWorkerLease._meta.label: 1,
+                        "django_ray.RayWorkerTargetCapability": 1,
+                    },
+                )
+
+        monkeypatch.setattr(connection.features, "has_select_for_update", False)
+        monkeypatch.setattr(
+            admin_obj,
+            "message_user",
+            lambda request, msg: messages.append(str(msg)),
+        )
+
+        admin_obj.delete_inactive(_request(), _CascadingDeletion())
+
+        assert messages == ["Deleted 1 inactive worker lease(s)."]
+
     def test_permissions_are_disabled(self) -> None:
         admin_obj = _lease_admin()
         request = _request()

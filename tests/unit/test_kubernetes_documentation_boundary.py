@@ -329,3 +329,68 @@ def test_dormant_task_target_route_selection_has_no_production_consumer() -> Non
         "src/django_ray/migrations/0024_ray_target_routes.py",
         "src/django_ray/models.py",
     }
+
+
+def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() -> None:
+    guide = _read(Path("docs/deployment/local-kuberay-gate.md"))
+    normalized_guide = " ".join(guide.split())
+    row = next(
+        line
+        for line in guide.splitlines()
+        if "lease-cascading worker/target current-capability table" in line
+    )
+
+    assert "KubeRay not applicable" in row
+    assert "mandatory SQLite and PostgreSQL capability migration/coordination evidence" in row
+    assert "private compare-and-set coordinator" in row
+    assert "no production path creates, renews, reads, or treats capability rows as capacity" in row
+    assert "exact-lease deletion may only fail-closed cascade-withdraw" in row
+    assert "CAS renewal, lease-cascade withdrawal" in row
+    assert "latest `active` or `draining` Ray Core policy" in row
+    assert "draining never authorizes a new route or enqueue" in row
+    assert "Row presence alone is never claim authority" in row
+    assert "Policy and attestation revisions remain the audit history" in row
+    assert "future generations or attempts must archive their own observed tuple" in row
+    assert "Ray Job capability APIs remain unsupported" in row
+    assert "supported Admin inactive-lease cleanup" in row
+    assert "KubeRay remains not applicable because no production producer can create" in row
+    assert "final target routing requires the two-cluster handoff extension" in row
+
+    assert (
+        "For the dormant worker-target-capability exception, retain the exact SQLite and "
+        "PostgreSQL capability migration and coordination results plus the explicit guarded-"
+        "KubeRay-not-applicable decision"
+    ) in normalized_guide
+    assert "lease deletion cascades the ephemeral current row" in normalized_guide
+    assert "fail-closed withdrawal is the only indirect production mutation" in normalized_guide
+    assert "CAS revision is not audit history" in normalized_guide
+    assert "row presence never replaces live lease, policy, proof" in normalized_guide
+    assert "no production producer can create, renew, or advertise" in normalized_guide
+
+
+def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
+    production_root = ROOT / "src" / "django_ray"
+    references = {
+        path.relative_to(ROOT).as_posix()
+        for path in production_root.rglob("*.py")
+        if "RayWorkerTargetCapability" in path.read_text(encoding="utf-8")
+    }
+
+    assert references == {
+        "src/django_ray/migrations/0025_ray_worker_target_capabilities.py",
+        "src/django_ray/models.py",
+        "src/django_ray/target_capabilities.py",
+    }
+
+    coordinator_symbols = (
+        "advertise_ray_worker_target_capability",
+        "withdraw_ray_worker_target_capability",
+        "withdraw_all_ray_worker_target_capabilities",
+    )
+    for symbol in coordinator_symbols:
+        callers = {
+            path.relative_to(ROOT).as_posix()
+            for path in production_root.rglob("*.py")
+            if symbol in path.read_text(encoding="utf-8")
+        }
+        assert callers == {"src/django_ray/target_capabilities.py"}

@@ -10,7 +10,7 @@ from django.db.migrations.executor import MigrationExecutor
 
 MIGRATE_FROM = [("django_ray", "0015_raytaskexecution_task_id_unique")]
 MIGRATE_TO = [("django_ray", "0016_raytaskexecution_queue_expiration")]
-LATEST = [("django_ray", "0024_ray_target_routes")]
+LATEST = [("django_ray", "0025_ray_worker_target_capabilities")]
 
 
 def _assert_existing_queued_rows_get_deadline_from_latest_eligibility(
