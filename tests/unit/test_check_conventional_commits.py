@@ -727,6 +727,42 @@ def test_validate_preserves_context_before_evidence_in_the_same_block() -> None:
     assert CHECKER.validate_message(message, label="Commit 1") == []
 
 
+def test_validation_block_finds_tail_evidence_after_adversarial_prefix() -> None:
+    prefix = " ".join(f"Durable context sentence {index}." for index in range(2048))
+
+    is_validation, context = CHECKER._classify_validation_block(
+        [f"{prefix} Focused lease recovery tests passed."],
+        validation_section=False,
+    )
+
+    assert is_validation
+    assert context == prefix
+
+
+def test_validation_block_suffix_classification_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates: list[str] = []
+
+    def reject_candidate(candidate: str, *, validation_section: bool) -> bool:
+        assert not validation_section
+        candidates.append(candidate)
+        return False
+
+    monkeypatch.setattr(CHECKER, "_is_validation_record", reject_candidate)
+    block = "Context sentence. " * 10_000
+
+    is_validation, context = CHECKER._classify_validation_block(
+        [block],
+        validation_section=False,
+    )
+
+    assert not is_validation
+    assert context == block
+    assert len(candidates) <= CHECKER._MAX_VALIDATION_CANDIDATES
+    assert max(map(len, candidates)) <= CHECKER._MAX_VALIDATION_CANDIDATE_CHARS
+
+
 def test_validate_rejects_validation_matrix_only_body() -> None:
     message = """fix: close the lease
 
@@ -925,6 +961,23 @@ def test_validate_does_not_wrap_one_column_table_rows() -> None:
     )
 
     assert CHECKER.validate_message(message, label="Commit 1") == []
+
+
+def test_markdown_table_parser_visits_each_adversarial_row_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_split = CHECKER._split_markdown_table_row
+    visits: list[str] = []
+
+    def counted_split(line: str) -> list[str] | None:
+        visits.append(line)
+        return original_split(line)
+
+    monkeypatch.setattr(CHECKER, "_split_markdown_table_row", counted_split)
+    lines = ["| --- |"] * 2048
+
+    assert CHECKER._markdown_table_lines(lines) == set(range(len(lines)))
+    assert len(visits) == len(lines)
 
 
 def test_validate_does_not_split_escaped_table_pipes() -> None:
@@ -1145,6 +1198,29 @@ Signed-off-by: dependabot[bot] <support@github.com>
     assert any("body must contain meaningful context" in error for error in errors)
 
 
+def test_generated_dependency_header_rejects_an_unbounded_count() -> None:
+    records = [
+        {
+            "dependency-name": "example",
+            "dependency-version": "1.0.1",
+            "dependency-type": "direct:production",
+            "update-type": "version-update:semver-patch",
+            "dependency-group": "python",
+        }
+    ]
+    header = f"chore(deps): bump the python group with {'9' * 10_000} updates"
+
+    assert not CHECKER._has_generated_dependency_header(header, records)
+
+
+def test_generated_metadata_rejects_many_duplicate_headers() -> None:
+    lines = ["fix: preserve dependency policy", "", "---"]
+    lines.extend(["updated-dependencies:"] * 4096)
+    lines.append("...")
+
+    assert CHECKER._generated_metadata_candidate_bounds(lines) is None
+
+
 def test_validate_accepts_crlf_commit_message() -> None:
     assert (
         CHECKER.validate_message(
@@ -1153,6 +1229,13 @@ def test_validate_accepts_crlf_commit_message() -> None:
         )
         == []
     )
+
+
+@pytest.mark.parametrize("prefix", ["\n", "\r\n", " \n"])
+def test_validate_rejects_a_blank_commit_header(prefix: str) -> None:
+    errors = CHECKER.validate_message(f"{prefix}{VALID_MESSAGE}", label="Commit 1")
+
+    assert any("is not a Conventional Commit header" in error for error in errors)
 
 
 def test_validate_reads_full_commit_messages_from_json_file(tmp_path: Path) -> None:
@@ -1182,6 +1265,46 @@ def test_validate_reads_full_commit_message_from_file(tmp_path: Path) -> None:
             commit_file=str(message),
         )
         == []
+    )
+
+
+def test_validate_preserves_a_blank_header_from_file(tmp_path: Path) -> None:
+    message = tmp_path / "message.txt"
+    message.write_text(f"\n{VALID_MESSAGE}", encoding="utf-8")
+
+    errors = CHECKER.validate(
+        title="fix(worker): preserve task ownership",
+        commits=[],
+        commit_range=None,
+        commit_file=str(message),
+    )
+
+    assert any("Commit 1 is not a Conventional Commit header" in error for error in errors)
+
+
+def test_git_message_transport_preserves_a_blank_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        commands.append(command)
+        return type(
+            "Result",
+            (),
+            {"stdout": f"\x1e{VALID_MESSAGE}\n\x1e\n{VALID_MESSAGE}\n"},
+        )()
+
+    monkeypatch.setattr(CHECKER.subprocess, "run", run)
+
+    messages = CHECKER._messages_from_git("origin/main..HEAD")
+
+    assert messages[0].startswith("fix(worker):")
+    assert messages[1].startswith("\nfix(worker):")
+    assert "--format=%x1e%B" in commands[0]
+    assert any(
+        "is not a Conventional Commit header" in error
+        for error in CHECKER.validate_message(messages[1], label="Commit 2")
     )
 
 

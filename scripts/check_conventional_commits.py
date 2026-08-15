@@ -30,6 +30,8 @@ _ALLOWED_TYPES = frozenset(
     }
 )
 _MAX_LINE_LENGTH = 72
+_MAX_VALIDATION_CANDIDATE_CHARS = 4096
+_MAX_VALIDATION_CANDIDATES = 64
 _MARKDOWN_LINK_RE = re.compile(r"\[([^]\r\n]+)\]\(https?://[^)\s]+\)", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _MARKDOWN_TABLE_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
@@ -491,13 +493,20 @@ def _classify_validation_block(
     if validation_section or _VALIDATION_LABEL_RE.match(block):
         return _is_validation_record(block, validation_section=validation_section), ""
 
-    candidate_starts = {0}
+    # Only concise trailing records can be portable validation evidence. Keep
+    # suffix classification bounded so punctuation- or line-dense untrusted
+    # commit bodies cannot trigger a quadratic series of regex scans.
+    window_start = max(0, len(block) - _MAX_VALIDATION_CANDIDATE_CHARS)
+    candidate_starts = {0} if window_start == 0 else set()
     offset = 0
     for part in parts[:-1]:
         offset += len(part) + 1
-        candidate_starts.add(offset)
-    candidate_starts.update(match.end() for match in re.finditer(r"(?<=[.!?])\s+", block))
-    for start in sorted(candidate_starts, reverse=True):
+        if offset >= window_start:
+            candidate_starts.add(offset)
+    candidate_starts.update(
+        window_start + match.end() for match in re.finditer(r"(?<=[.!?])\s+", block[window_start:])
+    )
+    for start in sorted(candidate_starts, reverse=True)[:_MAX_VALIDATION_CANDIDATES]:
         candidate = block[start:].strip()
         if _is_validation_record(candidate, validation_section=False):
             return True, block[:start].strip()
@@ -577,15 +586,16 @@ def _generated_metadata_candidate_bounds(lines: Sequence[str]) -> tuple[int, int
     """Return syntactic bounds for a generated dependency metadata block."""
     body_start = 2 if len(lines) >= 2 and lines[1] == "" else 1
     top_level_indexes = _top_level_line_indexes(lines)
-    metadata_headers = [
-        index
-        for index in range(body_start, len(lines))
-        if index in top_level_indexes and lines[index].strip() == "updated-dependencies:"
-    ]
-    if len(metadata_headers) != 1:
+    metadata_header: int | None = None
+    for index in range(body_start, len(lines)):
+        if index not in top_level_indexes or lines[index].strip() != "updated-dependencies:":
+            continue
+        if metadata_header is not None:
+            return None
+        metadata_header = index
+    if metadata_header is None:
         return None
 
-    metadata_header = metadata_headers[0]
     metadata_start = metadata_header - 1
     if (
         metadata_start < body_start
@@ -594,14 +604,15 @@ def _generated_metadata_candidate_bounds(lines: Sequence[str]) -> tuple[int, int
     ):
         return None
 
-    metadata_ends = [
-        index
-        for index in range(metadata_header + 1, len(lines))
-        if index in top_level_indexes and lines[index].strip() == "..."
-    ]
-    if len(metadata_ends) != 1:
+    metadata_end: int | None = None
+    for index in range(metadata_header + 1, len(lines)):
+        if index not in top_level_indexes or lines[index].strip() != "...":
+            continue
+        if metadata_end is not None:
+            return None
+        metadata_end = index
+    if metadata_end is None:
         return None
-    metadata_end = metadata_ends[0]
 
     return metadata_start, metadata_end
 
@@ -712,28 +723,26 @@ def _split_markdown_table_row(line: str) -> list[str] | None:
 def _markdown_table_lines(lines: Sequence[str]) -> set[int]:
     """Return line indexes belonging to complete GFM-style tables."""
     table_lines: set[int] = set()
-    for index in range(1, len(lines)):
-        header_cells = _split_markdown_table_row(lines[index - 1])
-        delimiter_cells = _split_markdown_table_row(lines[index])
-        if (
-            header_cells is None
-            or delimiter_cells is None
-            or len(header_cells) != len(delimiter_cells)
-            or not all(
-                _MARKDOWN_TABLE_DELIMITER_CELL_RE.fullmatch(cell) for cell in delimiter_cells
-            )
-        ):
-            continue
-        table_lines.update({index - 1, index})
-        row_index = index + 1
-        while row_index < len(lines):
-            if _BLOCK_STRUCTURE_RE.match(lines[row_index]):
-                break
-            row_cells = _split_markdown_table_row(lines[row_index])
-            if row_cells is None:
-                break
-            table_lines.add(row_index)
-            row_index += 1
+    previous_cells: list[str] | None = None
+    in_table = False
+    for index, line in enumerate(lines):
+        cells = _split_markdown_table_row(line)
+        starts_table = bool(
+            index > 0
+            and previous_cells is not None
+            and cells is not None
+            and len(previous_cells) == len(cells)
+            and all(_MARKDOWN_TABLE_DELIMITER_CELL_RE.fullmatch(cell) for cell in cells)
+        )
+        if starts_table:
+            table_lines.update({index - 1, index})
+            in_table = True
+        elif in_table:
+            if _BLOCK_STRUCTURE_RE.match(line) or cells is None:
+                in_table = False
+            else:
+                table_lines.add(index)
+        previous_cells = cells
     return table_lines
 
 
@@ -778,7 +787,8 @@ def _has_generated_dependency_header(header: str, records: Sequence[dict[str, st
 
     if group_match := _DEPENDABOT_GROUP_SUMMARY_RE.fullmatch(summary):
         group = group_match.group("group").casefold()
-        return len(records) == int(group_match.group("count")) and all(
+        count = group_match.group("count").lstrip("0") or "0"
+        return count == str(len(records)) and all(
             record.get("dependency-group", "").casefold() == group for record in records
         )
     return False
@@ -891,7 +901,7 @@ def _line_length_errors(
 
 def validate_message(message: str, *, label: str) -> list[str]:
     """Validate a full commit message, including its explanatory body."""
-    lines = message.strip().splitlines()
+    lines = message.rstrip().splitlines()
     if not lines:
         return [f"{label} is empty; provide a Conventional Commit header and descriptive body."]
 
@@ -949,7 +959,7 @@ def validate_message(message: str, *, label: str) -> list[str]:
 def _messages_from_git(commit_range: str) -> list[str]:
     try:
         result = subprocess.run(
-            ["git", "log", "--format=%B%x1e", "--no-merges", commit_range],
+            ["git", "log", "--format=%x1e%B", "--no-merges", commit_range],
             check=True,
             capture_output=True,
             text=True,
@@ -957,7 +967,7 @@ def _messages_from_git(commit_range: str) -> list[str]:
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.strip() or "git log failed"
         raise RuntimeError(f"Unable to inspect commit range {commit_range!r}: {detail}") from exc
-    return [message.strip() for message in result.stdout.split("\x1e") if message.strip()]
+    return [message.rstrip() for message in result.stdout.split("\x1e") if message.strip()]
 
 
 def _messages_from_file(path: str) -> list[str]:
@@ -966,8 +976,8 @@ def _messages_from_file(path: str) -> list[str]:
         contents = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"Unable to read commit message file {path!r}: {exc}") from exc
-    message = contents.strip()
-    return [message] if message else []
+    message = contents.rstrip()
+    return [message] if message.strip() else []
 
 
 def _messages_from_json_file(path: str) -> list[str]:
