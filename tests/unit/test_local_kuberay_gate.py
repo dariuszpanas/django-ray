@@ -2042,7 +2042,12 @@ def test_docker_context_policies_fail_closed_without_exact_specific_allowlists(
     with pytest.raises(ValueError, match="missing required Docker context policy"):
         inspect_docker_context_allowlists(tmp_path)
 
-    for omitted_pattern in ("**/.env", "**/.env.*", "**/*.sqlite3"):
+    for omitted_pattern in (
+        "**/.env",
+        "**/.env.*",
+        "**/*.sqlite3",
+        "**/*.sqlite3-*",
+    ):
         unsafe_patterns = tuple(
             pattern
             for pattern in DOCKER_CONTEXT_ALLOWLISTS["Dockerfile.dockerignore"]
@@ -9710,9 +9715,12 @@ def test_local_memory_and_rendered_docs_are_outside_docker_build_context() -> No
 
     assert ".vault/" in dockerignore
     assert "site/" in dockerignore
-    assert ".env" in dockerignore
-    assert ".env.*" in dockerignore
-    assert "*.sqlite3" in dockerignore
+    assert "**/.env" in dockerignore
+    assert "**/.env.*" in dockerignore
+    assert "!.env.example" in dockerignore
+    assert dockerignore.index("!.env.example") > dockerignore.index("**/.env.*")
+    assert "**/*.sqlite3" in dockerignore
+    assert "**/*.sqlite3-*" in dockerignore
 
 
 def test_dockerfile_specific_context_policies_reexclude_local_sensitive_files() -> None:
@@ -9728,7 +9736,12 @@ def test_dockerfile_specific_context_policies_reexclude_local_sensitive_files() 
         last_reinclude = max(
             index for index, pattern in enumerate(effective) if pattern.startswith("!")
         )
-        for sensitive_pattern in ("**/.env", "**/.env.*", "**/*.sqlite3"):
+        for sensitive_pattern in (
+            "**/.env",
+            "**/.env.*",
+            "**/*.sqlite3",
+            "**/*.sqlite3-*",
+        ):
             assert effective.index(sensitive_pattern) > last_reinclude
 
 

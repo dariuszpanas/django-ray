@@ -491,6 +491,7 @@ DOCKER_CONTEXT_ALLOWLISTS = {
         "**/.env",
         "**/.env.*",
         "**/*.sqlite3",
+        "**/*.sqlite3-*",
     ),
     "Dockerfile.ray.dockerignore": (
         "**",
@@ -505,6 +506,7 @@ DOCKER_CONTEXT_ALLOWLISTS = {
         "**/.env",
         "**/.env.*",
         "**/*.sqlite3",
+        "**/*.sqlite3-*",
     ),
 }
 RELEASED_V040_DOCKER_CONTEXT_ALLOWLISTS = {
