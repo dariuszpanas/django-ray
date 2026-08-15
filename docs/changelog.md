@@ -171,7 +171,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on active write protocol `1` with `1..1` package support and
   worker leases: no backend enqueues protocol `2`, no worker claims it, no capability producer
   creates its generation evidence, and Ray Job remains unsupported.
-
+- Required `Maintainer Approval` and `Codex Review` merge checks now let the repository owner merge
+  without self-approval while requiring the owner's current-head approval for every other author, a
+  fresh base-and-head-bound Codex review signal, and native resolution of every review conversation.
+  Their staged ruleset activation also requires strict status freshness and separate owner plus
+  external-or-bot canaries before rollout is considered complete.
 - A Django-free, versioned target-attestation contract now defines bounded canonical
   target expectations, exact Ray/Python runtime tuples, per-node observations, and a
   before/after resource-state boundary. Its dormant Ray 2.56.0 probe hard-pins one

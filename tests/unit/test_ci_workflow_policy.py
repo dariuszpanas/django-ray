@@ -19,9 +19,12 @@ MAKEFILE = PROJECT_ROOT / "Makefile"
 TEST_SUITE_TAXONOMY = PROJECT_ROOT / ".github" / "test-suite-taxonomy.json"
 CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
 CONTRIBUTING_DOCS = PROJECT_ROOT / "docs" / "contributing.md"
+CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 REQUIRED_CHECK_JOBS = {
     ("ci.yml", "ci-gate"): "CI Gate",
+    ("codex-review.yml", "codex-review"): "Codex Review",
     ("commit-messages.yml", "conventional-commits"): "Commit Messages",
+    ("maintainer-approval.yml", "maintainer-approval"): "Maintainer Approval",
 }
 REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values())
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {}
@@ -738,7 +741,9 @@ def test_release_matrix_verifies_wheel_and_sdist_metadata() -> None:
 
 def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
     ci = _workflow()
+    codex_review = _workflow(WORKFLOWS / "codex-review.yml")
     commit_messages = _workflow(WORKFLOWS / "commit-messages.yml")
+    maintainer_approval = _workflow(WORKFLOWS / "maintainer-approval.yml")
 
     assert ci["concurrency"] == {
         "group": "ci-${{ github.event.pull_request.number || github.run_id }}",
@@ -748,6 +753,123 @@ def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
         "group": "commit-messages-${{ github.event.pull_request.number }}",
         "cancel-in-progress": "true",
     }
+    assert maintainer_approval["concurrency"] == {
+        "group": "maintainer-approval-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": "true",
+    }
+    assert codex_review["concurrency"] == {
+        "group": "codex-review-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": "true",
+    }
+
+
+def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
+    lifecycle_types = [
+        "opened",
+        "synchronize",
+        "reopened",
+        "edited",
+        "ready_for_review",
+        "converted_to_draft",
+    ]
+    maintainer_events = _workflow(WORKFLOWS / "maintainer-approval.yml")["on"]
+    codex_events = _workflow(WORKFLOWS / "codex-review.yml")["on"]
+
+    assert maintainer_events == {
+        "pull_request_target": {"types": lifecycle_types},
+        "pull_request_review": {"types": ["submitted", "dismissed"]},
+    }
+    assert codex_events == {"pull_request_target": {"types": lifecycle_types}}
+
+
+@pytest.mark.parametrize(
+    ("workflow_name", "job_id", "timeout_minutes"),
+    [
+        ("maintainer-approval.yml", "maintainer-approval", "5"),
+        ("codex-review.yml", "codex-review", "20"),
+    ],
+)
+def test_review_policy_workflows_execute_only_trusted_default_branch_code(
+    workflow_name: str,
+    job_id: str,
+    timeout_minutes: str,
+) -> None:
+    path = WORKFLOWS / workflow_name
+    workflow = _workflow(path)
+    job = _jobs(path)[job_id]
+
+    assert workflow["permissions"] == {"contents": "read", "pull-requests": "read"}
+    assert set(_jobs(path)) == {job_id}
+    assert job["timeout-minutes"] == timeout_minutes
+    assert "if" not in job
+    assert "continue-on-error" not in job
+    assert "needs" not in job
+
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    checkout = steps[0]
+    assert checkout["uses"] == CHECKOUT_ACTION
+    assert checkout["with"] == {
+        "fetch-depth": "1",
+        "ref": "${{ github.event.repository.default_branch }}",
+        "persist-credentials": "false",
+    }
+    assert all("if" not in step for step in steps)
+    assert not _contains_key(steps, "continue-on-error")
+
+    validation = steps[1]
+    assert validation["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert "scripts/check_pr_review_policy.py" in validation["run"]
+    assert "${{" not in validation["run"]
+    assert "git fetch" not in validation["run"]
+
+
+def test_maintainer_approval_invokes_exact_base_and_head_policy() -> None:
+    step = _jobs(WORKFLOWS / "maintainer-approval.yml")["maintainer-approval"]["steps"][1]
+
+    assert step["env"] == {
+        "BASE_REF": "${{ github.event.pull_request.base.ref }}",
+        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+        "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        "PR_NUMBER": "${{ github.event.pull_request.number }}",
+    }
+    assert "--mode maintainer" in step["run"]
+    assert '--repository "$GITHUB_REPOSITORY"' in step["run"]
+    assert '--pull-request "$PR_NUMBER"' in step["run"]
+    assert '--expected-base-ref "$BASE_REF"' in step["run"]
+    assert '--expected-base-sha "$BASE_SHA"' in step["run"]
+    assert '--expected-head "$HEAD_SHA"' in step["run"]
+
+
+def test_codex_review_has_bounded_exact_head_polling_and_draft_failure() -> None:
+    step = _jobs(WORKFLOWS / "codex-review.yml")["codex-review"]["steps"][1]
+
+    assert step["env"] == {
+        "ACTION": "${{ github.event.action }}",
+        "BASE_CHANGED": "${{ github.event.changes.base != null }}",
+        "BASE_REF": "${{ github.event.pull_request.base.ref }}",
+        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+        "BASELINE_TIME": "${{ github.event.pull_request.updated_at }}",
+        "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        "PR_NUMBER": "${{ github.event.pull_request.number }}",
+        "RUN_ATTEMPT": "${{ github.run_attempt }}",
+    }
+    assert "--mode codex" in step["run"]
+    assert '--expected-base-ref "$BASE_REF"' in step["run"]
+    assert '--expected-base-sha "$BASE_SHA"' in step["run"]
+    assert '--expected-head "$HEAD_SHA"' in step["run"]
+    assert '--action "$ACTION"' in step["run"]
+    assert "base_change_args=()" in step["run"]
+    assert 'if [ "$ACTION" = "edited" ]; then' in step["run"]
+    assert 'base_change_args=(--base-changed "$BASE_CHANGED")' in step["run"]
+    assert '"${base_change_args[@]}"' in step["run"]
+    assert '--baseline-time "$BASELINE_TIME"' in step["run"]
+    assert '--run-attempt "$RUN_ATTEMPT"' in step["run"]
+    assert "--poll-timeout 900" in step["run"]
+    assert "--poll-interval 60" in step["run"]
+    assert "eval " not in step["run"]
 
 
 def test_public_workflows_do_not_invoke_native_compiled_graph() -> None:
@@ -859,14 +981,34 @@ def test_ci_gate_rejects_partial_or_unexpected_result_inventory(
 
 
 def test_required_and_nonblocking_workflows_are_documented() -> None:
-    documentation = CONTRIBUTING.read_text(encoding="utf-8") + CONTRIBUTING_DOCS.read_text(
-        encoding="utf-8"
-    )
+    documents = [
+        CONTRIBUTING.read_text(encoding="utf-8"),
+        CONTRIBUTING_DOCS.read_text(encoding="utf-8"),
+    ]
+    combined = "".join(documents)
 
-    assert "`CI Gate`" in documentation
-    assert "`Commit Messages`" in documentation
-    assert "guarded local KubeRay" in documentation
-    assert "benchmark workflows" in documentation
+    for documentation in documents:
+        for check_name in REQUIRED_CHECK_NAMES:
+            assert f"`{check_name}`" in documentation
+        assert "native required review-conversation resolution" in documentation
+        assert "fresh `@codex review`" in documentation
+        assert "django-ray:codex-review-head=<full current head SHA>" in documentation
+        assert "current-head approval for every other author" in documentation
+        assert "trusted event base ref, base SHA, and head SHA" in documentation
+        assert "base change requires a new Codex outcome" in documentation
+        assert "preserves only an existing" in documentation
+        assert "exact-head connector review" in documentation
+        assert "pull-request root clean reaction" in documentation
+        assert "deliberately not reusable" in documentation
+        assert "requires a new `+1` on a SHA-bound" in documentation
+        assert "a pull-request root reaction never counts" in documentation
+        assert "first automatic opened or ready run" in documentation
+        assert "Every rerun ignores pull-request root reactions" in documentation
+        assert "strict required-status freshness" in documentation
+        assert "external or bot-authored canary" in documentation
+        assert "not absolute enforcement" in documentation
+    assert "guarded local KubeRay" in combined
+    assert "benchmark workflows" in combined
     for reason in EXPLICIT_NONBLOCKING_PR_JOBS.values():
         assert reason.strip()
-        assert reason in documentation
+        assert all(reason in documentation for documentation in documents)
