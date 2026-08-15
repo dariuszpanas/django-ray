@@ -285,6 +285,7 @@ def test_dormant_task_target_binding_has_no_production_consumer() -> None:
     assert references == {
         "src/django_ray/migrations/0023_ray_task_target_binding.py",
         "src/django_ray/migrations/0024_ray_target_routes.py",
+        "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
         "src/django_ray/models.py",
     }
 
@@ -327,6 +328,7 @@ def test_dormant_task_target_route_selection_has_no_production_consumer() -> Non
 
     assert references == {
         "src/django_ray/migrations/0024_ray_target_routes.py",
+        "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
         "src/django_ray/models.py",
     }
 
@@ -378,6 +380,7 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
 
     assert references == {
         "src/django_ray/migrations/0025_ray_worker_target_capabilities.py",
+        "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
         "src/django_ray/models.py",
         "src/django_ray/target_capabilities.py",
     }
@@ -394,3 +397,34 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
             if symbol in path.read_text(encoding="utf-8")
         }
         assert callers == {"src/django_ray/target_capabilities.py"}
+
+
+def test_protocol_v2_evidence_has_no_production_persistence_consumer() -> None:
+    production_root = ROOT / "src" / "django_ray"
+    expected_model_references = {
+        "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
+        "src/django_ray/models.py",
+    }
+
+    for model_name in (
+        "RayTaskTargetExecutionEvidence",
+        "RayTaskTargetExecutionOutcome",
+    ):
+        pattern = re.compile(rf"\b{model_name}\b")
+        references = {
+            path.relative_to(ROOT).as_posix()
+            for path in production_root.rglob("*.py")
+            if pattern.search(path.read_text(encoding="utf-8"))
+        }
+        assert references == expected_model_references
+
+    for private_seam in (
+        "_submit_target_execution(",
+        "_poll_target_execution_results(",
+    ):
+        references = {
+            path.relative_to(ROOT).as_posix()
+            for path in production_root.rglob("*.py")
+            if private_seam in path.read_text(encoding="utf-8")
+        }
+        assert references == {"src/django_ray/runner/ray_core.py"}

@@ -50,6 +50,17 @@ forbidden until #381 supplies exact mapping lineage. Until those later boundarie
 upgrade task managers and every cluster node together and treat any Ray or Python patch
 difference as unsupported.
 
+The root `Dockerfile` and ordinary Compose path intentionally remain patch-flexible on
+Python `3.12`. After non-mutating preflight, the guarded local KubeRay gate's mutable images
+layer requires one exact shared rendered Ray head/worker image reference and runs that
+image's interpreter to discover its canonical `3.12.X` patch. It supplies the discovered
+`PYTHON_VERSION` only to the current and released-`v0.4.0` application image builds, not to
+`Dockerfile.ray`. This corrects the protocol-`2` probe precondition/runtime mismatch without
+weakening exact tuple checks: final live attestation remains authoritative, including over
+any local-Docker/Kubernetes cache divergence. A supported `py312` Ray image patch refresh
+automatically rediscovers the local image patch and must still pass the cold proof; a different
+Python minor is rejected.
+
 Both binding foreign keys use `PROTECT`: once a binding exists, deleting its execution or
 target-policy revision is rejected by the ORM and database. Current cleanup paths remain
 unchanged only because the table is unseeded. Activation therefore requires every task-
@@ -95,18 +106,71 @@ may only fail-closed cascade-withdraw an otherwise unreachable row. Row presence
 never authority: every future consumer must revalidate the exact live lease, current policy,
 same latest verified attestation, and proof expiry under its ownership locks.
 
+Protocol `2` now has a separate, package-private Ray Core transport and provenance boundary.
+Its canonical request binds the durable task identity to a positive target-execution-evidence
+ID and digest, its canonical `claimed_at`, the selected target-expectation digest, and the exact
+claim-attestation digest. The private submit seam receives the complete canonical evidence claim,
+expectation, attestation, and attestation-recorded time; it recomputes the digests, validates the
+exact `RUNNING` task owner/route/generation/start and manager-runtime lineage, and requires
+`attestation.observed_at <= recorded_at <= claimed_at < expires_at` before crossing Ray. The remote
+bootstrap revalidates those request-bound controls, then takes a fresh bounded resource-state
+snapshot. It requires the complete current schedulable node-ID set to equal the attested set and
+the executing node's current session and runtime to match that still-valid claim before importing
+Django setup, input-storage code, or the application callable. A matching proof can return a
+`completion`; a proven mismatch returns only a `compatibility_rejection` with complete observed
+evidence and `application_invoked=false`.
+Malformed transport or a missing authenticated observation is uncertain, not a remote
+compatibility rejection. A future authoritative manager may durably record that as an
+`UNCERTAIN` outcome with `application_invoked=NULL` and no claimed observed proof so drain
+remains blocked. Ray Job has no equivalent authenticated channel and remains unsupported for
+protocol `2`.
+
+The manager independently requires the authenticated observation time to satisfy
+`claimed_at <= observed_at <= receipt_time`. A pre-claim or not-yet-valid timestamp, backwards
+clock, or observation dated after manager receipt is uncertainty and retains the exact Ray handle;
+it cannot authorize compatibility handback. The result and observed-proof preimage must also echo
+the exact request-bound `claimed_at`; even a different canonical UTC timestamp is uncertainty.
+
+This transport is staged rather than activated. The package production protocol and supported
+range remain `1` and `1..1`; the seeded database policy still writes protocol `1`, and every
+production worker lease still advertises `1..1`. No backend enqueues protocol `2`, no worker
+claims it, no capability producer supplies the required generation claim, and no production
+runner calls the package-private submission seam. The existing protocol-`1` request and
+completion bytes remain unchanged.
+
+Migration `0026_ray_task_target_execution_evidence` adds two unseeded, immutable provenance
+records for that future activation. `RayTaskTargetExecutionEvidence` binds an exact execution,
+positive attempt and claimed generation, and required route selection to the target, policy,
+claim attestation, capability, lease-incarnation, and runner/manager runtime snapshots reviewed
+for the claim. `RayTaskTargetExecutionOutcome` is a separate optional one-to-one record for the
+matching completion evidence, proven compatibility rejection, or a future manager's durable
+`UNCERTAIN` disposition. An uncertain outcome has null application-invocation state and no
+claimed observed proof. At insert, the claim must match the exact `RUNNING` execution task, owner,
+attempt, generation, route selection, and claim-time capability lineage. A complete outcome must
+satisfy `claimed_at <= observed_at <= recorded_at`. The claim is create-once, the outcome is
+create-once, retained evidence survives later execution lifecycle changes, and neither row is a
+current-capacity signal. No production writer or reader creates or consumes either table in this
+slice.
+
+The Django-free `target_execution_evidence` codec canonically encodes every immutable claim
+snapshot and computes its domain-separated digest. The positive database evidence ID is carried
+separately; protocol `2` binds that ID and digest together in the request and observed proof. The
+codec is package-private provenance infrastructure and does not create a claim or authorize work.
+
 Migrations `0022_ray_target_persistence`, `0023_ray_task_target_binding`, and
-`0024_ray_target_routes`, and `0025_ray_worker_target_capabilities` are dormant and additive
-for a schema-first upgrade from 0.4.0. Exact 0.4.0 code ignores their new tables, so a code-only
-rollback retains the durable history while no old process consumes a capability row. Schema
-reversal is a separate stopped-writer operation. Delete every current capability before
+`0024_ray_target_routes`, `0025_ray_worker_target_capabilities`, and
+`0026_ray_task_target_execution_evidence` are additive for a schema-first upgrade from 0.4.0.
+Exact 0.4.0 code ignores their new tables, so a code-only
+rollback retains the durable history while no old process consumes a capability, generation
+claim, or outcome row. Schema reversal is a separate stopped-writer operation. Delete every
+outcome and generation claim before reversing `0026`; delete every current capability before
 reversing `0025`; reverse `0024` only after exporting or auditing and deliberately deleting
 every selection, route revision, and route; reverse `0023` only after every binding is deleted;
 reverse `0022` only after all target history is deleted. Database guards reject invalid bounded
 inserts and unsafe capability transitions while leaving explicit withdrawal and maintenance
-deletion paths. A binding, route revision, or capability row records neither self-sufficient
-claim authority nor permission to ignore a later policy or proof change. Schema reversal is
-not part of an ordinary binary rollback.
+deletion paths. A binding, route revision, capability, claim, or outcome row is not permission
+to ignore a later policy or proof change. Schema reversal is not part of an ordinary binary
+rollback.
 
 The general version range and base `ray[default]` dependency do not install or promise
 every optional Ray component. See the

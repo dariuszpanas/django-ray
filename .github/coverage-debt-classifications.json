@@ -112,6 +112,12 @@
         "rationale": "Exact lease-incarnation snapshots, bounded current-capability rows, parent equality, lease-cascade withdrawal, CAS revisions, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
       }
     },
+    "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Immutable protocol-2 generation claims, route and target lineage, exact capability and attestation snapshots, normalized outcomes, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
+      }
+    },
     "src/django_ray/migrations/__init__.py": {
       "default": {
         "category": "dead-or-non-behavioral-code",
@@ -236,7 +242,7 @@
     "src/django_ray/runtime/remote.py": {
       "default": {
         "category": "testable-behavior",
-        "rationale": "Progress-actor admission and map registration are package behavior that can be covered with exact state-transition and no-op assertions."
+        "rationale": "Pre-Django target verification, strict task execution, progress-actor admission, and map registration are package behavior that can be covered with exact completion, rejection, state-transition, and no-op assertions plus serial real-Ray evidence."
       }
     },
     "src/django_ray/runtime/result_buffer.py": {
@@ -273,6 +279,18 @@
       "default": {
         "category": "testable-behavior",
         "rationale": "Target registration, revision-checked desired-state transitions, verified-only attestation history, and SQLite/PostgreSQL serialization are deterministic persistence contracts suited to exact database and race tests."
+      }
+    },
+    "src/django_ray/target_execution_codec.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Canonical protocol-2 target requests, authenticated observed evidence, completion and compatibility-rejection results, digest binding, exact identity checks, and resource limits are deterministic trust-boundary contracts suited to exhaustive codec tests."
+      }
+    },
+    "src/django_ray/target_execution_evidence.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Canonical per-generation target claim evidence, immutable snapshot fields, strict timestamps, digest binding, and resource limits are deterministic provenance contracts suited to exhaustive codec tests."
       }
     },
     "src/django_ray/target_routing.py": {

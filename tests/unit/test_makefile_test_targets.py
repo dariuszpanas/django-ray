@@ -34,3 +34,15 @@ def test_ci_target_remains_serial_and_independent_of_local_xdist() -> None:
     assert "test-xdist" not in target
     assert "pytest -n" not in target
     assert "--execution xdist" not in target
+
+
+def test_postgres_target_includes_target_execution_evidence_migration() -> None:
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    target = _target_body(makefile, "test-postgres")
+    migration_test = "tests/integration/test_ray_task_target_execution_evidence_migration.py"
+
+    assert target.count(migration_test) == 1
+    assert target.index("test_ray_worker_target_capability_migration.py") < target.index(
+        migration_test
+    )
+    assert "-m postgresql" in target

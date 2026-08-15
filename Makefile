@@ -94,6 +94,7 @@ test-postgres:
 		tests/integration/test_ray_task_target_binding_migration.py \
 		tests/integration/test_ray_target_route_migration.py \
 		tests/integration/test_ray_worker_target_capability_migration.py \
+		tests/integration/test_ray_task_target_execution_evidence_migration.py \
 		tests/integration/test_priority_migration.py \
 		tests/integration/test_queue_expiration_migration.py \
 		tests/integration/test_request_reference_schema_migration.py \

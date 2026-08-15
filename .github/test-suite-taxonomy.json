@@ -175,6 +175,7 @@
           "tests/unit/test_ci_workflow_policy.py",
           "tests/unit/test_coverage_debt.py",
           "tests/unit/test_docs_theme.py",
+          "tests/unit/test_makefile_test_targets.py",
           "tests/unit/test_package_metadata.py",
           "tests/unit/test_release.py",
           "tests/unit/test_test_suite_inventory.py",
@@ -203,6 +204,8 @@
           "tests/unit/test_ray_target_probe.py",
           "tests/unit/test_remote.py",
           "tests/unit/test_target_attestation.py",
+          "tests/unit/test_target_execution_codec.py",
+          "tests/unit/test_target_execution_transport.py",
           "tests/unit/test_worker_command_coverage.py",
           "tests/unit/test_worker_command_runtime.py",
           "tests/unit/test_worker_mode_selection.py",
@@ -233,6 +236,7 @@
           "tests/unit/test_polling.py",
           "tests/unit/test_polling_benchmark_command.py",
           "tests/unit/test_reconciliation.py",
+          "tests/unit/test_target_execution_evidence.py",
           "tests/unit/test_worker_reconnect_poll_reconcile.py"
         ]
       }
@@ -252,6 +256,7 @@
           "tests/integration/test_priority_migration.py",
           "tests/integration/test_queue_expiration_migration.py",
           "tests/integration/test_ray_task_target_binding_migration.py",
+          "tests/integration/test_ray_task_target_execution_evidence_migration.py",
           "tests/integration/test_ray_target_persistence_migration.py",
           "tests/integration/test_ray_target_route_migration.py",
           "tests/integration/test_ray_worker_target_capability_migration.py",
@@ -404,6 +409,7 @@
           "tests/integration/test_priority_migration.py",
           "tests/integration/test_queue_expiration_migration.py",
           "tests/integration/test_ray_task_target_binding_migration.py",
+          "tests/integration/test_ray_task_target_execution_evidence_migration.py",
           "tests/integration/test_ray_target_coordination.py",
           "tests/integration/test_ray_target_persistence_migration.py",
           "tests/integration/test_ray_target_route_migration.py",

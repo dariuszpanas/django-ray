@@ -97,6 +97,7 @@ RAY_CLUSTER_NAME = "ray"
 RAY_CLUSTER_LABEL = "ray.io/cluster"
 RAY_GROUP_LABEL = "ray.io/group"
 KUBERAY_WAIT_GCS_INIT = "wait-gcs-ready"
+RAY_IMAGE_PYTHON_VERSION_PATTERN = re.compile(r"3\.12\.(?:0|[1-9][0-9]*)\Z")
 MAX_RAY_DISCOVERY_PODS = 128
 MAX_RAY_POD_CONTAINERS = 16
 MAX_RAY_POD_NAME_CHARACTERS = 253
@@ -1042,6 +1043,9 @@ class GateEvidence:
     protocol_v2_unsupported_visible: bool = False
     protocol_v2_preinvocation_rejected: bool = False
     protocol_v2_application_marker_absent: bool = False
+    protocol_v2_target_exact_completed: bool = False
+    protocol_v2_target_mismatch_rejected: bool = False
+    protocol_v2_target_mismatch_marker_absent: bool = False
     protocol_handoff_cleanup_restored: bool = False
     workflow_task_id: str = ""
     workflow_task_state: str = ""
@@ -1413,6 +1417,43 @@ def _parse_json_without_cause(
         # and UnicodeDecodeError.object may contain the complete private input.
         raise ValueError(error_message)
     return parsed
+
+
+def _parse_single_json_object_line_without_cause(
+    value: str,
+    *,
+    completion_marker: str,
+    error_message: str,
+) -> Mapping[str, Any]:
+    """Extract one private JSON object completed by the controlled script."""
+    lines = value.splitlines()
+    marker_positions = [
+        index for index, line in enumerate(lines) if line.strip() == completion_marker
+    ]
+    if len(marker_positions) != 1:
+        raise ValueError(error_message)
+    candidates: list[Mapping[str, Any]] = []
+    for line in lines[: marker_positions[0]]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parsed: Any = None
+        parsed_ok = False
+        try:
+            parsed = json.loads(stripped)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+            pass
+        else:
+            parsed_ok = True
+        if parsed_ok and isinstance(parsed, Mapping):
+            candidates.append(cast("Mapping[str, Any]", parsed))
+            if len(candidates) > 1:
+                break
+    if len(candidates) != 1:
+        # Keep this raise outside the except block. JSONDecodeError.doc may
+        # contain a complete private diagnostic or response line.
+        raise ValueError(error_message)
+    return candidates[0]
 
 
 def secret_data_sha256(data: Mapping[str, Any]) -> str:
@@ -2047,6 +2088,62 @@ def normalize_ray_topology(ray_cluster: Mapping[str, Any]) -> RayTopology:
         head_pod_images=head_images,
         worker_groups=tuple(sorted(normalized_groups, key=lambda group: group.name)),
     )
+
+
+def ray_runtime_image_reference(topology: RayTopology) -> str:
+    """Return one exact pinned image reference shared by every rendered Ray runtime."""
+
+    def named_image(contract: PodImageContract, *, name: str, field_name: str) -> str:
+        matches = tuple(
+            image for container_name, image in contract.containers if container_name == name
+        )
+        if len(matches) != 1:
+            raise ValueError(f"{field_name} must declare exactly one {name!r} container")
+        return matches[0]
+
+    images = [
+        named_image(
+            topology.head_pod_images,
+            name="ray-head",
+            field_name="RayCluster head template",
+        )
+    ]
+    images.extend(
+        named_image(
+            group.pod_images,
+            name="ray-worker",
+            field_name=f"RayCluster worker group {group.name!r}",
+        )
+        for group in topology.worker_groups
+    )
+    distinct = set(images)
+    if len(distinct) != 1:
+        raise ValueError("rendered Ray head and workers must share one exact image reference")
+    image = images[0]
+    if (
+        len(image) > MAX_RAY_IMAGE_REFERENCE_CHARACTERS
+        or not image.isascii()
+        or not image.isprintable()
+        or image.startswith("-")
+    ):
+        raise ValueError("the rendered Ray runtime image reference is not bounded canonical ASCII")
+    normalized = normalize_image_reference(image)
+    leaf = normalized.rsplit("/", 1)[-1]
+    if normalized.endswith(":latest") or (":" not in leaf and "@" not in leaf):
+        raise ValueError("the rendered Ray runtime image must use a pinned reference")
+    return image
+
+
+def parse_ray_image_python_version(stdout: str) -> str:
+    """Parse one canonical Python 3.12 patch emitted by a Ray image probe."""
+
+    if stdout.endswith("\n"):
+        value = stdout[:-1]
+    else:
+        value = stdout
+    if RAY_IMAGE_PYTHON_VERSION_PATTERN.fullmatch(value) is None:
+        raise ValueError("Ray image Python probe must emit exactly one canonical 3.12.X line")
+    return value
 
 
 def expected_ray_topology(ray_cluster: Mapping[str, Any]) -> tuple[int, int]:
@@ -2804,6 +2901,28 @@ def validate_protocol_v2_rejection(payload: Mapping[str, Any]) -> None:
         raise ValueError("protocol-v2 probe did not return the fixed pre-invocation rejection")
 
 
+def validate_protocol_v2_target_execution(payload: Mapping[str, Any]) -> None:
+    """Validate secret-free exact and mismatched package-private p2 evidence."""
+
+    expected = {
+        "exact_result_kind": "completion",
+        "exact_application_invoked": True,
+        "exact_application_success": True,
+        "exact_application_result": 5,
+        "exact_observed_proof_bound": True,
+        "mismatch_result_kind": "compatibility_rejection",
+        "mismatch_reason": "python_version_mismatch",
+        "mismatch_application_invoked": False,
+        "mismatch_marker_present": False,
+        "mismatch_observed_proof_bound": True,
+    }
+    if set(payload) != set(expected) or any(
+        type(payload.get(field_name)) is not type(value) or payload.get(field_name) != value
+        for field_name, value in expected.items()
+    ):
+        raise ValueError("protocol-v2 target execution proof was incomplete or unsafe")
+
+
 def validate_bounded_poll_projection(
     payload: Mapping[str, Any],
     *,
@@ -2949,6 +3068,7 @@ class LocalKubeRayGate:
             self.runner.redactor.register(RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID)
         self._ray_cluster_uid: str | None = None
         self._ray_pod_identities: frozenset[PodRuntimeIdentity] | None = None
+        self._ray_image_python_version: str | None = None
         self.diagnostics_attempted = False
         self.rendered_ray_topology: RayTopology | None = None
         self.setup_pod_images: PodImageContract | None = None
@@ -3577,12 +3697,16 @@ class LocalKubeRayGate:
 
         if self.released_v040_source_context is None:
             raise ValueError("released v0.4.0 source archive has not been initialized")
+        if self._ray_image_python_version is None:
+            raise ValueError("rendered Ray image Python version has not been discovered")
         self._verify_released_v040_source_identity()
         command = [
             "docker",
             "build",
             "--tag",
             self.evidence.released_v040_image_tag,
+            "--build-arg",
+            f"PYTHON_VERSION={self._ray_image_python_version}",
             "--label",
             f"org.opencontainers.image.revision={RELEASED_V040_COMMIT}",
             "--label",
@@ -3598,22 +3722,63 @@ class LocalKubeRayGate:
             commit=RELEASED_V040_COMMIT,
             source_tree=RELEASED_V040_SOURCE_TREE,
         )
+        if (
+            self._docker_image_python_version(self.evidence.released_v040_image_tag)
+            != self._ray_image_python_version
+        ):
+            raise ValueError("released v0.4.0 image Python version does not match the Ray image")
+
+    def _docker_image_python_version(self, image: str) -> str:
+        """Read one image's interpreter tuple without network or writable state."""
+
+        result = self._docker(
+            "run",
+            "--rm",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--entrypoint",
+            "python",
+            "--",
+            image,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            'import sys; print(".".join(map(str, sys.version_info[:3])))',
+            timeout=self.config.build_timeout,
+        )
+        return parse_ray_image_python_version(result.stdout)
+
+    def _discover_ray_image_python_version(self) -> str:
+        """Read the exact Python patch from the rendered Ray runtime image."""
+
+        if self.rendered_ray_topology is None:
+            raise ValueError("rendered Ray topology was not captured in preflight")
+        image = ray_runtime_image_reference(self.rendered_ray_topology)
+        version = self._docker_image_python_version(image)
+        self._ray_image_python_version = version
+        return version
 
     def _build_images(self) -> None:
         if self.source_context is None:
             raise ValueError("immutable source archive has not been initialized")
         self._verify_source_identity()
+        ray_image_python_version = self._discover_ray_image_python_version()
         context = self.source_context
         labels = (
             f"org.opencontainers.image.revision={self.evidence.commit}",
             f"org.opencontainers.image.source-tree={self.evidence.source_tree}",
         )
         builds = (
-            (self.evidence.app_tag, context / "Dockerfile"),
-            (self.evidence.worker_tag, context / "Dockerfile.ray"),
+            (self.evidence.app_tag, context / "Dockerfile", True),
+            (self.evidence.worker_tag, context / "Dockerfile.ray", False),
         )
-        for tag, dockerfile in builds:
+        for tag, dockerfile, align_with_ray in builds:
             command = ["docker", "build", "--tag", tag]
+            if align_with_ray:
+                command.extend(["--build-arg", f"PYTHON_VERSION={ray_image_python_version}"])
             for label in labels:
                 command.extend(["--label", label])
             command.extend(["--file", str(dockerfile), str(context)])
@@ -3631,6 +3796,8 @@ class LocalKubeRayGate:
             commit=self.evidence.commit,
             source_tree=self.evidence.source_tree,
         )
+        if self._docker_image_python_version(self.evidence.app_tag) != ray_image_python_version:
+            raise ValueError("application image Python version does not match the Ray image")
         self._build_released_v040_image()
         if self.config.context.startswith("kind-"):
             cluster_name = self.config.kind_cluster_name or self.config.context.removeprefix(
@@ -7526,6 +7693,305 @@ print(json.dumps({{
         self.evidence.protocol_v2_application_marker_absent = True
         return outcome
 
+    def _verify_protocol_v2_target_execution(
+        self,
+        fixture: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Exercise the private p2 Core seam without creating durable p2 evidence."""
+
+        script = f"""
+import json
+import os
+import platform
+import sys
+import time
+from dataclasses import replace
+from datetime import UTC, datetime
+
+import ray
+
+from django_ray.models import RayTaskExecution
+from django_ray.ray_target_probe import probe_ray_target
+from django_ray.runner.ray_core import (
+    RayCoreRunner,
+    RayCoreTargetExecutionTransportState,
+)
+from django_ray.runtime.runtime_env import resolve_runtime_env_profile
+from django_ray.target_attestation import (
+    RayRunnerFamily,
+    RayRuntimeVersion,
+    RayTargetExpectation,
+    build_ray_cluster_attestation,
+    build_ray_node_observation,
+    ray_cluster_attestation_digest,
+    ray_target_expectation_digest,
+)
+from django_ray.target_execution_codec import (
+    TargetExecutionCompatibilityReason,
+    TargetExecutionCompatibilityRejection,
+    TargetExecutionCompletion,
+    encode_target_execution_result,
+)
+from django_ray.target_execution_evidence import (
+    RayTaskTargetExecutionEvidenceClaim,
+    ray_task_target_execution_evidence_digest,
+)
+
+if not ray.is_initialized():
+    ray.init(address=os.environ["RAY_ADDRESS"], ignore_reinit_error=True)
+
+
+def canonical_evidence_claim(
+    *,
+    evidence_id,
+    execution_generation,
+    expected,
+    expectation_digest,
+    attestation_digest,
+    snapshot_at,
+):
+    return RayTaskTargetExecutionEvidenceClaim(
+            execution_id={fixture["pk"]!r},
+            task_id={fixture["task_id"]!r},
+            attempt_number=1,
+            execution_generation=execution_generation,
+            route_selection_id={fixture["pk"]!r},
+            route_backend_alias="local-kuberay-private-p2-core",
+            route_revision_id=evidence_id,
+            route_revision=1,
+            selected_target_policy_id=evidence_id,
+            target_id=expected.target_key,
+            target_policy_id=evidence_id,
+            claim_attestation_id=evidence_id,
+            target_expectation_digest=expectation_digest,
+            claim_attestation_digest=attestation_digest,
+            worker_target_capability_id=evidence_id,
+            worker_target_capability_schema_version=1,
+            worker_target_capability_revision=1,
+            worker_target_capability_advertised_at=snapshot_at,
+            worker_lease_id="local-kuberay-private-p2-core-lease",
+            worker_lease_hostname="local-kuberay-private-p2-core-host",
+            worker_lease_pid=1,
+            worker_lease_started_at=snapshot_at,
+            runner_family=RayRunnerFamily.RAY_CORE.value,
+            manager_ray_major=expected.runtime.ray_major,
+            manager_ray_minor=expected.runtime.ray_minor,
+            manager_ray_patch=expected.runtime.ray_patch,
+            manager_python_implementation=expected.runtime.python_implementation,
+            manager_python_major=expected.runtime.python_major,
+            manager_python_minor=expected.runtime.python_minor,
+            manager_python_patch=expected.runtime.python_patch,
+            claimed_at=snapshot_at,
+        )
+
+
+def await_target_result(runner, submission):
+    deadline = time.monotonic() + 120
+    while True:
+        results = runner._poll_target_execution_results((submission.pending_handle,))
+        if results:
+            if len(results) != 1:
+                raise RuntimeError("private target execution returned an inexact result count")
+            return results[0]
+        if time.monotonic() >= deadline:
+            runner.cancel(submission)
+            raise RuntimeError("private target execution did not finish within its bound")
+        time.sleep(0.25)
+
+
+context = ray.get_runtime_context()
+runtime = RayRuntimeVersion(
+    ray_major=2,
+    ray_minor=56,
+    ray_patch=0,
+    python_implementation=platform.python_implementation().strip().lower(),
+    python_major=sys.version_info.major,
+    python_minor=sys.version_info.minor,
+    python_patch=sys.version_info.micro,
+)
+expectation = RayTargetExpectation(
+    target_key="local-kuberay-private-p2-core",
+    runner_family=RayRunnerFamily.RAY_CORE,
+    cluster_session=context.get_session_name(),
+    policy_revision=1,
+    runtime=runtime,
+)
+claim_attestation = probe_ray_target(
+    expectation,
+    ttl_seconds=900,
+    timeout_seconds=120,
+)
+expectation_digest = ray_target_expectation_digest(expectation)
+attestation_digest = ray_cluster_attestation_digest(claim_attestation)
+
+execution = RayTaskExecution.objects.get(
+    pk={fixture["pk"]!r},
+    task_id={fixture["task_id"]!r},
+)
+runtime_env = resolve_runtime_env_profile("project")
+execution.runtime_env_profile = runtime_env.profile
+execution.runtime_env_json = runtime_env.serialized
+execution.runtime_env_hash = runtime_env.digest
+execution.execution_protocol_version = 2
+execution.attempt_number = 1
+execution.execution_generation = 1
+execution.state = "RUNNING"
+execution.claimed_by_worker = "local-kuberay-private-p2-core-lease"
+execution.callable_path = "testproject.tasks.add_numbers"
+execution.args_json = "[2,3]"
+execution.kwargs_json = "{{}}"
+execution.input_reference = None
+
+exact_evidence_id = int(execution.pk)
+exact_claimed_at = datetime.now(UTC)
+execution.started_at = exact_claimed_at
+execution.finished_at = None
+exact_evidence_claim = canonical_evidence_claim(
+    evidence_id=exact_evidence_id,
+    execution_generation=execution.execution_generation,
+    expected=expectation,
+    expectation_digest=expectation_digest,
+    attestation_digest=attestation_digest,
+    snapshot_at=exact_claimed_at,
+)
+exact_evidence_digest = ray_task_target_execution_evidence_digest(exact_evidence_claim)
+runner = RayCoreRunner()
+exact_submission = runner._submit_target_execution(
+    execution,
+    target_execution_evidence_id=exact_evidence_id,
+    target_execution_evidence_claim=exact_evidence_claim,
+    target_expectation=expectation,
+    claim_attestation=claim_attestation,
+    claim_attestation_recorded_at=claim_attestation.observed_at,
+)
+exact_outcome = await_target_result(runner, exact_submission)
+exact_result = exact_outcome.result
+exact_wire = (
+    json.loads(encode_target_execution_result(exact_result))
+    if isinstance(exact_result, TargetExecutionCompletion)
+    else {{}}
+)
+exact_observed_proof_bound = (
+    isinstance(exact_result, TargetExecutionCompletion)
+    and exact_outcome.transport_state is RayCoreTargetExecutionTransportState.COMPLETION
+    and exact_outcome.uncertainty is None
+    and exact_result.target_execution_evidence_id == exact_evidence_id
+    and exact_result.target_execution_evidence_digest == exact_evidence_digest
+    and exact_result.target_expectation_digest == expectation_digest
+    and exact_result.claim_attestation_digest == attestation_digest
+    and exact_result.observed_target.observed_cluster_session == expectation.cluster_session
+    and exact_result.observed_target.observed_runtime == expectation.runtime
+    and exact_result.observed_target.observed_membership_digest
+    == claim_attestation.membership_digest
+)
+
+mismatch_runtime = replace(runtime, python_patch=runtime.python_patch + 1)
+mismatch_expectation = replace(expectation, runtime=mismatch_runtime)
+mismatch_claim_attestation = build_ray_cluster_attestation(
+    expectation=mismatch_expectation,
+    boundary=claim_attestation.boundary,
+    nodes=tuple(
+        build_ray_node_observation(
+            node_id=node.node_id,
+            cluster_session=node.cluster_session,
+            runtime=mismatch_runtime,
+        )
+        for node in claim_attestation.nodes
+    ),
+    observed_at=claim_attestation.observed_at,
+    expires_at=claim_attestation.expires_at,
+)
+mismatch_expectation_digest = ray_target_expectation_digest(mismatch_expectation)
+mismatch_attestation_digest = ray_cluster_attestation_digest(mismatch_claim_attestation)
+mismatch_evidence_id = exact_evidence_id + 1
+execution.execution_generation = 2
+poison = {fixture["poison"]!r}
+execution.callable_path = "testproject.tasks.echo_task"
+execution.args_json = json.dumps([poison], separators=(",", ":"))
+mismatch_claimed_at = datetime.now(UTC)
+mismatch_evidence_claim = canonical_evidence_claim(
+    evidence_id=mismatch_evidence_id,
+    execution_generation=execution.execution_generation,
+    expected=mismatch_expectation,
+    expectation_digest=mismatch_expectation_digest,
+    attestation_digest=mismatch_attestation_digest,
+    snapshot_at=mismatch_claimed_at,
+)
+mismatch_evidence_digest = ray_task_target_execution_evidence_digest(
+    mismatch_evidence_claim
+)
+mismatch_submission = runner._submit_target_execution(
+    execution,
+    target_execution_evidence_id=mismatch_evidence_id,
+    target_execution_evidence_claim=mismatch_evidence_claim,
+    target_expectation=mismatch_expectation,
+    claim_attestation=mismatch_claim_attestation,
+    claim_attestation_recorded_at=mismatch_claim_attestation.observed_at,
+)
+mismatch_outcome = await_target_result(runner, mismatch_submission)
+mismatch_result = mismatch_outcome.result
+mismatch_wire_text = (
+    encode_target_execution_result(mismatch_result)
+    if isinstance(mismatch_result, TargetExecutionCompatibilityRejection)
+    else "{{}}"
+)
+mismatch_wire = json.loads(mismatch_wire_text)
+mismatch_observed_proof_bound = (
+    isinstance(mismatch_result, TargetExecutionCompatibilityRejection)
+    and mismatch_outcome.transport_state
+    is RayCoreTargetExecutionTransportState.COMPATIBILITY_REJECTION
+    and mismatch_outcome.uncertainty is None
+    and mismatch_result.compatibility_reason
+    is TargetExecutionCompatibilityReason.PYTHON_VERSION_MISMATCH
+    and mismatch_result.target_execution_evidence_id == mismatch_evidence_id
+    and mismatch_result.target_execution_evidence_digest == mismatch_evidence_digest
+    and mismatch_result.target_expectation_digest == mismatch_expectation_digest
+    and mismatch_result.claim_attestation_digest == mismatch_attestation_digest
+    and mismatch_result.observed_target.observed_cluster_session
+    == mismatch_expectation.cluster_session
+    and mismatch_result.observed_target.observed_runtime == runtime
+    and mismatch_result.observed_target.observed_membership_digest
+    == mismatch_claim_attestation.membership_digest
+)
+
+print(json.dumps({{
+    "exact_result_kind": exact_wire.get("result_kind"),
+    "exact_application_invoked": exact_wire.get("application_invoked"),
+    "exact_application_success": (
+        exact_result.application_completion.success
+        if isinstance(exact_result, TargetExecutionCompletion)
+        else None
+    ),
+    "exact_application_result": (
+        exact_result.application_completion.result
+        if isinstance(exact_result, TargetExecutionCompletion)
+        else None
+    ),
+    "exact_observed_proof_bound": exact_observed_proof_bound,
+    "mismatch_result_kind": mismatch_wire.get("result_kind"),
+    "mismatch_reason": (
+        mismatch_result.compatibility_reason.value
+        if isinstance(mismatch_result, TargetExecutionCompatibilityRejection)
+        else None
+    ),
+    "mismatch_application_invoked": mismatch_wire.get("application_invoked"),
+    "mismatch_marker_present": poison in mismatch_wire_text,
+    "mismatch_observed_proof_bound": mismatch_observed_proof_bound,
+}}, sort_keys=True, separators=(",", ":")))
+""".strip()
+        outcome = self._sensitive_django_shell(
+            script,
+            field_name="protocol-v2 private target execution",
+        )
+        validate_protocol_v2_target_execution(outcome)
+        final_row = self._observe_protocol_v2_fixture(fixture)
+        if final_row.get("row_sha256") != fixture.get("row_sha256"):
+            raise ValueError("protocol-v2 queued row changed during private target execution")
+        self.evidence.protocol_v2_target_exact_completed = True
+        self.evidence.protocol_v2_target_mismatch_rejected = True
+        self.evidence.protocol_v2_target_mismatch_marker_absent = True
+        return outcome
+
     def _cleanup_protocol_v2_fixture(
         self,
         fixture: Mapping[str, Any],
@@ -7898,6 +8364,7 @@ print(json.dumps({{
                 baseline_metrics=baseline_metrics,
             )
             self._verify_protocol_v2_rejection(fixture)
+            self._verify_protocol_v2_target_execution(fixture)
         except BaseException as error:
             failure = error
         finally:
@@ -8445,6 +8912,8 @@ print(json.dumps({{
         field_name: str,
     ) -> Mapping[str, Any]:
         """Run one bounded in-pod inspector whose successful stdout stays private."""
+        completion_marker = f"django_ray_private_json_complete_v1_{uuid4().hex}"
+        wrapped_script = f"{script.rstrip()}\nprint({completion_marker!r})\n"
         result = self._kubectl(
             "exec",
             "deployment/django-web",
@@ -8456,17 +8925,17 @@ print(json.dumps({{
             "shell",
             "--no-imports",
             "-c",
-            script,
+            wrapped_script,
             sensitive_output=True,
             timeout=self.config.command_timeout,
         )
         if len(result.stdout) > MAX_OUTPUT_CHARACTERS:
             raise ValueError(f"{field_name} exceeded the private JSON size limit")
-        value = _parse_json_without_cause(
+        return _parse_single_json_object_line_without_cause(
             result.stdout,
+            completion_marker=completion_marker,
             error_message=f"{field_name} did not return valid private JSON",
         )
-        return _mapping(value, field_name=field_name)
 
     def _poll_runtime_env_canary(
         self,
@@ -11032,6 +11501,9 @@ print(json.dumps({{
             self.evidence.protocol_v2_unsupported_visible,
             self.evidence.protocol_v2_preinvocation_rejected,
             self.evidence.protocol_v2_application_marker_absent,
+            self.evidence.protocol_v2_target_exact_completed,
+            self.evidence.protocol_v2_target_mismatch_rejected,
+            self.evidence.protocol_v2_target_mismatch_marker_absent,
             self.evidence.protocol_handoff_cleanup_restored,
         )
         if not all(value is True for value in protocol_evidence):
@@ -11226,6 +11698,18 @@ print(json.dumps({{
             (
                 "protocol_v2_application_marker_absent",
                 self.evidence.protocol_v2_application_marker_absent,
+            ),
+            (
+                "protocol_v2_target_exact_completed",
+                self.evidence.protocol_v2_target_exact_completed,
+            ),
+            (
+                "protocol_v2_target_mismatch_rejected",
+                self.evidence.protocol_v2_target_mismatch_rejected,
+            ),
+            (
+                "protocol_v2_target_mismatch_marker_absent",
+                self.evidence.protocol_v2_target_mismatch_marker_absent,
             ),
             (
                 "protocol_handoff_cleanup_restored",

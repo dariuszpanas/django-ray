@@ -421,6 +421,218 @@ class TestRayRemoteExecution:
         assert decoded.completion.result == 42
         assert decoded.completion.executor_django_ray_version
 
+    def test_ray_core_protocol_2_verifies_target_before_application(
+        self,
+        django_settings_env,
+        ray_cluster,
+    ):
+        """A real Ray worker verifies fresh membership and returns both p2 variants."""
+        import platform
+        from datetime import UTC, datetime, timedelta
+
+        from django_ray.execution_codec import ExecutionIdentity
+        from django_ray.ray_target_probe import probe_ray_target
+        from django_ray.runtime.remote import execute_django_task_remote
+        from django_ray.target_attestation import (
+            RayRunnerFamily,
+            RayRuntimeVersion,
+            RayTargetExpectation,
+            build_ray_cluster_attestation,
+            build_ray_node_observation,
+            ray_cluster_attestation_digest,
+            ray_target_expectation_digest,
+        )
+        from django_ray.target_execution_codec import (
+            TargetExecutionCompatibilityReason,
+            TargetExecutionCompatibilityRejection,
+            TargetExecutionCompletion,
+            TargetExecutionRequest,
+            decode_target_execution_result,
+            encode_target_execution_request,
+        )
+        from django_ray.target_execution_evidence import (
+            RayTaskTargetExecutionEvidenceClaim,
+            ray_task_target_execution_evidence_digest,
+        )
+
+        runtime = RayRuntimeVersion(
+            ray_major=2,
+            ray_minor=56,
+            ray_patch=0,
+            python_implementation=platform.python_implementation().strip().lower(),
+            python_major=sys.version_info.major,
+            python_minor=sys.version_info.minor,
+            python_patch=sys.version_info.micro,
+        )
+        session = ray.get_runtime_context().get_session_name()
+        expectation = RayTargetExpectation(
+            target_key="local-green",
+            runner_family=RayRunnerFamily.RAY_CORE,
+            cluster_session=session,
+            policy_revision=1,
+            runtime=runtime,
+        )
+        attestation = probe_ray_target(expectation, ttl_seconds=120)
+        remote_entrypoint: Any = ray.remote(execute_django_task_remote).options(
+            runtime_env={"env_vars": {"DJANGO_SETTINGS_MODULE": "testproject.settings"}}
+        )
+
+        def submit(
+            *,
+            identity: ExecutionIdentity,
+            evidence_id: int,
+            expected: RayTargetExpectation,
+            claim_attestation,
+        ):
+            expected_digest = ray_target_expectation_digest(expected)
+            attestation_digest = ray_cluster_attestation_digest(claim_attestation)
+            claimed_at = datetime.now(UTC)
+            evidence_claim = RayTaskTargetExecutionEvidenceClaim(
+                execution_id=identity.task_execution_pk,
+                task_id=identity.task_id,
+                attempt_number=identity.attempt_number,
+                execution_generation=identity.execution_generation,
+                route_selection_id=identity.task_execution_pk,
+                route_backend_alias="default",
+                route_revision_id=evidence_id,
+                route_revision=1,
+                selected_target_policy_id=evidence_id,
+                target_id=expected.target_key,
+                target_policy_id=evidence_id,
+                claim_attestation_id=evidence_id,
+                target_expectation_digest=expected_digest,
+                claim_attestation_digest=attestation_digest,
+                worker_target_capability_id=evidence_id,
+                worker_target_capability_schema_version=1,
+                worker_target_capability_revision=1,
+                worker_target_capability_advertised_at=(claimed_at - timedelta(seconds=1)),
+                worker_lease_id=f"worker-{evidence_id}",
+                worker_lease_hostname="local.test",
+                worker_lease_pid=os.getpid(),
+                worker_lease_started_at=claimed_at - timedelta(seconds=2),
+                runner_family="ray_core",
+                manager_ray_major=expected.runtime.ray_major,
+                manager_ray_minor=expected.runtime.ray_minor,
+                manager_ray_patch=expected.runtime.ray_patch,
+                manager_python_implementation=expected.runtime.python_implementation,
+                manager_python_major=expected.runtime.python_major,
+                manager_python_minor=expected.runtime.python_minor,
+                manager_python_patch=expected.runtime.python_patch,
+                claimed_at=claimed_at,
+            )
+            evidence_digest = ray_task_target_execution_evidence_digest(evidence_claim)
+            request = TargetExecutionRequest(
+                identity=identity,
+                execution_protocol_version=2,
+                target_execution_evidence_id=evidence_id,
+                target_execution_evidence_digest=evidence_digest,
+                target_execution_claimed_at=evidence_claim.claimed_at,
+                target_expectation=expected,
+                target_expectation_digest=expected_digest,
+                claim_attestation=claim_attestation,
+                claim_attestation_digest=attestation_digest,
+                callable_path="testproject.tasks.add_numbers",
+                transport_version=1,
+                serialized_args="[20,22]",
+                serialized_kwargs="{}",
+                input_reference=None,
+                runtime_env_profile=None,
+                runtime_env_hash="0" * 64,
+                runtime_env_plan_identity={},
+                compiled_graph_submission_transport="direct-ray-core",
+            )
+            serialized = ray.get(
+                remote_entrypoint.remote(
+                    encode_target_execution_request(request),
+                    expected_task_execution_pk=identity.task_execution_pk,
+                    expected_task_id=identity.task_id,
+                    expected_attempt_number=identity.attempt_number,
+                    expected_execution_generation=identity.execution_generation,
+                    expected_execution_protocol_version=2,
+                    expected_target_execution_evidence_id=evidence_id,
+                    expected_target_execution_evidence_digest=evidence_digest,
+                    expected_target_execution_claimed_at=evidence_claim.claimed_at,
+                    expected_target_expectation_digest=expected_digest,
+                    expected_claim_attestation_digest=attestation_digest,
+                    _target_execution_transport=True,
+                )
+            )
+            return decode_target_execution_result(
+                serialized,
+                expected_identity=identity,
+                expected_target_execution_evidence_id=evidence_id,
+                expected_target_execution_evidence_digest=evidence_digest,
+                expected_target_execution_claimed_at=evidence_claim.claimed_at,
+                expected_target_expectation_digest=expected_digest,
+                expected_claim_attestation_digest=attestation_digest,
+            )
+
+        completion = submit(
+            identity=ExecutionIdentity(
+                task_execution_pk=4245,
+                task_id="target-ray-core-request",
+                attempt_number=1,
+                execution_generation=1,
+            ),
+            evidence_id=1,
+            expected=expectation,
+            claim_attestation=attestation,
+        )
+        assert isinstance(completion, TargetExecutionCompletion)
+        assert completion.application_completion.success is True
+        assert completion.application_completion.result == 42
+        assert completion.observed_target.observed_membership_digest == (
+            attestation.membership_digest
+        )
+
+        mismatched_runtime = RayRuntimeVersion(
+            ray_major=runtime.ray_major,
+            ray_minor=runtime.ray_minor,
+            ray_patch=runtime.ray_patch,
+            python_implementation=runtime.python_implementation,
+            python_major=runtime.python_major,
+            python_minor=runtime.python_minor,
+            python_patch=runtime.python_patch + 1,
+        )
+        mismatched_expectation = RayTargetExpectation(
+            target_key=expectation.target_key,
+            runner_family=expectation.runner_family,
+            cluster_session=expectation.cluster_session,
+            policy_revision=2,
+            runtime=mismatched_runtime,
+        )
+        observed_at = datetime.now(UTC)
+        mismatched_attestation = build_ray_cluster_attestation(
+            expectation=mismatched_expectation,
+            boundary=attestation.boundary,
+            nodes=tuple(
+                build_ray_node_observation(
+                    node_id=node.node_id,
+                    cluster_session=mismatched_expectation.cluster_session,
+                    runtime=mismatched_runtime,
+                )
+                for node in attestation.nodes
+            ),
+            observed_at=observed_at,
+            expires_at=observed_at + timedelta(minutes=2),
+        )
+        rejection = submit(
+            identity=ExecutionIdentity(
+                task_execution_pk=4246,
+                task_id="target-ray-core-mismatch",
+                attempt_number=1,
+                execution_generation=1,
+            ),
+            evidence_id=2,
+            expected=mismatched_expectation,
+            claim_attestation=mismatched_attestation,
+        )
+        assert isinstance(rejection, TargetExecutionCompatibilityRejection)
+        assert rejection.compatibility_reason is (
+            TargetExecutionCompatibilityReason.PYTHON_VERSION_MISMATCH
+        )
+        assert rejection.observed_target.observed_runtime == runtime
+
     def test_ray_job_runs_async_task_through_cli_entrypoint(
         self,
         django_settings_env,

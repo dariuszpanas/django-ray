@@ -84,6 +84,134 @@ def _fixed_legacy_request_rejection(classification: str) -> str:
     )
 
 
+def _execute_target_bound_django_task_remote(
+    serialized_request: str,
+    *,
+    expected_task_execution_pk: int | None,
+    expected_task_id: str | None,
+    expected_attempt_number: int | None,
+    expected_execution_generation: int | None,
+    expected_target_execution_evidence_id: int | None,
+    expected_target_execution_evidence_digest: str | None,
+    expected_target_execution_claimed_at: datetime | None,
+    expected_target_expectation_digest: str | None,
+    expected_claim_attestation_digest: str | None,
+) -> str:
+    """Execute one dormant protocol-2 request after remote target verification."""
+    from django_ray import __version__
+    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
+    from django_ray.target_execution_codec import (
+        TargetExecutionCompatibilityRejection,
+        TargetExecutionCompletion,
+        decode_target_application_completion,
+        decode_target_execution_request,
+        encode_target_execution_result,
+    )
+
+    expected_identity = ExecutionIdentity(
+        task_execution_pk=cast(int, expected_task_execution_pk),
+        task_id=cast(str, expected_task_id),
+        attempt_number=cast(int, expected_attempt_number),
+        execution_generation=cast(int, expected_execution_generation),
+    )
+    # Any malformed request or disagreement with the duplicated submission
+    # controls raises through Ray. Without a trustworthy full observation the
+    # manager must retain uncertainty, not assert a compatibility rejection.
+    request = decode_target_execution_request(
+        serialized_request,
+        expected_identity=expected_identity,
+        expected_target_execution_evidence_id=cast(int, expected_target_execution_evidence_id),
+        expected_target_execution_evidence_digest=cast(
+            str, expected_target_execution_evidence_digest
+        ),
+        expected_target_execution_claimed_at=cast(datetime, expected_target_execution_claimed_at),
+        expected_target_expectation_digest=cast(str, expected_target_expectation_digest),
+        expected_claim_attestation_digest=cast(str, expected_claim_attestation_digest),
+    )
+
+    from django_ray.ray_target_probe import (
+        RayTargetExecutionCompatibilityError,
+        verify_ray_target_execution,
+    )
+
+    try:
+        observed_target = verify_ray_target_execution(request)
+    except RayTargetExecutionCompatibilityError as error:
+        return encode_target_execution_result(
+            TargetExecutionCompatibilityRejection(
+                identity=request.identity,
+                execution_protocol_version=TARGET_EXECUTION_PROTOCOL_VERSION,
+                target_execution_evidence_id=request.target_execution_evidence_id,
+                target_execution_evidence_digest=request.target_execution_evidence_digest,
+                target_execution_claimed_at=request.target_execution_claimed_at,
+                target_expectation_digest=request.target_expectation_digest,
+                claim_attestation_digest=request.claim_attestation_digest,
+                executor_django_ray_version=__version__,
+                observed_target=error.observed_target,
+                compatibility_reason=error.reason,
+            )
+        )
+
+    # These imports are the first application/Django execution seams. The
+    # target verifier above has already checked attestation integrity and TTL,
+    # local session/runtime/node membership, and the current schedulable set.
+    from django_ray.redaction import redact_text
+    from django_ray.runtime.context import durable_task_execution
+    from django_ray.runtime.entrypoint import execute_task
+
+    print(
+        f"[Task {request.identity.task_execution_pk}] Starting: {request.callable_path}",
+        flush=True,
+    )
+    with durable_task_execution(
+        request.identity.task_execution_pk,
+        task_id=request.identity.task_id,
+        execution_protocol_version=request.execution_protocol_version,
+        attempt_number=request.identity.attempt_number,
+        execution_generation=request.identity.execution_generation,
+        runtime_env_profile=request.runtime_env_profile,
+        runtime_env_hash=request.runtime_env_hash,
+        runtime_env_plan_identity=request.runtime_env_plan_identity,
+        compiled_graph_submission_transport=request.compiled_graph_submission_transport,
+        strict_execution_request=True,
+    ):
+        # Protocol 2 owns the only trusted identity wrapper. ``execute_task``
+        # intentionally emits its raw v1-shaped application body here; the
+        # strict outer encoder normalizes and bounds it before returning.
+        raw_application_result = execute_task(
+            request.callable_path,
+            request.serialized_args,
+            request.serialized_kwargs,
+            input_reference=request.input_reference,
+        )
+    application_completion = decode_target_application_completion(raw_application_result)
+    result = encode_target_execution_result(
+        TargetExecutionCompletion(
+            identity=request.identity,
+            execution_protocol_version=TARGET_EXECUTION_PROTOCOL_VERSION,
+            target_execution_evidence_id=request.target_execution_evidence_id,
+            target_execution_evidence_digest=request.target_execution_evidence_digest,
+            target_execution_claimed_at=request.target_execution_claimed_at,
+            target_expectation_digest=request.target_expectation_digest,
+            claim_attestation_digest=request.claim_attestation_digest,
+            executor_django_ray_version=__version__,
+            observed_target=observed_target,
+            application_completion=application_completion,
+        )
+    )
+    if application_completion.success:
+        print(f"[Task {request.identity.task_execution_pk}] SUCCESS", flush=True)
+    else:
+        print(
+            f"[Task {request.identity.task_execution_pk}] FAILED: "
+            f"{redact_text(application_completion.error)}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return result
+
+
 def execute_django_task_remote(
     request_or_callable_path: str,
     args_json: str | None = None,
@@ -102,11 +230,53 @@ def execute_django_task_remote(
     expected_attempt_number: int | None = None,
     expected_execution_generation: int | None = None,
     expected_execution_protocol_version: int | None = None,
+    expected_target_execution_evidence_id: int | None = None,
+    expected_target_execution_evidence_digest: str | None = None,
+    expected_target_execution_claimed_at: datetime | None = None,
+    expected_target_expectation_digest: str | None = None,
+    expected_claim_attestation_digest: str | None = None,
+    _target_execution_transport: bool = False,
 ) -> str:
     """Execute one durable task through the strict or released-v1 boundary."""
+    if _target_execution_transport is True:
+        from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
+
+        if (
+            args_json is not None
+            or kwargs_json is not None
+            or expected_execution_protocol_version != TARGET_EXECUTION_PROTOCOL_VERSION
+        ):
+            from django_ray.target_execution_codec import (
+                TargetExecutionRequestDecodeError,
+                TargetExecutionRequestRejection,
+            )
+
+            raise TargetExecutionRequestDecodeError(
+                TargetExecutionRequestRejection.INVALID
+            ) from None
     if (args_json is None) != (kwargs_json is None):
         return _fixed_legacy_request_rejection("legacy_request")
     if args_json is None and kwargs_json is None:
+        from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
+
+        if (
+            _target_execution_transport is True
+            and expected_execution_protocol_version == TARGET_EXECUTION_PROTOCOL_VERSION
+        ):
+            return _execute_target_bound_django_task_remote(
+                request_or_callable_path,
+                expected_task_execution_pk=expected_task_execution_pk,
+                expected_task_id=expected_task_id,
+                expected_attempt_number=expected_attempt_number,
+                expected_execution_generation=expected_execution_generation,
+                expected_target_execution_evidence_id=expected_target_execution_evidence_id,
+                expected_target_execution_evidence_digest=(
+                    expected_target_execution_evidence_digest
+                ),
+                expected_target_execution_claimed_at=expected_target_execution_claimed_at,
+                expected_target_expectation_digest=expected_target_expectation_digest,
+                expected_claim_attestation_digest=expected_claim_attestation_digest,
+            )
         from django_ray import __version__
         from django_ray.execution_codec import (
             ExecutionIdentity,

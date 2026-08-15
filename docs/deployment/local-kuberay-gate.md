@@ -48,7 +48,7 @@ gate and choose the cold Ray restart.
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior other than the narrow dormant-attestation exception above | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
 | Ray Job request encoding, request-reference storage, Jobs API metadata, entrypoint transport, manager reconciliation, or pre-Django request loading | Required | `required` | Proves rq2 uses only a bounded request-reference carrier, survives a manager replacement without resubmission, and rejects a missing request before application effects or retry. |
-| Execution-protocol schema, worker capability leases, protocol filtering, rolling task-manager handoff, or unsupported-protocol visibility/rejection | Required | `required` | Proves a real released 0.4 schema-`0` manager can hand one protocol-`1` Ray Job to the exact current schema-`1`, `1..1` cohort without resubmission while a separate compatible queued row survives and later completes once. A synthetic queued protocol-`2` fixture must remain unclaimed and visible, and its direct strict Ray Core executor request must reject before application invocation; the gate never advertises a live `1..2` capability or activates protocol `2`. |
+| Execution-protocol schema, worker capability leases, protocol filtering, rolling task-manager handoff, unsupported-protocol visibility/rejection, or the package-private protocol-`2` Ray Core target-execution transport and provenance boundary | Required | `required` | Proves a real released 0.4 schema-`0` manager can hand one protocol-`1` Ray Job to the exact current schema-`1`, `1..1` cohort without resubmission while a separate compatible queued row survives and later completes once. A synthetic queued protocol-`2` fixture must remain unclaimed and visible, and its production-default strict Ray Core request must reject before application invocation. The same cold cluster must separately prove that explicit package-private protocol-`2` support completes with exact target evidence and returns an authenticated `compatibility_rejection` with complete observed evidence and no application invocation for a target mismatch. The gate never advertises a live `1..2` capability, creates a production protocol-`2` writer, or activates protocol `2`. |
 | Ray Client submission, reconnect, cancellation, retry, task context, result persistence, or cross-component task lifecycle | Required | `required` | Exercises a fresh Ray session plus fresh task managers and a durable result. |
 | Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, retry identity, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow with default-full and explicit terminal-only reporting in both success and deterministic first-attempt failure modes, then preserve one recovery showcase across early-failed, mid-failed, and successful attempts. Full reporting must expose complete bounded detail; terminal-only must expose exactly one summary and no detail storage or actions. New and archived protected fields must retain the original external diagnostic evidence, every ordinary Admin/API projection must be terminal-inert and pattern-redacted, and Admin must present escaped tracebacks with preserved line separation and safe wrapping. |
 | KubeRay `RayCluster`, Ray services, Ray pod volumes/environment, or Ray metrics configuration | Required | `required` | The tested Ray pods must be cold replacements of the prior pods. |
@@ -97,6 +97,12 @@ fail-closed withdrawal is the only indirect production mutation. CAS revision is
 `active` and `draining` have different future placement meanings, and row presence never replaces
 live lease, policy, proof, and per-generation execution fences. KubeRay is not applicable because no
 production producer can create, renew, or advertise a capability row.
+
+The staged protocol-`2` target-execution transport is not one of the dormant exceptions. It changes
+the by-value `runtime/remote.py` pre-Django boundary and package contents, so the execution-protocol
+and remote-bootstrap rows require the cold gate even though production remains on protocol `1` and
+`1..1`. Retain the SQLite and PostgreSQL `0026` migration evidence as well; the cluster proof does
+not replace database immutability and reversal evidence.
 
 ## Guarded local capacity
 
@@ -224,8 +230,17 @@ The gate performs these bounded layers:
    source tree directly, then also requires a local `refs/tags/v0.4.0` to be annotated and peel to
    that commit when the optional tag ref is present. A checkout fetched without tags remains valid
    when it contains the pinned commit and tree. The gate creates a separate immutable archive of
-   that released tree and builds the ephemeral legacy task-manager image from it. Deny-by-default
-   Dockerfile context rules admit
+   that released tree and builds the ephemeral legacy task-manager image from it. This mutable
+   images layer first requires the rendered Ray head and worker
+   containers to use one exact shared image reference, then runs that image's Python interpreter to
+   discover its canonical `3.12.X` patch. The gate passes that exact patch as the `PYTHON_VERSION`
+   build argument to the current and released-`v0.4.0` application images; it does not pass the
+   argument to `Dockerfile.ray`. The root `Dockerfile` and ordinary Compose path remain
+   patch-flexible on Python `3.12`. This discovery does not run during non-mutating preflight, and a
+   future supported `py312` Ray image patch refresh automatically rediscovers its local Docker
+   image patch before it can pass the cold proof. Kubernetes cache divergence remains fail-closed:
+   the final live attestation is authoritative over the actual Ray pods.
+   Deny-by-default Dockerfile context rules admit
    only reviewed image inputs; the gate rejects a missing or altered Dockerfile-specific policy
    instead of falling back to the broader root context. Current images carry the commit-at-run and
    stable source-tree OCI labels, the release image carries its pinned release provenance, and named
@@ -335,8 +350,27 @@ The gate performs these bounded layers:
     direct strict Ray Core executor request bound to that fixture must reject the protocol before
     application invocation, and a unique invocation marker must remain absent.
 
+    The same cold Ray cluster then exercises the separate package-private target-execution seam with
+    explicit protocol-`2` support. A fresh full-node claim attestation must remain valid while a
+    bounded resource-state snapshot proves the complete current schedulable NodeID set, and the
+    executing node's current session/runtime must match it. One exact request must return an
+    authenticated `completion`; its evidence digest is built from the canonical, in-memory
+    per-generation claim representation rather than from a durable row. The package-private seam
+    recomputes the claim digest, validates the synthetic in-memory running-owner/start lineage and
+    attestation-recorded chronology, and binds the canonical claim time into the request and proof.
+    A second generation with a second canonical in-memory claim and controlled target mismatch must
+    return an authenticated `compatibility_rejection`, complete observed evidence, and
+    `application_invoked=false`, while its unique marker remains absent. The gate reports only fixed
+    booleans and never emits the target-execution request, canonical expectation, claim attestation,
+    target key, task identity, evidence ID, or any of their digests.
+
+    The image-layer alignment establishes the probe precondition; this final live attestation remains
+    authoritative. It still requires the exact Ray and Python implementation plus
+    `major.minor.patch` tuple and does not turn a runtime mismatch into a compatible result.
+
     This is negative validation, not a protocol-`2` write or activation path: every production lease
-    stays `1..1`, and no synthetic live `1..2` worker is created. Cleanup returns the exact
+    stays `1..1`, no synthetic live `1..2` worker is created, and neither package-private probe
+    creates a durable generation claim or outcome. Cleanup returns the exact
     protocol-`2` row to a terminal state, revision-checks and reopens legacy admission at its next
     revision, recreates the consistent admission token, deletes the exact row, and restores the
     rendered current manager replica count on success or failure before any passing evidence can
@@ -472,8 +506,10 @@ The runtime block records:
   the protocol-`1` same-job handoff without resubmission, a distinct compatible queued row surviving
   that replacement and completing through one current submission, synthetic protocol-`2`
   queued-row preservation and unsupported visibility, strict pre-invocation rejection, marker
-  absence, and revision-checked legacy-admission/token plus replica restoration. No fixture task or
-  Ray object identity, marker, or request bytes are emitted;
+  absence, package-private target-execution exact completion, authenticated target mismatch,
+  mismatch marker absence, and revision-checked legacy-admission/token plus replica restoration. No
+  fixture task or Ray object identity, marker, request bytes, canonical expectation, claim
+  attestation, target-execution evidence identity, target key, or digest is emitted;
 - the successful workflow's first-attempt state, schema-v3 availability, topology/detail counts,
   exact three-leaf enqueue/result agreement, authenticated admin-reader count, and clean current
   publication storage;
@@ -508,8 +544,10 @@ After a full pass, retain a concise semantic summary in the material commit and 
   sanitized Admin graphs for current and archived attempts, probes, Prometheus targets, preserved
   Ray topology, Secret, PostgreSQL data, or PVCs. For an execution-protocol change, also record the
   released-0.4-to-current protocol-`1` same-job handoff, unchanged unsupported protocol-`2` fixture,
-  pre-invocation rejection, absence of any live `1..2` capability, reopened legacy admission with a
-  consistent token, and restored steady-state topology.
+  production-default pre-invocation rejection, package-private protocol-`2` exact target completion,
+  authenticated target mismatch with no application invocation, absence of any live `1..2`
+  capability or durable protocol-`2` writer, reopened legacy admission with a consistent token, and
+  restored steady-state topology.
 
 For example, portable commit validation can say:
 
@@ -535,8 +573,12 @@ For example, portable commit validation can say:
   same replacement preserved and then processed a separate queued
   protocol-1 row exactly once, the current 1..1 cohort left synthetic
   protocol-2 work queued and visible before its strict Ray Core executor
-  rejected prior to callable invocation, no live 1..2 capability was
-  advertised, and all
+  rejected prior to callable invocation, the package-private protocol-2
+  target boundary completed with exact current node-set and executor evidence
+  against the full-node claim, then returned
+  an authenticated compatibility rejection for a controlled mismatch
+  without invoking its marker callable, no live 1..2 capability or durable
+  protocol-2 writer was advertised, and all
   protocol fixtures and temporary topology were removed, legacy
   admission was reopened with a consistent token at its next revision,
   the full application Secret remained unchanged, and the
