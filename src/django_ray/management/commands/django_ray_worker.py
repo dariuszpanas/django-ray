@@ -10,6 +10,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import Event
 from types import FrameType
 from typing import Any
 
@@ -98,6 +99,7 @@ from django_ray.runtime.runtime_env import (
 )
 
 _WORKER_ID_ALLOCATION_ATTEMPTS = 3
+_SHUTDOWN_WAIT_SLICE_SECONDS = 0.1
 
 
 class _WorkerIdReservedByTaskError(Exception):
@@ -148,6 +150,7 @@ class Command(BaseCommand):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.shutdown_requested = False
+        self._shutdown_event = Event()
         self.lease_ownership_lost = False
         self.worker_id = generate_worker_id()
         self.logger = get_worker_logger(self.worker_id)
@@ -871,11 +874,25 @@ class Command(BaseCommand):
         """Handle shutdown signals."""
         del frame
         if self.shutdown_requested:
+            self._shutdown_event.set()
             return
         self.stdout.write(self.style.WARNING(f"\nReceived signal {signum}, shutting down..."))
         self.shutdown_requested = True
         self.shutdown_signal = signum
         self.shutdown_exit_code = 128 + signum
+        self._shutdown_event.set()
+
+    def _wait_for_poll_deadline(self, timeout: float) -> None:
+        """Wait for the next loop deadline or a graceful-shutdown wakeup."""
+        deadline = time.monotonic() + timeout
+        while not self.shutdown_requested:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            # Event waits are not signal-interruptible on every supported
+            # Windows/Python combination. Keep that fallback latency bounded.
+            if self._shutdown_event.wait(min(remaining, _SHUTDOWN_WAIT_SLICE_SECONDS)):
+                return
 
     def run_loop(
         self,
@@ -982,7 +999,7 @@ class Command(BaseCommand):
                 deadlines.append(next_completion_poll)
 
             sleep_seconds = max(0.0, min(deadlines) - time.monotonic())
-            time.sleep(sleep_seconds)
+            self._wait_for_poll_deadline(sleep_seconds)
 
     def send_heartbeat(self) -> None:
         """Send worker heartbeat, update lease, and check Ray connection."""
@@ -1098,6 +1115,7 @@ class Command(BaseCommand):
         self.shutdown_requested = True
         if self.shutdown_exit_code is None:
             self.shutdown_exit_code = 1
+        self._shutdown_event.set()
 
     def _update_lease_heartbeat(self) -> bool:
         """Update lease heartbeat without full heartbeat logic.

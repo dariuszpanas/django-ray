@@ -589,8 +589,51 @@ class TestWorkerCommandRuntime:
         cmd.handle_shutdown_signal(signal.SIGTERM, None)
 
         assert cmd.shutdown_requested is True
+        assert cmd._shutdown_event.is_set()
         assert cmd.shutdown_signal == signal.SIGTERM
         assert cmd.shutdown_exit_code == 143
+
+    def test_idle_poll_wait_is_interrupted_by_shutdown_signal(self, monkeypatch) -> None:
+        cmd = _make_command()
+        clock = FakeClock()
+        cmd.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=60.0,
+            max_interval_seconds=60.0,
+            random_value=lambda: 0.0,
+        )
+        cmd.reconciliation_interval = 120.0
+        cmd.timeout_check_interval = 120.0
+        cmd.cancellation_interval = 120.0
+        cmd.lease_cleanup_interval = 120.0
+        waits: list[float] = []
+        wakeups: list[bool] = []
+
+        class ShutdownEvent:
+            def wait(self, timeout: float) -> bool:
+                waits.append(timeout)
+                cmd.handle_shutdown_signal(signal.SIGTERM, None)
+                return True
+
+            def set(self) -> None:
+                wakeups.append(True)
+
+        monkeypatch.setattr(cmd, "_shutdown_event", ShutdownEvent())
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: None)
+        monkeypatch.setattr(cmd, "claim_and_process_tasks", lambda *_: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", lambda *_: 0)
+        monkeypatch.setattr(cmd, "reconcile_tasks", lambda *_: 0)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda *_: 0)
+        monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.monotonic",
+            clock.monotonic,
+        )
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=120.0)
+
+        assert waits == [0.1]
+        assert wakeups == [True]
+        assert cmd.shutdown_requested is True
 
     def test_worker_startup_output_respects_django_verbosity(self) -> None:
         cmd = _make_command()
@@ -619,9 +662,7 @@ class TestWorkerCommandRuntime:
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.time.time", lambda: 100.0
         )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.time.sleep", lambda *_: None
-        )
+        monkeypatch.setattr(cmd, "_wait_for_poll_deadline", lambda *_: None)
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=1)
 
@@ -697,9 +738,7 @@ class TestWorkerCommandRuntime:
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.time.time", lambda: 100.0
         )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.time.sleep", lambda *_: None
-        )
+        monkeypatch.setattr(cmd, "_wait_for_poll_deadline", lambda *_: None)
 
         cmd.run_loop(queues=["default"], concurrency=2, heartbeat_interval=1)
 
@@ -792,10 +831,7 @@ class TestWorkerCommandRuntime:
             "django_ray.management.commands.django_ray_worker.time.monotonic",
             clock.monotonic,
         )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.time.sleep",
-            clock.sleep,
-        )
+        monkeypatch.setattr(cmd, "_wait_for_poll_deadline", clock.sleep)
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
 
@@ -834,10 +870,7 @@ class TestWorkerCommandRuntime:
             "django_ray.management.commands.django_ray_worker.time.monotonic",
             clock.monotonic,
         )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.time.sleep",
-            clock.sleep,
-        )
+        monkeypatch.setattr(cmd, "_wait_for_poll_deadline", clock.sleep)
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=0.25)
 
@@ -884,10 +917,7 @@ class TestWorkerCommandRuntime:
             "django_ray.management.commands.django_ray_worker.time.monotonic",
             clock.monotonic,
         )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.time.sleep",
-            clock.sleep,
-        )
+        monkeypatch.setattr(cmd, "_wait_for_poll_deadline", clock.sleep)
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
 
@@ -940,10 +970,7 @@ class TestWorkerCommandRuntime:
             "django_ray.management.commands.django_ray_worker.time.monotonic",
             clock.monotonic,
         )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.time.sleep",
-            clock.sleep,
-        )
+        monkeypatch.setattr(cmd, "_wait_for_poll_deadline", clock.sleep)
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
 

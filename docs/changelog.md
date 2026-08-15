@@ -91,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Graceful-shutdown signals now wake adaptive worker polling within a bounded 100 ms slice, so a
+  long idle backoff cannot postpone Ray cancellation handoff or lease cleanup.
 - Malformed workflow plan-selection rows now fail with the bounded validation error used by
   observability readers, and signed pagination cursors expire whenever the stored summary revision
   advances so pages cannot mix publication epochs.
