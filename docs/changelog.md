@@ -119,7 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observability readers, and signed pagination cursors expire whenever the stored summary revision
   advances so pages cannot mix publication epochs.
 - The sample browser dashboard now keeps its verified bearer token only in loaded-page memory;
-  reload starts unauthenticated and no token is written to browser storage, cookies, or URLs.
+  reload starts unauthenticated, no token is written to browser storage, cookies, or URLs, and the
+  exact storage entry used by older releases is removed without being read or restored.
 - Docker build contexts now recursively re-exclude nested environment files, SQLite databases,
   and SQLite journal, WAL, and shared-memory sidecars, including after broad source inclusions;
   direct KubeRay deployment no longer removes a potentially unrelated local Kong release or routes.

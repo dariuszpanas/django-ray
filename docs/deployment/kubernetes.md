@@ -98,7 +98,9 @@ dashboard clears the password field after submission and retains the token only 
 page's memory after the statistics API verifies it. Reloading starts a new page without the token;
 selecting **Forget token** or receiving a 401 for the current credential clears it immediately. The
 token is never put in rendered HTML, browser storage, cookies, or URLs. Missing tokens produce a
-prompt, and unverified replacements are discarded.
+prompt, and unverified replacements are discarded. On load and every credential-clear path, the page
+also removes the exact browser-storage entry used by older releases without reading or restoring it;
+unrelated storage remains untouched.
 
 This flow is intended for trusted local demos. While the page is loaded, same-origin JavaScript,
 extensions, developer tools, or a compromised page can access its in-memory token. Do not pass

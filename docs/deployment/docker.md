@@ -85,7 +85,9 @@ docker compose logs migrate
 Open the [sample landing page](http://127.0.0.1:8000/) and paste the current token value into
 **Browser API access**. The page retains a verified token only in the loaded page's memory; it does
 not place the token in rendered HTML, browser storage, a cookie, or a URL. Reloading starts a new
-page without the token, so paste it again after a reload.
+page without the token, so paste it again after a reload. The page removes the exact browser-storage
+entry used by older releases on load and whenever credentials are cleared, but never reads or
+restores it and leaves unrelated storage intact.
 
 Open [Swagger](http://127.0.0.1:8000/api/docs), select **Authorize**, and paste the token value.
 Swagger adds the `Bearer` scheme automatically, so the dialog should receive the value without the
