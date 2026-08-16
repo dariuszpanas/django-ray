@@ -101,7 +101,7 @@ def _execute_target_bound_django_task_remote(
     from django_ray import __version__
     from django_ray.execution_codec import ExecutionIdentity
     from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
-    from django_ray.target_execution_codec import (
+    from django_ray.target.execution_codec import (
         TargetExecutionCompatibilityRejection,
         TargetExecutionCompletion,
         decode_target_application_completion,
@@ -130,7 +130,7 @@ def _execute_target_bound_django_task_remote(
         expected_claim_attestation_digest=cast(str, expected_claim_attestation_digest),
     )
 
-    from django_ray.ray_target_probe import (
+    from django_ray.target.probe import (
         RayTargetExecutionCompatibilityError,
         verify_ray_target_execution,
     )
@@ -246,7 +246,7 @@ def execute_django_task_remote(
             or kwargs_json is not None
             or expected_execution_protocol_version != TARGET_EXECUTION_PROTOCOL_VERSION
         ):
-            from django_ray.target_execution_codec import (
+            from django_ray.target.execution_codec import (
                 TargetExecutionRequestDecodeError,
                 TargetExecutionRequestRejection,
             )

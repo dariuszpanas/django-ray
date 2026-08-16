@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from django_ray import ray_target_probe as probe
-from django_ray.target_attestation import (
+from django_ray.target import probe
+from django_ray.target.attestation import (
     RAY_TARGET_ATTESTATION_MAX_TTL_SECONDS,
     RayRunnerFamily,
     RayRuntimeVersion,
@@ -1380,7 +1380,7 @@ def test_public_probe_builds_only_canonical_attestation(
 def test_public_probe_maps_canonical_builder_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from django_ray import target_attestation
+    from django_ray.target import attestation as target_attestation
 
     monkeypatch.setattr(
         probe,

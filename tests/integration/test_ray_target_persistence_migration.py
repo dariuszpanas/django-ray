@@ -34,7 +34,7 @@ from django_ray.models import (
     RayTargetDesiredState,
     RayTargetPolicyRevision,
 )
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION,
     RAY_TARGET_ATTESTATION_MAX_COUNTER,
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,

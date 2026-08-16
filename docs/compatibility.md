@@ -152,8 +152,8 @@ create-once, retained evidence survives later execution lifecycle changes, and n
 current-capacity signal. No production writer or reader creates or consumes either table in this
 slice.
 
-The Django-free `target_execution_evidence` codec canonically encodes every immutable claim
-snapshot and computes its domain-separated digest. The positive database evidence ID is carried
+The Django-free `django_ray.target.execution_evidence` codec canonically encodes every immutable
+claim snapshot and computes its domain-separated digest. The positive database evidence ID is carried
 separately; protocol `2` binds that ID and digest together in the request and observed proof. The
 codec is package-private provenance infrastructure and does not create a claim or authorize work.
 

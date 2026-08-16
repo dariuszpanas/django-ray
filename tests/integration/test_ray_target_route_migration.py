@@ -39,7 +39,7 @@ from django_ray.models import (
     RayTaskTargetBinding,
     RayTaskTargetRouteSelection,
 )
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RAY_TARGET_ATTESTATION_MAX_COUNTER,
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,

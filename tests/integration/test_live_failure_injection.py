@@ -138,8 +138,7 @@ class TestLiveFailureInjection:
         import platform
         import sys
 
-        from django_ray.ray_target_probe import probe_ray_target
-        from django_ray.target_attestation import (
+        from django_ray.target.attestation import (
             RayRunnerFamily,
             RayRuntimeVersion,
             RayTargetExpectation,
@@ -147,6 +146,7 @@ class TestLiveFailureInjection:
             decode_ray_cluster_attestation,
             encode_ray_cluster_attestation,
         )
+        from django_ray.target.probe import probe_ray_target
 
         context = live_ray_cluster.get_runtime_context()
         expectation = RayTargetExpectation(

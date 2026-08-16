@@ -38,7 +38,7 @@ from django_ray.models import (
     TaskWorkerLease,
 )
 from django_ray.protocol_coordination import close_legacy_worker_admission
-from django_ray.target_execution_evidence import (
+from django_ray.target.execution_evidence import (
     RayTaskTargetExecutionEvidenceClaim,
     ray_task_target_execution_evidence_digest,
 )

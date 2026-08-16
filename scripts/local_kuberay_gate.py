@@ -7713,13 +7713,13 @@ from datetime import UTC, datetime
 import ray
 
 from django_ray.models import RayTaskExecution
-from django_ray.ray_target_probe import probe_ray_target
+from django_ray.target.probe import probe_ray_target
 from django_ray.runner.ray_core import (
     RayCoreRunner,
     RayCoreTargetExecutionTransportState,
 )
 from django_ray.runtime.runtime_env import resolve_runtime_env_profile
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RayRunnerFamily,
     RayRuntimeVersion,
     RayTargetExpectation,
@@ -7728,13 +7728,13 @@ from django_ray.target_attestation import (
     ray_cluster_attestation_digest,
     ray_target_expectation_digest,
 )
-from django_ray.target_execution_codec import (
+from django_ray.target.execution_codec import (
     TargetExecutionCompatibilityReason,
     TargetExecutionCompatibilityRejection,
     TargetExecutionCompletion,
     encode_target_execution_result,
 )
-from django_ray.target_execution_evidence import (
+from django_ray.target.execution_evidence import (
     RayTaskTargetExecutionEvidenceClaim,
     ray_task_target_execution_evidence_digest,
 )

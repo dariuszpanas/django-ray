@@ -130,12 +130,6 @@
         "rationale": "Redaction, bounded status projection, and Ray identifier handling are deterministic observability contracts that should be covered with exact payload assertions."
       }
     },
-    "src/django_ray/ray_target_probe.py": {
-      "default": {
-        "category": "testable-behavior",
-        "rationale": "Version-pinned cluster snapshots, hard-affinity node observations, deadline handling, fixed rejections, and portable Ray bootstrap behavior are deterministic probe contracts that should be covered with provider doubles and serial real-Ray evidence."
-      }
-    },
     "src/django_ray/result_storage.py": {
       "default": {
         "category": "testable-behavior",
@@ -263,37 +257,43 @@
         "rationale": "Envelope validation, key selection, authentication failure, and rotation compatibility are deterministic cryptographic-boundary contracts suited to fixed-key tests."
       }
     },
-    "src/django_ray/target_attestation.py": {
+    "src/django_ray/target/attestation.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Canonical target expectations, exact runtime tuples, observation boundaries, digest verification, validity windows, and mismatch classifications are deterministic trust-boundary contracts suited to exhaustive codec tests."
       }
     },
-    "src/django_ray/target_capabilities.py": {
+    "src/django_ray/target/capabilities.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Lease-incarnation validation, current-policy and proof freshness, CAS advertise/renew/withdraw behavior, fixed refusals, and SQLite/PostgreSQL serialization are deterministic coordination contracts suited to exact database and race tests."
       }
     },
-    "src/django_ray/target_coordination.py": {
+    "src/django_ray/target/coordination.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Target registration, revision-checked desired-state transitions, verified-only attestation history, and SQLite/PostgreSQL serialization are deterministic persistence contracts suited to exact database and race tests."
       }
     },
-    "src/django_ray/target_execution_codec.py": {
+    "src/django_ray/target/execution_codec.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Canonical protocol-2 target requests, authenticated observed evidence, completion and compatibility-rejection results, digest binding, exact identity checks, and resource limits are deterministic trust-boundary contracts suited to exhaustive codec tests."
       }
     },
-    "src/django_ray/target_execution_evidence.py": {
+    "src/django_ray/target/execution_evidence.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Canonical per-generation target claim evidence, immutable snapshot fields, strict timestamps, digest binding, and resource limits are deterministic provenance contracts suited to exhaustive codec tests."
       }
     },
-    "src/django_ray/target_routing.py": {
+    "src/django_ray/target/probe.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Version-pinned cluster snapshots, hard-affinity node observations, deadline handling, fixed rejections, and portable Ray bootstrap behavior are deterministic probe contracts that should be covered with provider doubles and serial real-Ray evidence."
+      }
+    },
+    "src/django_ray/target/routing.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Route registration, revision-checked transitions, active-policy validation, stable route locking, fixed refusals, and SQLite/PostgreSQL serialization are deterministic persistence contracts suited to exact database and race tests."

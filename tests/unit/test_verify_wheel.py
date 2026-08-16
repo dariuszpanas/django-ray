@@ -33,6 +33,14 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/target_execution_codec.py" in EXPECTED_FILES
     assert "django_ray/target_execution_evidence.py" in EXPECTED_FILES
     assert "django_ray/target_routing.py" in EXPECTED_FILES
+    assert "django_ray/target/__init__.py" in EXPECTED_FILES
+    assert "django_ray/target/attestation.py" in EXPECTED_FILES
+    assert "django_ray/target/capabilities.py" in EXPECTED_FILES
+    assert "django_ray/target/coordination.py" in EXPECTED_FILES
+    assert "django_ray/target/execution_codec.py" in EXPECTED_FILES
+    assert "django_ray/target/execution_evidence.py" in EXPECTED_FILES
+    assert "django_ray/target/probe.py" in EXPECTED_FILES
+    assert "django_ray/target/routing.py" in EXPECTED_FILES
     assert "django_ray/runner/ray_core.py" in EXPECTED_FILES
     assert "django_ray/runtime/remote.py" in EXPECTED_FILES
     assert "django_ray/migrations/0019_execution_protocol_schema.py" in EXPECTED_FILES
