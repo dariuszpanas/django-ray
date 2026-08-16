@@ -130,6 +130,81 @@ profile independently. The optional `kong-local` overlay is deliberately
 outside this gate and explicitly restores two default task managers and four
 Ray workers for its heavier backlog/capacity role.
 
+## Shared heavy-lane ownership and status
+
+Phase 1 coordinates the full local gate with full local CI and standalone real-Ray pytest through
+one daemonless `host-heavy` lane. Its fixed profiles are `ci-final`, `real-ray`, and
+`kuberay-final`. Inspect host ownership, queue position, source identity, last completion, and the
+reported safe action without changing coordinator, Docker, or Kubernetes state:
+
+Contained coordinator runs are supported only on Windows, Linux, and macOS; on other POSIX hosts
+they fail before lane acquisition because Phase 1 has no stable native process-birth identity, and
+contributors must not bypass the coordinator.
+
+```powershell
+uv run make local-resources
+uv run make local-resources LOCAL_RESOURCES_FORMAT=json
+```
+
+Inspect the named local Kubernetes stack with a separate bounded, read-only view:
+
+```powershell
+uv run make k8s-final-gate-status `
+  K8S_CONTEXT=docker-desktop `
+  K8S_NAMESPACE=django-ray
+```
+
+That target validates the explicit context and namespace, confirms the API server is local, and uses
+only allowlisted `kubectl config view` and `kubectl ... get` reads. It captures one bounded,
+raw/flattened/minified kubeconfig in a private temporary file, rejects proxy routing, and pins every
+projection to that exact verified snapshot and API server before cleaning the file on every exit.
+Make transfers the explicit context, namespace, and selected output format as unexpanded private
+environment data rather than recipe text. Python pops, bounds, and validates each value as exactly one
+argument before any status read, discards inherited Make recursion metadata, and scrubs the private
+fields from every `kubectl` child.
+It never invokes Docker or a mutating `kubectl` verb, and its projections omit object names, UIDs,
+pod status, and image IDs.
+Phase 1 has no Kubernetes Lease mirror, so `kubernetes_mirror.state` remains
+`not-configured`. The deployed-stack provenance machine value is `image-references-only` when image
+references can be observed and is otherwise unavailable. This is a current image-reference
+observation only, with no Phase 1 Kubernetes ownership mirror or historical deploy attribution; it
+does not prove which current user, session, worktree, or gate run created the workloads.
+
+Preflight-only performs its existing bounded read checks and client-side dry run without acquiring
+or writing coordinator state. The public full-gate Make target runs that direct check first, then
+queues through coordinator `run --profile kuberay-final`. The coordinator launches the full gate as
+one durably recorded contained child. That child first proves and borrows the inherited lease in its
+`local-resources` layer and scrubs the capability environment before Git or another preflight helper
+can inherit it. It then repeats preflight and uses `local-resources-recheck` to revalidate the active
+record and clean source before the `images` layer or any Docker/Kubernetes mutation. Direct
+full-gate invocation without that proved inheritance fails before repeated preflight or mutation.
+
+The outer coordinator retains ownership through gate-body evidence/error preparation, bounded
+diagnostics, protocol-fixture restoration, private-workspace cleanup, child-tree settlement, and its
+own release. A second interrupt during diagnostics or cleanup remains secondary to the original
+failure or interruption and cannot bypass that release path. Docker daemon work and Kubernetes
+server-side operations cannot belong to an OS child tree after their clients exit; the gate handles
+that boundary with its existing exact residue, recovery, preservation, and convergence checks.
+The preflight, contained run, and final marker form one fail-closed `&&` recipe, so Make's
+ignore-errors mode cannot continue from a failed stage to the definitive marker.
+The final-gate wrapper never interpolates `K8S_CONTEXT`, `K8S_NAMESPACE`, `K8S_RAY_RESTART`,
+`K8S_WEB_URL`, or `K8S_PROMETHEUS_URL` into its recipes. It transfers their unexpanded values through
+private internal environment fields; the Python gate pops, bounds, and validates each as exactly one
+argument before any preflight helper. It discards inherited Make recursion metadata that can repeat
+command-line assignments, then keeps those private fields out of Docker and `kubectl` children.
+`K8S_FINAL_GATE_EXTRA_ARGS` may tune non-wrapper options such as timeouts. Make likewise exports its
+unexpanded value through a private internal environment field; the Python gate bounds and parses it
+as arguments, never as shell syntax, before any preflight action. It cannot select help or
+preflight-only mode or override the wrapper-owned scope, restart decision, or local endpoints.
+
+Treat the coordinator's `safe_action` as the operator boundary. OS lock occupancy is authoritative;
+PID, heartbeat age, process name, ports, metadata, Docker/Kubernetes objects, and vault text cannot
+authorize killing, signaling, deleting, or taking over another run. An exact live orphan blocks the
+lane with termination authority `none`. The registry assumes cooperating processes under one OS
+user rather than defending against a malicious same-user process. Standalone PostgreSQL tests,
+Docker Compose, and manual Ray/Docker/Kubernetes probes remain outside Phase 1 and require an
+explicit live handoff.
+
 ## Prerequisites
 
 - A clean checkout whose committed tree is the exact source under test. Untracked files also fail
@@ -466,13 +541,17 @@ and RuntimeEnv boundary.
 
 ## Runtime evidence and durable validation summary
 
-On success, the gate prints a complete `=== Local KubeRay final gate evidence ===` block for immediate
-diagnosis. It prepares the block during its final identity check but emits neither the final success
-line nor any evidence until its private workspace and kubeconfig have been removed successfully. A
-workspace creation or cleanup failure therefore cannot leave a false passing block. The block is
-secret-free and bounded, but it contains ephemeral image IDs, pod hashes, cluster UIDs, checksums,
-and other run-specific identifiers. Do not copy the complete block into a retained commit or PR by
-default.
+After the contained gate body succeeds, it prints a complete
+`=== Local KubeRay gate-body evidence (outer release pending) ===` block for immediate diagnosis. It
+prepares the block during its final identity check but emits neither the gate-body completion line nor
+any evidence until its private workspace and kubeconfig have been removed successfully. The header
+and completion line explicitly keep outer release pending. Only Make prints
+`[final-release] passed: KubeRay gate complete; local resources released`, after the coordinator has
+settled the owned child tree and returned zero from release. A workspace creation, cleanup, child-tree
+settlement, or coordinator-release failure therefore cannot leave a definitive final passing line.
+The block is secret-free and bounded, but it contains ephemeral image IDs, pod hashes, cluster UIDs,
+checksums, and other run-specific identifiers.
+Do not copy the complete block into a retained commit or PR by default.
 
 Each emitted line is at most 72 characters for bounded terminal output and stable diagnostic
 artifacts. A long value is emitted as `key_parts=<count>` followed by ordered `key_part_001=...`
@@ -599,7 +678,8 @@ final-gate evidence.
 
 ## Failure diagnostics and recovery
 
-Failures are labeled by layer: `preflight`, `images`, `apply`, `setup`, `workloads`, `ray`, `rollouts`,
+Failures are labeled by layer: `preflight`, `local-resources`, `local-resources-recheck`, `images`,
+`apply`, `setup`, `workloads`, `ray`, `rollouts`,
 `app-convergence`, `image-identity`, `protocol-handoff-recovery`, `runtime-env`, `probes`,
 `api-smoke`, `ray-job-request-reference`, `protocol-handoff`, `runtime-env-encryption`,
 `workflow-progress`, `workflow-admin`, `prometheus`, or
@@ -617,7 +697,14 @@ layer remains authoritative and the cleanup error is retained as separately boun
 
 Fix the named layer and rerun the same source tree with a new unique tag. Normal recovery must not
 use `k8s-reset`, delete the namespace, delete PostgreSQL, delete a PVC, prune Docker, or remove other
-local images. The gate itself never performs those actions. It only:
+local images.
+
+Do not terminate or clean up a process or stack because a PID, heartbeat, port, lock-file payload,
+Kubernetes object, or vault note appears stale. Query `uv run make local-resources`, follow its safe
+action, and request a live handoff from the verified owner. `orphaned` and `unknown` require
+investigation and grant no termination authority.
+
+The gate itself never performs those actions. It only:
 
 - applies namespace-confined prerequisites first and defers application/Ray workloads until setup;
 - preserves the existing `Secret/django-ray-secret` rather than applying its checked-in placeholder;

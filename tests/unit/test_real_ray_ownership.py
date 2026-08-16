@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import tests.real_ray_ownership as real_ray_ownership
+from scripts import local_resource_coordinator as coordinator
 from tests.real_ray_ownership import (
     MAX_OWNER_METADATA_BYTES,
     OWNER_METADATA_OFFSET,
@@ -42,6 +43,20 @@ print(f"LOCKED:{os.getpid()}", flush=True)
 sys.stdin.readline()
 os._exit(0)
 """
+
+
+def test_legacy_module_reexports_the_coordinator_implementation() -> None:
+    for name in (
+        "DEFAULT_REAL_RAY_LOCK_PATH",
+        "LOCK_BYTE_OFFSET",
+        "MAX_OWNER_METADATA_BYTES",
+        "OWNER_METADATA_OFFSET",
+        "RealRayOwnershipLock",
+        "RealRayOwnershipPathError",
+        "RealRayOwnershipUnavailableError",
+        "build_owner_metadata",
+    ):
+        assert getattr(real_ray_ownership, name) is getattr(coordinator, name)
 
 
 def _stop_process(process: subprocess.Popen[str]) -> None:

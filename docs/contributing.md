@@ -221,6 +221,14 @@ uv run make test-cov
 
 `uv run make ci` runs the required format, lint, type, runtime-dependency advisory,
 coverage, strict-documentation, and package-build checks for the current interpreter.
+The public target also waits for and owns the local `ci-final` host-heavy lane for its complete
+duration. Invoke it once as shown; do not call its private owned target or put another `uv run`
+inside the Make recipe. The selected real-Ray pytest phase validates and borrows that same lease
+rather than deadlocking by reacquiring it.
+
+Do not add GNU Make's `-i`/`--ignore-errors`: both CI entrypoints reject that mode during parsing so
+an ownership or inheritance failure cannot be ignored before later CI commands.
+
 GitHub Actions additionally repeats tests across supported Python versions and
 minimum/latest dependency resolutions. Run the advisory check alone with
 `uv run make audit-dependencies`; it exports the exact locked default and optional-extra
@@ -712,14 +720,78 @@ uv run python scripts/test_suite_inventory.py run \
   -- -v
 ```
 
-Any non-collection pytest session whose final selected items include `real_ray` acquires
-one OS-released host-wide django-ray test lock before executing tests. The lock spans
-processes and linked worktrees, so two agents cannot accidentally start independent local
-Ray test owners on the same machine. A contender fails before test execution with bounded
-owner metadata; it does not wait, retry, skip, or delete another process's state. The lock
-file may remain after a process exits, but the operating-system lock is released
-automatically and stale contents never establish ownership. Collect-only inventory and
-sessions with no selected `real_ray` case remain lock-free.
+Phase 1 uses one daemonless, host-wide `host-heavy` lane with three fixed profiles:
+
+- `ci-final` for the complete local CI-equivalent target;
+- `real-ray` for a standalone non-collection pytest session whose final selected items include
+  `real_ray`; and
+- `kuberay-final` for the full guarded KubeRay gate.
+
+Contained coordinator runs are supported only on Windows, Linux, and macOS; on other POSIX hosts
+they fail before lane acquisition because Phase 1 has no stable native process-birth identity, and
+contributors must not bypass the coordinator.
+
+Inspect the coordinator without creating, repairing, or taking ownership of local state:
+
+```bash
+uv run make local-resources
+uv run make local-resources LOCAL_RESOURCES_FORMAT=json
+```
+
+The text form gives the active phase and safe action. The JSON form is bounded and stable for local
+tools and includes active, queue, orphaned, last-completed, source, and diagnostic fields. Status
+works from a dirty or detached worktree and does not mutate Docker or Kubernetes. Self-declared
+diagnostics may be supplied with `DJANGO_RAY_LOCAL_OWNER`, `DJANGO_RAY_LOCAL_SESSION`,
+`DJANGO_RAY_LOCAL_AGENT`, `DJANGO_RAY_LOCAL_MODEL`, `DJANGO_RAY_LOCAL_INTENT`, and
+`DJANGO_RAY_LOCAL_HANDOFF`; they are not authentication or takeover capabilities. Do not set, copy,
+or persist the internal lease-token environment.
+
+Coordinator-aware contenders join a FIFO queue instead of racing or failing immediately. Waiting is
+bounded to four hours by default, reports progress on the first queued poll and then at the requested
+or default 30-second interval, and leaves the owner lock open until the guarded command and cleanup
+finish. A nested Make or pytest consumer validates the exact resolved checkout root, inherited run,
+requested-resource subset, state directory, token digest, live owner root process and birth identity,
+held per-user authority lock, and caller ancestry beneath the durably recorded launch child before
+borrowing the lease. Borrowers neither update nor release their parent's lease and perform no state
+writes. Pytest
+removes all internal inheritance variables before Ray can start child processes. A lock cannot be
+transferred in a handoff: the current owner completes and releases it, then the oldest eligible
+contender acquires it.
+
+Coordinator-run commands record durable child-tree custody. Standalone pytest instead holds the
+lease in-process: it preserves mutual exclusion, but after a hard crash any detached Ray descendant
+remains subject to the existing Ray residue checks and cleanup contract. It never grants coordinator
+kill authority.
+
+The KubeRay Make wrapper runs direct preflight before queueing, then launches the repeated full gate
+as one coordinator-contained child. Its gate-body evidence says that outer release is pending; only
+the Make line printed after child-tree settlement and coordinator release is definitive success.
+Docker daemon work and Kubernetes server-side operations cannot remain in OS child-tree custody, so
+the gate's residue, recovery, preservation, and convergence checks remain authoritative for them.
+
+On POSIX, the historical real-Ray lock is only a same-user compatibility bridge when its fixed path
+is safely usable; a foreign-user inode is ignored without mutation and never establishes authority.
+The coordinator holds its authoritative lock in the private per-user registry. Windows retains the
+original single lock path. An older same-user real-Ray checkout therefore remains
+mutually exclusive when the compatibility path is usable, but a legacy client cannot join the FIFO
+queue. Lock-file contents and stale metadata never establish ownership; OS lock occupancy is
+authoritative. When the owner lock is free but an exact recorded child PID and process-birth identity
+remains live, status reports
+`orphaned`, keeps the lane blocked, and sets termination authority to `none`. If liveness cannot be
+proved, status instead fails closed as `unknown`; it still grants no termination authority. PID,
+heartbeat age, process name, ports, Ray temporary files, Docker/Kubernetes objects, and vault text
+never authorize killing, signaling, cleanup, or takeover.
+
+The private registry excludes foreign OS users. Processes under the same OS user are expected to
+cooperate with the mutex and capability contract; the coordinator is not a security sandbox against
+a malicious same-user process that can already inspect or signal peers. The ignored Obsidian vault is
+narrative handoff context only and is never the queue, lock, cancellation capability, or termination
+authority.
+
+Standalone PostgreSQL tests, Docker Compose, and manual Ray, Docker, or Kubernetes probes do not yet
+have Phase 1 profiles. Coordinate those commands through an explicit live handoff and do not overlap
+them with an active host-heavy lane. Collect-only inventory and sessions with no selected `real_ray`
+case remain lock-free.
 
 This guard protects the validity of local evidence; it is not a workaround for Ray's
 native Windows lifecycle issue and does not prove that an upstream version fixed it. Run

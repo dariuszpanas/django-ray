@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+from scripts import local_resource_coordinator as coordinator
 from tests import conftest
 from tests.integration import test_live_failure_injection, test_task_execution
 
@@ -293,11 +295,10 @@ def test_real_ray_ownership_ignores_non_executing_final_selections(
     testsfailed: int,
     markers: set[str],
 ) -> None:
-    class _UnexpectedOwnership:
-        def __init__(self) -> None:
-            raise AssertionError("ownership must remain inert")
+    def unexpected_acquisition(**_kwargs: object) -> None:
+        raise AssertionError("ownership must remain inert")
 
-    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _UnexpectedOwnership)
+    monkeypatch.setattr(conftest, "acquire_local_resources", unexpected_acquisition)
     session = _Session(
         config=_Config(
             rootpath=tmp_path,
@@ -317,16 +318,29 @@ def test_real_ray_ownership_uses_final_items_and_releases_once(
     first_release_hook: str,
 ) -> None:
     acquired: list[dict[str, object]] = []
-    release_calls: list[bool] = []
+    release_calls: list[tuple[str, str | None]] = []
 
     class _FakeOwnership:
-        def acquire(self, owner: dict[str, object]) -> None:
-            acquired.append(owner)
+        def release(
+            self,
+            *,
+            outcome: str = "completed",
+            postcondition: str | None = None,
+        ) -> None:
+            release_calls.append((outcome, postcondition))
 
-        def release(self) -> None:
-            release_calls.append(True)
+    ownership = _FakeOwnership()
 
-    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _FakeOwnership)
+    def acquire(**kwargs: object) -> _FakeOwnership:
+        acquired.append(dict(kwargs))
+        on_acquired = cast(Callable[[object], None], kwargs["on_acquired"])
+        on_acquired(ownership)
+        return ownership
+
+    monkeypatch.setattr(conftest, "acquire_local_resources", acquire)
+    for key in coordinator.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS:
+        monkeypatch.setenv(key, f"private-{key}")
+    monkeypatch.setenv(coordinator.LOCAL_RESOURCE_AGENT_ENV, "pytest-agent")
     config = _Config(rootpath=tmp_path)
     session = _Session(
         config=config,
@@ -340,9 +354,19 @@ def test_real_ray_ownership_uses_final_items_and_releases_once(
     conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
 
     assert len(acquired) == 1
-    assert acquired[0]["pid"] == os.getpid()
-    assert acquired[0]["rootpath"] == str(tmp_path.resolve())
+    assert set(acquired[0]) == {
+        "on_acquired",
+        "phase",
+        "profile",
+        "rootpath",
+        "selected_count",
+    }
+    assert acquired[0]["rootpath"] == tmp_path.resolve()
     assert acquired[0]["selected_count"] == 2
+    assert acquired[0]["profile"] == "real-ray"
+    assert acquired[0]["phase"] == "pytest"
+    assert all(key not in os.environ for key in coordinator.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
+    assert os.environ[coordinator.LOCAL_RESOURCE_AGENT_ENV] == "pytest-agent"
 
     if first_release_hook == "sessionfinish":
         conftest.pytest_sessionfinish(session, 0)  # type: ignore[arg-type]
@@ -351,30 +375,229 @@ def test_real_ray_ownership_uses_final_items_and_releases_once(
         conftest.pytest_unconfigure(config)  # type: ignore[arg-type]
         conftest.pytest_sessionfinish(session, 0)  # type: ignore[arg-type]
 
-    assert release_calls == [True]
+    expected_outcome = "passed" if first_release_hook == "sessionfinish" else "interrupted"
+    assert release_calls == [
+        (
+            expected_outcome,
+            (
+                "pytest session finished; Ray cleanup checks remain authoritative"
+                if first_release_hook == "sessionfinish"
+                else "pytest unconfigured; Ray cleanup checks remain authoritative"
+            ),
+        )
+    ]
+
+
+def test_real_ray_ownership_is_retained_before_acquisition_returns_and_scrub_errors_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    retained_before_return: list[bool] = []
+    release_calls: list[tuple[str, str | None]] = []
+
+    class _FakeOwnership:
+        def release(
+            self,
+            *,
+            outcome: str = "completed",
+            postcondition: str | None = None,
+        ) -> None:
+            release_calls.append((outcome, postcondition))
+
+    ownership = _FakeOwnership()
+    config = _Config(rootpath=tmp_path)
+
+    def acquire(**kwargs: object) -> _FakeOwnership:
+        on_acquired = cast(Callable[[object], None], kwargs["on_acquired"])
+        on_acquired(ownership)
+        retained_before_return.append(
+            config.stash.get(conftest._REAL_RAY_OWNERSHIP_KEY) is ownership
+        )
+        return ownership
+
+    class _InterruptDuringScrub:
+        def __iter__(self) -> Iterator[str]:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(conftest, "acquire_local_resources", acquire)
+    monkeypatch.setattr(
+        conftest,
+        "LOCAL_RESOURCE_INHERITANCE_ENV_KEYS",
+        _InterruptDuringScrub(),
+    )
+    session = _Session(
+        config=config,
+        items=[_CollectedItem(markers={"real_ray"})],
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
+
+    assert retained_before_return == [True]
+    assert release_calls == [("failed", "pytest ownership initialization failed")]
+    assert conftest._REAL_RAY_OWNERSHIP_KEY not in config.stash
+
+
+def test_real_ray_ownership_callback_failure_is_bounded_and_released(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    release_calls: list[tuple[str, str | None]] = []
+
+    class _FakeOwnership:
+        released = False
+
+        def release(
+            self,
+            *,
+            outcome: str = "completed",
+            postcondition: str | None = None,
+        ) -> None:
+            if self.released:
+                return
+            self.released = True
+            release_calls.append((outcome, postcondition))
+
+    class _CommitThenFailStash(dict[object, object]):
+        def __setitem__(self, key: object, value: object) -> None:
+            super().__setitem__(key, value)
+            raise RuntimeError("synthetic private callback detail")
+
+    ownership = _FakeOwnership()
+    config = _Config(rootpath=tmp_path, stash=_CommitThenFailStash())
+
+    def acquire(**kwargs: object) -> _FakeOwnership:
+        on_acquired = cast(Callable[[object], None], kwargs["on_acquired"])
+        try:
+            on_acquired(ownership)
+        except BaseException:
+            ownership.release(
+                outcome="failed",
+                postcondition="public acquisition callback failed",
+            )
+            raise
+        return ownership
+
+    monkeypatch.setattr(conftest, "acquire_local_resources", acquire)
+    session = _Session(
+        config=config,
+        items=[_CollectedItem(markers={"real_ray"})],
+    )
+
+    with pytest.raises(
+        pytest.UsageError,
+        match="pytest could not retain acquired local resource ownership",
+    ):
+        conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
+
+    assert release_calls == [("failed", "public acquisition callback failed")]
+    assert conftest._REAL_RAY_OWNERSHIP_KEY not in config.stash
+
+
+def test_real_ray_acquisition_cleanup_error_is_bounded_and_unconfigure_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    release_calls: list[tuple[str, str | None]] = []
+
+    class _FailOnceOwnership:
+        def release(
+            self,
+            *,
+            outcome: str = "completed",
+            postcondition: str | None = None,
+        ) -> None:
+            release_calls.append((outcome, postcondition))
+            if len(release_calls) == 1:
+                raise coordinator.LocalResourceStateError(
+                    "synthetic bounded initialization cleanup failure"
+                )
+
+    ownership = _FailOnceOwnership()
+    config = _Config(rootpath=tmp_path)
+
+    def acquire(**kwargs: object) -> _FailOnceOwnership:
+        on_acquired = cast(Callable[[object], None], kwargs["on_acquired"])
+        on_acquired(ownership)
+        raise coordinator.LocalResourceStateError("synthetic bounded post-acquisition failure")
+
+    monkeypatch.setattr(conftest, "acquire_local_resources", acquire)
+    session = _Session(
+        config=config,
+        items=[_CollectedItem(markers={"real_ray"})],
+    )
+
+    with pytest.raises(
+        pytest.UsageError,
+        match="synthetic bounded initialization cleanup failure",
+    ):
+        conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
+
+    assert config.stash[conftest._REAL_RAY_OWNERSHIP_KEY] is ownership
+
+    conftest.pytest_unconfigure(config)  # type: ignore[arg-type]
+
+    assert release_calls == [
+        ("failed", "pytest ownership initialization failed"),
+        (
+            "interrupted",
+            "pytest unconfigured; Ray cleanup checks remain authoritative",
+        ),
+    ]
+    assert conftest._REAL_RAY_OWNERSHIP_KEY not in config.stash
+
+
+def test_real_ray_ownership_release_failure_remains_stashed_for_unconfigure_retry(
+    tmp_path: Path,
+) -> None:
+    release_calls: list[tuple[str, str | None]] = []
+
+    class _FailOnceOwnership:
+        def release(
+            self,
+            *,
+            outcome: str = "completed",
+            postcondition: str | None = None,
+        ) -> None:
+            release_calls.append((outcome, postcondition))
+            if len(release_calls) == 1:
+                raise OSError("synthetic first release failure")
+
+    config = _Config(rootpath=tmp_path)
+    session = _Session(config=config, items=[])
+    ownership = _FailOnceOwnership()
+    config.stash[conftest._REAL_RAY_OWNERSHIP_KEY] = ownership
+
+    with pytest.raises(OSError, match="synthetic first release failure"):
+        conftest.pytest_sessionfinish(session, 0)  # type: ignore[arg-type]
+
+    assert config.stash[conftest._REAL_RAY_OWNERSHIP_KEY] is ownership
+
+    conftest.pytest_unconfigure(config)  # type: ignore[arg-type]
+
+    assert release_calls == [
+        (
+            "passed",
+            "pytest session finished; Ray cleanup checks remain authoritative",
+        ),
+        (
+            "interrupted",
+            "pytest unconfigured; Ray cleanup checks remain authoritative",
+        ),
+    ]
+    assert conftest._REAL_RAY_OWNERSHIP_KEY not in config.stash
 
 
 def test_real_ray_ownership_contention_becomes_bounded_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class _ContendedOwnership:
-        def acquire(self, owner: dict[str, object]) -> None:
-            del owner
-            raise conftest.RealRayOwnershipUnavailableError(
-                tmp_path / "owner.lock",
-                {
-                    "pid": 4242,
-                    "hostname": "other-host",
-                    "rootpath": "other-worktree",
-                    "selected_count": 2,
-                },
-            )
+    def contend(**_kwargs: object) -> None:
+        raise coordinator.LocalResourceBusyError(
+            'local resources are active; owner metadata: {"pid": 4242}'
+        )
 
-        def release(self) -> None:
-            raise AssertionError("an unacquired lock must not be released")
-
-    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _ContendedOwnership)
+    monkeypatch.setattr(conftest, "acquire_local_resources", contend)
     session = _Session(
         config=_Config(rootpath=tmp_path),
         items=[_CollectedItem(markers={"real_ray"})],
@@ -388,15 +611,10 @@ def test_unsafe_real_ray_ownership_path_becomes_bounded_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class _UnsafePathOwnership:
-        def acquire(self, owner: dict[str, object]) -> None:
-            del owner
-            raise conftest.RealRayOwnershipPathError(tmp_path / "owner.lock")
+    def reject_path(**_kwargs: object) -> None:
+        raise coordinator.RealRayOwnershipPathError(tmp_path / "owner.lock")
 
-        def release(self) -> None:
-            raise AssertionError("an unacquired lock must not be released")
-
-    monkeypatch.setattr(conftest, "RealRayOwnershipLock", _UnsafePathOwnership)
+    monkeypatch.setattr(conftest, "acquire_local_resources", reject_path)
     session = _Session(
         config=_Config(rootpath=tmp_path),
         items=[_CollectedItem(markers={"real_ray"})],

@@ -157,7 +157,8 @@
           "tests/unit/test_kuberay_compiled_graph_pilot.py",
           "tests/unit/test_kuberay_resource_profiles.py",
           "tests/unit/test_kubernetes_web_probes.py",
-          "tests/unit/test_local_kuberay_gate.py"
+          "tests/unit/test_local_kuberay_gate.py",
+          "tests/unit/test_local_kuberay_status.py"
         ]
       }
     },
@@ -175,9 +176,12 @@
           "tests/unit/test_ci_workflow_policy.py",
           "tests/unit/test_coverage_debt.py",
           "tests/unit/test_docs_theme.py",
+          "tests/unit/test_local_resource_coordinator.py",
           "tests/unit/test_makefile_test_targets.py",
           "tests/unit/test_package_metadata.py",
+          "tests/unit/test_real_ray_ownership.py",
           "tests/unit/test_release.py",
+          "tests/unit/test_test_resource_ownership.py",
           "tests/unit/test_test_suite_inventory.py",
           "tests/unit/test_verify_wheel.py"
         ]

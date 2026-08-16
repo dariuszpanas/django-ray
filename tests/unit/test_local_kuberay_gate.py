@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -131,6 +133,51 @@ TOKEN68 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=="
 RUNTIME_ENV_CANARY_TASK_ID = "a5200000-0000-4000-8000-000000000010"
 RUNTIME_ENV_TAMPER_TASK_ID = "b5200000-0000-4000-8000-000000000011"
 RUNTIME_ENV_UNKNOWN_KEY_TASK_ID = "c5200000-0000-4000-8000-000000000012"
+
+
+class _LocalResourceLeaseStub:
+    def __init__(self) -> None:
+        self.inherited = True
+        self.run_id = "synthetic-kuberay-run"
+        self.profile = "kuberay-final"
+        self.resources = ("host-heavy",)
+        self.phases: list[str] = []
+        self.releases: list[tuple[str, str | None]] = []
+
+    def inheritance_environment(self) -> dict[str, str]:
+        return dict(
+            zip(
+                gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS,
+                (self.run_id, "synthetic-token", self.profile, "synthetic-state-dir"),
+                strict=True,
+            )
+        )
+
+    def update_phase(self, phase: str) -> None:
+        self.phases.append(phase)
+
+    def release(
+        self,
+        *,
+        outcome: str = "completed",
+        postcondition: str | None = None,
+    ) -> None:
+        self.releases.append((outcome, postcondition))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_local_resource_inheritance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    calls: list[dict[str, object]] = []
+    lease = _LocalResourceLeaseStub()
+
+    def require(**kwargs: object) -> _LocalResourceLeaseStub:
+        calls.append(dict(kwargs))
+        return lease
+
+    monkeypatch.setattr(gate_module, "require_inherited_local_resources", require)
+    return {"calls": calls, "lease": lease}
 
 
 def _task_status_payload(
@@ -733,6 +780,7 @@ def _config(
     context: str = "docker-desktop",
     kind_cluster_name: str | None = None,
     rollout_timeout: int = 300,
+    preflight_only: bool = False,
 ) -> GateConfig:
     return GateConfig(
         root=ROOT,
@@ -748,7 +796,7 @@ def _config(
         command_timeout=120,
         build_timeout=1200,
         kubectl_request_timeout=30,
-        preflight_only=False,
+        preflight_only=preflight_only,
     )
 
 
@@ -4998,6 +5046,7 @@ def test_setup_failure_prevents_workload_reconciliation(
     order: list[str] = []
     gate = LocalKubeRayGate(_config())
     monkeypatch.setattr(gate, "_preflight", lambda: order.append("preflight"))
+    monkeypatch.setattr(gate, "_verify_source_identity", lambda: None)
     monkeypatch.setattr(gate, "_build_images", lambda: order.append("images"))
     monkeypatch.setattr(gate, "_apply_overlay", lambda: order.append("apply"))
 
@@ -7230,12 +7279,17 @@ def test_preflight_registers_secret_before_any_mutation_or_diagnostics(
     gate.temp_root = tmp_path
     events: list[str] = []
     monkeypatch.delenv("DOCKER_HOST", raising=False)
-    for key in gate_module.PROXY_ENVIRONMENT_KEYS | {
-        "DOCKER_CONTEXT",
-        "DOCKER_TLS_VERIFY",
-        "BUILDX_BUILDER",
-        "KUBECONFIG",
-    }:
+    hostile_routing_keys = (
+        gate_module.PROXY_ENVIRONMENT_KEYS
+        | set(gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
+        | {
+            "DOCKER_CONTEXT",
+            "DOCKER_TLS_VERIFY",
+            "BUILDX_BUILDER",
+            "KUBECONFIG",
+        }
+    )
+    for key in hostile_routing_keys:
         monkeypatch.setenv(key, f"hostile-{key.lower()}")
     monkeypatch.setattr(shutil, "which", lambda executable: f"/bin/{executable}")
     monkeypatch.setattr(
@@ -7265,6 +7319,7 @@ def test_preflight_registers_secret_before_any_mutation_or_diagnostics(
             else gate_module.KUBECTL_ENVIRONMENT_KEYS
         )
         assert not ({key.upper() for key in environment} & removed)
+    assert all(key in os.environ for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
 
 
 def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -10063,7 +10118,7 @@ def test_gate_guide_separates_runtime_evidence_from_durable_summary() -> None:
     guide = (ROOT / "docs/deployment/local-kuberay-gate.md").read_text(encoding="utf-8")
 
     assert "## Runtime evidence and durable validation summary" in guide
-    assert "=== Local KubeRay final gate evidence ===" in guide
+    assert "=== Local KubeRay gate-body evidence (outer release pending) ===" in guide
     assert "Do not copy the complete block into a retained commit or PR" in guide
     assert "exact `uv run make k8s-final-gate` command and arguments" in guide
     assert "`K8S_RAY_RESTART=required`: passed" in guide
@@ -10139,17 +10194,53 @@ def test_make_gate_requires_explicit_context_namespace_and_ray_decision() -> Non
 
     assert "k8s-final-gate-preflight:" in makefile
     assert "k8s-final-gate:" in makefile
-    assert '--context "$(K8S_CONTEXT)"' in makefile
-    assert '--namespace "$(K8S_NAMESPACE)"' in makefile
-    assert '--ray-restart "$(K8S_RAY_RESTART)"' in makefile
     assert "--preflight-only" in makefile
+    preflight_target = makefile.split("k8s-final-gate-preflight:", maxsplit=1)[1]
+    preflight_target = preflight_target.split("\n# ", maxsplit=1)[0]
+    final_target = makefile.split("k8s-final-gate: k8s-evaluation-warning", maxsplit=1)[1]
+    final_target = final_target.split("\n# ", maxsplit=1)[0]
+    wrapper_targets = f"{preflight_target}\n{final_target}"
+    for public_name in (
+        "K8S_CONTEXT",
+        "K8S_NAMESPACE",
+        "K8S_RAY_RESTART",
+        "K8S_WEB_URL",
+        "K8S_PROMETHEUS_URL",
+        "K8S_FINAL_GATE_EXTRA_ARGS",
+    ):
+        assert f"$({public_name})" not in wrapper_targets
+        assert f"unexport {public_name}" in makefile
+    assert final_target.count("python -m scripts.local_kuberay_gate") == 2
+    assert final_target.count("--preflight-only") == 1
+    assert "python -m scripts.local_resource_coordinator run" in final_target
+    assert "--profile kuberay-final" in final_target
+    assert "--phase kuberay-final" in final_target
+    assert "[final-release] passed" in final_target
+    assert final_target.index("--preflight-only") < final_target.index(
+        "python -m scripts.local_resource_coordinator run"
+    )
+    assert final_target.index("python -m scripts.local_resource_coordinator run") < (
+        final_target.index("[final-release] passed")
+    )
+    gate_source = (ROOT / "scripts/local_kuberay_gate.py").read_text(encoding="utf-8")
+    assert "[final-release] passed" not in gate_source
     assert "if [ -z" not in makefile
-    assert "$(if $(strip $(K8S_CONTEXT))" in makefile
-    assert "$(if $(strip $(K8S_RAY_RESTART))" in makefile
+    private_mapping = {
+        "K8S_CONTEXT": "DJANGO_RAY_INTERNAL_KUBERAY_CONTEXT",
+        "K8S_NAMESPACE": "DJANGO_RAY_INTERNAL_KUBERAY_NAMESPACE",
+        "K8S_RAY_RESTART": "DJANGO_RAY_INTERNAL_KUBERAY_RAY_RESTART",
+        "K8S_WEB_URL": "DJANGO_RAY_INTERNAL_KUBERAY_WEB_URL",
+        "K8S_PROMETHEUS_URL": "DJANGO_RAY_INTERNAL_KUBERAY_PROMETHEUS_URL",
+        "K8S_FINAL_GATE_EXTRA_ARGS": "DJANGO_RAY_INTERNAL_KUBERAY_GATE_EXTRA_ARGS",
+    }
+    for public_name, private_name in private_mapping.items():
+        assert f"{private_name} := $(value {public_name})" in makefile
+        assert makefile.count(f"$(value {public_name})") == 1
+    assert "K8S_FINAL_GATE_FORBIDDEN_EXTRA_PATTERNS" not in makefile
 
 
 @pytest.mark.parametrize("target", ["k8s-final-gate-preflight", "k8s-final-gate"])
-def test_make_gate_wrapper_expands_on_the_host_shell(target: str) -> None:
+def test_make_gate_wrapper_dry_run_contains_only_fixed_commands(target: str) -> None:
     make = shutil.which("make")
     if make is None:
         pytest.skip("make is required to exercise the repository wrapper")
@@ -10172,12 +10263,25 @@ def test_make_gate_wrapper_expands_on_the_host_shell(target: str) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "python -m scripts.local_kuberay_gate" in result.stdout
-    assert '--web-url "http://localhost:30080"' in result.stdout
-    assert '--prometheus-url "http://localhost:30090"' in result.stdout
+    assert "docker-desktop" not in result.stdout
+    assert EXPECTED_NAMESPACE not in result.stdout
+    assert "http://localhost:30080" not in result.stdout
+    assert "http://localhost:30090" not in result.stdout
     assert "if [ -z" not in result.stdout
+    if target == "k8s-final-gate":
+        assert result.stdout.count("python -m scripts.local_kuberay_gate") == 2
+        assert result.stdout.count("--preflight-only") == 1
+        assert "python -m scripts.local_resource_coordinator run" in result.stdout
+        assert result.stdout.rstrip().endswith(
+            'echo "[final-release] passed: KubeRay gate complete; local resources released"'
+        )
+    else:
+        assert result.stdout.count("python -m scripts.local_kuberay_gate") == 1
+        assert "local_resource_coordinator run" not in result.stdout
+        assert "[final-release] passed" not in result.stdout
 
 
-def test_make_gate_wrapper_rejects_a_missing_context_before_python() -> None:
+def test_make_gate_wrapper_rejects_a_missing_context_before_gate_action() -> None:
     make = shutil.which("make")
     if make is None:
         pytest.skip("make is required to exercise the repository wrapper")
@@ -10186,7 +10290,6 @@ def test_make_gate_wrapper_rejects_a_missing_context_before_python() -> None:
         [
             make,
             "--no-print-directory",
-            "--dry-run",
             "k8s-final-gate-preflight",
             f"K8S_NAMESPACE={EXPECTED_NAMESPACE}",
             "K8S_RAY_RESTART=required",
@@ -10198,8 +10301,572 @@ def test_make_gate_wrapper_rejects_a_missing_context_before_python() -> None:
     )
 
     assert result.returncode != 0
-    assert "K8S_CONTEXT is required" in result.stderr
-    assert "python -m scripts.local_kuberay_gate" not in result.stdout
+    assert "K8S_CONTEXT must be bounded printable ASCII data" in result.stderr
+    assert "[preflight]" not in result.stdout
+    assert "Preflight-only mode" not in result.stdout
+    assert "local_resource_coordinator run" not in result.stdout
+    assert "[final-release] passed" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    (
+        "; true #",
+        "&& echo bypass",
+        "| echo bypass",
+        "& echo bypass #",
+        "`echo bypass`",
+        '"; true #"',
+        "'unterminated",
+        "$(error must-not-expand)",
+    ),
+)
+def test_make_dry_run_never_interpolates_extra_argument_data_into_recipes(
+    hostile: str,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is required to exercise the repository wrapper")
+
+    result = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "--dry-run",
+            "k8s-final-gate",
+            "K8S_CONTEXT=docker-desktop",
+            f"K8S_NAMESPACE={EXPECTED_NAMESPACE}",
+            "K8S_RAY_RESTART=required",
+            f"K8S_FINAL_GATE_EXTRA_ARGS={hostile}",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert hostile not in result.stdout
+    assert hostile not in result.stderr
+    assert result.stdout.count("python -m scripts.local_kuberay_gate") == 2
+    assert result.stdout.count("python -m scripts.local_resource_coordinator run") == 1
+    assert result.stdout.count("[final-release] passed") == 1
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    (
+        "; true #",
+        "&& echo bypass",
+        "| echo bypass",
+        "& echo bypass #",
+        "`echo bypass`",
+        '"; true #"',
+        "'unterminated",
+        "$(error must-not-expand)",
+    ),
+)
+def test_real_make_preflight_rejects_extra_shell_data_before_any_gate_action(
+    hostile: str,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is required to exercise the repository wrapper")
+
+    result = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "k8s-final-gate-preflight",
+            "K8S_CONTEXT=docker-desktop",
+            "K8S_NAMESPACE=invalid-safe-test-namespace",
+            "K8S_RAY_RESTART=required",
+            f"K8S_FINAL_GATE_EXTRA_ARGS={hostile}",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "[preflight]" not in result.stdout
+    assert "Preflight-only mode" not in result.stdout
+    assert "python -m scripts.local_resource_coordinator run" not in result.stdout
+    assert "[final-release] passed" not in result.stdout
+
+
+def test_gate_parser_does_not_abbreviate_preflight_or_wrapper_owned_options() -> None:
+    with pytest.raises(SystemExit) as captured:
+        gate_module._parser().parse_args(
+            [
+                "--cont",
+                "docker-desktop",
+                "--namespace",
+                EXPECTED_NAMESPACE,
+                "--ray-restart",
+                "required",
+            ]
+        )
+
+    assert captured.value.code == 2
+
+
+def _valid_gate_cli_arguments(*, context: str = "docker-desktop") -> list[str]:
+    return [
+        "--context",
+        context,
+        "--namespace",
+        EXPECTED_NAMESPACE,
+        "--ray-restart",
+        "required",
+        "--preflight-only",
+    ]
+
+
+def _set_make_gate_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    context: str = "docker-desktop",
+    namespace: str = EXPECTED_NAMESPACE,
+    ray_restart: str = "required",
+    web_url: str = "http://localhost:30080",
+    prometheus_url: str = "http://localhost:30090",
+) -> None:
+    values = {
+        gate_module.K8S_CONTEXT_ENV: context,
+        gate_module.K8S_NAMESPACE_ENV: namespace,
+        gate_module.K8S_RAY_RESTART_ENV: ray_restart,
+        gate_module.K8S_WEB_URL_ENV: web_url,
+        gate_module.K8S_PROMETHEUS_URL_ENV: prometheus_url,
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_make_gate_scalar_bundle_is_one_argv_per_value_and_scrubbed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[GateConfig] = []
+
+    class RecordingGate:
+        def __init__(self, config: GateConfig) -> None:
+            observed.append(config)
+
+        def run(self) -> None:
+            pass
+
+    _set_make_gate_bundle(monkeypatch)
+    for key in gate_module.MAKE_RECURSION_ENVIRONMENT_KEYS:
+        monkeypatch.setenv(key, "K8S_CONTEXT=hostile-make-metadata")
+    monkeypatch.setattr(gate_module, "LocalKubeRayGate", RecordingGate)
+
+    assert gate_module.main(["--preflight-only"]) == 0
+
+    assert len(observed) == 1
+    assert observed[0].context == "docker-desktop"
+    assert observed[0].namespace == EXPECTED_NAMESPACE
+    assert observed[0].ray_restart == "required"
+    assert observed[0].web_url == "http://localhost:30080"
+    assert observed[0].prometheus_url == "http://localhost:30090"
+    assert all(key not in os.environ for key in gate_module.K8S_GATE_WRAPPER_ENV_KEYS)
+    assert all(key not in os.environ for key in gate_module.MAKE_RECURSION_ENVIRONMENT_KEYS)
+    assert set(gate_module.K8S_GATE_WRAPPER_ENV_KEYS) <= gate_module.KUBECTL_ENVIRONMENT_KEYS
+    assert set(gate_module.K8S_GATE_WRAPPER_ENV_KEYS) <= gate_module.DOCKER_ENVIRONMENT_KEYS
+    assert gate_module.MAKE_RECURSION_ENVIRONMENT_KEYS <= gate_module.KUBECTL_ENVIRONMENT_KEYS
+    assert gate_module.MAKE_RECURSION_ENVIRONMENT_KEYS <= gate_module.DOCKER_ENVIRONMENT_KEYS
+
+
+def test_partial_make_gate_scalar_bundle_fails_before_gate_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(gate_module.K8S_CONTEXT_ENV, "docker-desktop")
+    monkeypatch.setattr(
+        gate_module,
+        "LocalKubeRayGate",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("a partial Make bundle must fail before gate construction")
+        ),
+    )
+
+    assert gate_module.main(["--preflight-only"]) == 2
+    assert all(key not in os.environ for key in gate_module.K8S_GATE_WRAPPER_ENV_KEYS)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "hostile"),
+    (
+        ("context", 'docker-desktop" ; true #'),
+        ("namespace", 'django-ray" && true #'),
+        ("ray_restart", 'required" | true #'),
+        ("web_url", 'http://localhost:30080" & echo bypass #'),
+        ("prometheus_url", "`echo bypass`"),
+        ("context", "$(error must-not-expand)"),
+        ("context", '"unterminated'),
+        ("context", "\N{SNOWMAN}"),
+        ("context", "x" * 513),
+        ("web_url", "x" * (gate_module.MAX_MAKE_SCALAR_BYTES + 1)),
+    ),
+)
+def test_make_gate_scalar_shell_data_fails_before_gate_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    hostile: str,
+) -> None:
+    _set_make_gate_bundle(monkeypatch, **{field_name: hostile})
+    monkeypatch.setattr(
+        gate_module,
+        "LocalKubeRayGate",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("invalid Make scalar data must fail before gate construction")
+        ),
+    )
+
+    assert gate_module.main(["--preflight-only"]) == 2
+    assert all(key not in os.environ for key in gate_module.K8S_GATE_WRAPPER_ENV_KEYS)
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    (
+        "; true #",
+        "&& echo bypass",
+        "| echo bypass",
+        "& echo bypass #",
+        "`echo bypass`",
+        '"; true #"',
+        "'unterminated",
+        "$(error must-not-expand)",
+    ),
+)
+def test_extra_argument_shell_syntax_is_inert_and_fails_before_gate_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    hostile: str,
+) -> None:
+    monkeypatch.setenv(gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV, hostile)
+    monkeypatch.setattr(
+        gate_module,
+        "LocalKubeRayGate",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("invalid argument data must fail before gate construction")
+        ),
+    )
+
+    try:
+        result = gate_module.main(_valid_gate_cli_arguments())
+    except SystemExit as error:
+        result = error.code
+
+    assert result == 2
+    assert gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV not in os.environ
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    (
+        "--preflight-only",
+        '"--preflight-only"',
+        "--help",
+        "-h",
+        "-hfoo",
+        "-hh",
+        "-h=foo",
+        "--context kind-other",
+        "--context=kind-other",
+        f"--namespace {EXPECTED_NAMESPACE}",
+        f"--namespace={EXPECTED_NAMESPACE}",
+        "--ray-restart skip",
+        "--ray-restart=skip",
+        "--web-url http://localhost:30081",
+        "--web-url=http://localhost:30081",
+        "--prometheus-url http://localhost:30091",
+        "--prometheus-url=http://localhost:30091",
+    ),
+)
+def test_extra_arguments_cannot_select_help_preflight_or_make_owned_options(
+    monkeypatch: pytest.MonkeyPatch,
+    forbidden: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV, forbidden)
+    monkeypatch.setattr(
+        gate_module,
+        "LocalKubeRayGate",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("forbidden options must fail before gate construction")
+        ),
+    )
+
+    assert gate_module.main(_valid_gate_cli_arguments()) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "cannot select preflight/help or override Make-owned gate options" in captured.err
+    assert "[final-release] passed" not in captured.err
+    assert gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV not in os.environ
+
+
+def _write_python_coordinator_tripwire(*, directory: Path, marker: Path) -> None:
+    """Place a Python shim first on PATH that refuses coordinator execution."""
+
+    if os.name == "nt":
+        wrapper = directory / "python.cmd"
+        wrapper.write_text(
+            "@echo off\n"
+            'if "%~2"=="scripts.local_resource_coordinator" (\n'
+            f'  echo attempted>"{marker}"\n'
+            "  exit /b 97\n"
+            ")\n"
+            f'"{sys.executable}" %*\n'
+            "exit /b %errorlevel%\n",
+            encoding="utf-8",
+        )
+        return
+    wrapper = directory / "python"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$2" = "scripts.local_resource_coordinator" ]; then\n'
+        f"  printf attempted > {shlex.quote(str(marker))}\n"
+        "  exit 97\n"
+        "fi\n"
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    ("variable", "hostile"),
+    (
+        ("K8S_CONTEXT", 'docker-desktop" ; true #'),
+        ("K8S_NAMESPACE", 'django-ray" && true #'),
+        ("K8S_RAY_RESTART", 'required" | true #'),
+        ("K8S_WEB_URL", 'http://localhost:30080" & echo bypass #'),
+        ("K8S_PROMETHEUS_URL", "`echo bypass`"),
+        ("K8S_CONTEXT", "$(error must-not-expand)"),
+        ("K8S_CONTEXT", '"unterminated'),
+    ),
+)
+def test_make_dry_run_never_interpolates_gate_scalar_data(
+    variable: str,
+    hostile: str,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is required to exercise the repository wrapper")
+    values = {
+        "K8S_CONTEXT": "docker-desktop",
+        "K8S_NAMESPACE": EXPECTED_NAMESPACE,
+        "K8S_RAY_RESTART": "required",
+        "K8S_WEB_URL": "http://localhost:30080",
+        "K8S_PROMETHEUS_URL": "http://localhost:30090",
+    }
+    values[variable] = hostile
+
+    result = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "--dry-run",
+            "k8s-final-gate",
+            *(f"{key}={value}" for key, value in values.items()),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert hostile not in result.stdout
+    assert hostile not in result.stderr
+    assert result.stdout.count("python -m scripts.local_kuberay_gate") == 2
+    assert result.stdout.count("python -m scripts.local_resource_coordinator run") == 1
+
+
+@pytest.mark.parametrize(
+    ("variable", "hostile"),
+    (
+        ("K8S_CONTEXT", 'docker-desktop" ; true #'),
+        ("K8S_NAMESPACE", 'django-ray" && true #'),
+        ("K8S_RAY_RESTART", 'required" | true #'),
+        ("K8S_WEB_URL", 'http://localhost:30080" & echo bypass #'),
+        ("K8S_PROMETHEUS_URL", "`echo bypass`"),
+        ("K8S_CONTEXT", "$(error must-not-expand)"),
+        ("K8S_CONTEXT", '"unterminated'),
+    ),
+)
+def test_real_make_full_gate_rejects_scalar_shell_data_before_coordinator_or_final_pass(
+    tmp_path: Path,
+    variable: str,
+    hostile: str,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is required to exercise the repository wrapper")
+    marker = tmp_path / "coordinator-attempted"
+    _write_python_coordinator_tripwire(directory=tmp_path, marker=marker)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}{os.pathsep}{environment.get('PATH', '')}"
+    values = {
+        "K8S_CONTEXT": "docker-desktop",
+        "K8S_NAMESPACE": EXPECTED_NAMESPACE,
+        "K8S_RAY_RESTART": "required",
+        "K8S_WEB_URL": "http://localhost:30080",
+        "K8S_PROMETHEUS_URL": "http://localhost:30090",
+    }
+    values[variable] = hostile
+
+    result = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "k8s-final-gate",
+            *(f"{key}={value}" for key, value in values.items()),
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    assert hostile not in result.stdout
+    assert hostile not in result.stderr
+    assert "scripts.local_resource_coordinator run" not in result.stdout
+    assert "[final-release] passed" not in result.stdout
+
+
+def test_inherited_make_ignore_errors_cannot_print_final_pass_after_preflight_failure(
+    tmp_path: Path,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is required to exercise the repository wrapper")
+    marker = tmp_path / "coordinator-attempted"
+    _write_python_coordinator_tripwire(directory=tmp_path, marker=marker)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}{os.pathsep}{environment.get('PATH', '')}"
+    environment["MAKEFLAGS"] = "-i"
+
+    result = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "k8s-final-gate",
+            'K8S_CONTEXT=docker-desktop" ; true #',
+            f"K8S_NAMESPACE={EXPECTED_NAMESPACE}",
+            "K8S_RAY_RESTART=required",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert "scripts.local_resource_coordinator run" not in result.stdout
+    assert "[final-release] passed" not in result.stdout
+    assert "[final-release] passed" not in result.stderr
+
+
+@pytest.mark.parametrize("attached_help", ("-hfoo", "-hh", "-h=foo"))
+def test_real_make_full_gate_rejects_attached_help_before_coordinator_or_final_pass(
+    tmp_path: Path,
+    attached_help: str,
+) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is required to exercise the repository wrapper")
+    marker = tmp_path / "coordinator-attempted"
+    _write_python_coordinator_tripwire(directory=tmp_path, marker=marker)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}{os.pathsep}{environment.get('PATH', '')}"
+
+    result = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "k8s-final-gate",
+            "K8S_CONTEXT=docker-desktop",
+            "K8S_NAMESPACE=invalid-safe-test-namespace",
+            "K8S_RAY_RESTART=required",
+            f"K8S_FINAL_GATE_EXTRA_ARGS={attached_help}",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    assert "scripts.local_resource_coordinator run" not in result.stdout
+    assert "[final-release] passed" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        "x" * (gate_module.MAX_EXTRA_ARGUMENT_DATA_BYTES + 1),
+        "--command-timeout\n180",
+        " ".join("--command-timeout" for _ in range(gate_module.MAX_EXTRA_ARGUMENT_COUNT + 1)),
+        '"' + ("x" * (gate_module.MAX_EXTRA_ARGUMENT_BYTES + 1)) + '"',
+    ),
+)
+def test_extra_argument_data_is_bounded_before_gate_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: str,
+) -> None:
+    monkeypatch.setenv(gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV, invalid)
+    monkeypatch.setattr(
+        gate_module,
+        "LocalKubeRayGate",
+        lambda _config: (_ for _ in ()).throw(
+            AssertionError("unbounded argument data must fail before gate construction")
+        ),
+    )
+
+    assert gate_module.main(_valid_gate_cli_arguments()) == 2
+    assert gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV not in os.environ
+
+
+def test_documented_extra_arguments_are_parsed_as_data_and_appended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[GateConfig] = []
+
+    class RecordingGate:
+        def __init__(self, config: GateConfig) -> None:
+            observed.append(config)
+
+        def run(self) -> None:
+            pass
+
+    monkeypatch.setenv(
+        gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV,
+        "--kind-cluster-name django-ray --command-timeout 180 "
+        "--build-timeout=1800 --kubectl-request-timeout 45",
+    )
+    monkeypatch.setattr(gate_module, "LocalKubeRayGate", RecordingGate)
+
+    assert gate_module.main(_valid_gate_cli_arguments(context="kind-django-ray")) == 0
+
+    assert len(observed) == 1
+    config = observed[0]
+    assert config.kind_cluster_name == "django-ray"
+    assert config.command_timeout == 180
+    assert config.build_timeout == 1800
+    assert config.kubectl_request_timeout == 45
+    assert config.preflight_only is True
+    assert gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV not in os.environ
+    assert gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV in gate_module.KUBECTL_ENVIRONMENT_KEYS
+    assert gate_module.K8S_FINAL_GATE_EXTRA_ARGS_ENV in gate_module.DOCKER_ENVIRONMENT_KEYS
 
 
 def _stub_successful_gate_layers(
@@ -10208,6 +10875,7 @@ def _stub_successful_gate_layers(
 ) -> None:
     for method_name in (
         "_preflight",
+        "_verify_source_identity",
         "_build_images",
         "_apply_overlay",
         "_run_setup",
@@ -10228,6 +10896,390 @@ def _stub_successful_gate_layers(
         "_verify_prometheus",
     ):
         monkeypatch.setattr(gate, method_name, lambda: None)
+
+
+def test_preflight_only_never_requires_or_scrubs_local_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_local_resource_inheritance: dict[str, object],
+) -> None:
+    gate = LocalKubeRayGate(_config(preflight_only=True), output=lambda _value: None)
+    monkeypatch.setattr(gate, "_preflight", lambda: None)
+    run_id_key = gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS[0]
+    monkeypatch.setenv(run_id_key, "diagnostic-parent-value")
+
+    gate.run()
+
+    assert _isolate_local_resource_inheritance["calls"] == []
+    assert os.environ[run_id_key] == "diagnostic-parent-value"
+    assert gate.local_resource_lease is None
+
+
+def test_direct_full_gate_requires_contained_inheritance_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=lambda _value: None)
+    monkeypatch.setattr(gate, "_preflight", lambda: events.append("preflight"))
+
+    def reject(**kwargs: object) -> None:
+        events.append("require-inherited")
+        assert kwargs == {"profile": "kuberay-final", "rootpath": ROOT}
+        raise RuntimeError("valid inherited lease is required")
+
+    monkeypatch.setattr(gate_module, "require_inherited_local_resources", reject)
+    for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS:
+        monkeypatch.setenv(key, f"invalid-{key}")
+    monkeypatch.setattr(
+        gate,
+        "_preflight",
+        lambda: pytest.fail("a direct full gate must not repeat preflight without inheritance"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_build_images",
+        lambda: pytest.fail("a direct full gate must not reach Docker mutation"),
+    )
+
+    with pytest.raises(GateError, match="valid inherited lease is required") as captured:
+        gate.run()
+
+    assert captured.value.layer == "local-resources"
+    assert events == ["require-inherited"]
+    assert all(key not in os.environ for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
+    assert gate.local_resource_lease is None
+
+
+def test_full_gate_borrows_before_repeated_preflight_then_refences_before_images(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=lambda value: events.append(f"output:{value}"))
+    _stub_successful_gate_layers(gate, monkeypatch)
+    lease = _LocalResourceLeaseStub()
+    lease.inherited = True
+
+    require_count = 0
+
+    def require(**kwargs: object) -> _LocalResourceLeaseStub:
+        nonlocal require_count
+        require_count += 1
+        event = "require-initial" if require_count == 1 else "require-recheck"
+        events.append(event)
+        assert kwargs["profile"] == "kuberay-final"
+        assert kwargs["rootpath"] == ROOT
+        if require_count == 1:
+            assert "preflight" not in events
+        else:
+            assert "preflight" in events
+            assert all(key in os.environ for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
+        return lease
+
+    def repeated_preflight() -> None:
+        assert all(key not in os.environ for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
+        events.append("preflight")
+
+    def source_recheck() -> None:
+        assert all(key not in os.environ for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
+        events.append("source-recheck")
+
+    def images() -> None:
+        assert lease.releases == []
+        events.append("images")
+
+    def release(*, outcome: str, postcondition: str | None = None) -> None:
+        events.append("release")
+        lease.releases.append((outcome, postcondition))
+
+    class TemporaryDirectory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.name = str(tmp_path)
+
+        def cleanup(self) -> None:
+            assert lease.releases == []
+            events.append("workspace-cleanup")
+
+    for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS:
+        monkeypatch.setenv(key, f"borrowed-{key}")
+    monkeypatch.setattr(gate_module, "require_inherited_local_resources", require)
+    monkeypatch.setattr(gate_module.tempfile, "TemporaryDirectory", TemporaryDirectory)
+    monkeypatch.setattr(gate, "_preflight", repeated_preflight)
+    monkeypatch.setattr(gate, "_verify_source_identity", source_recheck)
+    monkeypatch.setattr(gate, "_build_images", images)
+    monkeypatch.setattr(gate, "_evidence_lines", lambda: ("gate-evidence",))
+    monkeypatch.setattr(lease, "release", release)
+
+    gate.run()
+
+    assert events.index("require-initial") < events.index("preflight")
+    assert events.index("preflight") < events.index("require-recheck")
+    assert events.index("require-recheck") < events.index("source-recheck")
+    assert events.index("source-recheck") < events.index("images")
+    assert events.index("images") < events.index("workspace-cleanup") < events.index("release")
+    body_complete = "output:[gate-body] complete; outer local-resource release pending"
+    assert events.index("release") < events.index(body_complete)
+    assert events.index(body_complete) < events.index("output:gate-evidence")
+    assert lease.releases == [("passed", "private workspace removed; no coordinator-owned child")]
+    assert gate.local_resource_lease is None
+
+
+def test_source_change_after_repeated_preflight_releases_without_docker_or_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=lambda _value: None)
+    lease = _LocalResourceLeaseStub()
+    monkeypatch.setattr(gate, "_preflight", lambda: events.append("preflight"))
+
+    require_count = 0
+
+    def require(**_kwargs: object) -> _LocalResourceLeaseStub:
+        nonlocal require_count
+        require_count += 1
+        events.append("require-initial" if require_count == 1 else "require-recheck")
+        return lease
+
+    def source_changed() -> None:
+        events.append("source-recheck")
+        raise ValueError("checkout changed during FIFO wait")
+
+    def release(*, outcome: str, postcondition: str | None = None) -> None:
+        events.append("release")
+        lease.releases.append((outcome, postcondition))
+
+    monkeypatch.setattr(gate_module, "require_inherited_local_resources", require)
+    monkeypatch.setattr(gate, "_verify_source_identity", source_changed)
+    monkeypatch.setattr(
+        gate,
+        "_build_images",
+        lambda: pytest.fail("Docker image build must not start after source drift"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "diagnostics",
+        lambda _layer: pytest.fail("acquisition/source failures must not query the cluster"),
+    )
+    monkeypatch.setattr(lease, "release", release)
+
+    with pytest.raises(GateError, match="checkout changed during FIFO wait") as captured:
+        gate.run()
+
+    assert captured.value.layer == "local-resources-recheck"
+    assert events == [
+        "require-initial",
+        "preflight",
+        "require-recheck",
+        "source-recheck",
+        "release",
+    ]
+    assert lease.releases == [("failed", "private workspace removed; no coordinator-owned child")]
+    assert gate.diagnostics_attempted is False
+
+
+def test_active_record_change_after_repeated_preflight_releases_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=lambda _value: None)
+    lease = _LocalResourceLeaseStub()
+    require_count = 0
+
+    def require(**_kwargs: object) -> _LocalResourceLeaseStub:
+        nonlocal require_count
+        require_count += 1
+        events.append("require-initial" if require_count == 1 else "require-recheck")
+        if require_count == 2:
+            raise RuntimeError("active record changed during repeated preflight")
+        return lease
+
+    def release(*, outcome: str, postcondition: str | None = None) -> None:
+        events.append("release")
+        lease.releases.append((outcome, postcondition))
+
+    monkeypatch.setattr(gate_module, "require_inherited_local_resources", require)
+    monkeypatch.setattr(gate, "_preflight", lambda: events.append("preflight"))
+    monkeypatch.setattr(
+        gate,
+        "_verify_source_identity",
+        lambda: pytest.fail("source checks must not run after active-record rejection"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_build_images",
+        lambda: pytest.fail("Docker must not start after active-record rejection"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "diagnostics",
+        lambda _layer: pytest.fail("local-resource recheck must not query the cluster"),
+    )
+    monkeypatch.setattr(lease, "release", release)
+
+    with pytest.raises(GateError, match="active record changed") as captured:
+        gate.run()
+
+    assert captured.value.layer == "local-resources-recheck"
+    assert events == ["require-initial", "preflight", "require-recheck", "release"]
+    assert lease.releases == [("failed", "private workspace removed; no coordinator-owned child")]
+    assert all(key not in os.environ for key in gate_module.LOCAL_RESOURCE_INHERITANCE_ENV_KEYS)
+
+
+def test_gate_holds_resources_through_failure_diagnostics_and_workspace_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=lambda _value: None)
+    _stub_successful_gate_layers(gate, monkeypatch)
+    lease = _LocalResourceLeaseStub()
+    monkeypatch.setattr(
+        gate_module,
+        "require_inherited_local_resources",
+        lambda **_kwargs: lease,
+    )
+    monkeypatch.setattr(
+        gate, "_verify_api", lambda: (_ for _ in ()).throw(ValueError("api failed"))
+    )
+
+    def diagnostics(layer: str) -> None:
+        assert layer == "api-smoke"
+        assert lease.releases == []
+        events.append("diagnostics")
+
+    def release(*, outcome: str, postcondition: str | None = None) -> None:
+        events.append("release")
+        lease.releases.append((outcome, postcondition))
+
+    class TemporaryDirectory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.name = str(tmp_path)
+
+        def cleanup(self) -> None:
+            assert lease.releases == []
+            events.append("workspace-cleanup")
+
+    monkeypatch.setattr(gate, "diagnostics", diagnostics)
+    monkeypatch.setattr(lease, "release", release)
+    monkeypatch.setattr(gate_module.tempfile, "TemporaryDirectory", TemporaryDirectory)
+
+    with pytest.raises(GateError, match="api failed") as captured:
+        gate.run()
+
+    assert captured.value.layer == "api-smoke"
+    assert events == ["diagnostics", "workspace-cleanup", "release"]
+    assert lease.releases == [("failed", "private workspace removed; no coordinator-owned child")]
+
+
+def test_second_interrupt_during_diagnostics_preserves_primary_and_releases_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=lambda _value: None)
+    _stub_successful_gate_layers(gate, monkeypatch)
+    lease = _LocalResourceLeaseStub()
+    monkeypatch.setattr(
+        gate_module,
+        "require_inherited_local_resources",
+        lambda **_kwargs: lease,
+    )
+    monkeypatch.setattr(
+        gate,
+        "_verify_api",
+        lambda: (_ for _ in ()).throw(ValueError("primary api failure")),
+    )
+
+    def interrupted_diagnostics(layer: str) -> None:
+        events.append(f"diagnostics:{layer}")
+        raise KeyboardInterrupt("second interrupt during diagnostics")
+
+    def release(*, outcome: str, postcondition: str | None = None) -> None:
+        events.append("release")
+        lease.releases.append((outcome, postcondition))
+
+    monkeypatch.setattr(gate, "diagnostics", interrupted_diagnostics)
+    monkeypatch.setattr(lease, "release", release)
+
+    with pytest.raises(GateError, match="primary api failure") as captured:
+        gate.run()
+
+    assert captured.value.layer == "api-smoke"
+    assert events == ["diagnostics:api-smoke", "release"]
+    assert lease.releases == [("failed", "private workspace removed; no coordinator-owned child")]
+
+
+def test_second_interrupt_during_cleanup_preserves_primary_interrupt_and_releases_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    primary_interrupt = KeyboardInterrupt("primary gate interrupt")
+    gate = LocalKubeRayGate(_config(), output=lambda _value: None)
+    _stub_successful_gate_layers(gate, monkeypatch)
+    lease = _LocalResourceLeaseStub()
+    monkeypatch.setattr(
+        gate_module,
+        "require_inherited_local_resources",
+        lambda **_kwargs: lease,
+    )
+
+    def interrupt_gate() -> None:
+        raise primary_interrupt
+
+    def release(*, outcome: str, postcondition: str | None = None) -> None:
+        events.append("release")
+        lease.releases.append((outcome, postcondition))
+
+    class InterruptedCleanup:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.name = str(tmp_path)
+
+        def cleanup(self) -> None:
+            events.append("workspace-cleanup")
+            raise KeyboardInterrupt("second interrupt during cleanup")
+
+    monkeypatch.setattr(gate, "_verify_api", interrupt_gate)
+    monkeypatch.setattr(lease, "release", release)
+    monkeypatch.setattr(gate_module.tempfile, "TemporaryDirectory", InterruptedCleanup)
+
+    with pytest.raises(KeyboardInterrupt) as captured:
+        gate.run()
+
+    assert captured.value is primary_interrupt
+    assert events == ["workspace-cleanup", "release"]
+    assert lease.releases == [
+        ("interrupted", "no coordinator-owned child; private workspace cleanup failed")
+    ]
+    assert any(
+        "temporary workspace cleanup also failed" in note
+        for note in getattr(primary_interrupt, "__notes__", ())
+    )
+
+
+def test_release_failure_withholds_success_and_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output: list[str] = []
+    gate = LocalKubeRayGate(_config(), output=output.append)
+    _stub_successful_gate_layers(gate, monkeypatch)
+    lease = _LocalResourceLeaseStub()
+    monkeypatch.setattr(
+        gate_module,
+        "require_inherited_local_resources",
+        lambda **_kwargs: lease,
+    )
+    monkeypatch.setattr(gate, "_evidence_lines", lambda: ("must-not-emit",))
+    monkeypatch.setattr(
+        lease,
+        "release",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("release failed")),
+    )
+
+    with pytest.raises(GateError, match="local resource release failed") as captured:
+        gate.run()
+
+    assert captured.value.layer == "local-resources"
+    assert "[gate-body] complete" not in output
+    assert "must-not-emit" not in output
 
 
 def test_protocol_recovery_runs_after_app_readiness_and_before_any_task_verification(
@@ -10293,7 +11345,7 @@ def test_protocol_recovery_runs_after_app_readiness_and_before_any_task_verifica
     monkeypatch.setattr(
         gate,
         "_evidence_lines",
-        lambda: ("=== Local KubeRay final gate evidence ===",),
+        lambda: ("=== Local KubeRay gate-body evidence (outer release pending) ===",),
     )
 
     gate.run()
@@ -10353,7 +11405,7 @@ def test_temporary_workspace_creation_failure_is_bounded_redacted_and_has_no_evi
     assert encoded not in captured.err
     assert mixed_case_encoded not in captured.err
     assert "Traceback" not in captured.err
-    assert "=== Local KubeRay final gate evidence ===" not in captured.out
+    assert "=== Local KubeRay gate-body evidence" not in captured.out
 
 
 def test_successful_gate_with_cleanup_failure_withholds_all_final_success(
@@ -10367,7 +11419,10 @@ def test_successful_gate_with_cleanup_failure_withholds_all_final_success(
     monkeypatch.setattr(
         gate,
         "_evidence_lines",
-        lambda: ("=== Local KubeRay final gate evidence ===", f"source_tree={SOURCE_TREE}"),
+        lambda: (
+            "=== Local KubeRay gate-body evidence (outer release pending) ===",
+            f"source_tree={SOURCE_TREE}",
+        ),
     )
 
     class CleanupFailure:
@@ -10400,8 +11455,8 @@ def test_successful_gate_with_cleanup_failure_withholds_all_final_success(
     assert len(captured.err) <= MAX_OUTPUT_CHARACTERS
     assert "Traceback" not in captured.err
     assert "workspace-cleanup" in events
-    assert not any("=== Local KubeRay final gate evidence ===" in event for event in events)
-    assert "output:[final-identity] passed" not in events
+    assert not any("=== Local KubeRay gate-body evidence" in event for event in events)
+    assert not any("output:[gate-body] complete" in event for event in events)
 
 
 def test_primary_and_cleanup_failures_are_both_preserved_without_false_evidence(
@@ -10466,8 +11521,8 @@ def test_primary_and_cleanup_failures_are_both_preserved_without_false_evidence(
     assert mixed_case_encoded not in captured.err
     assert "Traceback" not in captured.err
     assert events.index("diagnostics:api-smoke") < events.index("workspace-cleanup")
-    assert not any("=== Local KubeRay final gate evidence ===" in event for event in events)
-    assert "output:[final-identity] passed" not in events
+    assert not any("=== Local KubeRay gate-body evidence" in event for event in events)
+    assert not any("output:[gate-body] complete" in event for event in events)
 
 
 def test_success_evidence_is_emitted_only_after_workspace_cleanup(
@@ -10480,7 +11535,10 @@ def test_success_evidence_is_emitted_only_after_workspace_cleanup(
     monkeypatch.setattr(
         gate,
         "_evidence_lines",
-        lambda: ("=== Local KubeRay final gate evidence ===", f"source_tree={SOURCE_TREE}"),
+        lambda: (
+            "=== Local KubeRay gate-body evidence (outer release pending) ===",
+            f"source_tree={SOURCE_TREE}",
+        ),
     )
 
     class SuccessfulTemporaryDirectory:
@@ -10500,9 +11558,13 @@ def test_success_evidence_is_emitted_only_after_workspace_cleanup(
     gate.run()
 
     cleanup_index = events.index("workspace-cleanup")
-    final_pass_index = events.index("output:[final-identity] passed")
-    evidence_index = events.index("output:=== Local KubeRay final gate evidence ===")
-    assert cleanup_index < final_pass_index < evidence_index
+    body_complete_index = events.index(
+        "output:[gate-body] complete; outer local-resource release pending"
+    )
+    evidence_index = events.index(
+        "output:=== Local KubeRay gate-body evidence (outer release pending) ==="
+    )
+    assert cleanup_index < body_complete_index < evidence_index
     assert gate.temp_root is None
     assert gate.diagnostics_attempted is False
 
@@ -10514,6 +11576,7 @@ def test_final_evidence_identity_failure_is_labeled_once_without_traceback(
     gate = LocalKubeRayGate(_config())
     for method_name in (
         "_preflight",
+        "_verify_source_identity",
         "_build_images",
         "_apply_overlay",
         "_run_setup",
@@ -10560,7 +11623,7 @@ def test_final_evidence_identity_failure_is_labeled_once_without_traceback(
     assert identity_checks == 1
     assert "FAILED [final-identity]: final identity changed before evidence" in captured.err
     assert "Traceback" not in captured.err
-    assert "=== Local KubeRay final gate evidence ===" not in captured.out
+    assert "=== Local KubeRay gate-body evidence" not in captured.out
 
 
 def test_main_preserves_primary_failure_when_diagnostics_fail(

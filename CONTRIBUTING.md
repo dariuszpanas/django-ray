@@ -262,6 +262,36 @@ checks:
 uv run make ci
 ```
 
+The public `ci` target queues for and owns the daemonless host-wide `ci-final` lane; do not invoke its
+private owned target directly or add a nested `uv run` inside the Make recipe. Selected standalone
+`real_ray` pytest sessions and the full guarded KubeRay gate use the same conservative lane through
+the fixed `real-ray` and `kuberay-final` profiles. The KubeRay Make wrapper runs direct preflight,
+then the coordinator contains the repeated full gate and prints definitive success only after
+child-tree settlement and release.
+Contained coordinator runs are supported only on Windows, Linux, and macOS; on other POSIX hosts
+they fail before lane acquisition because Phase 1 has no stable native process-birth identity, and
+contributors must not bypass the coordinator.
+
+Run `ci` without GNU Make's `-i`/`--ignore-errors`; both the public and private CI entrypoints reject
+that mode while parsing because an ignored ownership or inheritance failure could otherwise continue
+later CI commands.
+
+Inspect the coordinator's bounded read-only status, including from a dirty checkout, with:
+
+```bash
+uv run make local-resources
+uv run make local-resources LOCAL_RESOURCES_FORMAT=json
+```
+
+Follow the reported safe action. An OS-held lock is authoritative; PIDs, heartbeat age, process
+names, ports, Docker/Kubernetes objects, local metadata, and the ignored vault are diagnostics only
+and grant no termination, cleanup, or takeover authority. The coordinator assumes cooperating
+processes under the same OS user; it is not a security boundary against a malicious same-user
+process. Phase 1 covers only `ci-final`, `real-ray`, and `kuberay-final`. Docker Compose, standalone
+PostgreSQL tests, and manual Ray/Docker/Kubernetes probes still require an explicit live handoff. See
+[external-resource ownership](docs/contributing.md#external-resource-ownership) for the complete
+queue, inheritance, orphan, and legacy-client contract.
+
 This command checks formatting, lint, types, the CI coverage floors, strict documentation, and the
 package build for the current interpreter without modifying tracked files. GitHub Actions additionally
 tests the supported Python and dependency-resolution matrix. Use `uv run make format` or

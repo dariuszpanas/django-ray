@@ -2,7 +2,7 @@
 # Include in main Makefile with: include mk/k8s.mk
 
 .PHONY: k8s-build k8s-deploy k8s-deploy-local k8s-deploy-tls k8s-delete k8s-status k8s-reset k8s-urls k8s-urls-kong
-.PHONY: k8s-check-prometheus-targets k8s-final-gate-preflight k8s-final-gate
+.PHONY: k8s-check-prometheus-targets k8s-final-gate-status k8s-final-gate-preflight k8s-final-gate
 .PHONY: k8s-install-kuberay k8s-uninstall-kuberay k8s-kind-load k8s-prepare-kuberay-kind k8s-delete-local-raycluster k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
 .PHONY: k8s-install-kong-local k8s-uninstall-kong-local k8s-deploy-kong-local
 .PHONY: k8s-logs k8s-logs-web k8s-logs-worker k8s-logs-ray k8s-logs-ray-head k8s-logs-ray-workers
@@ -15,12 +15,16 @@ K8S_WEB_PORT ?= 30080
 K8S_RAY_DASHBOARD_PORT ?= 30265
 K8S_GRAFANA_PORT ?= 30030
 K8S_PROMETHEUS_PORT ?= 30090
-K8S_WEB_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_WEB_PORT)
+ifeq ($(origin K8S_WEB_URL), undefined)
+K8S_WEB_URL := $(value K8S_URL_SCHEME)://$(value K8S_URL_HOST):$(value K8S_WEB_PORT)
+endif
 K8S_API_DOCS_URL ?= $(K8S_WEB_URL)/api/docs
 K8S_ADMIN_URL ?= $(K8S_WEB_URL)/admin/
 K8S_RAY_DASHBOARD_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_RAY_DASHBOARD_PORT)
 K8S_GRAFANA_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_GRAFANA_PORT)
-K8S_PROMETHEUS_URL ?= $(K8S_URL_SCHEME)://$(K8S_URL_HOST):$(K8S_PROMETHEUS_PORT)
+ifeq ($(origin K8S_PROMETHEUS_URL), undefined)
+K8S_PROMETHEUS_URL := $(value K8S_URL_SCHEME)://$(value K8S_URL_HOST):$(value K8S_PROMETHEUS_PORT)
+endif
 K8S_KONG_PORT ?= 30080
 K8S_KONG_WEB_HOST ?= localhost
 K8S_KONG_GRAFANA_HOST ?= grafana.localhost
@@ -37,6 +41,21 @@ K8S_CONTEXT ?=
 K8S_NAMESPACE ?= django-ray
 K8S_RAY_RESTART ?=
 K8S_FINAL_GATE_EXTRA_ARGS ?=
+K8S_FINAL_GATE_STATUS_FORMAT ?= text
+unexport K8S_CONTEXT
+unexport K8S_NAMESPACE
+unexport K8S_RAY_RESTART
+unexport K8S_WEB_URL
+unexport K8S_PROMETHEUS_URL
+unexport K8S_FINAL_GATE_EXTRA_ARGS
+unexport K8S_FINAL_GATE_STATUS_FORMAT
+k8s-final-gate k8s-final-gate-status k8s-final-gate-preflight: override export DJANGO_RAY_INTERNAL_KUBERAY_CONTEXT := $(value K8S_CONTEXT)
+k8s-final-gate k8s-final-gate-status k8s-final-gate-preflight: override export DJANGO_RAY_INTERNAL_KUBERAY_NAMESPACE := $(value K8S_NAMESPACE)
+k8s-final-gate k8s-final-gate-preflight: override export DJANGO_RAY_INTERNAL_KUBERAY_RAY_RESTART := $(value K8S_RAY_RESTART)
+k8s-final-gate k8s-final-gate-preflight: override export DJANGO_RAY_INTERNAL_KUBERAY_WEB_URL := $(value K8S_WEB_URL)
+k8s-final-gate k8s-final-gate-preflight: override export DJANGO_RAY_INTERNAL_KUBERAY_PROMETHEUS_URL := $(value K8S_PROMETHEUS_URL)
+k8s-final-gate k8s-final-gate-preflight: override export DJANGO_RAY_INTERNAL_KUBERAY_GATE_EXTRA_ARGS := $(value K8S_FINAL_GATE_EXTRA_ARGS)
+k8s-final-gate-status: override export DJANGO_RAY_INTERNAL_KUBERAY_STATUS_FORMAT := $(value K8S_FINAL_GATE_STATUS_FORMAT)
 
 k8s-evaluation-warning:
 	@echo "WARNING: the checked-in Kubernetes manifests are for trusted, disposable local evaluation only."
@@ -213,28 +232,25 @@ k8s-check-prometheus-targets:
 		--url "$(K8S_PROMETHEUS_URL)" \
 		--timeout "$(K8S_PROMETHEUS_TARGET_TIMEOUT)"
 
+# Print bounded read-only host ownership and local Kubernetes image-reference status.
+k8s-final-gate-status:
+	$(if $(findstring command line,$(origin K8S_CONTEXT)),,$(error K8S_CONTEXT must be provided on the command line))
+	$(if $(findstring command line,$(origin K8S_NAMESPACE)),,$(error K8S_NAMESPACE must be provided on the command line))
+	python -m scripts.local_kuberay_status
+
 # Non-mutating context, clean-tree, Kustomize, and client-side apply checks.
 k8s-final-gate-preflight:
-	$(if $(strip $(K8S_CONTEXT)),,$(error K8S_CONTEXT is required (docker-desktop or kind-<name>)))
-	$(if $(strip $(K8S_RAY_RESTART)),,$(error K8S_RAY_RESTART is required (required or skip)))
-	python -m scripts.local_kuberay_gate \
-		--context "$(K8S_CONTEXT)" \
-		--namespace "$(K8S_NAMESPACE)" \
-		--ray-restart "$(K8S_RAY_RESTART)" \
-		--web-url "$(K8S_WEB_URL)" \
-		--prometheus-url "$(K8S_PROMETHEUS_URL)" \
-		--preflight-only $(K8S_FINAL_GATE_EXTRA_ARGS)
+	python -m scripts.local_kuberay_gate --preflight-only
 
 # Complete guarded Docker Desktop/Kind KubeRay final integration gate.
 k8s-final-gate: k8s-evaluation-warning
-	$(if $(strip $(K8S_CONTEXT)),,$(error K8S_CONTEXT is required (docker-desktop or kind-<name>)))
-	$(if $(strip $(K8S_RAY_RESTART)),,$(error K8S_RAY_RESTART is required (required or skip)))
-	python -m scripts.local_kuberay_gate \
-		--context "$(K8S_CONTEXT)" \
-		--namespace "$(K8S_NAMESPACE)" \
-		--ray-restart "$(K8S_RAY_RESTART)" \
-		--web-url "$(K8S_WEB_URL)" \
-		--prometheus-url "$(K8S_PROMETHEUS_URL)" $(K8S_FINAL_GATE_EXTRA_ARGS)
+	@python -m scripts.local_kuberay_gate --preflight-only && \
+	python -m scripts.local_resource_coordinator run \
+		--profile kuberay-final \
+		--phase kuberay-final \
+		--root . \
+		-- python -m scripts.local_kuberay_gate && \
+	echo "[final-release] passed: KubeRay gate complete; local resources released"
 
 # Print local service URLs. Override K8S_URL_HOST, K8S_URL_SCHEME, or ports for non-local clusters.
 k8s-urls:

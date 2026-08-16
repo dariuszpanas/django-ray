@@ -5,7 +5,8 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
+.PHONY: all install format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci _ci-owned build clean help local-resources
+.PHONY: _ci-reject-makeflags-origin _ci-reject-mflags-origin _ci-reject-ignore-errors
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -15,6 +16,10 @@
 -include mk/k8s.mk
 -include mk/tls.mk
 -include mk/loadtest.mk
+
+# Keep no-goal invocations on the ordinary public default even when an imported
+# Makefile or caller tries to redirect the special default-goal variable.
+override .DEFAULT_GOAL := all
 
 COVERAGE_GLOBAL_MIN ?= 95
 COVERAGE_WORKER_MIN ?= 90
@@ -26,6 +31,41 @@ COVERAGE_DEBT_DEFAULT_TIMEOUT_SECONDS ?= 1200
 COVERAGE_DEBT_LOCAL_RAY_TIMEOUT_SECONDS ?= 900
 TEST_SUITE_INVENTORY_OUTPUT_DIR ?= artifacts/test-suite-inventory
 TEST_XDIST_WORKERS ?= 4
+LOCAL_RESOURCES_FORMAT ?= text
+
+# `-i` can turn a failed ownership guard into a false-success CI run. Attach a
+# fixed phony prerequisite only when parse-time provenance detects an unsafe
+# invocation. Its literal Make error is expanded only when a guarded target is
+# actually reached, including through an alias or imported prerequisite. The
+# later definitions below replace any recipes injected before this Makefile,
+# while unrelated targets never reach the guards.
+ifeq ($(filter default undefined,$(origin MAKECMDGOALS)),)
+$(error GNU Make MAKECMDGOALS is reserved and must not be assigned)
+endif
+
+ifneq ($(filter command line override,$(origin MAKEFLAGS)),)
+ci _ci-owned: _ci-reject-makeflags-origin
+endif
+ifneq ($(filter command line override,$(origin MFLAGS)),)
+ci _ci-owned: _ci-reject-mflags-origin
+endif
+override _DJANGO_RAY_MAKEFLAGS_FIRST_WORD := $(firstword $(value MAKEFLAGS))
+override _DJANGO_RAY_MAKEFLAGS_SHORT := $(if $(filter --%,$(_DJANGO_RAY_MAKEFLAGS_FIRST_WORD)),,$(patsubst -%,%,$(_DJANGO_RAY_MAKEFLAGS_FIRST_WORD)))
+override _DJANGO_RAY_MFLAGS_FIRST_WORD := $(firstword $(value MFLAGS))
+override _DJANGO_RAY_MFLAGS_SHORT := $(if $(filter --%,$(_DJANGO_RAY_MFLAGS_FIRST_WORD)),,$(patsubst -%,%,$(_DJANGO_RAY_MFLAGS_FIRST_WORD)))
+override _DJANGO_RAY_IGNORE_ERRORS := $(strip $(findstring i,$(_DJANGO_RAY_MAKEFLAGS_SHORT)) $(findstring i,$(_DJANGO_RAY_MFLAGS_SHORT)) $(filter --ignore-errors,$(value MAKEFLAGS) $(value MFLAGS)))
+ifneq ($(_DJANGO_RAY_IGNORE_ERRORS),)
+ci _ci-owned: _ci-reject-ignore-errors
+endif
+
+_ci-reject-makeflags-origin:
+	$(error command-line or override MAKEFLAGS is forbidden for ci and _ci-owned)
+
+_ci-reject-mflags-origin:
+	$(error command-line or override MFLAGS is forbidden for ci and _ci-owned)
+
+_ci-reject-ignore-errors:
+	$(error GNU Make ignore-errors (-i/--ignore-errors) is forbidden for ci and _ci-owned)
 
 # =============================================================================
 # Development
@@ -158,6 +198,17 @@ check:
 # CI check - current-interpreter equivalents of required CI jobs, without modifications.
 # Invoke as `uv run make ci` so Ray inherits one uv-managed environment.
 ci:
+	python -m scripts.local_resource_coordinator run \
+		--profile ci-final \
+		--phase ci \
+		--root . \
+		-- python -m scripts.local_ci_runner
+
+# Private CI body. The first recipe action proves it is a launched borrower.
+_ci-owned:
+	python -m scripts.local_resource_coordinator require-inherited \
+		--profile ci-final \
+		--root .
 	ruff format --check .
 	ruff check .
 	ty check
@@ -165,10 +216,14 @@ ci:
 	pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
-	$(MAKE) test-testproject
+	make --no-print-directory --jobs=1 test-testproject
 	zensical build --strict --clean
 	uv build
 	@echo "All CI checks passed!"
+
+# Inspect host-wide heavy-resource ownership without creating or changing state.
+local-resources:
+	python -m scripts.local_resource_coordinator status --format "$(LOCAL_RESOURCES_FORMAT)"
 
 # Build the package
 build:
@@ -265,7 +320,9 @@ help:
 	@echo "  test-cov       - Run tests with coverage"
 	@echo "  test-suite-inventory - Classify collected tests by execution contract"
 	@echo "  coverage-debt  - Build exact JSON and Markdown line-coverage debt reports"
+	@echo "  local-resources - Show bounded read-only local heavy-resource status"
 	@echo "  k8s-final-gate-preflight - Validate a guarded local KubeRay gate without mutations"
+	@echo "  k8s-final-gate-status - Inspect bounded local KubeRay status without mutations"
 	@echo "  k8s-final-gate - Run the guarded local KubeRay final integration gate"
 	@echo "  docs-build     - Build Zensical site"
 	@echo "  docs-build-strict - Build Zensical site (strict mode)"

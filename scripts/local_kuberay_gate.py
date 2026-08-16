@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -43,8 +44,55 @@ from scripts.check_prometheus_targets import (
     fetch_active_targets,
     wait_for_healthy_targets,
 )
+from scripts.local_resource_coordinator import (
+    LOCAL_RESOURCE_INHERITANCE_ENV_KEYS,
+    LocalResourceLease,
+    require_inherited_local_resources,
+)
 
 EXPECTED_NAMESPACE = "django-ray"
+K8S_CONTEXT_ENV = "DJANGO_RAY_INTERNAL_KUBERAY_CONTEXT"
+K8S_NAMESPACE_ENV = "DJANGO_RAY_INTERNAL_KUBERAY_NAMESPACE"
+K8S_RAY_RESTART_ENV = "DJANGO_RAY_INTERNAL_KUBERAY_RAY_RESTART"
+K8S_WEB_URL_ENV = "DJANGO_RAY_INTERNAL_KUBERAY_WEB_URL"
+K8S_PROMETHEUS_URL_ENV = "DJANGO_RAY_INTERNAL_KUBERAY_PROMETHEUS_URL"
+K8S_FINAL_GATE_EXTRA_ARGS_ENV = "DJANGO_RAY_INTERNAL_KUBERAY_GATE_EXTRA_ARGS"
+K8S_GATE_WRAPPER_ENV_KEYS = (
+    K8S_CONTEXT_ENV,
+    K8S_NAMESPACE_ENV,
+    K8S_RAY_RESTART_ENV,
+    K8S_WEB_URL_ENV,
+    K8S_PROMETHEUS_URL_ENV,
+)
+MAX_MAKE_SCALAR_BYTES = 2048
+MAX_EXTRA_ARGUMENT_DATA_BYTES = 4096
+MAX_EXTRA_ARGUMENT_COUNT = 32
+MAX_EXTRA_ARGUMENT_BYTES = 512
+MAKE_RECURSION_ENVIRONMENT_KEYS = frozenset(
+    {
+        "GNUMAKEFLAGS",
+        "MAKEFLAGS",
+        "MAKEFILES",
+        "MAKELEVEL",
+        "MAKEOVERRIDES",
+        "MAKE_RESTARTS",
+        "MAKE_TERMERR",
+        "MAKE_TERMOUT",
+        "MFLAGS",
+    }
+)
+MAKE_OWNED_GATE_OPTIONS = frozenset(
+    {
+        "--context",
+        "--help",
+        "--namespace",
+        "--preflight-only",
+        "--prometheus-url",
+        "--ray-restart",
+        "--web-url",
+        "-h",
+    }
+)
 LOCAL_CONTEXT_PATTERN = re.compile(r"(?:docker-desktop|kind-[a-z0-9][a-z0-9._-]*)\Z")
 LOCAL_API_HOSTS = frozenset(
     {
@@ -545,6 +593,10 @@ PROXY_ENVIRONMENT_KEYS = frozenset(
 KUBECTL_ENVIRONMENT_KEYS = frozenset(
     {
         *PROXY_ENVIRONMENT_KEYS,
+        *LOCAL_RESOURCE_INHERITANCE_ENV_KEYS,
+        *K8S_GATE_WRAPPER_ENV_KEYS,
+        *MAKE_RECURSION_ENVIRONMENT_KEYS,
+        K8S_FINAL_GATE_EXTRA_ARGS_ENV,
         "KUBECONFIG",
         "KUBERNETES_MASTER",
         "SSL_CERT_DIR",
@@ -554,6 +606,10 @@ KUBECTL_ENVIRONMENT_KEYS = frozenset(
 DOCKER_ENVIRONMENT_KEYS = frozenset(
     {
         *PROXY_ENVIRONMENT_KEYS,
+        *LOCAL_RESOURCE_INHERITANCE_ENV_KEYS,
+        *K8S_GATE_WRAPPER_ENV_KEYS,
+        *MAKE_RECURSION_ENVIRONMENT_KEYS,
+        K8S_FINAL_GATE_EXTRA_ARGS_ENV,
         "BUILDKIT_HOST",
         "BUILDX_BUILDER",
         "BUILDX_CONFIG",
@@ -3071,6 +3127,7 @@ class LocalKubeRayGate:
         self._ray_cluster_uid: str | None = None
         self._ray_pod_identities: frozenset[PodRuntimeIdentity] | None = None
         self._ray_image_python_version: str | None = None
+        self.local_resource_lease: LocalResourceLease | None = None
         self.diagnostics_attempted = False
         self.rendered_ray_topology: RayTopology | None = None
         self.setup_pod_images: PodImageContract | None = None
@@ -3104,6 +3161,8 @@ class LocalKubeRayGate:
     ) -> None:
         self._announce(layer)
         try:
+            if self.local_resource_lease is not None:
+                self.local_resource_lease.update_phase(layer)
             action()
         except GateError:
             raise
@@ -3114,6 +3173,50 @@ class LocalKubeRayGate:
             ) from error
         if complete:
             self._complete(layer)
+
+    def _require_local_resources(self) -> None:
+        """Borrow the outer contained-command lease and scrub its capability."""
+
+        if self.local_resource_lease is not None:
+            raise ValueError("local KubeRay gate already holds local resources")
+        try:
+            self.local_resource_lease = require_inherited_local_resources(
+                profile="kuberay-final",
+                rootpath=self.config.root,
+            )
+        finally:
+            for key in LOCAL_RESOURCE_INHERITANCE_ENV_KEYS:
+                os.environ.pop(key, None)
+        if not self.local_resource_lease.inherited:
+            raise ValueError("full local KubeRay gate requires inherited local resources")
+
+    def _revalidate_local_resources(self) -> None:
+        """Revalidate active custody and source after repeated preflight."""
+
+        lease = self.local_resource_lease
+        if lease is None or not lease.inherited:
+            raise ValueError("full local KubeRay gate has no inherited local resources")
+        inherited_environment = lease.inheritance_environment()
+        refreshed: LocalResourceLease | None = None
+        try:
+            os.environ.update(inherited_environment)
+            refreshed = require_inherited_local_resources(
+                profile="kuberay-final",
+                rootpath=self.config.root,
+            )
+        finally:
+            for key in LOCAL_RESOURCE_INHERITANCE_ENV_KEYS:
+                os.environ.pop(key, None)
+        if (
+            not refreshed.inherited
+            or refreshed.run_id != lease.run_id
+            or refreshed.profile != lease.profile
+            or refreshed.resources != lease.resources
+        ):
+            raise ValueError("inherited local resource revalidation changed identity")
+        # Fence the first mutating Docker command against a checkout changed
+        # during this contained child's repeated preflight.
+        self._verify_source_identity()
 
     def _verify_kubeconfig_snapshot(self) -> None:
         """Fail before every API call if the private routing snapshot changed."""
@@ -3349,6 +3452,7 @@ class LocalKubeRayGate:
         secondary_contexts: list[tuple[str, object]] = []
         interrupted: BaseException | None = None
         evidence_lines: tuple[str, ...] | None = None
+        workspace_cleanup_succeeded = False
 
         try:
             temporary = tempfile.TemporaryDirectory(prefix="django-ray-local-gate-")
@@ -3366,8 +3470,15 @@ class LocalKubeRayGate:
         if temporary is not None:
             try:
                 self.temp_root = Path(temporary.name)
-                self._layer("preflight", self._preflight)
-                if not self.config.preflight_only:
+                if self.config.preflight_only:
+                    self._layer("preflight", self._preflight)
+                else:
+                    self._layer("local-resources", self._require_local_resources)
+                    self._layer("preflight", self._preflight)
+                    self._layer(
+                        "local-resources-recheck",
+                        self._revalidate_local_resources,
+                    )
                     self._layer("images", self._build_images)
                     self._layer("apply", self._apply_overlay)
                     self._layer("setup", self._run_setup)
@@ -3406,8 +3517,8 @@ class LocalKubeRayGate:
                         nonlocal evidence_lines
                         evidence_lines = self._evidence_lines()
 
-                    # The final success line and evidence remain withheld until
-                    # the private workspace and kubeconfig have been removed.
+                    # Gate-body completion and release-pending evidence remain
+                    # withheld until the private workspace is removed.
                     self._layer(
                         "final-identity",
                         prepare_evidence,
@@ -3427,22 +3538,26 @@ class LocalKubeRayGate:
             except BaseException as error:
                 interrupted = error
 
-            if primary_failure is not None:
+            if primary_failure is not None and primary_failure.layer not in {
+                "local-resources",
+                "local-resources-recheck",
+            }:
                 self.diagnostics_attempted = True
                 try:
                     self.diagnostics(primary_failure.layer)
-                except Exception as diagnostic_error:
+                except BaseException as diagnostic_error:
                     secondary_contexts.append(("bounded diagnostics unavailable", diagnostic_error))
 
             try:
                 temporary.cleanup()
-            except Exception as cleanup_error:
+                workspace_cleanup_succeeded = True
+            except BaseException as cleanup_error:
                 self.diagnostics_attempted = True
-                if interrupted is not None:
+                if interrupted is not None or primary_failure is not None:
                     secondary_contexts.append(
                         ("temporary workspace cleanup also failed", cleanup_error)
                     )
-                elif primary_failure is None:
+                elif isinstance(cleanup_error, Exception):
                     cleanup_layer = "preflight" if self.config.preflight_only else "final-identity"
                     primary_failure = GateError(
                         cleanup_layer,
@@ -3453,11 +3568,57 @@ class LocalKubeRayGate:
                         ),
                     )
                 else:
-                    secondary_contexts.append(
-                        ("temporary workspace cleanup also failed", cleanup_error)
-                    )
+                    interrupted = cleanup_error
             finally:
                 self.temp_root = None
+
+        if (
+            not self.config.preflight_only
+            and interrupted is None
+            and primary_failure is None
+            and evidence_lines is None
+        ):
+            primary_failure = GateError(
+                "final-identity",
+                "final evidence was not prepared before local resource release",
+            )
+
+        if self.local_resource_lease is not None:
+            lease = self.local_resource_lease
+            release_outcome = (
+                "interrupted"
+                if interrupted is not None
+                else "failed"
+                if primary_failure is not None
+                else "passed"
+            )
+            release_postcondition = (
+                "private workspace removed; no coordinator-owned child"
+                if workspace_cleanup_succeeded
+                else "no coordinator-owned child; private workspace cleanup failed"
+            )
+            try:
+                lease.release(
+                    outcome=release_outcome,
+                    postcondition=release_postcondition,
+                )
+                self.local_resource_lease = None
+            except BaseException as release_error:
+                if interrupted is not None:
+                    secondary_contexts.append(("local resource release also failed", release_error))
+                elif primary_failure is not None:
+                    secondary_contexts.append(("local resource release also failed", release_error))
+                elif isinstance(release_error, Exception):
+                    primary_failure = GateError(
+                        "local-resources",
+                        _gate_error_detail(
+                            "local resource release failed",
+                            redactor=self.redactor,
+                            contexts=(("release error", release_error),),
+                        ),
+                    )
+                else:
+                    interrupted = release_error
 
         if interrupted is not None:
             if secondary_contexts:
@@ -3493,7 +3654,7 @@ class LocalKubeRayGate:
                 "final-identity",
                 "final evidence was not prepared before workspace cleanup",
             )
-        self._complete("final-identity")
+        self._emit("[gate-body] complete; outer local-resource release pending")
         for line in evidence_lines:
             self._emit(line)
 
@@ -11992,7 +12153,7 @@ print(json.dumps({{
             )
             for job in EXPECTED_JOBS
         )
-        lines = ["=== Local KubeRay final gate evidence ==="]
+        lines = ["=== Local KubeRay gate-body evidence (outer release pending) ==="]
         for key, value in fields:
             lines.extend(self._evidence_field_lines(key, value))
         return tuple(lines)
@@ -12089,7 +12250,8 @@ print(json.dumps({{
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the guarded local Docker Desktop/Kind KubeRay final integration gate"
+        description="Run the guarded local Docker Desktop/Kind KubeRay final integration gate",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--context",
@@ -12150,9 +12312,147 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+class GateExtraArgumentsError(ValueError):
+    """Raised when Make-provided gate argument data cannot be trusted."""
+
+
+def _bounded_make_scalar(value: str, *, field_name: str, maximum_bytes: int) -> str:
+    """Reject empty, unbounded, non-ASCII, or control-bearing Make data."""
+
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise GateExtraArgumentsError(
+            f"{field_name} must be bounded printable ASCII data"
+        ) from error
+    if (
+        not encoded
+        or len(encoded) > maximum_bytes
+        or any(byte < 0x20 or byte > 0x7E for byte in encoded)
+    ):
+        raise GateExtraArgumentsError(f"{field_name} must be bounded printable ASCII data")
+    return value
+
+
+def _pop_make_gate_arguments() -> tuple[str, ...]:
+    """Pop and validate the complete Make-owned scalar argument bundle."""
+
+    values = {key: os.environ.pop(key) for key in K8S_GATE_WRAPPER_ENV_KEYS if key in os.environ}
+    if not values:
+        return ()
+    if len(values) != len(K8S_GATE_WRAPPER_ENV_KEYS):
+        raise GateExtraArgumentsError(
+            "Make-provided KubeRay gate inputs must be present as one complete bundle"
+        )
+
+    context = _bounded_make_scalar(
+        values[K8S_CONTEXT_ENV], field_name="K8S_CONTEXT", maximum_bytes=512
+    )
+    namespace = _bounded_make_scalar(
+        values[K8S_NAMESPACE_ENV], field_name="K8S_NAMESPACE", maximum_bytes=512
+    )
+    ray_restart = _bounded_make_scalar(
+        values[K8S_RAY_RESTART_ENV], field_name="K8S_RAY_RESTART", maximum_bytes=512
+    )
+    web_url = _bounded_make_scalar(
+        values[K8S_WEB_URL_ENV],
+        field_name="K8S_WEB_URL",
+        maximum_bytes=MAX_MAKE_SCALAR_BYTES,
+    )
+    prometheus_url = _bounded_make_scalar(
+        values[K8S_PROMETHEUS_URL_ENV],
+        field_name="K8S_PROMETHEUS_URL",
+        maximum_bytes=MAX_MAKE_SCALAR_BYTES,
+    )
+
+    if LOCAL_CONTEXT_PATTERN.fullmatch(context) is None:
+        raise GateExtraArgumentsError(
+            "K8S_CONTEXT must select docker-desktop or a named kind-* context"
+        )
+    try:
+        validate_namespace(namespace)
+    except ValueError as error:
+        raise GateExtraArgumentsError(
+            f"K8S_NAMESPACE must be exactly {EXPECTED_NAMESPACE}"
+        ) from error
+    if ray_restart not in {"required", "skip"}:
+        raise GateExtraArgumentsError("K8S_RAY_RESTART must be required or skip")
+    try:
+        validate_local_http_url(web_url, option="K8S_WEB_URL")
+        validate_local_http_url(prometheus_url, option="K8S_PROMETHEUS_URL")
+    except ValueError as error:
+        raise GateExtraArgumentsError(str(error)) from error
+
+    return (
+        "--context",
+        context,
+        "--namespace",
+        namespace,
+        "--ray-restart",
+        ray_restart,
+        "--web-url",
+        web_url,
+        "--prometheus-url",
+        prometheus_url,
+    )
+
+
+def _pop_make_extra_arguments() -> tuple[str, ...]:
+    """Pop, bound, and parse Make-provided extras without invoking a shell."""
+
+    raw = os.environ.pop(K8S_FINAL_GATE_EXTRA_ARGS_ENV, "")
+    if not raw:
+        return ()
+    try:
+        encoded = raw.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise GateExtraArgumentsError(
+            "K8S_FINAL_GATE_EXTRA_ARGS must be bounded printable ASCII argument data"
+        ) from error
+    if len(encoded) > MAX_EXTRA_ARGUMENT_DATA_BYTES or any(
+        byte < 0x20 or byte > 0x7E for byte in encoded
+    ):
+        raise GateExtraArgumentsError(
+            "K8S_FINAL_GATE_EXTRA_ARGS must be bounded printable ASCII argument data"
+        )
+    try:
+        arguments = tuple(shlex.split(raw, comments=False, posix=True))
+    except ValueError as error:
+        raise GateExtraArgumentsError(
+            "K8S_FINAL_GATE_EXTRA_ARGS must contain valid shell-style argument quoting"
+        ) from error
+    if len(arguments) > MAX_EXTRA_ARGUMENT_COUNT:
+        raise GateExtraArgumentsError("K8S_FINAL_GATE_EXTRA_ARGS contains too many arguments")
+    for argument in arguments:
+        try:
+            argument_size = len(argument.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError as error:
+            raise GateExtraArgumentsError(
+                "K8S_FINAL_GATE_EXTRA_ARGS contains an invalid argument"
+            ) from error
+        if not argument or argument_size > MAX_EXTRA_ARGUMENT_BYTES:
+            raise GateExtraArgumentsError("K8S_FINAL_GATE_EXTRA_ARGS contains an invalid argument")
+        option = argument.split("=", maxsplit=1)[0]
+        if option in MAKE_OWNED_GATE_OPTIONS or argument.startswith("-h"):
+            raise GateExtraArgumentsError(
+                "K8S_FINAL_GATE_EXTRA_ARGS cannot select preflight/help or override "
+                "Make-owned gate options"
+            )
+    return arguments
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
-    args = _parser().parse_args(argv)
+    try:
+        make_arguments = _pop_make_gate_arguments()
+        extra_arguments = _pop_make_extra_arguments()
+    except GateExtraArgumentsError as error:
+        print(error, file=sys.stderr)
+        return 2
+    for key in MAKE_RECURSION_ENVIRONMENT_KEYS:
+        os.environ.pop(key, None)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    args = _parser().parse_args([*arguments, *make_arguments, *extra_arguments])
     if (
         args.rollout_timeout <= 0
         or args.task_timeout <= 0
@@ -12185,7 +12485,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         gate.run()
     except GateError as error:
         primary_failure = f"FAILED [{error.layer}]: {gate.redactor.clean(error)}"
-        if getattr(gate, "diagnostics_attempted", False):
+        if error.layer in {"local-resources", "local-resources-recheck"}:
+            print(
+                _bounded_redacted_error(
+                    primary_failure,
+                    redactor=gate.redactor,
+                    characters=MAX_OUTPUT_CHARACTERS - 1,
+                ),
+                file=sys.stderr,
+            )
+        elif getattr(gate, "diagnostics_attempted", False):
             print(
                 _bounded_redacted_error(
                     primary_failure,

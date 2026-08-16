@@ -71,6 +71,39 @@ After amending only the commit message with the summary, verify that the emitted
 equals `git rev-parse HEAD^{tree}` without recording the hash. Any tracked tree change invalidates the
 evidence and requires a new run.
 
+## Local heavy-resource coordination
+
+Before starting or diagnosing heavy local validation, inspect the daemonless host-wide coordinator:
+
+```bash
+uv run make local-resources
+```
+
+Use `LOCAL_RESOURCES_FORMAT=json` when another tool needs the bounded schema. Phase 1 coordinates only
+the fixed `ci-final`, `real-ray`, and `kuberay-final` profiles on one conservative `host-heavy` lane.
+`uv run make ci`, a non-collection pytest session whose final selection contains `real_ray`, and the
+full guarded KubeRay gate enter that lane through their supported wrappers. Do not invoke private Make
+targets or bypass the coordinator. KubeRay preflight-only remains non-mutating and does not acquire the
+lane. The public full-gate wrapper runs that direct check first, then the coordinator owns and
+contains the repeated full gate before image or Kubernetes mutation. Only its final post-release
+Make line is definitive success.
+Contained coordinator runs are supported only on Windows, Linux, and macOS; on other POSIX hosts
+they fail before lane acquisition because Phase 1 has no stable native process-birth identity, and
+contributors must not bypass the coordinator.
+
+Treat the reported safe action (`safe_action`) as the operator boundary. An OS-held lock is
+authoritative; PID, heartbeat age, process name, ports, lock-file contents, Docker or Kubernetes
+objects, and vault text are diagnostics only. Never kill, signal, delete, or take over another task's
+process or stack from those observations. A live recorded child after its owner lock disappears is
+`orphaned`, blocks the lane, and grants no termination authority. The registry is private from other
+OS users, but it is a cooperative coordination mechanism among processes running as the same OS
+user, not a security boundary against a malicious same-user process.
+
+Phase 1 does not yet coordinate standalone PostgreSQL tests, Docker Compose, or manual Ray/Docker/
+Kubernetes probes. Those commands still require an explicit live handoff and must not overlap an
+active heavy lane. The ignored Obsidian vault may record narrative handoff context, but it is never
+the queue, lock, cancellation capability, or process-termination authority.
+
 ## Optional Obsidian project memory
 
 When a repository-local Obsidian vault is available (for example, `.vault/*/.obsidian/`), use it as a

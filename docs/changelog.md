@@ -161,6 +161,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A daemonless host-wide local-resource coordinator now queues full local CI, standalone real-Ray
+  pytest, and the guarded KubeRay final gate through fixed `ci-final`, `real-ray`, and
+  `kuberay-final` profiles on one conservative heavy lane. On POSIX, the historical real-Ray lock is
+  only a same-user compatibility bridge when its fixed path is safely usable; a foreign-user inode
+  is ignored without mutation and never establishes authority. It validates nested Make/pytest
+  inheritance without reacquisition, scrubs
+  lease capabilities before Ray children start, contains the full KubeRay client process tree after
+  direct preflight, and reports bounded read-only host and explicitly scoped Kubernetes status. OS
+  locks remain authoritative; stale metadata, PID, heartbeat, ports,
+  workloads, and Obsidian notes never authorize termination or takeover, while an exact live orphan
+  blocks mutation with no termination authority. Kubernetes Lease mirroring, Compose, standalone
+  PostgreSQL, and manual-probe profiles remain future work requiring explicit live handoff.
+  Contained coordinator runs are supported only on Windows, Linux, and macOS; on other POSIX hosts
+  they fail before lane acquisition because Phase 1 has no stable native process-birth identity, and
+  contributors must not bypass the coordinator.
+
 - A disjoint protocol-`2` Ray Core target-execution codec now binds each canonical request to a
   positive target-execution-evidence ID and digest, the canonical claim time, the selected
   target-expectation digest, and the exact claim-attestation digest. The package-private submit

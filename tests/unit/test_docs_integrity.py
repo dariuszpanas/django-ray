@@ -53,6 +53,109 @@ def test_repository_llms_guide_matches_published_copy() -> None:
     assert (ROOT / "llms.txt").read_bytes() == (DOCS / "llms.txt").read_bytes()
 
 
+def test_local_heavy_resource_coordination_policy_is_consistent() -> None:
+    guidance = {
+        path: (ROOT / path).read_text(encoding="utf-8")
+        for path in ("AGENTS.md", "CONTRIBUTING.md", "docs/contributing.md")
+    }
+    profiles = ("ci-final", "real-ray", "kuberay-final")
+    platform_boundary = (
+        "Contained coordinator runs are supported only on Windows, Linux, and macOS; "
+        "on other POSIX hosts they fail before lane acquisition because Phase 1 has no "
+        "stable native process-birth identity, and contributors must not bypass the "
+        "coordinator."
+    )
+    posix_legacy_boundary = (
+        "On POSIX, the historical real-Ray lock is only a same-user compatibility bridge "
+        "when its fixed path is safely usable; a foreign-user inode is ignored without "
+        "mutation and never establishes authority."
+    )
+
+    for path, content in guidance.items():
+        normalized = " ".join(content.split())
+        assert "uv run make local-resources" in content, path
+        assert all(profile in content for profile in profiles), path
+        assert "safe action" in normalized.lower(), path
+        assert "same OS user" in normalized, path
+        assert "malicious same-user" in content, path
+        assert "PostgreSQL" in content and "Docker Compose" in content, path
+        assert "explicit live handoff" in normalized, path
+        assert "vault" in normalized.lower(), path
+        assert "termination" in normalized.lower(), path
+        assert platform_boundary in normalized, path
+
+    for path in ("CONTRIBUTING.md", "docs/contributing.md"):
+        normalized = " ".join(guidance[path].split())
+        assert "`-i`/`--ignore-errors`" in normalized, path
+        assert "both" in normalized and "CI entrypoints reject" in normalized, path
+        assert "ownership or inheritance failure" in normalized, path
+
+    gate = (DOCS / "deployment" / "local-kuberay-gate.md").read_text(encoding="utf-8")
+    normalized_gate = " ".join(gate.split())
+    assert platform_boundary in normalized_gate
+    assert "## Shared heavy-lane ownership and status" in gate
+    assert "uv run make k8s-final-gate-status" in gate
+    assert "K8S_CONTEXT=docker-desktop" in gate
+    assert "K8S_NAMESPACE=django-ray" in gate
+    assert "confirms the API server is local" in normalized_gate
+    assert "`kubectl config view`" in gate and "`kubectl ... get`" in gate
+    assert "raw/flattened/minified kubeconfig" in normalized_gate
+    assert "rejects proxy routing" in normalized_gate
+    assert "exact verified snapshot and API server" in normalized_gate
+    assert "cleaning the file on every exit" in normalized_gate
+    assert "context, namespace, and selected output format as unexpanded private" in normalized_gate
+    assert "validates each value as exactly one argument before any status read" in normalized_gate
+    assert "discards inherited Make recursion metadata" in normalized_gate
+    assert "scrubs the private fields from every `kubectl` child" in normalized_gate
+    assert "kubernetes_mirror.state" in gate and "not-configured" in gate
+    assert "`image-references-only`" in gate
+    assert "current image-reference observation only" in normalized_gate
+    assert "historical deploy attribution" in normalized_gate
+    contributor_guide = guidance["docs/contributing.md"]
+    normalized_contributor_guide = " ".join(contributor_guide.split())
+    assert "Standalone pytest" in contributor_guide
+    assert "detached Ray descendant" in contributor_guide
+    assert "never grants coordinator kill authority" in normalized_contributor_guide
+    assert "Preflight-only" in gate and "without acquiring" in normalized_gate
+    assert "before the `images` layer" in gate
+    assert "bounded diagnostics" in normalized_gate
+    assert "private-workspace cleanup" in normalized_gate
+    assert "`local-resources`" in gate
+    assert "before Git or another preflight helper can inherit it" in normalized_gate
+    assert "`local-resources-recheck`" in gate
+    assert "revalidate the active record and clean source" in normalized_gate
+    assert "durably recorded contained child" in normalized_gate
+    assert "outer release pending" in normalized_gate
+    assert "`[final-release] passed:" in gate
+    assert "Docker daemon work and Kubernetes server-side operations" in normalized_gate
+    assert "one fail-closed `&&` recipe" in normalized_gate
+    assert "ignore-errors mode cannot continue" in normalized_gate
+    assert (
+        "The final-gate wrapper never interpolates `K8S_CONTEXT`, `K8S_NAMESPACE`, "
+        "`K8S_RAY_RESTART`, `K8S_WEB_URL`, or `K8S_PROMETHEUS_URL` into its recipes"
+    ) in normalized_gate
+    assert "validates each as exactly one argument before any preflight helper" in normalized_gate
+    assert "repeat command-line assignments" in normalized_gate
+    assert "keeps those private fields out of Docker and `kubectl` children" in normalized_gate
+    assert "exports its unexpanded value through a private internal environment field" in (
+        normalized_gate
+    )
+    assert "bounds and parses it as arguments, never as shell syntax" in normalized_gate
+    assert "cannot select help or preflight-only mode" in normalized_gate
+    assert (
+        "override the wrapper-owned scope, restart decision, or local endpoints" in normalized_gate
+    )
+
+    changelog = (DOCS / "changelog.md").read_text(encoding="utf-8")
+    unreleased = changelog.split("## [Unreleased]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
+    assert platform_boundary in " ".join(unreleased.split())
+    assert "daemonless host-wide local-resource coordinator" in unreleased
+    assert "historical real-Ray lock" in unreleased
+    assert posix_legacy_boundary in " ".join(guidance["docs/contributing.md"].split())
+    assert posix_legacy_boundary in " ".join(unreleased.split())
+    assert "no termination authority" in unreleased
+
+
 def test_security_policy_is_private_bounded_and_discoverable() -> None:
     policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
     normalized_policy = " ".join(policy.split())
