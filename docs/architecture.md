@@ -80,6 +80,14 @@ The architecture separates four layers:
 4. an execution strategy such as local execution, dynamic Ray tasks, static actors, or
    a future Compiled Graph adapter.
 
+The public `django_ray.workflows` module remains the defining facade for those builders,
+including their logger and serialization identities. Dependency-leaf support contracts
+live under the inert `django_ray.workflow` package: output previews in `workflow/previews.py`
+and bounded limits and summaries in `workflow/progress/`. Their former flat modules remain
+compatibility exports with the released serialization identities. Execution, planning,
+publication, preparation, and storage modules stay flat until their shared import cycles can
+be separated without changing workflow behavior.
+
 One `RayTaskExecution` remains the durability and recovery boundary. Logical plan nodes,
 runtime map expansions, physical actors, and prepared graph instances do not create
 independent Django task identities. Compiled Graph is therefore an execution strategy

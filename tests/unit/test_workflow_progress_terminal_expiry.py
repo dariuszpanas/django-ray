@@ -21,7 +21,7 @@ from django_ray.models import (
     WorkflowProgressRunStorage,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress_summary import (
+from django_ray.workflow.progress.summary import (
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
 )

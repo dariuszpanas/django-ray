@@ -37,6 +37,7 @@ from django_ray.runtime.context import (
     require_strict_task_execution_context,
 )
 from django_ray.runtime.runtime_env import normalize_runtime_env
+from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
 from django_ray.workflow_plans import (
     MAX_PLAN_BYTES,
     MAX_PLAN_NODES,
@@ -62,7 +63,6 @@ from django_ray.workflow_progress_protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
 )
-from django_ray.workflow_progress_summary import deserialize_workflow_progress_summary
 from django_ray.workflows import chain, group, map_step, step
 
 

@@ -30,7 +30,7 @@ from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runner.ray_core import RayCoreHandle
 from django_ray.runtime.runtime_env import normalize_runtime_env, runtime_env_for_storage
-from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 

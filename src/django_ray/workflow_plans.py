@@ -49,7 +49,7 @@ from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
     resolve_runtime_env_profile,
 )
-from django_ray.workflow_progress_summary import WORKFLOW_PROGRESS_REPORTING_POLICIES
+from django_ray.workflow.progress.summary import WORKFLOW_PROGRESS_REPORTING_POLICIES
 
 if TYPE_CHECKING:
     from django_ray.runtime.context import DurableTaskContext
@@ -1649,7 +1649,7 @@ class _PlanBuilder:
         output_preview: dict[str, Any] | None = None
         if signature.output_preview_path is not None:
             preview_ref, _ = self._register_callable(signature.output_preview_path)
-            from django_ray.workflow_output_previews import (
+            from django_ray.workflow.previews import (
                 WORKFLOW_OUTPUT_PREVIEW_LIMITS_PROFILE,
             )
 

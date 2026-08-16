@@ -13,7 +13,7 @@ from typing import Any, cast
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
 )
-from django_ray.workflow_progress_limits import (
+from django_ray.workflow.progress.limits import (
     canonical_workflow_progress_retained_size,
     workflow_progress_retained_state_size,
 )
@@ -711,7 +711,7 @@ def _execute_workflow_step(
         logger.exception("Workflow step failed")
         raise
     if output_preview_path is not None:
-        from django_ray.workflow_output_previews import (
+        from django_ray.workflow.previews import (
             WorkflowOutputPreviewAvailability,
             project_workflow_output_preview,
             unavailable_workflow_output_preview,
@@ -1100,7 +1100,7 @@ class _WorkflowProgressCollector:
         return True
 
     def _placeholder(self, node_id: str, label: str | None = None) -> dict[str, Any]:
-        from django_ray.workflow_output_previews import (
+        from django_ray.workflow.previews import (
             WorkflowOutputPreviewAvailability,
             unavailable_workflow_output_preview,
         )
@@ -1378,7 +1378,7 @@ class _WorkflowProgressCollector:
         elif event.kind is WorkflowProgressEventKind.FAILED:
             node["label"] = label
             if not terminal:
-                from django_ray.workflow_output_previews import (
+                from django_ray.workflow.previews import (
                     WorkflowOutputPreviewAvailability,
                     unavailable_workflow_output_preview,
                 )
@@ -1483,7 +1483,7 @@ class _WorkflowProgressCollector:
         for node_id in sorted(self.nodes):
             node = copy.deepcopy(self.nodes[node_id])
             if workflow_terminal and node["output_preview"]["availability"] == "PENDING":
-                from django_ray.workflow_output_previews import (
+                from django_ray.workflow.previews import (
                     WorkflowOutputPreviewAvailability,
                     unavailable_workflow_output_preview,
                 )

@@ -27,7 +27,7 @@ from django_ray.models import (
     WorkflowProgressTopologySlot,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress_summary import WorkflowProgressTruncationReason
+from django_ray.workflow.progress.summary import WorkflowProgressTruncationReason
 from tests.workflow_progress_storage_helpers import (
     publish_initial_workflow,
     workflow_detail,

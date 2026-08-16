@@ -12,7 +12,7 @@ import pytest
 import django_ray.workflow_progress_storage as storage
 from django_ray.redaction import REDACTED
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress_summary import WorkflowProgressTruncationReason
+from django_ray.workflow.progress.summary import WorkflowProgressTruncationReason
 
 
 def _identity() -> WorkflowRunIdentity:

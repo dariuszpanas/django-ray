@@ -27,7 +27,7 @@ from django_ray.lifecycle import (
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.redaction import REDACTED, redact_text
-from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 

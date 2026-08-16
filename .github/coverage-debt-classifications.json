@@ -299,7 +299,7 @@
         "rationale": "Route registration, revision-checked transitions, active-policy validation, stable route locking, fixed refusals, and SQLite/PostgreSQL serialization are deterministic persistence contracts suited to exact database and race tests."
       }
     },
-    "src/django_ray/workflow_output_previews.py": {
+    "src/django_ray/workflow/previews.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Output-preview budgets, canonicalization, redaction, validation, and read-time suppression are deterministic safety contracts that should be covered with exact boundary and malformed-payload assertions."
@@ -307,7 +307,7 @@
       "overrides": [
         {
           "ranges": [
-            "148-149"
+            "149-150"
           ],
           "category": "defensive-invariant",
           "rationale": "Canonical encoding receives only the freshly normalized finite, UTF-8, bounded exact-JSON tree, so this exception path protects an internal regression."
@@ -362,7 +362,7 @@
         "rationale": "Topology preparation, record verification, fenced persistence, audit, and expiry behavior can be covered against SQLite or the dedicated PostgreSQL job."
       }
     },
-    "src/django_ray/workflow_progress_summary.py": {
+    "src/django_ray/workflow/progress/summary.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Summary-shape predicates are deterministic compatibility behavior that can be covered with malformed and valid payload assertions."

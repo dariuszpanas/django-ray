@@ -577,7 +577,7 @@ class _RayExecutor(_Executor):
         import ray
 
         from django_ray.runtime.context import get_current_task_context
-        from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
+        from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_LIMITS_V1
 
         self.ray = ray
         self.materialized_plan = materialized_plan
@@ -665,7 +665,7 @@ class _RayExecutor(_Executor):
         if reporting_policy in {"disabled", "terminal_only"}:
             return
         from django_ray.conf.settings import get_settings
-        from django_ray.workflow_progress_limits import (
+        from django_ray.workflow.progress.limits import (
             WORKFLOW_PROGRESS_LIMITS_V1,
             WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
         )
@@ -921,7 +921,7 @@ class _RayExecutor(_Executor):
                 dependencies=dependencies,
             )
             if signature.output_preview_path is not None:
-                from django_ray.workflow_output_previews import (
+                from django_ray.workflow.previews import (
                     WorkflowOutputPreviewAvailability,
                     unavailable_workflow_output_preview,
                 )
@@ -955,7 +955,7 @@ class _RayExecutor(_Executor):
                 if self.workflow_run_identity is not None
                 else None
             )
-        from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
+        from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_LIMITS_V1
 
         if (
             getattr(self, "reporting_policy", "full") != "terminal_only"

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import Any
 
-from django_ray.workflow_progress_limits import (
+from django_ray.workflow.progress.limits import (
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressLimits,
 )

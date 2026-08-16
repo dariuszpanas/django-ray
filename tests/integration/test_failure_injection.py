@@ -10,7 +10,7 @@ import pytest
 
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
 from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
-from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 

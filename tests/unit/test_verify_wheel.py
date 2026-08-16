@@ -41,6 +41,15 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/target/execution_evidence.py" in EXPECTED_FILES
     assert "django_ray/target/probe.py" in EXPECTED_FILES
     assert "django_ray/target/routing.py" in EXPECTED_FILES
+    assert "django_ray/workflow_output_previews.py" in EXPECTED_FILES
+    assert "django_ray/workflow_progress_limits.py" in EXPECTED_FILES
+    assert "django_ray/workflow_progress_summary.py" in EXPECTED_FILES
+    assert "django_ray/workflow/__init__.py" in EXPECTED_FILES
+    assert "django_ray/workflow/_compat.py" in EXPECTED_FILES
+    assert "django_ray/workflow/previews.py" in EXPECTED_FILES
+    assert "django_ray/workflow/progress/__init__.py" in EXPECTED_FILES
+    assert "django_ray/workflow/progress/limits.py" in EXPECTED_FILES
+    assert "django_ray/workflow/progress/summary.py" in EXPECTED_FILES
     assert "django_ray/runner/ray_core.py" in EXPECTED_FILES
     assert "django_ray/runtime/remote.py" in EXPECTED_FILES
     assert "django_ray/migrations/0019_execution_protocol_schema.py" in EXPECTED_FILES

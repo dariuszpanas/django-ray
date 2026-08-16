@@ -8,18 +8,18 @@ from typing import Any, NoReturn
 from uuid import UUID
 
 from django_ray.redaction import redact_text
-from django_ray.workflow_output_previews import (
+from django_ray.workflow.previews import (
     WorkflowOutputPreviewAvailability,
     WorkflowOutputPreviewError,
     unavailable_workflow_output_preview,
     validate_workflow_output_preview,
 )
-from django_ray.workflow_progress_limits import (
+from django_ray.workflow.progress.limits import (
     WORKFLOW_PROGRESS_LABEL_MAX_BYTES,
     WORKFLOW_PROGRESS_MESSAGE_MAX_BYTES,
     WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES,
 )
-from django_ray.workflow_progress_summary import (
+from django_ray.workflow.progress.summary import (
     WORKFLOW_PROGRESS_STATES,
     WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
     WORKFLOW_PROGRESS_TERMINAL_STATES,

@@ -180,7 +180,8 @@
           "tests/unit/test_release.py",
           "tests/unit/test_target_package.py",
           "tests/unit/test_test_suite_inventory.py",
-          "tests/unit/test_verify_wheel.py"
+          "tests/unit/test_verify_wheel.py",
+          "tests/unit/test_workflow_package.py"
         ]
       }
     },

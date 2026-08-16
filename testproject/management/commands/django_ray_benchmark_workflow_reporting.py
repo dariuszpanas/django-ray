@@ -39,6 +39,11 @@ from django_ray.observability import (
     get_workflow_plan,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.workflow.progress.summary import (
+    WorkflowProgressDetailAvailability,
+    deserialize_workflow_progress_summary,
+    serialize_workflow_progress_summary,
+)
 from django_ray.workflow_progress_publication import (
     WorkflowProgressPilotError,
     prepare_terminal_workflow_progress_publication,
@@ -46,11 +51,6 @@ from django_ray.workflow_progress_publication import (
 from django_ray.workflow_progress_storage import (
     audit_workflow_progress_detail_storage,
     verify_workflow_progress_topology_manifest,
-)
-from django_ray.workflow_progress_summary import (
-    WorkflowProgressDetailAvailability,
-    deserialize_workflow_progress_summary,
-    serialize_workflow_progress_summary,
 )
 from testproject.apps.cluster_tasks.tasks import complex_workflow_benchmark
 

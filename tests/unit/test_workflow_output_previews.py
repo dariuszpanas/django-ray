@@ -4,9 +4,9 @@ from typing import Any
 
 import pytest
 
-import django_ray.workflow_output_previews as previews_module
+import django_ray.workflow.previews as previews_module
 from django_ray.redaction import REDACTED
-from django_ray.workflow_output_previews import (
+from django_ray.workflow.previews import (
     WORKFLOW_OUTPUT_PREVIEW_MAX_ENCODED_BYTES,
     WorkflowOutputPreviewAvailability,
     WorkflowOutputPreviewError,
