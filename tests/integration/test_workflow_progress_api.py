@@ -12,11 +12,11 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from django_ray.models import RayTaskExecution, TaskState
+from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from django_ray.workflow_progress_reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
 )
-from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from tests.workflow_progress_summary_helpers import (
     terminal_only_workflow_progress_summary,
 )

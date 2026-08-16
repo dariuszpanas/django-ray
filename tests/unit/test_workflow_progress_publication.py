@@ -19,15 +19,15 @@ from django_ray.models import (
     WorkflowProgressTopologySlot,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.workflow.progress.summary import (
+    deserialize_workflow_progress_summary,
+)
 from django_ray.workflow_plans import PlanEligibility
 from django_ray.workflow_progress_reads import (
     get_workflow_progress_summary,
     list_workflow_node_details,
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
-)
-from django_ray.workflow_progress_summary import (
-    deserialize_workflow_progress_summary,
 )
 
 RUN_ID = "00000000-0000-0000-0000-000000000212"

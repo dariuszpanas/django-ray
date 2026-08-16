@@ -4,6 +4,15 @@ This page defines the tested dependency and platform matrix. The separate
 [Stability and Deprecation Policy](stability.md) defines the proposed 1.0 public
 contract, experimental boundary, and removal process while django-ray remains Beta.
 
+## Module Path Compatibility
+
+`django_ray.workflows` remains the public defining module for workflow builders.
+Dependency-leaf workflow support now lives under the inert `django_ray.workflow` package,
+while the released flat `workflow_output_previews`, `workflow_progress_limits`, and
+`workflow_progress_summary` module paths remain compatibility exports. Their exported
+classes and callables retain the legacy module identities used by existing pickle payloads.
+New package code should import the canonical package paths.
+
 ## Supported Versions
 
 | Component | Supported |

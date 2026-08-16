@@ -75,6 +75,10 @@ from django_ray.models import (
 from django_ray.protocol_status import annotate_execution_protocol_availability
 from django_ray.redaction import normalize_terminal_text, redact_text, safe_json_dumps
 from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
+from django_ray.workflow.progress.summary import (
+    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    WORKFLOW_PROGRESS_TERMINAL_STATES,
+)
 from django_ray.workflow_plans import (
     MAX_PLAN_BYTES,
     effective_plan_selection_reporting_policy,
@@ -89,10 +93,6 @@ from django_ray.workflow_progress_reads import (
     list_workflow_node_details,
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
-)
-from django_ray.workflow_progress_summary import (
-    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
-    WORKFLOW_PROGRESS_TERMINAL_STATES,
 )
 
 _DJANGO_RAY_ADMIN_USES_UNFOLD = apps.is_installed("unfold")

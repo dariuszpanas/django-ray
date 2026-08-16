@@ -67,16 +67,16 @@ from django_ray.runner.leasing import WorkerLeaseIdentity, get_active_workers
 from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
 from django_ray.runtime.context import DurableTaskContext, WorkflowRunIdentity
+from django_ray.workflow.progress.summary import (
+    deserialize_workflow_progress_summary,
+    serialize_workflow_progress_summary,
+)
 from django_ray.workflow_progress import (
     WorkflowProgressDiagnosticCode,
     allocate_workflow_run,
     persist_workflow_progress,
     persist_workflow_progress_summary,
     read_workflow_progress,
-)
-from django_ray.workflow_progress_summary import (
-    deserialize_workflow_progress_summary,
-    serialize_workflow_progress_summary,
 )
 from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary

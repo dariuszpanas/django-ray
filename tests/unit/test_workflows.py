@@ -22,7 +22,7 @@ from django_ray.runtime.context import (
     workflow_step_execution,
 )
 from django_ray.runtime.remote import WorkflowProgressActor
-from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
+from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_LIMITS_V1
 from django_ray.workflow_progress_protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
@@ -2702,7 +2702,7 @@ def test_incomplete_or_malformed_strict_context_never_submits_legacy_work(
 
 
 def test_ray_executor_submit_passes_strict_pilot_limits_to_remote_step() -> None:
-    from django_ray.workflow_progress_limits import (
+    from django_ray.workflow.progress.limits import (
         WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
     )
 
@@ -3364,9 +3364,10 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         WorkflowProgressTopologyPage,
         WorkflowProgressTopologySlot,
     )
-    from django_ray.workflow_progress_limits import (
+    from django_ray.workflow.progress.limits import (
         WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS,
     )
+    from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
     from django_ray.workflow_progress_publication import (
         WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
     )
@@ -3376,7 +3377,6 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         list_workflow_topology_edges,
         list_workflow_topology_nodes,
     )
-    from django_ray.workflow_progress_summary import deserialize_workflow_progress_summary
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -3974,7 +3974,7 @@ def test_report_progress_uses_current_workflow_context() -> None:
 
 
 def test_report_progress_validates_values_and_metrics() -> None:
-    from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_METRICS_MAX_ITEMS
+    from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_METRICS_MAX_ITEMS
 
     identity = _workflow_identity()
     actor = _IngestOnlyProgressActor()

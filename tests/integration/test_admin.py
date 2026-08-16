@@ -55,6 +55,7 @@ from django_ray.models import (
     TaskWorkerLease,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
+from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from django_ray.workflow_plans import (
     MAX_PLAN_BYTES,
     PLAN_DOMAIN_SEPARATOR,
@@ -77,7 +78,6 @@ from django_ray.workflow_progress_storage import (
     prepare_workflow_progress_topology,
     stage_workflow_progress_topology,
 )
-from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from django_ray.workflows import map_step
 from tests.workflow_progress_storage_helpers import (
     workflow_detail,

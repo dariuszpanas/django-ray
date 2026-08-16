@@ -18,7 +18,7 @@ from django_ray.execution_protocol import (
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.runtime_env import runtime_env_for_execution
-from django_ray.workflow_progress_summary import (
+from django_ray.workflow.progress.summary import (
     WORKFLOW_PROGRESS_TERMINAL_STATES,
     WorkflowProgressDetailAvailability,
     WorkflowProgressSummaryError,

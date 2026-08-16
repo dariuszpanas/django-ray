@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from django_ray.workflow_progress_limits import (
+from django_ray.workflow.progress.limits import (
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressLimits,
 )

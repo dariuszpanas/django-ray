@@ -13,8 +13,8 @@ from django.db import DatabaseError, connection, transaction
 from django.db.models.query import QuerySet
 from django.test.utils import CaptureQueriesContext
 
+import django_ray.workflow.progress.summary as summary_module
 import django_ray.workflow_progress as progress_module
-import django_ray.workflow_progress_summary as summary_module
 from django_ray.lifecycle import cancel_task, record_failure, retry_task, succeed_task
 from django_ray.models import (
     RayTaskExecution,
@@ -34,6 +34,16 @@ from django_ray.runtime.context import (
     DurableTaskContext,
     WorkflowRunIdentity,
 )
+from django_ray.workflow.progress.summary import (
+    WORKFLOW_PROGRESS_DETAIL_RETENTION_MAX_DAYS,
+    WORKFLOW_PROGRESS_SUMMARY_MAX_BYTES,
+    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    WorkflowProgressSummaryError,
+    deserialize_workflow_progress_summary,
+    normalize_workflow_progress_summary,
+    public_workflow_progress_summary,
+    serialize_workflow_progress_summary,
+)
 from django_ray.workflow_plans import (
     PLAN_DOMAIN_SEPARATOR,
     PLAN_FORMAT,
@@ -48,16 +58,6 @@ from django_ray.workflow_progress import (
     allocate_workflow_run,
     persist_workflow_progress_summary,
     read_workflow_progress,
-)
-from django_ray.workflow_progress_summary import (
-    WORKFLOW_PROGRESS_DETAIL_RETENTION_MAX_DAYS,
-    WORKFLOW_PROGRESS_SUMMARY_MAX_BYTES,
-    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
-    WorkflowProgressSummaryError,
-    deserialize_workflow_progress_summary,
-    normalize_workflow_progress_summary,
-    public_workflow_progress_summary,
-    serialize_workflow_progress_summary,
 )
 
 

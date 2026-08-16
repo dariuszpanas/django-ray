@@ -20,11 +20,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 from django_ray.redaction import REDACTED, normalize_terminal_text, redact_text
-from django_ray.workflow_output_previews import (
+from django_ray.workflow.previews import (
     WorkflowOutputPreviewError,
     validate_workflow_output_preview,
 )
-from django_ray.workflow_progress_limits import (
+from django_ray.workflow.progress.limits import (
     WORKFLOW_PROGRESS_LIMITS_PROFILE,
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressLimits,

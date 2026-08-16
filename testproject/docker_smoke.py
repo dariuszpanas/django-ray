@@ -1507,14 +1507,14 @@ def _verify_existing_terminal_only_storage_contract(
         WorkflowProgressTopologyManifestPage,
         WorkflowProgressTopologyPage,
     )
+    from django_ray.workflow.progress.summary import (
+        WorkflowProgressSummaryError,
+        deserialize_workflow_progress_summary,
+    )
     from django_ray.workflow_plans import (
         WorkflowPlanValidationError,
         effective_plan_selection_reporting_policy,
         validate_plan_selection_manifest,
-    )
-    from django_ray.workflow_progress_summary import (
-        WorkflowProgressSummaryError,
-        deserialize_workflow_progress_summary,
     )
 
     if (
@@ -1804,7 +1804,7 @@ def _run_existing_workflow_admin_smoke(
     selected_execution = execution
     if attempt_number is not None:
         from django_ray.models import TaskAttempt
-        from django_ray.workflow_progress_summary import (
+        from django_ray.workflow.progress.summary import (
             WorkflowProgressSummaryError,
             deserialize_workflow_progress_summary,
         )

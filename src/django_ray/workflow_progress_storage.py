@@ -43,13 +43,13 @@ from django_ray.models import (
 )
 from django_ray.redaction import REDACTED, redact_text
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_output_previews import (
+from django_ray.workflow.previews import (
     WorkflowOutputPreviewError,
     _validate_workflow_output_preview,
     read_workflow_output_preview,
     validate_workflow_output_preview,
 )
-from django_ray.workflow_progress_limits import (
+from django_ray.workflow.progress.limits import (
     WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES,
     WORKFLOW_PROGRESS_COMBINED_MAX_ENCODED_BYTES,
     WORKFLOW_PROGRESS_DETAIL_MAX_DECODED_BYTES,
@@ -78,7 +78,7 @@ from django_ray.workflow_progress_limits import (
     WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS,
     WORKFLOW_PROGRESS_VALUE_MAX_DEPTH,
 )
-from django_ray.workflow_progress_summary import (
+from django_ray.workflow.progress.summary import (
     WORKFLOW_PROGRESS_TERMINAL_STATES,
     WorkflowProgressDetailAvailability,
     WorkflowProgressSummaryError,

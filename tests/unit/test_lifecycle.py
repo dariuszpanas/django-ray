@@ -41,7 +41,7 @@ from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
     runtime_env_for_storage,
 )
-from django_ray.workflow_progress_summary import (
+from django_ray.workflow.progress.summary import (
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
 )

@@ -25,6 +25,7 @@ from django_ray.models import (
     WorkflowProgressTopologyPage,
 )
 from django_ray.redaction import REDACTED
+from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from django_ray.workflow_plans import (
     PLAN_SELECTION_FORMAT,
     PLAN_SELECTION_FORMAT_VERSION,
@@ -55,7 +56,6 @@ from django_ray.workflow_progress_storage import (
     prepare_workflow_progress_topology,
     stage_workflow_progress_topology,
 )
-from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
 from tests.workflow_progress_storage_helpers import (
     PublishedWorkflow,
     publish_initial_workflow,

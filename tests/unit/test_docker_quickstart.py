@@ -400,7 +400,7 @@ def test_existing_workflow_smoke_selects_archived_attempt_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
-    from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
+    from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
     from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
     execution = RayTaskExecution.objects.create(
@@ -1732,11 +1732,11 @@ def test_existing_workflow_storage_can_select_an_archived_run_identity() -> None
 @pytest.mark.django_db
 def test_terminal_only_storage_requires_one_summary_and_no_detail_rows() -> None:
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+    from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
     from django_ray.workflow_plans import (
         PLAN_SELECTION_FORMAT,
         PLAN_SELECTION_FORMAT_VERSION,
     )
-    from django_ray.workflow_progress_summary import serialize_workflow_progress_summary
     from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
     fingerprint = f"sha256:{'a' * 64}"

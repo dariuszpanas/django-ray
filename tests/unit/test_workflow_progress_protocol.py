@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from django_ray.workflow_progress_limits import WORKFLOW_PROGRESS_LIMITS_V1
+from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_LIMITS_V1
 from django_ray.workflow_progress_protocol import (
     WORKFLOW_PROGRESS_EVENT_ENCODING,
     WORKFLOW_PROGRESS_EVENT_SCHEMA_VERSION,

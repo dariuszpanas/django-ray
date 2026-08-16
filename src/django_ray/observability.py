@@ -14,6 +14,10 @@ from django.db.models import Count, Min, Q
 
 from django_ray.conf.settings import get_settings
 from django_ray.redaction import redact_text, redact_value
+from django_ray.workflow.progress.summary import (
+    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    public_workflow_progress_summary,
+)
 from django_ray.workflow_plans import (
     PLAN_DOMAIN_SEPARATOR,
     PLAN_FORMAT,
@@ -23,10 +27,6 @@ from django_ray.workflow_plans import (
     validate_plan_selection_manifest,
 )
 from django_ray.workflow_progress import WorkflowProgressReadSource, read_workflow_progress
-from django_ray.workflow_progress_summary import (
-    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
-    public_workflow_progress_summary,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
