@@ -710,6 +710,34 @@ def test_repository_manifest_classifies_workflow_progress_rss_fallback() -> None
     assert {policy.for_line(line).category for line in (135, 136)} == {"environment-specific"}
 
 
+def test_repository_manifest_classifies_canonical_target_implementations() -> None:
+    classifications = load_classifications(CLASSIFICATIONS)
+    canonical_paths = {
+        "src/django_ray/target/attestation.py",
+        "src/django_ray/target/capabilities.py",
+        "src/django_ray/target/coordination.py",
+        "src/django_ray/target/execution_codec.py",
+        "src/django_ray/target/execution_evidence.py",
+        "src/django_ray/target/probe.py",
+        "src/django_ray/target/routing.py",
+    }
+    legacy_paths = {
+        "src/django_ray/ray_target_probe.py",
+        "src/django_ray/target_attestation.py",
+        "src/django_ray/target_capabilities.py",
+        "src/django_ray/target_coordination.py",
+        "src/django_ray/target_execution_codec.py",
+        "src/django_ray/target_execution_evidence.py",
+        "src/django_ray/target_routing.py",
+    }
+
+    assert canonical_paths <= classifications.keys()
+    assert legacy_paths.isdisjoint(classifications)
+    assert {classifications[path].default.category for path in canonical_paths} == {
+        "testable-behavior"
+    }
+
+
 @pytest.mark.parametrize(
     ("branch_coverage", "classify_small", "message"),
     [

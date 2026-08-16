@@ -22,7 +22,7 @@ from django_ray.execution_protocol import (
     PROTOCOL_POLICY_SCHEMA_VERSION,
     WORKER_CAPABILITY_SCHEMA_VERSION,
 )
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RAY_CLUSTER_ATTESTATION_MAX_BYTES,
     RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION,
     RAY_TARGET_ATTESTATION_MAX_COUNTER,

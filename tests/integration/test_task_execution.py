@@ -431,9 +431,8 @@ class TestRayRemoteExecution:
         from datetime import UTC, datetime, timedelta
 
         from django_ray.execution_codec import ExecutionIdentity
-        from django_ray.ray_target_probe import probe_ray_target
         from django_ray.runtime.remote import execute_django_task_remote
-        from django_ray.target_attestation import (
+        from django_ray.target.attestation import (
             RayRunnerFamily,
             RayRuntimeVersion,
             RayTargetExpectation,
@@ -442,7 +441,7 @@ class TestRayRemoteExecution:
             ray_cluster_attestation_digest,
             ray_target_expectation_digest,
         )
-        from django_ray.target_execution_codec import (
+        from django_ray.target.execution_codec import (
             TargetExecutionCompatibilityReason,
             TargetExecutionCompatibilityRejection,
             TargetExecutionCompletion,
@@ -450,10 +449,11 @@ class TestRayRemoteExecution:
             decode_target_execution_result,
             encode_target_execution_request,
         )
-        from django_ray.target_execution_evidence import (
+        from django_ray.target.execution_evidence import (
             RayTaskTargetExecutionEvidenceClaim,
             ray_task_target_execution_evidence_digest,
         )
+        from django_ray.target.probe import probe_ray_target
 
         runtime = RayRuntimeVersion(
             ray_major=2,

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 
 import pytest
 
-import django_ray.target_execution_codec as codec
+import django_ray.target.execution_codec as codec
 from django_ray.execution_codec import (
     EXECUTION_COMPLETION_MAX_BYTES,
     EXECUTION_REQUEST_MAX_BYTES,
@@ -20,7 +20,7 @@ from django_ray.execution_protocol import (
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     TARGET_EXECUTION_PROTOCOL_VERSION,
 )
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RAY_CLUSTER_ATTESTATION_MAX_BYTES,
     RAY_TARGET_EXPECTATION_MAX_BYTES,
     RayNodeStateVersion,
@@ -36,7 +36,7 @@ from django_ray.target_attestation import (
     ray_membership_digest,
     ray_target_expectation_digest,
 )
-from django_ray.target_execution_codec import (
+from django_ray.target.execution_codec import (
     TARGET_EXECUTION_METADATA_MAX_BYTES,
     TargetApplicationCompletion,
     TargetExecutionCompatibilityReason,

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RAY_CLUSTER_ATTESTATION_MAX_BYTES,
     RAY_CLUSTER_ATTESTATION_SCHEMA,
     RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION,

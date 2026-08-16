@@ -22,14 +22,14 @@ from django.db.models import F
 from django.db.models.query import QuerySet
 from django.test.utils import CaptureQueriesContext
 
-import django_ray.target_coordination as coordination
+import django_ray.target.coordination as coordination
 from django_ray.models import (
     RayTarget,
     RayTargetAttestationRevision,
     RayTargetDesiredState,
     RayTargetPolicyRevision,
 )
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION,
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayNodeStateVersion,
@@ -46,7 +46,7 @@ from django_ray.target_attestation import (
     encode_ray_target_expectation,
     ray_target_expectation_digest,
 )
-from django_ray.target_coordination import (
+from django_ray.target.coordination import (
     InvalidRayTargetArgumentError,
     NestedRayTargetTransactionError,
     RayJobTargetPersistenceUnsupportedError,

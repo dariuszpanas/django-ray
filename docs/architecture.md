@@ -1172,7 +1172,12 @@ route-selection lineage, exact snapshot consistency, and create-once immutabilit
 evidence remains valid after a later lifecycle transition changes the execution's mutable current
 state, owner, attempt, or generation.
 
-`target_execution_evidence.py` defines the Django-free canonical claim representation and its
+Ray target contracts, probes, and coordination live under the inert `django_ray.target` package.
+The package initializer does not eagerly import Django or Ray across the cold contract boundary.
+The former flat target modules remain compatibility exports while package code uses the canonical
+submodules.
+
+`target/execution_evidence.py` defines the Django-free canonical claim representation and its
 domain-separated digest over every immutable lineage and claim snapshot above. The database's
 positive evidence ID is deliberately outside that digest and travels as a separate control; the
 protocol-`2` request and observed-proof digest bind the ID and claim digest together. This lets a

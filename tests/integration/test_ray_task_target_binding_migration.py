@@ -34,7 +34,7 @@ from django_ray.models import (
     RayTaskExecution,
     RayTaskTargetBinding,
 )
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,
 )

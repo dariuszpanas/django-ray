@@ -382,7 +382,7 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
         "src/django_ray/migrations/0025_ray_worker_target_capabilities.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
         "src/django_ray/models.py",
-        "src/django_ray/target_capabilities.py",
+        "src/django_ray/target/capabilities.py",
     }
 
     coordinator_symbols = (
@@ -396,7 +396,7 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
             for path in production_root.rglob("*.py")
             if symbol in path.read_text(encoding="utf-8")
         }
-        assert callers == {"src/django_ray/target_capabilities.py"}
+        assert callers == {"src/django_ray/target/capabilities.py"}
 
 
 def test_protocol_v2_evidence_has_no_production_persistence_consumer() -> None:

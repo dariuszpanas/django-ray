@@ -8,15 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import django_ray.ray_target_probe as probe_module
-from django_ray.ray_target_probe import (
-    RayTargetExecutionCompatibilityError,
-    RayTargetExecutionResultValidationError,
-    RayTargetProbeError,
-    RayTargetProbeFailure,
-    validate_ray_target_execution_result_semantics,
-    verify_ray_target_execution,
-)
+import django_ray.target.probe as probe_module
 from django_ray.runner.base import JobStatus
 from django_ray.runner.ray_core import (
     RayCoreHandle,
@@ -26,11 +18,11 @@ from django_ray.runner.ray_core import (
     _RayCoreSubmissionHandle,
 )
 from django_ray.runtime.remote import execute_django_task_remote
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     build_ray_cluster_attestation,
     ray_cluster_attestation_digest,
 )
-from django_ray.target_execution_codec import (
+from django_ray.target.execution_codec import (
     TargetApplicationCompletion,
     TargetExecutionCompatibilityReason,
     TargetExecutionCompatibilityRejection,
@@ -41,9 +33,17 @@ from django_ray.target_execution_codec import (
     encode_target_execution_request,
     encode_target_execution_result,
 )
-from django_ray.target_execution_evidence import (
+from django_ray.target.execution_evidence import (
     RayTaskTargetExecutionEvidenceClaim,
     ray_task_target_execution_evidence_digest,
+)
+from django_ray.target.probe import (
+    RayTargetExecutionCompatibilityError,
+    RayTargetExecutionResultValidationError,
+    RayTargetProbeError,
+    RayTargetProbeFailure,
+    validate_ray_target_execution_result_semantics,
+    verify_ray_target_execution,
 )
 from tests.unit.test_target_execution_codec import (
     _NODE_ID,

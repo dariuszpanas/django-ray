@@ -16,9 +16,9 @@ from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHan
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
     from django_ray.runner.cancellation import CancellationOutcome
-    from django_ray.target_attestation import RayClusterAttestation, RayTargetExpectation
-    from django_ray.target_execution_codec import TargetExecutionResult
-    from django_ray.target_execution_evidence import RayTaskTargetExecutionEvidenceClaim
+    from django_ray.target.attestation import RayClusterAttestation, RayTargetExpectation
+    from django_ray.target.execution_codec import TargetExecutionResult
+    from django_ray.target.execution_evidence import RayTaskTargetExecutionEvidenceClaim
 
 
 @dataclass(frozen=True)
@@ -144,7 +144,7 @@ def _canonical_target_execution_submission_evidence(
     """Validate one complete persisted-claim snapshot before any Ray crossing."""
     try:
         from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
-        from django_ray.target_attestation import (
+        from django_ray.target.attestation import (
             RayRunnerFamily,
             decode_ray_cluster_attestation,
             decode_ray_target_expectation,
@@ -153,7 +153,7 @@ def _canonical_target_execution_submission_evidence(
             ray_cluster_attestation_digest,
             ray_target_expectation_digest,
         )
-        from django_ray.target_execution_evidence import (
+        from django_ray.target.execution_evidence import (
             decode_ray_task_target_execution_evidence,
             encode_ray_task_target_execution_evidence,
             ray_task_target_execution_evidence_digest,
@@ -522,7 +522,7 @@ class RayCoreRunner(BaseRunner):
             target_expectation_digest = target_execution_evidence.target_expectation_digest
             claim_attestation = target_execution_evidence.claim_attestation
             claim_attestation_digest = target_execution_evidence.claim_attestation_digest
-            from django_ray.target_execution_codec import (
+            from django_ray.target.execution_codec import (
                 TargetExecutionRequest,
                 decode_target_execution_request,
                 encode_target_execution_request,
@@ -1109,15 +1109,15 @@ class RayCoreRunner(BaseRunner):
             return uncertain_results
 
         from django_ray.execution_codec import ExecutionIdentity
-        from django_ray.ray_target_probe import (
-            RayTargetExecutionResultValidationError,
-            validate_ray_target_execution_result_semantics,
-        )
-        from django_ray.target_execution_codec import (
+        from django_ray.target.execution_codec import (
             TargetExecutionCompatibilityRejection,
             TargetExecutionResultDecodeError,
             TargetExecutionResultRejection,
             decode_target_execution_result,
+        )
+        from django_ray.target.probe import (
+            RayTargetExecutionResultValidationError,
+            validate_ray_target_execution_result_semantics,
         )
 
         uncertainty_by_rejection = {

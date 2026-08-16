@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 
 import pytest
 
-from django_ray.target_execution_evidence import (
+from django_ray.target.execution_evidence import (
     RayTaskTargetExecutionEvidenceClaim,
     RayTaskTargetExecutionEvidenceError,
     decode_ray_task_target_execution_evidence,

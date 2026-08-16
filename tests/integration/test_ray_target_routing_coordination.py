@@ -21,7 +21,7 @@ from django.db.models import F
 from django.db.models.query import QuerySet
 from django.test.utils import CaptureQueriesContext
 
-import django_ray.target_routing as routing
+import django_ray.target.routing as routing
 from django_ray.models import (
     RayTarget,
     RayTargetDesiredState,
@@ -30,17 +30,17 @@ from django_ray.models import (
     RayTargetRouteRevision,
     RayTaskTargetRouteSelection,
 )
-from django_ray.target_attestation import (
+from django_ray.target.attestation import (
     RayRunnerFamily,
     RayRuntimeVersion,
     RayTargetExpectation,
     decode_ray_target_expectation,
 )
-from django_ray.target_coordination import (
+from django_ray.target.coordination import (
     register_ray_target,
     transition_ray_target_desired_state,
 )
-from django_ray.target_routing import (
+from django_ray.target.routing import (
     InvalidRayTargetRouteArgumentError,
     NestedRayTargetRouteTransactionError,
     RayJobTargetRoutingUnsupportedError,
