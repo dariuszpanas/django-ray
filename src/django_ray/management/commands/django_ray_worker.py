@@ -1806,7 +1806,7 @@ class Command(BaseCommand):
         """Execute a task synchronously (without Ray)."""
         from django_ray.conf.settings import get_settings
         from django_ray.runtime.entrypoint import execute_task
-        from django_ray.workflow_plans import runtime_env_plan_identity
+        from django_ray.workflow.plans import runtime_env_plan_identity
 
         expected_attempt_number = int(task.attempt_number)
         expected_execution_generation = int(task.execution_generation)
@@ -2663,7 +2663,7 @@ class Command(BaseCommand):
             import traceback
 
             from django_ray.execution_codec import ExecutionRequestEncodeError
-            from django_ray.workflow_plans import WorkflowPlanMismatchError
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
 
             self._handle_task_failure(
                 task,
@@ -2932,7 +2932,7 @@ class Command(BaseCommand):
             RayJobSubmissionUncertainError,
         )
         from django_ray.runner.ray_job import RayJobRunner
-        from django_ray.workflow_plans import WorkflowPlanMismatchError
+        from django_ray.workflow.plans import WorkflowPlanMismatchError
 
         expected_worker_id = self.worker_id
         expected_attempt_number = int(task.attempt_number)

@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-import django_ray.workflow_progress_storage as storage
+import django_ray.workflow.progress.preparation as preparation
+import django_ray.workflow.progress.storage as storage
 from django_ray.redaction import REDACTED
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.workflow.progress.summary import WorkflowProgressTruncationReason
@@ -139,8 +140,8 @@ def test_topology_is_canonical_across_collection_and_mapping_order() -> None:
         reordered["ray_options"] = dict(reversed(tuple(node["ray_options"].items())))
         reordered_nodes.append(reordered)
 
-    first = storage.prepare_workflow_progress_topology(identity, 4, nodes, edges)
-    second = storage.prepare_workflow_progress_topology(
+    first = preparation.prepare_workflow_progress_topology(identity, 4, nodes, edges)
+    second = preparation.prepare_workflow_progress_topology(
         identity,
         4,
         reordered_nodes,
@@ -166,7 +167,7 @@ def test_topology_is_canonical_across_collection_and_mapping_order() -> None:
 
 
 def test_topology_exact_shapes_redact_metadata_before_storage() -> None:
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [
@@ -209,7 +210,7 @@ def test_topology_exact_shapes_redact_metadata_before_storage() -> None:
 
 def test_storage_persists_only_normalized_metadata_metric_and_resource_keys() -> None:
     identity = _identity()
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         identity,
         1,
         [
@@ -260,7 +261,7 @@ def test_storage_rejects_duplicate_normalized_mapping_keys(location: str) -> Non
 
     with pytest.raises(storage.WorkflowProgressStorageError, match="duplicate normalized"):
         if location == "metadata":
-            storage.prepare_workflow_progress_topology(
+            preparation.prepare_workflow_progress_topology(
                 identity,
                 1,
                 [
@@ -321,9 +322,9 @@ def test_topology_requires_exact_node_and_edge_shapes(shape: str) -> None:
         edge.pop("target")
 
     with pytest.raises(storage.WorkflowProgressStorageError, match="exact protocol fields"):
-        storage.prepare_workflow_progress_topology(_identity(), 1, [node], [])
+        preparation.prepare_workflow_progress_topology(_identity(), 1, [node], [])
     with pytest.raises(storage.WorkflowProgressStorageError, match="exact protocol fields"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             [_node("node-a"), _node("node-b")],
@@ -340,9 +341,9 @@ def test_secret_like_values_are_rejected_from_identity_fields(location: str) -> 
 
     with pytest.raises(storage.WorkflowProgressStorageError, match="resembles sensitive data"):
         if location == "node":
-            storage.prepare_workflow_progress_topology(identity, 1, [_node("api_key")], [])
+            preparation.prepare_workflow_progress_topology(identity, 1, [_node("api_key")], [])
         elif location == "edge":
-            storage.prepare_workflow_progress_topology(
+            preparation.prepare_workflow_progress_topology(
                 identity,
                 1,
                 [_node("node-a"), _node("node-b")],
@@ -378,7 +379,7 @@ def test_invalid_unicode_is_rejected_before_canonical_encoding() -> None:
     invalid = "invalid-\ud800"
 
     with pytest.raises(storage.WorkflowProgressStorageError, match="valid UTF-8"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             [_node("node-a", runtime_env={"value": invalid})],
@@ -404,7 +405,7 @@ def test_invalid_unicode_is_rejected_before_canonical_encoding() -> None:
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_non_finite_values_are_rejected_everywhere(value: float) -> None:
     with pytest.raises(storage.WorkflowProgressStorageError, match="finite"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             [_node("node-a", runtime_env={"value": value})],
@@ -432,7 +433,7 @@ def test_metadata_nesting_is_bounded() -> None:
     for _ in range(storage.WORKFLOW_PROGRESS_VALUE_MAX_DEPTH + 1):
         nested = {"child": nested}
 
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a", runtime_env=nested)],
@@ -498,7 +499,7 @@ def test_observed_topology_is_distinct_from_deterministically_retained_topology(
 ) -> None:
     monkeypatch.setattr(storage, "WORKFLOW_PROGRESS_TOPOLOGY_NODE_MAX_ITEMS", 1)
 
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-b"), _node("node-a")],
@@ -518,21 +519,21 @@ def test_topology_rejects_unknown_duplicate_and_empty_edge_endpoints() -> None:
     nodes = [_node("node-a"), _node("node-b")]
 
     with pytest.raises(storage.WorkflowProgressStorageError, match="unknown node_id"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             nodes,
             [_edge("node-a", "missing")],
         )
     with pytest.raises(storage.WorkflowProgressStorageError, match="duplicate edge"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             nodes,
             [_edge("node-a", "node-b"), _edge("node-a", "node-b")],
         )
     with pytest.raises(storage.WorkflowProgressStorageError):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             nodes,
@@ -544,7 +545,7 @@ def test_manifest_lists_node_pages_before_edge_pages_with_identity_encoding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(storage, "WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS", 1)
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         7,
         [_node("node-c"), _node("node-a"), _node("node-b")],
@@ -936,7 +937,7 @@ def test_node_detail_rejects_inconsistent_fanout(fanout: dict[str, Any]) -> None
 
 def test_fanout_presence_matches_the_topology_map_kind() -> None:
     identity = _identity()
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         identity,
         1,
         [_node("map-node", kind="map"), _node("task-node")],
@@ -970,7 +971,7 @@ def test_fanout_presence_matches_the_topology_map_kind() -> None:
 
 
 def test_full_policy_requires_one_detail_per_observed_topology_node() -> None:
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-b")],
@@ -1036,7 +1037,7 @@ def test_sensitive_metadata_and_metric_keys_are_omitted_before_digesting() -> No
     ]:
         node = _node("node-a")
         node["runtime_env"] = {f"password={secret}": "value", "safe": "visible"}
-        topology = storage.prepare_workflow_progress_topology(
+        topology = preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             [node],
@@ -1085,7 +1086,7 @@ def test_page_item_and_encoded_byte_boundaries_are_inclusive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(storage, "WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS", 1)
-    baseline = storage.prepare_workflow_progress_topology(
+    baseline = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a")],
@@ -1099,7 +1100,7 @@ def test_page_item_and_encoded_byte_boundaries_are_inclusive(
         exact_page_bytes,
     )
 
-    exact = storage.prepare_workflow_progress_topology(
+    exact = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-b")],
@@ -1114,7 +1115,7 @@ def test_page_item_and_encoded_byte_boundaries_are_inclusive(
         exact_page_bytes - 1,
     )
     with pytest.raises(storage.WorkflowProgressStorageLimitError, match="cannot fit"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             [_node("node-a")],
@@ -1123,7 +1124,7 @@ def test_page_item_and_encoded_byte_boundaries_are_inclusive(
 
 
 def test_page_decoded_byte_boundary_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
-    baseline = storage.prepare_workflow_progress_topology(
+    baseline = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a")],
@@ -1136,7 +1137,7 @@ def test_page_decoded_byte_boundary_is_enforced(monkeypatch: pytest.MonkeyPatch)
     )
 
     with pytest.raises(storage.WorkflowProgressStorageLimitError, match="cannot fit"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             [_node("node-a")],
@@ -1147,13 +1148,13 @@ def test_page_decoded_byte_boundary_is_enforced(monkeypatch: pytest.MonkeyPatch)
 def test_topology_count_boundaries_are_inclusive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(storage, "WORKFLOW_PROGRESS_TOPOLOGY_NODE_MAX_ITEMS", 2)
     monkeypatch.setattr(storage, "WORKFLOW_PROGRESS_TOPOLOGY_EDGE_MAX_ITEMS", 1)
-    exact = storage.prepare_workflow_progress_topology(
+    exact = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-b")],
         [_edge("node-a", "node-b")],
     )
-    over = storage.prepare_workflow_progress_topology(
+    over = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-c"), _node("node-b"), _node("node-a")],
@@ -1192,7 +1193,7 @@ def test_topology_total_byte_boundaries_are_inclusive(
     size_attribute: str,
     reason: str,
 ) -> None:
-    baseline = storage.prepare_workflow_progress_topology(
+    baseline = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a")],
@@ -1200,14 +1201,14 @@ def test_topology_total_byte_boundaries_are_inclusive(
     )
     exact_size = getattr(baseline, size_attribute)
     monkeypatch.setattr(storage, constant, exact_size)
-    exact = storage.prepare_workflow_progress_topology(
+    exact = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a")],
         [],
     )
     monkeypatch.setattr(storage, constant, exact_size - 1)
-    truncated = storage.prepare_workflow_progress_topology(
+    truncated = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a")],
@@ -1246,7 +1247,7 @@ def test_node_detail_record_byte_boundary_is_inclusive(
 def test_detail_count_limit_selects_the_same_sorted_subset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-b"), _node("node-c")],
@@ -1300,7 +1301,7 @@ def test_detail_byte_boundaries_are_inclusive(
     combined: bool,
     reason: str,
 ) -> None:
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-b")],
@@ -1332,7 +1333,7 @@ def test_detail_byte_boundaries_are_inclusive(
 
 
 def test_detail_retains_the_newest_events_under_one_global_budget() -> None:
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-b")],
@@ -1359,7 +1360,7 @@ def test_detail_retains_the_newest_events_under_one_global_budget() -> None:
 def test_omitted_initial_row_cannot_evict_events_from_retained_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-z")],
@@ -1404,7 +1405,7 @@ def test_detail_rejects_unknown_nodes_but_omits_nodes_not_retained_by_topology(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(storage, "WORKFLOW_PROGRESS_TOPOLOGY_NODE_MAX_ITEMS", 1)
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [_node("node-a"), _node("node-b")],
@@ -1427,7 +1428,7 @@ def test_detail_rejects_unknown_nodes_but_omits_nodes_not_retained_by_topology(
 
 def test_detail_digests_and_selection_are_independent_of_input_mapping_order() -> None:
     identity = _identity()
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         identity,
         1,
         [_node("node-a"), _node("node-b")],

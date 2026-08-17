@@ -14,8 +14,9 @@ from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-import django_ray.workflow_progress as progress_module
-import django_ray.workflow_progress_storage as storage
+import django_ray.workflow.progress.preparation as preparation
+import django_ray.workflow.progress.runs as progress_module
+import django_ray.workflow.progress.storage as storage
 from django_ray.models import (
     RayTaskExecution,
     TaskState,
@@ -81,7 +82,7 @@ def _topology(
     node_kinds: Mapping[str, str] | None = None,
 ) -> storage.PreparedWorkflowProgressTopology:
     kinds = node_kinds or {}
-    return storage.prepare_workflow_progress_topology(
+    return preparation.prepare_workflow_progress_topology(
         identity,
         version,
         [_node(node_id, kind=kinds.get(node_id, "task")) for node_id in node_ids],

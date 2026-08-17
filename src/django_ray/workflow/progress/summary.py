@@ -15,7 +15,6 @@ from django_ray.runtime.context import (
     WORKFLOW_RUN_IDENTITY_SCHEMA_VERSION,
     WorkflowRunIdentity,
 )
-from django_ray.workflow._compat import preserve_legacy_module_identity
 
 WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION = 3
 WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION = 1
@@ -664,9 +663,3 @@ __all__ = [
     "serialize_workflow_progress_summary",
     "workflow_progress_detail_is_last_observed",
 ]
-
-preserve_legacy_module_identity(
-    globals(),
-    exports=__all__,
-    legacy_module="django_ray.workflow_progress_summary",
-)

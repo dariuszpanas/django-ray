@@ -6,12 +6,26 @@ contract, experimental boundary, and removal process while django-ray remains Be
 
 ## Module Path Compatibility
 
-`django_ray.workflows` remains the public defining module for workflow builders.
-Dependency-leaf workflow support now lives under the inert `django_ray.workflow` package,
-while the released flat `workflow_output_previews`, `workflow_progress_limits`, and
-`workflow_progress_summary` module paths remain compatibility exports. Their exported
-classes and callables retain the legacy module identities used by existing pickle payloads.
-New package code should import the canonical package paths.
+`django_ray.workflows` remains the public defining module for workflow builders. Private
+workflow planning, execution support, progress, storage, and Admin rendering live under the
+inert `django_ray.workflow` package, while private target contracts and coordination live
+under `django_ray.target`. The former flat internal module paths were removed during Beta;
+they were never part of the checked public API inventory and have no compatibility shims.
+Persisted workflow schemas and execution protocols retain their independent compatibility
+rules.
+
+Beta users that imported those private modules must move to the canonical package paths:
+
+| Removed private path | Canonical path |
+|---|---|
+| `django_ray.workflow_plans` | `django_ray.workflow.plans` |
+| `django_ray.admin_workflow_graph` | `django_ray.workflow.admin_graph` |
+| `django_ray.workflow_output_previews` | `django_ray.workflow.previews` |
+| `django_ray.workflow_progress` | `django_ray.workflow.progress.runs` |
+| `django_ray.workflow_progress_storage.prepare_workflow_progress_topology` | `django_ray.workflow.progress.preparation.prepare_workflow_progress_topology` |
+| `django_ray.workflow_progress_<name>` | `django_ray.workflow.progress.<name>` |
+| `django_ray.ray_target_probe` | `django_ray.target.probe` |
+| `django_ray.target_<name>` | `django_ray.target.<name>` |
 
 ## Supported Versions
 

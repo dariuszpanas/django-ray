@@ -18,27 +18,27 @@ from uuid import UUID
 
 import pytest
 
-import django_ray.workflow_progress_preparation as preparation
-import django_ray.workflow_progress_storage as storage
+import django_ray.workflow.progress.preparation as preparation
+import django_ray.workflow.progress.storage as storage
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress_preparation import (
+from django_ray.workflow.progress.preparation import (
     SQLitePreparationConfig,
     SQLitePreparationWorkspace,
     canonical_topology_evidence,
 )
-from django_ray.workflow_progress_preparation import (
+from django_ray.workflow.progress.preparation import (
     WorkflowProgressPreparationCleanupRefusedError as PrototypeCleanupRefusedError,
 )
-from django_ray.workflow_progress_preparation import (
+from django_ray.workflow.progress.preparation import (
     WorkflowProgressPreparationConfigurationError as PrototypeConfigurationError,
 )
-from django_ray.workflow_progress_preparation import (
+from django_ray.workflow.progress.preparation import (
     WorkflowProgressPreparationSpillExhaustedError as PrototypeSpillExhaustedError,
 )
-from django_ray.workflow_progress_preparation import (
+from django_ray.workflow.progress.preparation import (
     WorkflowProgressPreparationWorkspaceAcquisitionError as PrototypeWorkspaceAcquisitionError,
 )
-from django_ray.workflow_progress_preparation import (
+from django_ray.workflow.progress.preparation import (
     WorkflowProgressPreparationWorkspaceIntegrityError as PrototypeWorkspaceIntegrityError,
 )
 from scripts import benchmark_workflow_progress_preparation as benchmark

@@ -351,10 +351,10 @@ class TestRayCoreRunnerRuntime:
         fake = _install_fake_ray(monkeypatch)
         digests = iter(("planned", "snapshotted"))
         monkeypatch.setattr(
-            "django_ray.workflow_plans.runtime_env_plan_identity",
+            "django_ray.workflow.plans.runtime_env_plan_identity",
             lambda *_args, **_kwargs: SimpleNamespace(manifest={"digest": next(digests)}),
         )
-        from django_ray.workflow_plans import WorkflowPlanMismatchError
+        from django_ray.workflow.plans import WorkflowPlanMismatchError
 
         with pytest.raises(
             WorkflowPlanMismatchError,
@@ -373,10 +373,10 @@ class TestRayCoreRunnerRuntime:
         fake = _install_fake_ray(monkeypatch)
         digests = iter(("planned", "planned", "changed"))
         monkeypatch.setattr(
-            "django_ray.workflow_plans.runtime_env_plan_identity",
+            "django_ray.workflow.plans.runtime_env_plan_identity",
             lambda *_args, **_kwargs: SimpleNamespace(manifest={"digest": next(digests)}),
         )
-        from django_ray.workflow_plans import WorkflowPlanMismatchError
+        from django_ray.workflow.plans import WorkflowPlanMismatchError
 
         with pytest.raises(
             WorkflowPlanMismatchError,

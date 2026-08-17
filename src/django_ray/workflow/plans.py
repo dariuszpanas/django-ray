@@ -49,11 +49,14 @@ from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
     resolve_runtime_env_profile,
 )
+from django_ray.workflow.contracts import (
+    PlannableWorkflowSignature,
+    WorkflowDefinitionKind,
+)
 from django_ray.workflow.progress.summary import WORKFLOW_PROGRESS_REPORTING_POLICIES
 
 if TYPE_CHECKING:
     from django_ray.runtime.context import DurableTaskContext
-    from django_ray.workflows import WorkflowSignature
 
 
 PLAN_FORMAT = "django-ray.workflow-plan"
@@ -532,7 +535,7 @@ class WorkflowPlanBuildContext:
 
 
 def materialize_workflow_plan(
-    signature: WorkflowSignature,
+    signature: PlannableWorkflowSignature,
     *,
     invocation_args: Sequence[Any] = (),
     invocation_kwargs: Mapping[str, Any] | None = None,
@@ -1260,13 +1263,11 @@ class _PlanBuilder:
 
     def add(
         self,
-        signature: WorkflowSignature,
+        signature: PlannableWorkflowSignature,
         node_id: str,
         dependencies: tuple[str, ...],
     ) -> tuple[str, ...]:
         """Add a definition without consuming the Python recursion limit."""
-        from django_ray.workflows import Chain, Group, Map, Step
-
         next_result_id = 1
         results: dict[int, tuple[str, ...]] = {}
         # Work entries are tuples whose first item is one of the bounded set of
@@ -1286,14 +1287,15 @@ class _PlanBuilder:
                     result_id,
                     dynamic_map_depth,
                 ) = entry
-                if isinstance(current, Step):
+                definition_kind = getattr(current, "_workflow_definition_kind", None)
+                if definition_kind is WorkflowDefinitionKind.STEP:
                     results[result_id] = self._add_step(
                         current,
                         current_id,
                         current_dependencies,
                     )
                     continue
-                if isinstance(current, Chain):
+                if definition_kind is WorkflowDefinitionKind.CHAIN:
                     work.append(
                         (
                             "chain_next",
@@ -1306,7 +1308,7 @@ class _PlanBuilder:
                         )
                     )
                     continue
-                if isinstance(current, Group):
+                if definition_kind is WorkflowDefinitionKind.GROUP:
                     child_result_ids = tuple(
                         range(next_result_id, next_result_id + len(current.signatures))
                     )
@@ -1324,7 +1326,7 @@ class _PlanBuilder:
                             )
                         )
                     continue
-                if isinstance(current, Map):
+                if definition_kind is WorkflowDefinitionKind.MAP:
                     if current.result_buffer is not None and dynamic_map_depth:
                         raise WorkflowPlanValidationError(
                             "Result-buffer maps cannot be nested inside a dynamic map in v1"
@@ -1488,17 +1490,19 @@ class _PlanBuilder:
 
     @staticmethod
     def _signature_contains_map(signature: Any) -> bool:
-        from django_ray.workflows import Chain, Group, Map, Step
-
         work = [signature]
         while work:
             current = work.pop()
-            if isinstance(current, Map):
+            definition_kind = getattr(current, "_workflow_definition_kind", None)
+            if definition_kind is WorkflowDefinitionKind.MAP:
                 return True
-            if isinstance(current, Chain | Group):
+            if definition_kind in {
+                WorkflowDefinitionKind.CHAIN,
+                WorkflowDefinitionKind.GROUP,
+            }:
                 work.extend(current.signatures)
                 continue
-            if isinstance(current, Step):
+            if definition_kind is WorkflowDefinitionKind.STEP:
                 continue
             raise WorkflowPlanValidationError(
                 "Unsupported workflow signature type "

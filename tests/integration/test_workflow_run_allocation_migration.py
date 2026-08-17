@@ -11,7 +11,7 @@ from django.db.migrations.executor import MigrationExecutor
 
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.runtime.context import DurableTaskContext, WorkflowRunIdentity
-from django_ray.workflow_progress import (
+from django_ray.workflow.progress.runs import (
     _workflow_run_id,
     allocate_workflow_run,
     reclaim_workflow_run,
@@ -87,7 +87,7 @@ def _assert_workflow_run_allocation_migration_round_trip() -> None:
         assert current.workflow_run_namespace is None
         assert current.workflow_run_sequence == 0
 
-        with patch("django_ray.workflow_progress.randbits", return_value=namespace):
+        with patch("django_ray.workflow.progress.runs.randbits", return_value=namespace):
             fresh_identity = allocate_workflow_run(
                 DurableTaskContext(
                     task_pk=current.pk,

@@ -154,7 +154,7 @@ def _serialize_error(
         find_nested_execution_request_rejection,
     )
     from django_ray.input_storage import InputPayloadValidationError
-    from django_ray.workflow_plans import WorkflowPlanMismatchError
+    from django_ray.workflow.plans import WorkflowPlanMismatchError
 
     nested_rejection = find_nested_execution_request_rejection(e)
     if nested_rejection is not None:

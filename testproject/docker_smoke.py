@@ -1507,14 +1507,14 @@ def _verify_existing_terminal_only_storage_contract(
         WorkflowProgressTopologyManifestPage,
         WorkflowProgressTopologyPage,
     )
-    from django_ray.workflow.progress.summary import (
-        WorkflowProgressSummaryError,
-        deserialize_workflow_progress_summary,
-    )
-    from django_ray.workflow_plans import (
+    from django_ray.workflow.plans import (
         WorkflowPlanValidationError,
         effective_plan_selection_reporting_policy,
         validate_plan_selection_manifest,
+    )
+    from django_ray.workflow.progress.summary import (
+        WorkflowProgressSummaryError,
+        deserialize_workflow_progress_summary,
     )
 
     if (

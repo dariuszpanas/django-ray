@@ -1,23 +1,51 @@
-"""Workflow package structure and compatibility contracts."""
+"""Workflow package structure and cold-import contracts."""
 
 from __future__ import annotations
 
 import ast
 import importlib
-import inspect
 import pickle
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).parents[2]
-LEGACY_WORKFLOW_MODULES = (
+REMOVED_WORKFLOW_IMPORTS = (
+    "django_ray.admin_workflow_graph",
+    "django_ray.workflow._compat",
     "django_ray.workflow_output_previews",
+    "django_ray.workflow_plans",
+    "django_ray.workflow_progress",
+    "django_ray.workflow_progress_cleanup",
     "django_ray.workflow_progress_limits",
+    "django_ray.workflow_progress_preparation",
+    "django_ray.workflow_progress_producer",
+    "django_ray.workflow_progress_protocol",
+    "django_ray.workflow_progress_publication",
+    "django_ray.workflow_progress_reads",
+    "django_ray.workflow_progress_storage",
     "django_ray.workflow_progress_summary",
 )
+WORKFLOW_MODULES = {
+    "__init__.py",
+    "admin_graph.py",
+    "contracts.py",
+    "plans.py",
+    "previews.py",
+}
+WORKFLOW_PROGRESS_MODULES = {
+    "__init__.py",
+    "cleanup.py",
+    "limits.py",
+    "preparation.py",
+    "producer.py",
+    "protocol.py",
+    "publication.py",
+    "reads.py",
+    "runs.py",
+    "storage.py",
+    "summary.py",
+}
 PUBLIC_WORKFLOW_FACADE_SYMBOLS = (
     "Chain",
     "Group",
@@ -33,49 +61,16 @@ PUBLIC_WORKFLOW_FACADE_SYMBOLS = (
 )
 
 
-@pytest.mark.parametrize(
-    ("legacy_name", "canonical_name"),
-    [
-        ("django_ray.workflow_output_previews", "django_ray.workflow.previews"),
-        (
-            "django_ray.workflow_progress_limits",
-            "django_ray.workflow.progress.limits",
-        ),
-        (
-            "django_ray.workflow_progress_summary",
-            "django_ray.workflow.progress.summary",
-        ),
-    ],
-)
-def test_legacy_workflow_modules_export_canonical_symbols_with_pickle_identity(
-    legacy_name: str,
-    canonical_name: str,
-) -> None:
-    canonical = importlib.import_module(canonical_name)
-    legacy = importlib.import_module(legacy_name)
+def test_workflow_private_modules_are_grouped_under_canonical_packages() -> None:
+    source_root = ROOT / "src" / "django_ray"
+    workflow_root = source_root / "workflow"
 
-    assert legacy.__all__ == canonical.__all__
-    defined_exports = []
-    for name in canonical.__all__:
-        canonical_value = getattr(canonical, name)
-        assert getattr(legacy, name) is canonical_value
-        if inspect.isclass(canonical_value) or inspect.isfunction(canonical_value):
-            assert canonical_value.__module__ == legacy_name
-            defined_exports.append(name)
-            serialized = pickle.dumps(canonical_value)
-            assert legacy_name.encode() in serialized
-            assert pickle.loads(serialized) is canonical_value
-
-    assert defined_exports
-
-
-def test_workflow_progress_limits_instance_keeps_legacy_pickle_identity() -> None:
-    limits = importlib.import_module("django_ray.workflow.progress.limits")
-
-    serialized = pickle.dumps(limits.WORKFLOW_PROGRESS_LIMITS_V1)
-
-    assert b"django_ray.workflow_progress_limits" in serialized
-    assert pickle.loads(serialized) == limits.WORKFLOW_PROGRESS_LIMITS_V1
+    assert not (source_root / "admin_workflow_graph.py").exists()
+    assert {path.name for path in source_root.glob("workflow*.py")} == {"workflows.py"}
+    assert {path.name for path in workflow_root.glob("*.py")} == WORKFLOW_MODULES
+    assert {
+        path.name for path in (workflow_root / "progress").glob("*.py")
+    } == WORKFLOW_PROGRESS_MODULES
 
 
 def test_public_workflow_facade_keeps_defining_module_identity() -> None:
@@ -180,7 +175,7 @@ if unexpected:
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
-def test_repository_imports_canonical_workflow_foundation_modules() -> None:
+def test_repository_does_not_use_removed_workflow_imports() -> None:
     paths = [
         *sorted((ROOT / "src" / "django_ray").rglob("*.py")),
         *sorted((ROOT / "scripts").rglob("*.py")),
@@ -207,7 +202,7 @@ def test_repository_imports_canonical_workflow_foundation_modules() -> None:
             if isinstance(node, ast.ImportFrom) and node.module == "django_ray"
             for name in node.names
         )
-        for legacy_module in LEGACY_WORKFLOW_MODULES:
-            assert legacy_module not in imported_modules, (
-                f"{path.relative_to(ROOT)} imports compatibility module {legacy_module}"
+        for removed_import in REMOVED_WORKFLOW_IMPORTS:
+            assert removed_import not in imported_modules, (
+                f"{path.relative_to(ROOT)} imports removed private module {removed_import}"
             )

@@ -15,7 +15,7 @@ from django_ray.models import (
     WorkflowProgressTopologyPage,
 )
 from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS
-from django_ray.workflow_progress_storage import (
+from django_ray.workflow.progress.storage import (
     persist_workflow_progress_publication,
     prepare_workflow_progress_node_detail,
 )

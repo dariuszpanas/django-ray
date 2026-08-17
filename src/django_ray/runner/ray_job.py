@@ -421,7 +421,7 @@ class RayJobRunner(BaseRunner):
         """Submit one canonical request without hydrating application input."""
         handle = self.submission_handle(task_execution)
         runtime_env = runtime_env_for_execution(task_execution)
-        from django_ray.workflow_plans import runtime_env_plan_identity
+        from django_ray.workflow.plans import runtime_env_plan_identity
 
         settings = get_settings()
         trust_identity = settings.get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
@@ -440,7 +440,7 @@ class RayJobRunner(BaseRunner):
                     snapshot_runtime_env_identity.manifest["digest"]
                     != source_runtime_env_identity.manifest["digest"]
                 ):
-                    from django_ray.workflow_plans import WorkflowPlanMismatchError
+                    from django_ray.workflow.plans import WorkflowPlanMismatchError
 
                     raise WorkflowPlanMismatchError(
                         "Outer RuntimeEnv immutable snapshot differs from its effective plan"
@@ -524,7 +524,7 @@ class RayJobRunner(BaseRunner):
                     verified_source_identity.manifest["digest"]
                     != source_runtime_env_identity.manifest["digest"]
                 ):
-                    from django_ray.workflow_plans import WorkflowPlanMismatchError
+                    from django_ray.workflow.plans import WorkflowPlanMismatchError
 
                     raise WorkflowPlanMismatchError(
                         "Outer RuntimeEnv local content changed while it was being snapshotted"

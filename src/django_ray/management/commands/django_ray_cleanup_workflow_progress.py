@@ -6,7 +6,7 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
-from django_ray.workflow_progress_cleanup import (
+from django_ray.workflow.progress.cleanup import (
     WORKFLOW_PROGRESS_CLEANUP_DEFAULT_BATCH_SIZE,
     WORKFLOW_PROGRESS_CLEANUP_MAX_BATCH_SIZE,
     WorkflowProgressCleanupKind,

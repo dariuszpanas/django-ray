@@ -17,7 +17,7 @@ from django_ray.workflow.progress.limits import (
     canonical_workflow_progress_retained_size,
     workflow_progress_retained_state_size,
 )
-from django_ray.workflow_progress_protocol import (
+from django_ray.workflow.progress.protocol import (
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressEvent,
     WorkflowProgressEventKind,

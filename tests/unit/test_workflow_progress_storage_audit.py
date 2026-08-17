@@ -14,16 +14,16 @@ from django.test.utils import CaptureQueriesContext
 
 from django_ray.lifecycle import succeed_task
 from django_ray.models import WorkflowProgressNodeDetail, WorkflowProgressRunStorage
-from django_ray.workflow.progress.summary import (
-    deserialize_workflow_progress_summary,
-    serialize_workflow_progress_summary,
-)
-from django_ray.workflow_progress_storage import (
+from django_ray.workflow.progress.storage import (
     WORKFLOW_PROGRESS_DETAIL_MAX_ITEMS,
     WorkflowProgressStorageIntegrityError,
     audit_workflow_progress_detail_storage,
     persist_workflow_progress_publication,
     prepare_workflow_progress_node_detail,
+)
+from django_ray.workflow.progress.summary import (
+    deserialize_workflow_progress_summary,
+    serialize_workflow_progress_summary,
 )
 from tests.workflow_progress_storage_helpers import (
     PublishedWorkflow,
@@ -496,7 +496,7 @@ def test_audit_query_is_capped_at_hard_limit_plus_one(
         detail_pending_count=2,
     )
     monkeypatch.setattr(
-        "django_ray.workflow_progress_storage.WORKFLOW_PROGRESS_DETAIL_MAX_ITEMS",
+        "django_ray.workflow.progress.storage.WORKFLOW_PROGRESS_DETAIL_MAX_ITEMS",
         2,
     )
 

@@ -30,7 +30,7 @@ from django_ray.observability import (
     get_workflow_progress,
     get_workflow_snapshot,
 )
-from django_ray.workflow_plans import (
+from django_ray.workflow.plans import (
     PLAN_DOMAIN_SEPARATOR,
     EffectiveWorkflowPlan,
     PlanEligibility,

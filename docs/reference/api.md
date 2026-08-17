@@ -366,7 +366,7 @@ For a complete REST API example, see `testproject/api.py` in the repository.
 
 The reusable helpers in `django_ray.observability` expose schema-versioned task, queue,
 attempt, and workflow snapshots, then optionally query Ray's live State and Log APIs.
-The bounded functions in `django_ray.workflow_progress_reads` expose summary,
+The bounded functions in `django_ray.workflow.progress.reads` expose summary,
 topology-node, topology-edge, node-detail, and indexed-node reads. Every call requires
 an object authorizer; applications must replace the testproject's callable allowlist
 with their tenant or ownership policy. `django_ray.metrics.render_prometheus_metrics()`

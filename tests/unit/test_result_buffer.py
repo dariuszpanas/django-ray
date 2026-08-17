@@ -24,7 +24,7 @@ from django_ray.runtime.result_buffer import (
     result_buffer_plan_contract,
     validate_result_buffer_ack,
 )
-from django_ray.workflow_plans import WorkflowPlanValidationError
+from django_ray.workflow.plans import WorkflowPlanValidationError
 from django_ray.workflows import _Executor, _RayExecutor, chain, map_step, step
 
 SIDE_EFFECTS: list[int] = []

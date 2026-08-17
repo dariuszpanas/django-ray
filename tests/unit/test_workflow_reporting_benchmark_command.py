@@ -31,12 +31,12 @@ from django_ray.models import (
     WorkflowProgressTopologySlot,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
-from django_ray.workflow_plans import (
+from django_ray.workflow.plans import (
     PLAN_DOMAIN_SEPARATOR,
     PLAN_FORMAT,
     PLAN_FORMAT_VERSION,
 )
+from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from testproject.management.commands import (
     django_ray_benchmark_workflow_reporting as benchmark,
 )

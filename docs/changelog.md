@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade from 0.4.0
 
+- Private flat workflow and target implementation imports have moved without compatibility
+  shims while the project remains Beta. Replace `django_ray.workflow_plans` with
+  `django_ray.workflow.plans`, `django_ray.admin_workflow_graph` with
+  `django_ray.workflow.admin_graph`, `django_ray.workflow_output_previews` with
+  `django_ray.workflow.previews`, `django_ray.workflow_progress` with
+  `django_ray.workflow.progress.runs`,
+  `django_ray.workflow_progress_storage.prepare_workflow_progress_topology` with
+  `django_ray.workflow.progress.preparation.prepare_workflow_progress_topology`, other
+  `django_ray.workflow_progress_<name>` imports with `django_ray.workflow.progress.<name>`,
+  `django_ray.ray_target_probe` with `django_ray.target.probe`, and
+  `django_ray.target_<name>` imports with `django_ray.target.<name>`. The public
+  `django_ray.workflows` module and persisted workflow protocols remain unchanged.
 - The `0019_execution_protocol_schema` migration supports the exact published 0.4.0
   baseline at migration `0018`. It records existing executions and attempts as protocol
   `1`, but cannot prove the contract of retained nonterminal work written directly by

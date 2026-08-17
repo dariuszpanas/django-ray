@@ -35,7 +35,7 @@ from django_ray.runtime.result_fold import (
     result_fold_ray_actor_options,
     validate_result_fold_ack,
 )
-from django_ray.workflow_plans import (
+from django_ray.workflow.plans import (
     MAX_PLAN_BYTES,
     PLAN_FORMAT_VERSION,
     WorkflowPlanMismatchError,
@@ -177,7 +177,7 @@ def _strict_fold_request(
     node_id: str = "0.reducer",
 ) -> tuple[str, dict[str, object], dict[str, object]]:
     from django_ray.runtime.runtime_env import normalize_runtime_env
-    from django_ray.workflow_plans import runtime_env_plan_identity
+    from django_ray.workflow.plans import runtime_env_plan_identity
 
     outer_identity = ExecutionIdentity(
         task_execution_pk=611,
@@ -1001,7 +1001,7 @@ def test_retry_rejects_fold_resource_drift_before_leaf_effects() -> None:
     from django_ray.lifecycle import record_failure
     from django_ray.models import RayTaskExecution, TaskState
     from django_ray.runtime.context import DurableTaskContext
-    from django_ray.workflow_progress import allocate_workflow_run
+    from django_ray.workflow.progress.runs import allocate_workflow_run
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-result-fold-plan-retry",

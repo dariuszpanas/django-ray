@@ -6,11 +6,11 @@ from dataclasses import dataclass
 
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress_storage import (
+from django_ray.workflow.progress.preparation import prepare_workflow_progress_topology
+from django_ray.workflow.progress.storage import (
     PreparedWorkflowProgressTopology,
     persist_workflow_progress_publication,
     prepare_workflow_progress_detail,
-    prepare_workflow_progress_topology,
     stage_workflow_progress_topology,
 )
 

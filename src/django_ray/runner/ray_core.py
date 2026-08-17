@@ -422,7 +422,7 @@ class RayCoreRunner(BaseRunner):
         # processes without serializing a new nested function for every task.
         runtime_env = runtime_env_for_execution(task_execution)
         from django_ray.conf.settings import get_settings
-        from django_ray.workflow_plans import runtime_env_plan_identity
+        from django_ray.workflow.plans import runtime_env_plan_identity
 
         trust_identity = get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
         plan_runtime_env_identity = runtime_env_plan_identity(
@@ -438,7 +438,7 @@ class RayCoreRunner(BaseRunner):
                 snapshot_runtime_env_identity.manifest["digest"]
                 != plan_runtime_env_identity.manifest["digest"]
             ):
-                from django_ray.workflow_plans import WorkflowPlanMismatchError
+                from django_ray.workflow.plans import WorkflowPlanMismatchError
 
                 raise WorkflowPlanMismatchError(
                     "Outer RuntimeEnv immutable snapshot differs from its effective plan"
@@ -452,7 +452,7 @@ class RayCoreRunner(BaseRunner):
             verified_runtime_env_identity.manifest["digest"]
             != plan_runtime_env_identity.manifest["digest"]
         ):
-            from django_ray.workflow_plans import WorkflowPlanMismatchError
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
 
             raise WorkflowPlanMismatchError(
                 "Outer RuntimeEnv local content changed while it was being packaged"

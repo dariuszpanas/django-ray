@@ -11,7 +11,7 @@ from uuid import UUID
 import pytest
 from django.db import IntegrityError
 
-import django_ray.workflow_progress as workflow_progress_module
+import django_ray.workflow.progress.runs as workflow_progress_module
 from django_ray.lifecycle import record_failure, retry_task
 from django_ray.models import (
     RayTaskExecution,
@@ -27,7 +27,7 @@ from django_ray.runtime.context import (
     WorkflowInvocationIdentity,
     WorkflowRunIdentity,
 )
-from django_ray.workflow_progress import (
+from django_ray.workflow.progress.runs import (
     WORKFLOW_RUN_NAMESPACE_MAX,
     WORKFLOW_RUN_SEQUENCE_MAX,
     WorkflowRunAllocationError,
@@ -322,7 +322,7 @@ def test_namespace_collision_retries_under_database_unique_constraint(
         "randbits",
         lambda _bits: next(candidates),
     )
-    with caplog.at_level(logging.WARNING, logger="django_ray.workflow_progress"):
+    with caplog.at_level(logging.WARNING, logger="django_ray.workflow.progress.runs"):
         second = _allocate(second_execution)
 
     assert first.run_id != second.run_id
@@ -370,7 +370,7 @@ def test_namespace_allocation_exhaustion_is_bounded_and_fail_closed(
     monkeypatch.setattr(workflow_progress_module, "randbits", repeat_candidate)
 
     with (
-        caplog.at_level(logging.WARNING, logger="django_ray.workflow_progress"),
+        caplog.at_level(logging.WARNING, logger="django_ray.workflow.progress.runs"),
         pytest.raises(WorkflowRunAllocationError, match="after 3 attempts") as error,
     ):
         _allocate(execution)

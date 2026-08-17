@@ -327,14 +327,14 @@ def _prepare_terminal_only_workflow_progress_summary(
 
     try:
         from django_ray.conf.settings import get_settings
-        from django_ray.workflow_plans import (
+        from django_ray.workflow.plans import (
             PLAN_DOMAIN_SEPARATOR,
             PLAN_FORMAT,
             PLAN_FORMAT_VERSION,
             effective_plan_selection_reporting_policy,
             validate_plan_selection_manifest,
         )
-        from django_ray.workflow_progress_publication import (
+        from django_ray.workflow.progress.publication import (
             prepare_terminal_only_workflow_progress_summary,
         )
 
@@ -464,7 +464,7 @@ def _record_attempt(execution: RayTaskExecution) -> None:
         "result_reference": execution.result_reference,
     }
     workflow_progress_summary = _attempt_workflow_progress_summary(execution)
-    from django_ray.workflow_progress_storage import (
+    from django_ray.workflow.progress.storage import (
         stamp_workflow_progress_detail_expiry_locked,
     )
 

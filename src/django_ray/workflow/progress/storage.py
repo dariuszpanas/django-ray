@@ -1349,25 +1349,6 @@ def _prepare_workflow_progress_topology_materialized(
     return prepared
 
 
-def prepare_workflow_progress_topology(
-    identity: WorkflowRunIdentity,
-    topology_version: int,
-    nodes: Iterable[Mapping[str, Any]],
-    edges: Iterable[Mapping[str, Any]],
-) -> PreparedWorkflowProgressTopology:
-    """Normalize topology through the package-owned bounded spill workspace."""
-    from django_ray.workflow_progress_preparation import (
-        prepare_workflow_progress_topology as prepare_with_bounded_spill,
-    )
-
-    return prepare_with_bounded_spill(
-        identity,
-        topology_version,
-        nodes,
-        edges,
-    )
-
-
 def _normalize_event(
     value: Any,
     *,
@@ -4183,7 +4164,7 @@ def persist_workflow_progress_publication(
             target_manifest.published_at = now
             target_manifest.cleanup_error = None
             target_manifest.save(update_fields=["slot", "published_at", "cleanup_error"])
-        from django_ray.workflow_progress import _assign_workflow_progress_summary_locked
+        from django_ray.workflow.progress.runs import _assign_workflow_progress_summary_locked
 
         if not _assign_workflow_progress_summary_locked(
             execution,
@@ -4679,7 +4660,6 @@ __all__ = [
     "persist_workflow_progress_publication",
     "prepare_workflow_progress_detail",
     "prepare_workflow_progress_node_detail",
-    "prepare_workflow_progress_topology",
     "stage_workflow_progress_topology",
     "stamp_workflow_progress_detail_expiry_locked",
     "verify_workflow_progress_node_detail_record",

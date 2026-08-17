@@ -279,7 +279,7 @@ def workflow_step_execution(
 
     producer = None
     if progress_actor is not None and run_identity is not None:
-        from django_ray.workflow_progress_producer import WorkflowProgressProducerSession
+        from django_ray.workflow.progress.producer import WorkflowProgressProducerSession
 
         producer = WorkflowProgressProducerSession(
             progress_actor,
@@ -302,7 +302,7 @@ def workflow_step_execution(
             if producer is not None:
                 report = producer.finish()
                 if report["offered"]:
-                    from django_ray.workflow_progress_protocol import (
+                    from django_ray.workflow.progress.protocol import (
                         WorkflowProgressEventKind,
                         send_workflow_progress_event,
                     )

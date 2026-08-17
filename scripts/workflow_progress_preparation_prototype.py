@@ -19,7 +19,7 @@ from secrets import token_hex
 from typing import Any, Never
 from uuid import UUID, uuid4
 
-import django_ray.workflow_progress_storage as storage
+import django_ray.workflow.progress.storage as storage
 from django_ray.runtime.context import WorkflowRunIdentity
 
 SQLITE_PAGE_BYTES = 4 * 1024

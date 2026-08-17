@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 
 from django_ray.management.diagnostics import render_console_diagnostic
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress_storage import (
+from django_ray.workflow.progress.storage import (
     WorkflowProgressStorageError,
     WorkflowProgressStorageIntegrityError,
     audit_workflow_progress_detail_storage,

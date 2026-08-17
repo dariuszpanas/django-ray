@@ -7,7 +7,7 @@
         "rationale": "Admin authorization, input validation, and bounded error responses are observable contracts that should be covered with permission and response assertions."
       }
     },
-    "src/django_ray/admin_workflow_graph.py": {
+    "src/django_ray/workflow/admin_graph.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Workflow graph authorization, bounded projection, pagination, and failure-path rendering are observable Admin contracts that should be covered with exact response assertions."
@@ -307,56 +307,71 @@
       "overrides": [
         {
           "ranges": [
-            "149-150"
+            "148-149"
           ],
           "category": "defensive-invariant",
           "rationale": "Canonical encoding receives only the freshly normalized finite, UTF-8, bounded exact-JSON tree, so this exception path protects an internal regression."
         }
       ]
     },
-    "src/django_ray/workflow_plans.py": {
+    "src/django_ray/workflow/contracts.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Built-in workflow definition kinds and their planner dispatch boundary are deterministic internal contracts suited to exact compiler and dependency-graph assertions."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "24"
+          ],
+          "category": "dead-or-non-behavioral-code",
+          "rationale": "The Protocol method ellipsis is static typing syntax and has no runtime behavior to execute."
+        }
+      ]
+    },
+    "src/django_ray/workflow/plans.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Plan validation, normalization, RuntimeEnv identity, and retry-safety decisions are deterministic contracts suited to focused behavioral tests."
       }
     },
-    "src/django_ray/workflow_progress.py": {
+    "src/django_ray/workflow/progress/runs.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Workflow progress event normalization and bounded reporting decisions are deterministic public behavior that should be covered with exact event assertions."
       }
     },
-    "src/django_ray/workflow_progress_preparation.py": {
+    "src/django_ray/workflow/progress/preparation.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Topology and detail preparation limits, truncation reasons, and canonical ordering are deterministic safety contracts that should be covered at exact boundaries."
       }
     },
-    "src/django_ray/workflow_progress_producer.py": {
+    "src/django_ray/workflow/progress/producer.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Producer admission, coalescing, acknowledgement, and terminal handoff outcomes are deterministic bounded-delivery contracts suited to controlled actor tests."
       }
     },
-    "src/django_ray/workflow_progress_protocol.py": {
+    "src/django_ray/workflow/progress/protocol.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Progress protocol encoding, identity fencing, size limits, and malformed-envelope rejection are deterministic compatibility contracts requiring exact round-trip assertions."
       }
     },
-    "src/django_ray/workflow_progress_publication.py": {
+    "src/django_ray/workflow/progress/publication.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Terminal publication validation, stale-owner refusal, and bounded storage outcomes are deterministic lifecycle contracts that should be covered with exact persistence assertions."
       }
     },
-    "src/django_ray/workflow_progress_reads.py": {
+    "src/django_ray/workflow/progress/reads.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Bounded summary, cursor, topology, and node-detail read outcomes can be covered with exact query, authorization, and response assertions."
       }
     },
-    "src/django_ray/workflow_progress_storage.py": {
+    "src/django_ray/workflow/progress/storage.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Topology preparation, record verification, fenced persistence, audit, and expiry behavior can be covered against SQLite or the dedicated PostgreSQL job."

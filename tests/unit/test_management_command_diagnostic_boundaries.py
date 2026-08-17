@@ -22,7 +22,7 @@ from django_ray.result_storage import ResultStorageError
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.retry import RetryDecision
-from django_ray.workflow_progress_storage import WorkflowProgressStorageError
+from django_ray.workflow.progress.storage import WorkflowProgressStorageError
 
 
 def _output_command() -> tuple[WorkerCommand, StringIO]:
@@ -144,7 +144,7 @@ def test_worker_success_status_does_not_project_application_result(
         lambda _task: SimpleNamespace(profile="default", digest="digest"),
     )
     monkeypatch.setattr(
-        "django_ray.workflow_plans.runtime_env_plan_identity",
+        "django_ray.workflow.plans.runtime_env_plan_identity",
         lambda *_args, **_kwargs: SimpleNamespace(as_transport_dict=dict),
     )
     monkeypatch.setattr(

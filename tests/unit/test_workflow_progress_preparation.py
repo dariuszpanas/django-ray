@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import gc
 import json
@@ -23,11 +24,21 @@ from uuid import UUID
 
 import pytest
 
-import django_ray.workflow_progress_preparation as preparation
-import django_ray.workflow_progress_storage as storage
+import django_ray.workflow.progress.preparation as preparation
+import django_ray.workflow.progress.storage as storage
 from django_ray.runtime.context import WorkflowRunIdentity
 from scripts import benchmark_workflow_progress_preparation as benchmark
 from tests.workflow_progress_storage_helpers import workflow_node, workflow_node_id
+
+
+def test_storage_does_not_own_or_import_topology_preparation() -> None:
+    assert not hasattr(storage, "prepare_workflow_progress_topology")
+
+    source = Path(storage.__file__).read_text(encoding="utf-8")
+    imports = {
+        node.module for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)
+    }
+    assert "django_ray.workflow.progress.preparation" not in imports
 
 
 class _OneShot(Iterable[dict[str, Any]]):
@@ -65,7 +76,7 @@ def _topology_with_all_capability_evidence() -> storage.PreparedWorkflowProgress
     map_node["kind"] = "map"
     oversized = workflow_node("node-oversized")
     oversized["runtime_env"] = {f"key-{index}": "value" * 8 for index in range(1_000)}
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [task_node, map_node, oversized],
@@ -202,7 +213,7 @@ def test_public_spill_preparer_has_byte_for_byte_materialized_parity(
         _OneShot(nodes),
         _OneShot(edges),
     )
-    actual = storage.prepare_workflow_progress_topology(
+    actual = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         _OneShot(nodes),
@@ -2634,7 +2645,7 @@ def test_public_adapter_issues_membership_trust_only_after_cleanup(
         )
 
     monkeypatch.setattr(storage, "_register_prepared_topology_capability", register)
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [workflow_node("node-a")],
@@ -2660,7 +2671,7 @@ def test_public_adapter_registration_failure_still_leaves_no_workspace(
         fail_registration,
     )
     with pytest.raises(RuntimeError, match="injected capability registration failure"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             [workflow_node("node-a")],
@@ -2745,7 +2756,7 @@ def test_spill_exhaustion_cleans_before_public_adapter_can_issue_evidence(
         preparation.WorkflowProgressPreparationSpillExhaustedError,
         match="node item budget exhausted at 2",
     ):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             1,
             (workflow_node(workflow_node_id(index)) for index in range(3)),
@@ -2762,7 +2773,7 @@ def test_spill_exhaustion_cleans_before_public_adapter_can_issue_evidence(
 def test_durable_revalidation_does_not_reissue_changed_observed_membership() -> None:
     oversized = workflow_node("node-oversized-body")
     oversized["runtime_env"] = {f"key-{index}": "value" * 8 for index in range(1_000)}
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [oversized, workflow_node("node-retained")],
@@ -2789,7 +2800,7 @@ def test_durable_revalidation_does_not_reissue_changed_observed_membership() -> 
 
 
 def test_revalidated_copy_cannot_impersonate_observed_membership() -> None:
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         _identity(),
         1,
         [workflow_node("node-a")],

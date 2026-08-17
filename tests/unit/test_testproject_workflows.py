@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from django_ray.workflow_plans import materialize_workflow_plan
+from django_ray.workflow.plans import materialize_workflow_plan
 from django_ray.workflows import Step, _Executor
 from testproject.apps.cluster_tasks import workflows
 from testproject.apps.cluster_tasks.workflows import (

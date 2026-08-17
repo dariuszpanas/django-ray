@@ -37,8 +37,7 @@ from django_ray.runtime.context import (
     require_strict_task_execution_context,
 )
 from django_ray.runtime.runtime_env import normalize_runtime_env
-from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
-from django_ray.workflow_plans import (
+from django_ray.workflow.plans import (
     MAX_PLAN_BYTES,
     MAX_PLAN_NODES,
     MAX_RUNTIME_ENV_DIAGNOSTICS,
@@ -58,11 +57,12 @@ from django_ray.workflow_plans import (
     runtime_env_plan_identity_from_transport,
     validate_plan_selection_manifest,
 )
-from django_ray.workflow_progress import allocate_workflow_run, pin_workflow_plan
-from django_ray.workflow_progress_protocol import (
+from django_ray.workflow.progress.protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
 )
+from django_ray.workflow.progress.runs import allocate_workflow_run, pin_workflow_plan
+from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
 from django_ray.workflows import chain, group, map_step, step
 
 
@@ -682,7 +682,7 @@ def test_compiler_platform_and_deployment_identity_are_fingerprinted() -> None:
 def test_compiled_graph_lifecycle_protocol_is_fingerprinted_and_fail_closed(
     monkeypatch,
 ) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     baseline = _materialize(step(increment), 1).plan
     requirements = baseline.as_dict()["strategy_requirements"]["compiled_graph"]
@@ -899,7 +899,7 @@ def test_default_deployment_identity_keeps_build_and_image_components(
     settings,
     monkeypatch,
 ) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -1045,7 +1045,7 @@ def test_default_context_carries_actual_submission_transport(
     reason,
     path,
 ) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -1074,7 +1074,7 @@ def test_context_free_materialization_defers_direct_driver_identity(
     settings,
     monkeypatch,
 ) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -1441,7 +1441,7 @@ def test_worker_only_runtime_env_callable_remains_dynamic_compatible(tmp_path) -
 
 
 def test_submitter_import_side_effect_failure_remains_dynamic_compatible(monkeypatch) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     monkeypatch.setattr(
         plan_module,
@@ -1459,7 +1459,7 @@ def test_submitter_import_side_effect_failure_remains_dynamic_compatible(monkeyp
 
 
 def test_distinct_callables_from_one_module_share_one_content_digest(monkeypatch) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     original_source_digest = plan_module._source_digest
     source_digest_calls = 0
@@ -1648,7 +1648,7 @@ def test_runtime_env_identity_budget_exhaustion_keeps_dynamic_execution(
     tmp_path,
     monkeypatch,
 ) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     source = tmp_path / "large-code"
     source.mkdir()
@@ -1680,7 +1680,7 @@ def test_runtime_env_identity_budget_exhaustion_keeps_dynamic_execution(
 
 
 def test_callable_identity_budget_exhaustion_keeps_dynamic_execution(monkeypatch) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     monkeypatch.setattr(plan_module, "MAX_CODE_FILE_BYTES", 1)
 
@@ -1817,7 +1817,7 @@ def test_local_runtime_env_mutation_fails_before_leaf_submission(tmp_path, monke
 
 
 def test_repeated_step_runtime_env_identity_and_preparation_are_cached(monkeypatch) -> None:
-    import django_ray.workflow_plans as plan_module
+    import django_ray.workflow.plans as plan_module
 
     original_identity = plan_module.runtime_env_plan_identity
     identity_calls = 0
@@ -2183,7 +2183,7 @@ def test_stale_ray_fence_aborts_before_preparation_or_submission(monkeypatch) ->
         return materialized_plan
 
     monkeypatch.setattr(
-        "django_ray.workflow_plans.prepare_materialized_plan_for_ray",
+        "django_ray.workflow.plans.prepare_materialized_plan_for_ray",
         record_preparation,
     )
 
@@ -2227,7 +2227,7 @@ def test_ray_run_rechecks_fence_after_preparation_before_actor_or_leaf(monkeypat
         return materialized_plan
 
     monkeypatch.setattr(
-        "django_ray.workflow_plans.prepare_materialized_plan_for_ray",
+        "django_ray.workflow.plans.prepare_materialized_plan_for_ray",
         cancel_during_preparation,
     )
 
@@ -2263,7 +2263,7 @@ def test_terminal_only_preparation_failure_keeps_a_plan_for_durable_failure_summ
         raise RuntimeError("RuntimeEnv packaging failed")
 
     monkeypatch.setattr(
-        "django_ray.workflow_plans.prepare_materialized_plan_for_ray",
+        "django_ray.workflow.plans.prepare_materialized_plan_for_ray",
         fail_preparation,
     )
 
@@ -2452,7 +2452,7 @@ def test_disabled_ray_reporting_pins_policy_without_actor_or_codec(
     executor.progress_actor_cls = ProgressActor()
     prepared_events: list[tuple[object, ...]] = []
     monkeypatch.setattr(
-        "django_ray.workflow_progress_protocol.prepare_workflow_progress_event",
+        "django_ray.workflow.progress.protocol.prepare_workflow_progress_event",
         lambda *args, **kwargs: prepared_events.append((*args, kwargs)),
     )
 
@@ -2493,7 +2493,7 @@ def test_plan_pinning_enforces_serialized_plan_and_selection_bounds(
             selection=selection,
         )
 
-    monkeypatch.setattr("django_ray.workflow_progress.MAX_PLAN_SELECTION_BYTES", 1)
+    monkeypatch.setattr("django_ray.workflow.progress.runs.MAX_PLAN_SELECTION_BYTES", 1)
     with pytest.raises(ValueError, match="selection exceeds persistence limit"):
         allocate_workflow_run(
             _task_context(execution),
