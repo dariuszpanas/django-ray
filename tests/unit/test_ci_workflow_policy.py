@@ -298,6 +298,10 @@ def test_ci_gate_covers_every_pr_ci_job_and_runs_after_failures() -> None:
     assert _needs(jobs["build"]) == blocking
 
 
+def test_ci_runs_the_broad_matrix_for_every_open_pr_push() -> None:
+    assert _workflow()["on"]["pull_request"] == {"branches": ["main"]}
+
+
 def test_manual_ci_has_no_obsolete_xdist_retention_controls_or_jobs() -> None:
     workflow = _workflow()
     assert workflow["on"]["workflow_dispatch"] == ""
