@@ -252,8 +252,8 @@ the advisory input.
 once with `-n 4` by default and selects tests without the resource-owning `real_ray`, `postgresql`,
 and `live_cluster` markers. It does not define marker-derived phases or CI jobs, and tests must not
 communicate or depend on execution order. Run the excluded resource contracts separately using the
-commands under [External-resource ownership](#external-resource-ownership), and run
-`uv run make ci` before handoff. Change the worker count with `TEST_XDIST_WORKERS=<count>`.
+commands under [External-resource ownership](#external-resource-ownership), and apply the validation
+checkpoint policy below before handoff. Change the worker count with `TEST_XDIST_WORKERS=<count>`.
 
 ### Coverage debt review
 
@@ -566,7 +566,8 @@ Test via the API at http://127.0.0.1:8000/api/docs
 2. **Make your changes** as one or more clear logical commits; one large atomic commit is valid
 3. **Add tests** for new functionality
 4. **Update documentation** if needed
-5. **Run all checks**: `uv run make ci`
+5. **Validate the affected boundary** with focused tests and static checks; run `uv run make ci` only
+   when the checkpoint triggers below apply
 6. **Submit a pull request** with a Conventional Commit title, naturally formatted Markdown, clear
    description, validation results, and `Closes #<number>` when applicable
 
@@ -578,6 +579,20 @@ Keep commits focused and do not squash the PR. Once the required checks pass, en
 ```bash
 gh pr merge --auto --rebase <PR-number>
 ```
+
+Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
+schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
+hosted CI matrix. Record the commands and results in the retained commit and PR.
+
+A PR changing executable package or runtime behavior must pass `uv run make ci` once before final
+review or auto-merge. It is also required for release candidates, break-glass merges, dependency,
+packaging, build, or CI-composition changes, and before a required local KubeRay gate. Later changes
+limited to PR or commit metadata, documentation, or tests do not invalidate that result; focused
+delta checks and green final-head hosted CI suffice. Package, dependency, and deployment metadata or
+manifests are not exempt, and a runtime-affecting review repair re-evaluates the triggers. A PR
+containing only exempt deltas does not require a local full gate. Current-head `CI Gate` is the final
+broad merge proof. Do not rerun the local full gate merely because an exempt focused follow-up changed
+the commit hash: retain the checkpoint result and add exact delta evidence.
 
 The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and ordinary PR
 commit messages, and reports a required status check without needing secrets from the PR. Its
@@ -620,8 +635,9 @@ focused commits with their own descriptive bodies. Validate the final PR title t
 range before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
-conflicts, run `uv run make ci`, and push. The trusted workflow posts the fresh exact-head Codex
-request; auto-merge recalculates the required checks. The merge policy's steady state requires
+conflicts, rerun the affected checks, re-evaluate the full-gate triggers above, and push. The trusted
+workflow posts the fresh exact-head Codex request; auto-merge recalculates the required checks. The
+merge policy's steady state requires
 `Commit Messages`, `CI Gate`, `Maintainer Approval`, and `Codex Review` from GitHub Actions, requires
 native review conversation resolution, and allows rebase merges only. Activate a new required
 context only after its workflow is merged and a ready canary pull request reports that exact context
@@ -658,7 +674,9 @@ test: add unit tests for retry logic
 
 ### PR Checklist
 
-- [ ] CI-equivalent checks pass (`uv run make ci`)
+- [ ] Focused affected tests and applicable static/schema/docs/package checks pass
+- [ ] Full local-gate checkpoint decision is recorded; `uv run make ci` passed when triggered
+- [ ] Exact-head hosted `CI Gate` passes before merge
 - [ ] Packaging builds when packaging or release metadata changed (`uv build`)
 - [ ] Documentation updated (if needed)
 - [ ] Changelog updated (for user-facing changes)

@@ -54,8 +54,22 @@ When a task calls for a branch, start from current `main` and use the convention
   `uv run python scripts/check_conventional_commits.py --range origin/main..HEAD`.
 
 Use Conventional Commit syntax for commit messages and PR titles. See `CONTRIBUTING.md` for examples
-and the canonical `.gitmessage` template. Run the full local gate as `uv run make ci`; do not add nested
-`uv run` wrappers inside that target because real-Ray workers inherit the outer environment.
+and the canonical `.gitmessage` template.
+
+Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
+schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
+hosted CI matrix. A PR changing executable package or runtime behavior must pass `uv run make ci`
+once before final review or auto-merge. It is also required for release candidates, break-glass
+merges, dependency, packaging, build, or CI-composition changes, and before a required local KubeRay
+gate. Later changes limited to PR or commit metadata, documentation, or tests do not invalidate that
+result; focused delta checks and green final-head hosted CI suffice. Package, dependency, and
+deployment metadata or manifests are not exempt, and a runtime-affecting review repair re-evaluates
+the triggers. A PR containing only exempt deltas does not require a local full gate. Current-head
+`CI Gate` is the final broad merge proof.
+
+Record the focused commands, the checkpoint decision, and any carried-forward full-gate evidence in
+the commit and PR. Do not add nested `uv run` wrappers inside `make ci` because real-Ray workers
+inherit the outer environment.
 
 Before handing off deployed-behavior changes, consult the trigger matrix in
 `docs/deployment/local-kuberay-gate.md`. A required row must pass the guarded local KubeRay gate from

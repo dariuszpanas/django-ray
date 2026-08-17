@@ -218,8 +218,9 @@ retain each one as a focused commit with its own descriptive body. Run the valid
 PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
-conflicts, run `uv run make ci`, and push. The trusted workflow posts the fresh exact-head Codex
-request; auto-merge waits for the new head's checks. The merge policy's steady state requires
+conflicts, rerun the affected checks, re-evaluate the full-gate triggers below, and push. The trusted
+workflow posts the fresh exact-head Codex request; auto-merge waits for the new head's checks. The
+merge policy's steady state requires
 `Commit Messages`, `CI Gate`, `Maintainer Approval`, and `Codex Review` from GitHub Actions, requires
 native review conversation resolution, and permits rebase merges only. Activate a new required
 context only after its workflow is merged and a ready canary pull request reports that exact context
@@ -267,17 +268,26 @@ scope.
 
 ## Validation before a pull request
 
-Run the narrowest relevant tests while developing. Before opening a PR, run the local CI-equivalent
-checks:
+Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
+schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
+hosted CI matrix. Record the commands and results in the retained commit and PR instead of treating
+one broad command as the only valid evidence.
 
-```bash
-uv run make ci
-```
+A PR changing executable package or runtime behavior must pass `uv run make ci` once before final
+review or auto-merge. It is also required for release candidates, break-glass merges, dependency,
+packaging, build, or CI-composition changes, and before a required local KubeRay gate. Later changes
+limited to PR or commit metadata, documentation, or tests do not invalidate that result; focused
+delta checks and green final-head hosted CI suffice. Package, dependency, and deployment metadata or
+manifests are not exempt, and a runtime-affecting review repair re-evaluates the triggers. A PR
+containing only exempt deltas does not require a local full gate. Current-head `CI Gate` is the final
+broad merge proof.
 
-This command checks formatting, lint, types, the CI coverage floors, strict documentation, and the
-package build for the current interpreter without modifying tracked files. GitHub Actions additionally
-tests the supported Python and dependency-resolution matrix. Use `uv run make format` or
-`uv run make fix` explicitly when files should be changed.
+When triggered, `uv run make ci` checks formatting, lint, types, the CI coverage floors, strict
+documentation, and the package build for the current interpreter without modifying tracked files.
+GitHub Actions additionally tests the supported Python and dependency-resolution matrix. Use
+`uv run make format` or `uv run make fix` explicitly when files should be changed. Do not run another
+local full gate merely because an exempt focused follow-up changed the commit hash; record the
+passing checkpoint and the focused delta evidence instead.
 
 Changes that cross the local deployment boundary also follow the
 [local KubeRay final-gate trigger matrix](docs/deployment/local-kuberay-gate.md). Run a required gate

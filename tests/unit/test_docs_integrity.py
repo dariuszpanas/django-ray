@@ -21,6 +21,22 @@ PRIVATE_VULNERABILITY_REPORT_URL = (
     "https://github.com/dariuszpanas/django-ray/security/advisories/new"
 )
 SECURITY_POLICY_URL = "https://github.com/dariuszpanas/django-ray/security/policy"
+FOCUSED_PUSH_POLICY = (
+    "Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and "
+    "applicable schema, documentation, or packaging checks. Every push to an open PR receives the "
+    "broad exact-head hosted CI matrix."
+)
+FULL_GATE_CHECKPOINT_POLICY = (
+    "A PR changing executable package or runtime behavior must pass `uv run make ci` once before "
+    "final review or auto-merge. It is also required for release candidates, break-glass merges, "
+    "dependency, packaging, build, or CI-composition changes, and before a required local KubeRay "
+    "gate."
+)
+FULL_GATE_CARRY_FORWARD_POLICY = (
+    "Later changes limited to PR or commit metadata, documentation, or tests do not invalidate "
+    "that result; focused delta checks and green final-head hosted CI suffice. Package, dependency, "
+    "and deployment metadata or manifests are not exempt"
+)
 
 
 def _markdown_heading_anchors(content: str) -> set[str]:
@@ -51,6 +67,29 @@ def _assert_local_markdown_link(source: Path, destination: str) -> None:
 
 def test_repository_llms_guide_matches_published_copy() -> None:
     assert (ROOT / "llms.txt").read_bytes() == (DOCS / "llms.txt").read_bytes()
+
+
+def test_contributor_guides_use_checkpoint_based_local_validation() -> None:
+    contributor_guides = (
+        ROOT / "AGENTS.md",
+        ROOT / "CONTRIBUTING.md",
+        DOCS / "contributing.md",
+    )
+
+    for guide in contributor_guides:
+        content = " ".join(guide.read_text(encoding="utf-8").split())
+        assert FOCUSED_PUSH_POLICY in content
+        assert FULL_GATE_CHECKPOINT_POLICY in content
+        assert FULL_GATE_CARRY_FORWARD_POLICY in content
+        assert "A PR containing only exempt deltas does not require a local full gate" in content
+        assert "Current-head `CI Gate` is the final broad merge proof" in content
+
+    assert "Run the full local gate as `uv run make ci`" not in (ROOT / "AGENTS.md").read_text(
+        encoding="utf-8"
+    )
+    assert "**Run all checks**: `uv run make ci`" not in (DOCS / "contributing.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_security_policy_is_private_bounded_and_discoverable() -> None:

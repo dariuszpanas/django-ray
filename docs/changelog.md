@@ -162,6 +162,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   final confirmation without placing the potentially large body in process environment or arguments;
   a bounded lifecycle-event digest and stable final snapshot also reject close/reopen and draft/ready
   round trips. Findings remain subject to native required conversation resolution.
+- Contributor validation now uses fast static and focused pre-push checks plus one explicit full-gate
+  checkpoint for executable package/runtime, dependency, packaging, build, CI-composition, release,
+  break-glass, and required local KubeRay boundaries. Documentation-, test-, and PR/commit-metadata-only
+  follow-ups no longer repeat the complete local suite; exact-head hosted `CI Gate` remains the broad
+  merge proof.
 - GitHub workflows now declare least-privilege token permissions, and manual TestPyPI rehearsals
   check out only the trusted default branch before proving its exact authorized candidate identity.
 
