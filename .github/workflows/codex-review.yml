@@ -2,12 +2,12 @@ name: Codex Review
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, closed]
 
 permissions:
   actions: read
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: codex-review-${{ github.event.pull_request.number }}
@@ -17,7 +17,7 @@ jobs:
   codex-review:
     name: Codex Review
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,7 +25,11 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Wait for a current-head Codex review
+      - name: Request an exact-head Codex review
+        if: >-
+          github.event.action != 'converted_to_draft' &&
+          github.event.action != 'closed'
+        id: request
         env:
           ACTION: ${{ github.event.action }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -37,6 +41,45 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
         run: |
+          REQUEST_COMMENT_ID="$(
+            python scripts/check_pr_review_policy.py \
+              --mode codex-request \
+              --repository "$GITHUB_REPOSITORY" \
+              --pull-request "$PR_NUMBER" \
+              --expected-base-ref "$BASE_REF" \
+              --expected-base-sha "$BASE_SHA" \
+              --expected-head "$HEAD_SHA" \
+              --event-path "$GITHUB_EVENT_PATH" \
+              --action "$ACTION" \
+              --baseline-time "$BASELINE_TIME" \
+              --workflow-run-id "$RUN_ID" \
+              --run-attempt "$RUN_ATTEMPT"
+          )"
+          case "$REQUEST_COMMENT_ID" in
+            ''|*[!0-9]*)
+              echo "Codex request did not return a numeric comment ID" >&2
+              exit 1
+              ;;
+          esac
+          printf 'comment-id=%s\n' "$REQUEST_COMMENT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the exact-head Codex request to settle
+        env:
+          ACTION: ${{ github.event.action }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASELINE_TIME: ${{ github.event.pull_request.updated_at }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REQUEST_COMMENT_ID: ${{ steps.request.outputs.comment-id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          REQUEST_COMMENT_ARGS=()
+          if [[ -n "$REQUEST_COMMENT_ID" ]]; then
+            REQUEST_COMMENT_ARGS=(--request-comment-id "$REQUEST_COMMENT_ID")
+          fi
           python scripts/check_pr_review_policy.py \
             --mode codex \
             --repository "$GITHUB_REPOSITORY" \
@@ -44,9 +87,11 @@ jobs:
             --expected-base-ref "$BASE_REF" \
             --expected-base-sha "$BASE_SHA" \
             --expected-head "$HEAD_SHA" \
+            --event-path "$GITHUB_EVENT_PATH" \
             --action "$ACTION" \
             --baseline-time "$BASELINE_TIME" \
             --workflow-run-id "$RUN_ID" \
             --run-attempt "$RUN_ATTEMPT" \
-            --poll-timeout 900 \
-            --poll-interval 60
+            "${REQUEST_COMMENT_ARGS[@]}" \
+            --poll-timeout 1800 \
+            --poll-interval 15

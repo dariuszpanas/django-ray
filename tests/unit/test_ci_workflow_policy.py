@@ -852,14 +852,14 @@ def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
         "pull_request_target": {"types": lifecycle_types},
         "pull_request_review": {"types": ["submitted", "dismissed"]},
     }
-    assert codex_events == {"pull_request_target": {"types": lifecycle_types}}
+    assert codex_events == {"pull_request_target": {"types": [*lifecycle_types, "closed"]}}
 
 
 @pytest.mark.parametrize(
     ("workflow_name", "job_id", "timeout_minutes"),
     [
         ("maintainer-approval.yml", "maintainer-approval", "5"),
-        ("codex-review.yml", "codex-review", "20"),
+        ("codex-review.yml", "codex-review", "35"),
     ],
 )
 def test_review_policy_workflows_execute_only_trusted_default_branch_code(
@@ -874,6 +874,7 @@ def test_review_policy_workflows_execute_only_trusted_default_branch_code(
     expected_permissions = {"contents": "read", "pull-requests": "read"}
     if workflow_name == "codex-review.yml":
         expected_permissions["actions"] = "read"
+        expected_permissions["pull-requests"] = "write"
     assert workflow["permissions"] == expected_permissions
     assert set(_jobs(path)) == {job_id}
     assert job["timeout-minutes"] == timeout_minutes
@@ -890,7 +891,13 @@ def test_review_policy_workflows_execute_only_trusted_default_branch_code(
         "ref": "${{ github.event.repository.default_branch }}",
         "persist-credentials": "false",
     }
-    assert all("if" not in step for step in steps)
+    if workflow_name == "codex-review.yml":
+        assert steps[1]["if"] == (
+            "github.event.action != 'converted_to_draft' && github.event.action != 'closed'"
+        )
+        assert all("if" not in step for step in (steps[0], *steps[2:]))
+    else:
+        assert all("if" not in step for step in steps)
     assert not _contains_key(steps, "continue-on-error")
 
     validation = steps[1]
@@ -918,10 +925,12 @@ def test_maintainer_approval_invokes_exact_base_and_head_policy() -> None:
     assert '--expected-head "$HEAD_SHA"' in step["run"]
 
 
-def test_codex_review_has_bounded_exact_head_polling_and_draft_failure() -> None:
-    step = _jobs(WORKFLOWS / "codex-review.yml")["codex-review"]["steps"][1]
+def test_codex_review_requests_and_polls_one_attempt_bound_comment() -> None:
+    steps = _jobs(WORKFLOWS / "codex-review.yml")["codex-review"]["steps"]
+    request = steps[1]
+    step = steps[2]
 
-    assert step["env"] == {
+    common_env = {
         "ACTION": "${{ github.event.action }}",
         "BASE_REF": "${{ github.event.pull_request.base.ref }}",
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
@@ -932,6 +941,18 @@ def test_codex_review_has_bounded_exact_head_polling_and_draft_failure() -> None
         "RUN_ATTEMPT": "${{ github.run_attempt }}",
         "RUN_ID": "${{ github.run_id }}",
     }
+    assert request["env"] == common_env
+    assert request["id"] == "request"
+    assert "--mode codex-request" in request["run"]
+    assert '--workflow-run-id "$RUN_ID"' in request["run"]
+    assert '--run-attempt "$RUN_ATTEMPT"' in request["run"]
+    assert '--event-path "$GITHUB_EVENT_PATH"' in request["run"]
+    assert "printf 'comment-id=%s\\n'" in request["run"]
+    assert '>> "$GITHUB_OUTPUT"' in request["run"]
+    assert step["env"] == {
+        **common_env,
+        "REQUEST_COMMENT_ID": "${{ steps.request.outputs.comment-id }}",
+    }
     assert "--mode codex" in step["run"]
     assert '--expected-base-ref "$BASE_REF"' in step["run"]
     assert '--expected-base-sha "$BASE_SHA"' in step["run"]
@@ -940,11 +961,18 @@ def test_codex_review_has_bounded_exact_head_polling_and_draft_failure() -> None
     assert '--baseline-time "$BASELINE_TIME"' in step["run"]
     assert '--workflow-run-id "$RUN_ID"' in step["run"]
     assert '--run-attempt "$RUN_ATTEMPT"' in step["run"]
-    assert "--poll-timeout 900" in step["run"]
-    assert "--poll-interval 60" in step["run"]
+    assert '--event-path "$GITHUB_EVENT_PATH"' in step["run"]
+    assert 'REQUEST_COMMENT_ARGS=(--request-comment-id "$REQUEST_COMMENT_ID")' in step["run"]
+    assert "--poll-timeout 1800" in step["run"]
+    assert "--poll-interval 15" in step["run"]
     assert "BASE_CHANGED" not in step["run"]
     assert "--base-changed" not in step["run"]
     assert "eval " not in step["run"]
+    for command in (request["run"], step["run"]):
+        assert "PR_TITLE" not in command
+        assert "PR_BODY" not in command
+        assert "--expected-title" not in command
+        assert "--expected-body" not in command
 
 
 def test_public_workflows_do_not_invoke_native_compiled_graph() -> None:
@@ -1067,21 +1095,52 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
         for check_name in REQUIRED_CHECK_NAMES:
             assert f"`{check_name}`" in documentation
         assert "native required review-conversation resolution" in documentation
-        assert "fresh `@codex review`" in documentation
-        assert "django-ray:codex-review-head=<full current head SHA>" in documentation
+        assert (
+            "django-ray:codex-review-head=<full head SHA>;run=<workflow run ID>;"
+            "attempt=<run attempt>;metadata=<title/body digest>;lifecycle=<event digest>"
+            in normalized_documentation
+        )
         assert "current-head approval for every other author" in documentation
         assert "trusted event base ref, base SHA, and head SHA" in documentation
         assert (
             "base change, or title- or body-only edit requires a new Codex outcome" in documentation
         )
         assert "existing exact-head connector review is not reusable" in normalized_documentation
-        assert "pull-request root clean reaction" in documentation
-        assert "deliberately not reusable" in documentation
-        assert "new `+1` on a" in documentation
-        assert "SHA-bound maintainer request comment" in documentation
-        assert "a pull-request root reaction never counts" in documentation
-        assert "first automatic opened or ready run" in documentation
-        assert "Every rerun ignores pull-request root reactions" in documentation
+        assert "trusted `Codex Review` workflow posts one full-SHA" in documentation
+        assert "immutable comment ID" in documentation
+        assert "Contributors do not need to post a second request" in normalized_documentation
+        assert "Only an `eyes` reaction from the immutable Codex connector" in documentation
+        assert (
+            "reactions from Actions, maintainers, or other users are ignored"
+            in normalized_documentation
+        )
+        assert "that request or the pull-request root" in normalized_documentation
+        assert "must first observe Codex `eyes`" in normalized_documentation
+        assert "two consecutive eye-free polling observations" in normalized_documentation
+        assert "does not interpret `+1`, formal review state" in normalized_documentation
+        assert "attempt waits up to 30 minutes" in normalized_documentation
+        assert (
+            "reads title and body from the runner-provided `GITHUB_EVENT_PATH`"
+            in normalized_documentation
+        )
+        assert (
+            "never places the potentially large body in an environment variable or command argument"
+            in normalized_documentation
+        )
+        assert "metadata digest binds those values" in normalized_documentation
+        assert (
+            "canonical digest of bounded close, reopen, draft-conversion, and ready events"
+            in normalized_documentation
+        )
+        assert (
+            "brackets a lifecycle re-read with two live pull-request reads"
+            in normalized_documentation
+        )
+        assert "stable activity timestamp" in normalized_documentation
+        assert "reaction-driven pull-request activity timestamps" in normalized_documentation
+        assert "proves that the requested review settled" in normalized_documentation
+        assert "does not reinterpret findings as an approval" in normalized_documentation
+        assert "completed Codex review with findings cannot merge" in documentation
         assert "strict required-status freshness" in documentation
         assert "external or bot-authored canary" in documentation
         assert "not absolute enforcement" in documentation
