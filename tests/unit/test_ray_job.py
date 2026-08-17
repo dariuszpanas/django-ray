@@ -76,7 +76,7 @@ from django_ray.runtime.runtime_env import (
     normalize_runtime_env,
     runtime_env_for_storage,
 )
-from django_ray.workflow_plans import WorkflowPlanMismatchError
+from django_ray.workflow.plans import WorkflowPlanMismatchError
 
 _RQ2_REQUEST_LOCATOR = (
     base64.urlsafe_b64encode(b'{"schema":"django-ray.unit-test-locator"}')

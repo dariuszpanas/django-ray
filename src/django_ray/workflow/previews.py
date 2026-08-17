@@ -15,7 +15,6 @@ from enum import StrEnum
 from typing import Any, NoReturn
 
 from django_ray.redaction import REDACTED, normalize_terminal_text, redact_value
-from django_ray.workflow._compat import preserve_legacy_module_identity
 
 WORKFLOW_OUTPUT_PREVIEW_SCHEMA_VERSION = 1
 WORKFLOW_OUTPUT_PREVIEW_LIMITS_PROFILE = "v1"
@@ -359,9 +358,3 @@ __all__ = [
     "unavailable_workflow_output_preview",
     "validate_workflow_output_preview",
 ]
-
-preserve_legacy_module_identity(
-    globals(),
-    exports=__all__,
-    legacy_module="django_ray.workflow_output_previews",
-)

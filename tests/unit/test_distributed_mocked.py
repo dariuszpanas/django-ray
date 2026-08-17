@@ -24,7 +24,7 @@ from django_ray.execution_codec import (
 from django_ray.runtime import distributed
 from django_ray.runtime.context import durable_task_execution, get_current_task_context
 from django_ray.runtime.runtime_env import normalize_runtime_env
-from django_ray.workflow_plans import runtime_env_plan_identity
+from django_ray.workflow.plans import runtime_env_plan_identity
 
 
 def _add(a: int, b: int) -> int:

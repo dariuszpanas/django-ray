@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_LIMITS_V1
-from django_ray.workflow_progress_protocol import (
+from django_ray.workflow.progress.protocol import (
     WORKFLOW_PROGRESS_EVENT_ENCODING,
     WORKFLOW_PROGRESS_EVENT_SCHEMA_VERSION,
     WorkflowProgressEventKind,
@@ -1106,7 +1106,7 @@ def test_protocol_module_imports_cold_without_django_setup_or_models() -> None:
     code = """
 import sys
 assert "django" not in sys.modules
-import django_ray.workflow_progress_protocol as protocol
+import django_ray.workflow.progress.protocol as protocol
 assert protocol.WORKFLOW_PROGRESS_EVENT_SCHEMA_VERSION == 1
 assert "django" not in sys.modules
 assert "django_ray.models" not in sys.modules

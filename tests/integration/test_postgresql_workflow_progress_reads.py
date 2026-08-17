@@ -22,18 +22,18 @@ from django_ray.models import (
     WorkflowProgressTopologyManifestPage,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow_progress_reads import (
+from django_ray.workflow.progress.preparation import prepare_workflow_progress_topology
+from django_ray.workflow.progress.reads import (
     get_workflow_node_detail,
     get_workflow_progress_summary,
     list_workflow_node_details,
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
 )
-from django_ray.workflow_progress_storage import (
+from django_ray.workflow.progress.storage import (
     persist_workflow_progress_publication,
     prepare_workflow_progress_detail,
     prepare_workflow_progress_node_detail,
-    prepare_workflow_progress_topology,
     stage_workflow_progress_topology,
 )
 from tests.workflow_progress_storage_helpers import (

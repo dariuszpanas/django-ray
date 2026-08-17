@@ -14,7 +14,8 @@ from django.db.models import QuerySet
 from django.utils import timezone
 
 import django_ray.lifecycle as lifecycle
-import django_ray.workflow_progress_storage as storage
+import django_ray.workflow.progress.preparation as preparation
+import django_ray.workflow.progress.storage as storage
 from django_ray.models import (
     InputPayloadState,
     RayTaskExecution,
@@ -128,7 +129,7 @@ def _topology(
     edges: tuple[tuple[str, str], ...] = (("node-a", "node-b"),),
 ) -> storage.PreparedWorkflowProgressTopology:
     node_kinds = kinds or {}
-    return storage.prepare_workflow_progress_topology(
+    return preparation.prepare_workflow_progress_topology(
         identity,
         version,
         [_node(node_id, kind=node_kinds.get(node_id, "task")) for node_id in node_ids],
@@ -315,7 +316,7 @@ def test_identity_number_and_scalar_boundaries_are_defensive() -> None:
     with pytest.raises(storage.WorkflowProgressStorageError, match="must be an integer"):
         storage._bounded_int(True, "count")
     with pytest.raises(storage.WorkflowProgressStorageError, match="durable range"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             _identity(),
             storage.WORKFLOW_PROGRESS_IDENTITY_MAX_INTEGER + 1,
             (),
@@ -399,16 +400,16 @@ def test_topology_normalization_omits_indivisible_records_and_tracks_evidence(
 ) -> None:
     identity = _identity()
     with pytest.raises(storage.WorkflowProgressStorageError, match="positive integer"):
-        storage.prepare_workflow_progress_topology(identity, 0, (), ())
+        preparation.prepare_workflow_progress_topology(identity, 0, (), ())
     with pytest.raises(storage.WorkflowProgressStorageError, match="kind is unsupported"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             identity,
             1,
             [_node("node-a", kind="actor")],
             (),
         )
     with pytest.raises(storage.WorkflowProgressStorageError, match="duplicate node_id"):
-        storage.prepare_workflow_progress_topology(
+        preparation.prepare_workflow_progress_topology(
             identity,
             1,
             [_node("node-a"), _node("node-a")],
@@ -416,16 +417,16 @@ def test_topology_normalization_omits_indivisible_records_and_tracks_evidence(
         )
 
     oversized_node = _node("x" * (storage.WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES + 1))
-    omitted_node = storage.prepare_workflow_progress_topology(identity, 1, [oversized_node], ())
+    omitted_node = preparation.prepare_workflow_progress_topology(identity, 1, [oversized_node], ())
     assert omitted_node.retained_node_count == 0
     assert WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT in omitted_node.truncation_reasons
 
     truncated_node = _node("node-a")
     truncated_node["label"] = "x" * (storage.WORKFLOW_PROGRESS_LABEL_MAX_BYTES + 1)
-    truncated = storage.prepare_workflow_progress_topology(identity, 1, [truncated_node], ())
+    truncated = preparation.prepare_workflow_progress_topology(identity, 1, [truncated_node], ())
     assert WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT in truncated.truncation_reasons
 
-    omitted_edge = storage.prepare_workflow_progress_topology(
+    omitted_edge = preparation.prepare_workflow_progress_topology(
         identity,
         1,
         [_node("node-a")],
@@ -1605,7 +1606,7 @@ def test_prepared_initial_detail_must_retain_topology_truncation_evidence() -> N
     execution = _execution(task_id="publication-truncation-evidence")
     identity = _execution_identity(execution)
     oversized_node_id = "x" * (storage.WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES + 1)
-    topology = storage.prepare_workflow_progress_topology(
+    topology = preparation.prepare_workflow_progress_topology(
         identity,
         1,
         [_node(oversized_node_id)],

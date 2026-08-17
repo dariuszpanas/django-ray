@@ -34,7 +34,7 @@ from django_ray.runtime.remote import (
     execute_django_task_remote,
     execute_workflow_step_remote,
 )
-from django_ray.workflow_progress_protocol import (
+from django_ray.workflow.progress.protocol import (
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressEventKind,
     WorkflowProgressLimits,
@@ -125,7 +125,7 @@ def _strict_nested_workflow_request(
     output_preview_path: str | None = None,
 ) -> tuple[str, dict[str, object]]:
     from django_ray.runtime.runtime_env import normalize_runtime_env
-    from django_ray.workflow_plans import runtime_env_plan_identity
+    from django_ray.workflow.plans import runtime_env_plan_identity
 
     runtime_identity = runtime_env_plan_identity(
         normalize_runtime_env({"env_vars": {"NESTED_TEST": "1"}})
@@ -1252,7 +1252,7 @@ def test_execute_workflow_step_orders_terminal_latest_value_before_terminal_even
 
     actor.ingest.remote = pending_remote
     monkeypatch.setattr(
-        "django_ray.workflow_progress_producer._poll_ray_ack",
+        "django_ray.workflow.progress.producer._poll_ray_ack",
         lambda _reference: "pending",
     )
     run_identity = dict(_WORKFLOW_RUN_IDENTITY)
@@ -1967,7 +1967,7 @@ def test_progress_actor_terminalizes_pending_previews_without_byte_drift() -> No
     assert snapshot["ingress"]["retained_bytes"] > pending_retained_bytes
 
     from django_ray.runtime.context import WorkflowRunIdentity
-    from django_ray.workflow_progress_publication import (
+    from django_ray.workflow.progress.publication import (
         prepare_terminal_workflow_progress_publication,
     )
 

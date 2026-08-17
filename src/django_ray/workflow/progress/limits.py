@@ -6,8 +6,6 @@ import json
 from dataclasses import dataclass, fields
 from typing import Any
 
-from django_ray.workflow._compat import preserve_legacy_module_identity
-
 WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION = 1
 WORKFLOW_PROGRESS_LIMITS_PROFILE = "v1"
 
@@ -224,9 +222,3 @@ __all__ = [
     "canonical_workflow_progress_retained_size",
     "workflow_progress_retained_state_size",
 ]
-
-preserve_legacy_module_identity(
-    globals(),
-    exports=__all__,
-    legacy_module="django_ray.workflow_progress_limits",
-)

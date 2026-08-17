@@ -10,7 +10,7 @@ from django_ray.workflow.progress.limits import (
     WORKFLOW_PROGRESS_LIMITS_V1,
     WorkflowProgressLimits,
 )
-from django_ray.workflow_progress_protocol import (
+from django_ray.workflow.progress.protocol import (
     WorkflowProgressEventKind,
     prepare_workflow_progress_event,
 )

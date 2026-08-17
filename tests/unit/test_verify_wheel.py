@@ -12,6 +12,9 @@ import pytest
 from scripts.verify_wheel import (
     EXPECTED_FILES,
     EXPECTED_MIGRATION_LEAF,
+    EXPECTED_TARGET_MODULE_FILES,
+    EXPECTED_WORKFLOW_MODULE_FILES,
+    _verify_canonical_module_layout,
     verify_distribution_archives,
 )
 
@@ -21,35 +24,42 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/execution_protocol.py" in EXPECTED_FILES
     assert "django_ray/ray_job_protocol.py" in EXPECTED_FILES
     assert "django_ray/ray_job_request_storage.py" in EXPECTED_FILES
-    assert "django_ray/ray_target_probe.py" in EXPECTED_FILES
     assert "django_ray/protocol_coordination.py" in EXPECTED_FILES
     assert "django_ray/protocol_status.py" in EXPECTED_FILES
     assert "django_ray/management/commands/django_ray_protocol_status.py" in EXPECTED_FILES
     assert "django_ray/runner/ray_job.py" in EXPECTED_FILES
     assert "django_ray/runtime/entrypoint.py" in EXPECTED_FILES
-    assert "django_ray/target_attestation.py" in EXPECTED_FILES
-    assert "django_ray/target_capabilities.py" in EXPECTED_FILES
-    assert "django_ray/target_coordination.py" in EXPECTED_FILES
-    assert "django_ray/target_execution_codec.py" in EXPECTED_FILES
-    assert "django_ray/target_execution_evidence.py" in EXPECTED_FILES
-    assert "django_ray/target_routing.py" in EXPECTED_FILES
-    assert "django_ray/target/__init__.py" in EXPECTED_FILES
-    assert "django_ray/target/attestation.py" in EXPECTED_FILES
-    assert "django_ray/target/capabilities.py" in EXPECTED_FILES
-    assert "django_ray/target/coordination.py" in EXPECTED_FILES
-    assert "django_ray/target/execution_codec.py" in EXPECTED_FILES
-    assert "django_ray/target/execution_evidence.py" in EXPECTED_FILES
-    assert "django_ray/target/probe.py" in EXPECTED_FILES
-    assert "django_ray/target/routing.py" in EXPECTED_FILES
-    assert "django_ray/workflow_output_previews.py" in EXPECTED_FILES
-    assert "django_ray/workflow_progress_limits.py" in EXPECTED_FILES
-    assert "django_ray/workflow_progress_summary.py" in EXPECTED_FILES
-    assert "django_ray/workflow/__init__.py" in EXPECTED_FILES
-    assert "django_ray/workflow/_compat.py" in EXPECTED_FILES
-    assert "django_ray/workflow/previews.py" in EXPECTED_FILES
-    assert "django_ray/workflow/progress/__init__.py" in EXPECTED_FILES
-    assert "django_ray/workflow/progress/limits.py" in EXPECTED_FILES
-    assert "django_ray/workflow/progress/summary.py" in EXPECTED_FILES
+
+    assert EXPECTED_TARGET_MODULE_FILES == {
+        "django_ray/target/__init__.py",
+        "django_ray/target/attestation.py",
+        "django_ray/target/capabilities.py",
+        "django_ray/target/coordination.py",
+        "django_ray/target/execution_codec.py",
+        "django_ray/target/execution_evidence.py",
+        "django_ray/target/probe.py",
+        "django_ray/target/routing.py",
+    }
+    assert EXPECTED_WORKFLOW_MODULE_FILES == {
+        "django_ray/workflows.py",
+        "django_ray/workflow/__init__.py",
+        "django_ray/workflow/admin_graph.py",
+        "django_ray/workflow/contracts.py",
+        "django_ray/workflow/plans.py",
+        "django_ray/workflow/previews.py",
+        "django_ray/workflow/progress/__init__.py",
+        "django_ray/workflow/progress/cleanup.py",
+        "django_ray/workflow/progress/limits.py",
+        "django_ray/workflow/progress/preparation.py",
+        "django_ray/workflow/progress/producer.py",
+        "django_ray/workflow/progress/protocol.py",
+        "django_ray/workflow/progress/publication.py",
+        "django_ray/workflow/progress/reads.py",
+        "django_ray/workflow/progress/runs.py",
+        "django_ray/workflow/progress/storage.py",
+        "django_ray/workflow/progress/summary.py",
+    }
+    _verify_canonical_module_layout(EXPECTED_FILES)
     assert "django_ray/runner/ray_core.py" in EXPECTED_FILES
     assert "django_ray/runtime/remote.py" in EXPECTED_FILES
     assert "django_ray/migrations/0019_execution_protocol_schema.py" in EXPECTED_FILES
@@ -64,6 +74,21 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
         "django_ray",
         "0026_ray_task_target_execution_evidence",
     )
+
+
+@pytest.mark.parametrize(
+    "removed_module",
+    [
+        "django_ray/ray_target_probe.py",
+        "django_ray/target_attestation.py",
+        "django_ray/workflow/_compat.py",
+        "django_ray/admin_workflow_graph.py",
+        "django_ray/workflow_plans.py",
+    ],
+)
+def test_wheel_layout_rejects_removed_private_modules(removed_module: str) -> None:
+    with pytest.raises(RuntimeError, match=r"unexpected=.*" + removed_module.replace(".", r"\.")):
+        _verify_canonical_module_layout(EXPECTED_FILES | {removed_module})
 
 
 def _metadata(*, ray_requirement: str = "ray[default]>=2.56.0") -> bytes:

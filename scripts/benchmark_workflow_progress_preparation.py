@@ -380,8 +380,8 @@ def _implementation_digest() -> str:
     for path in (
         Path(__file__),
         ROOT / "scripts" / "workflow_progress_preparation_prototype.py",
-        ROOT / "src" / "django_ray" / "workflow_progress_preparation.py",
-        ROOT / "src" / "django_ray" / "workflow_progress_storage.py",
+        ROOT / "src" / "django_ray" / "workflow" / "progress" / "preparation.py",
+        ROOT / "src" / "django_ray" / "workflow" / "progress" / "storage.py",
     ):
         digest.update(path.relative_to(ROOT).as_posix().encode())
         digest.update(b"\0")
@@ -656,7 +656,7 @@ def _worker_environment() -> dict[str, Any]:
 
 
 def _v1_output_limits() -> dict[str, Any]:
-    import django_ray.workflow_progress_storage as storage
+    import django_ray.workflow.progress.storage as storage
 
     names = (
         "WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION",
@@ -707,7 +707,7 @@ def _workspace_config(args: argparse.Namespace):
         "batch_max_decoded_bytes": args.batch_decoded_bytes,
     }
     if _implementation(args) == "production-topology":
-        from django_ray.workflow_progress_preparation import SQLitePreparationConfig
+        from django_ray.workflow.progress.preparation import SQLitePreparationConfig
 
         return SQLitePreparationConfig(**common).validated()
 
@@ -723,7 +723,7 @@ def _workspace_config(args: argparse.Namespace):
 
 def _workspace_type(args: argparse.Namespace):
     if _implementation(args) == "production-topology":
-        from django_ray.workflow_progress_preparation import SQLitePreparationWorkspace
+        from django_ray.workflow.progress.preparation import SQLitePreparationWorkspace
 
         return SQLitePreparationWorkspace
 

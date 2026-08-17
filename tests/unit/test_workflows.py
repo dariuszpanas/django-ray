@@ -23,7 +23,7 @@ from django_ray.runtime.context import (
 )
 from django_ray.runtime.remote import WorkflowProgressActor
 from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_LIMITS_V1
-from django_ray.workflow_progress_protocol import (
+from django_ray.workflow.progress.protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
     prepare_workflow_progress_event,
@@ -1205,7 +1205,7 @@ def test_invalid_workflow_progress_policy_fails_before_plan_materialization(
         raise AssertionError("policy validation must run first")
 
     monkeypatch.setattr(
-        "django_ray.workflow_plans.materialize_workflow_plan",
+        "django_ray.workflow.plans.materialize_workflow_plan",
         record_materialization,
     )
 
@@ -1359,7 +1359,7 @@ def test_ray_executor_throttles_high_cardinality_progress_snapshots(
         return True
 
     monkeypatch.setattr(
-        "django_ray.workflow_progress.persist_workflow_progress",
+        "django_ray.workflow.progress.runs.persist_workflow_progress",
         persist,
     )
     settings.DJANGO_RAY = {
@@ -1437,7 +1437,7 @@ def test_flush_progress_reuses_pending_actor_snapshot_request(monkeypatch) -> No
         return True
 
     monkeypatch.setattr(
-        "django_ray.workflow_progress.persist_workflow_progress",
+        "django_ray.workflow.progress.runs.persist_workflow_progress",
         persist,
     )
 
@@ -1489,7 +1489,7 @@ def test_flush_progress_does_not_rewrite_one_unchanged_failed_snapshot(monkeypat
     }
 
     monkeypatch.setattr(
-        "django_ray.workflow_progress.persist_workflow_progress",
+        "django_ray.workflow.progress.runs.persist_workflow_progress",
         lambda reported_identity, value: persisted.append(value) or reported_identity is identity,
     )
     executor = object.__new__(_RayExecutor)
@@ -1520,7 +1520,7 @@ def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch)
         return True
 
     monkeypatch.setattr(
-        "django_ray.workflow_progress.persist_workflow_progress",
+        "django_ray.workflow.progress.runs.persist_workflow_progress",
         persist,
     )
 
@@ -1734,7 +1734,7 @@ def test_finish_progress_contains_persistence_failure_without_leaking_exception(
         raise RuntimeError("password=do-not-leak")
 
     monkeypatch.setattr(
-        "django_ray.workflow_progress.persist_workflow_progress",
+        "django_ray.workflow.progress.runs.persist_workflow_progress",
         persist,
     )
     executor = object.__new__(_RayExecutor)
@@ -2151,7 +2151,7 @@ def test_terminal_schema_v3_publication_is_default_off(
     monkeypatch,
     settings,
 ) -> None:
-    import django_ray.workflow_progress_publication as publication_module
+    import django_ray.workflow.progress.publication as publication_module
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -2185,7 +2185,7 @@ def test_enabled_terminal_schema_v3_publication_is_attempted_exactly_once(
     monkeypatch,
     settings,
 ) -> None:
-    import django_ray.workflow_progress_publication as publication_module
+    import django_ray.workflow.progress.publication as publication_module
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -2258,7 +2258,7 @@ def test_terminal_schema_v3_publication_failures_are_bounded_and_best_effort(
     settings,
     workflow_progress_warning_records,
 ) -> None:
-    import django_ray.workflow_progress_publication as publication_module
+    import django_ray.workflow.progress.publication as publication_module
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -2309,8 +2309,8 @@ def test_schema_v3_pilot_passes_strict_limits_to_the_progress_actor(
 ) -> None:
     from django_ray.models import RayTaskExecution, TaskState
     from django_ray.runtime.context import DurableTaskContext
-    from django_ray.workflow_plans import materialize_workflow_plan
-    from django_ray.workflow_progress_publication import (
+    from django_ray.workflow.plans import materialize_workflow_plan
+    from django_ray.workflow.progress.publication import (
         WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
     )
 
@@ -2374,7 +2374,7 @@ def test_terminal_only_bind_claims_plan_without_creating_progress_actor(
 ) -> None:
     from django_ray.models import RayTaskExecution, TaskState
     from django_ray.runtime.context import DurableTaskContext
-    from django_ray.workflow_plans import materialize_workflow_plan
+    from django_ray.workflow.plans import materialize_workflow_plan
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -2569,7 +2569,7 @@ def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
         NestedWorkflowBoundaryIdentity,
         decode_nested_execution_request,
     )
-    from django_ray.workflow_plans import materialize_workflow_plan
+    from django_ray.workflow.plans import materialize_workflow_plan
 
     def thaw(value: Any) -> Any:
         if isinstance(value, Mapping):
@@ -2666,7 +2666,7 @@ def test_incomplete_or_malformed_strict_context_never_submits_legacy_work(
         NestedExecutionRequestRejected,
         NestedExecutionRequestRejection,
     )
-    from django_ray.workflow_plans import materialize_workflow_plan
+    from django_ray.workflow.plans import materialize_workflow_plan
 
     class _RemoteStep:
         def options(self, **kwargs: Any) -> _RemoteStep:
@@ -2966,7 +2966,7 @@ def test_ray_map_cleanup_has_a_hard_deadline() -> None:
 @pytest.mark.django_db
 def test_ray_executor_flushes_failed_progress_snapshot() -> None:
     from django_ray.models import RayTaskExecution
-    from django_ray.workflow_progress import allocate_workflow_run
+    from django_ray.workflow.progress.runs import allocate_workflow_run
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-flush",
@@ -3017,7 +3017,7 @@ def test_ray_executor_disables_reporter_after_stale_write(
     workflow_progress_warning_records,
 ) -> None:
     from django_ray.models import RayTaskExecution, TaskState
-    from django_ray.workflow_progress import allocate_workflow_run
+    from django_ray.workflow.progress.runs import allocate_workflow_run
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-stale-flush",
@@ -3367,16 +3367,16 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
     from django_ray.workflow.progress.limits import (
         WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS,
     )
-    from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
-    from django_ray.workflow_progress_publication import (
+    from django_ray.workflow.progress.publication import (
         WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
     )
-    from django_ray.workflow_progress_reads import (
+    from django_ray.workflow.progress.reads import (
         get_workflow_node_detail,
         get_workflow_progress_summary,
         list_workflow_topology_edges,
         list_workflow_topology_nodes,
     )
+    from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -3676,7 +3676,7 @@ def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None
         WorkflowProgressTopologyManifest,
         WorkflowProgressTopologySlot,
     )
-    from django_ray.workflow_progress_reads import (
+    from django_ray.workflow.progress.reads import (
         get_workflow_progress_summary,
         list_workflow_node_details,
         list_workflow_topology_edges,

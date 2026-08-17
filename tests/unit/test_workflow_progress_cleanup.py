@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from django.utils import timezone
 
-import django_ray.workflow_progress_cleanup as cleanup_module
+import django_ray.workflow.progress.cleanup as cleanup_module
 from django_ray.models import (
     RayTaskExecution,
     TaskAttempt,
@@ -24,7 +24,7 @@ from django_ray.models import (
     WorkflowProgressTopologyPage,
     WorkflowProgressTopologySlot,
 )
-from django_ray.workflow_progress_cleanup import (
+from django_ray.workflow.progress.cleanup import (
     WORKFLOW_PROGRESS_ORPHAN_GRACE_PERIOD,
     WorkflowProgressCleanupKind,
     WorkflowProgressCleanupOutcome,

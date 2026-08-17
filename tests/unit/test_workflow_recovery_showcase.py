@@ -14,7 +14,7 @@ from django_ray.runner import retry as retry_module
 from django_ray.runtime.context import DurableTaskContext, durable_task_execution
 from django_ray.runtime.entrypoint import _serialize_error
 from django_ray.runtime.runtime_env import resolve_runtime_env_profile
-from django_ray.workflow_plans import materialize_workflow_plan, runtime_env_plan_identity
+from django_ray.workflow.plans import materialize_workflow_plan, runtime_env_plan_identity
 from testproject import settings as testproject_settings
 from testproject.apps.cluster_tasks import tasks, workflows
 

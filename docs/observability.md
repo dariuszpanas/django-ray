@@ -114,7 +114,7 @@ The package read facade requires an object authorizer on every call. There is no
 allow-all default, and a cursor never substitutes for authorization:
 
 ```python
-from django_ray.workflow_progress_reads import (
+from django_ray.workflow.progress.reads import (
     get_workflow_node_detail,
     get_workflow_progress_summary,
     list_workflow_node_details,

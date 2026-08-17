@@ -1,7 +1,7 @@
 """Package-owned SQLite engine for bounded workflow-progress preparation.
 
-Issue #141 activates only the topology phase through the legacy-compatible public
-preparer. Composite topology/detail detachment and schema-v3 producer activation
+Issue #141 activates only the topology phase through the package-owned preparer.
+Composite topology/detail detachment and schema-v3 producer activation
 remain disabled until issues #142 and #79 complete their independent boundaries.
 """
 
@@ -22,7 +22,7 @@ from threading import Lock, RLock, get_ident
 from typing import Any, Never
 from uuid import UUID, uuid4
 
-import django_ray.workflow_progress_storage as storage
+import django_ray.workflow.progress.storage as storage
 from django_ray.runtime.context import WorkflowRunIdentity
 
 SQLITE_PAGE_BYTES = 4 * 1024
@@ -945,7 +945,7 @@ class SQLitePreparationWorkspace:
         """Capture the one O(observed) compatibility value before cleanup.
 
         Issue #142 removes this residue by keeping topology and detail in one
-        workspace lifetime. Until then, the public preparer must preserve the
+        workspace lifetime. Until then, the package preparer must preserve the
         historical ``observed_node_ids`` field exactly.
         """
         if (

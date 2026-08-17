@@ -39,7 +39,7 @@ from django_ray.ray_job_request_storage import (
     RayJobRequestStorageRejection,
     encode_ray_job_request_locator,
 )
-from django_ray.workflow_plans import WorkflowPlanMismatchError
+from django_ray.workflow.plans import WorkflowPlanMismatchError
 
 
 def _payload_b64(serialized: str) -> str:

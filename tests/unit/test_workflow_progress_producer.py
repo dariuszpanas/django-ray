@@ -10,11 +10,11 @@ from typing import Any
 import pytest
 
 from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_LIMITS_V1
-from django_ray.workflow_progress_producer import (
+from django_ray.workflow.progress.producer import (
     WorkflowProgressProducerAck,
     WorkflowProgressProducerSession,
 )
-from django_ray.workflow_progress_protocol import (
+from django_ray.workflow.progress.protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
 )

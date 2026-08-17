@@ -13,22 +13,7 @@ from pathlib import Path
 
 from packaging.version import Version
 
-EXPECTED_FILES = {
-    "django_ray/__init__.py",
-    "django_ray/admin.py",
-    "django_ray/execution_codec.py",
-    "django_ray/execution_protocol.py",
-    "django_ray/ray_job_protocol.py",
-    "django_ray/ray_job_request_storage.py",
-    "django_ray/ray_target_probe.py",
-    "django_ray/protocol_coordination.py",
-    "django_ray/protocol_status.py",
-    "django_ray/target_attestation.py",
-    "django_ray/target_capabilities.py",
-    "django_ray/target_coordination.py",
-    "django_ray/target_execution_codec.py",
-    "django_ray/target_execution_evidence.py",
-    "django_ray/target_routing.py",
+EXPECTED_TARGET_MODULE_FILES = {
     "django_ray/target/__init__.py",
     "django_ray/target/attestation.py",
     "django_ray/target/capabilities.py",
@@ -37,15 +22,37 @@ EXPECTED_FILES = {
     "django_ray/target/execution_evidence.py",
     "django_ray/target/probe.py",
     "django_ray/target/routing.py",
-    "django_ray/workflow_output_previews.py",
-    "django_ray/workflow_progress_limits.py",
-    "django_ray/workflow_progress_summary.py",
+}
+EXPECTED_WORKFLOW_MODULE_FILES = {
+    "django_ray/workflows.py",
     "django_ray/workflow/__init__.py",
-    "django_ray/workflow/_compat.py",
+    "django_ray/workflow/admin_graph.py",
+    "django_ray/workflow/contracts.py",
+    "django_ray/workflow/plans.py",
     "django_ray/workflow/previews.py",
     "django_ray/workflow/progress/__init__.py",
+    "django_ray/workflow/progress/cleanup.py",
     "django_ray/workflow/progress/limits.py",
+    "django_ray/workflow/progress/preparation.py",
+    "django_ray/workflow/progress/producer.py",
+    "django_ray/workflow/progress/protocol.py",
+    "django_ray/workflow/progress/publication.py",
+    "django_ray/workflow/progress/reads.py",
+    "django_ray/workflow/progress/runs.py",
+    "django_ray/workflow/progress/storage.py",
     "django_ray/workflow/progress/summary.py",
+}
+EXPECTED_FILES = {
+    "django_ray/__init__.py",
+    "django_ray/admin.py",
+    "django_ray/execution_codec.py",
+    "django_ray/execution_protocol.py",
+    "django_ray/ray_job_protocol.py",
+    "django_ray/ray_job_request_storage.py",
+    "django_ray/protocol_coordination.py",
+    "django_ray/protocol_status.py",
+    *EXPECTED_TARGET_MODULE_FILES,
+    *EXPECTED_WORKFLOW_MODULE_FILES,
     "django_ray/models.py",
     "django_ray/runtime/runtime_env_encryption.py",
     "django_ray/static/django_ray/admin/diagnostics.css",
@@ -83,6 +90,36 @@ EXPECTED_MIGRATION_LEAF = (
     "django_ray",
     "0026_ray_task_target_execution_evidence",
 )
+
+
+def _verify_canonical_module_layout(files: set[str]) -> None:
+    target_files = {
+        path
+        for path in files
+        if path.endswith(".py")
+        and (
+            path.startswith(("django_ray/target/", "django_ray/target_"))
+            or path == "django_ray/ray_target_probe.py"
+        )
+    }
+    workflow_files = {
+        path
+        for path in files
+        if path.endswith(".py")
+        and (path.startswith("django_ray/workflow") or path == "django_ray/admin_workflow_graph.py")
+    }
+
+    for package, actual, expected in (
+        ("target", target_files, EXPECTED_TARGET_MODULE_FILES),
+        ("workflow", workflow_files, EXPECTED_WORKFLOW_MODULE_FILES),
+    ):
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"wheel {package} module layout mismatch: "
+                f"missing={missing!r}, unexpected={unexpected!r}"
+            )
 
 
 def _verify_ray_security_floor(requirements: list[str], *, source: str) -> None:
@@ -180,6 +217,7 @@ def verify_installed_wheel(expected_version: str) -> None:
     missing = sorted(EXPECTED_FILES - files)
     if missing:
         raise RuntimeError(f"wheel is missing expected files: {', '.join(missing)}")
+    _verify_canonical_module_layout(files)
 
     runtime_unfold_requirements = [
         requirement

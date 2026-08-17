@@ -1751,7 +1751,7 @@ def _normalize_nested_runtime_env(
         sort_keys=False,
         max_bytes=NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES,
     )
-    from django_ray.workflow_plans import runtime_env_plan_identity_from_transport
+    from django_ray.workflow.plans import runtime_env_plan_identity_from_transport
 
     normalized = runtime_env_plan_identity_from_transport(
         identity,

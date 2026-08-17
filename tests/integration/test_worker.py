@@ -1561,7 +1561,7 @@ class TestWorkerRayJobFailureHandling:
     def test_submit_task_to_ray_does_not_retry_pinned_plan_mismatch(self, monkeypatch):
         """A changed pinned plan is permanent for the existing task identity."""
         from django_ray.runner.ray_job import RayJobRunner
-        from django_ray.workflow_plans import WorkflowPlanMismatchError
+        from django_ray.workflow.plans import WorkflowPlanMismatchError
 
         cmd = self._make_command()
         task = RayTaskExecution.objects.create(

@@ -19,6 +19,7 @@ from typing import Any
 
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.import_utils import import_callable
+from django_ray.workflow.contracts import WorkflowDefinitionKind
 
 
 class WorkflowDefinitionError(ValueError):
@@ -397,7 +398,7 @@ class _LocalExecutor(_Executor):
         task_context = get_current_task_context()
         if task_context is None:
             return
-        from django_ray.workflow_progress import pin_workflow_plan
+        from django_ray.workflow.progress.runs import pin_workflow_plan
 
         selection = materialized_plan.plan.eligibility.select(
             "local",
@@ -407,7 +408,7 @@ class _LocalExecutor(_Executor):
         if task_context.attempt_number is None or task_context.execution_generation is None:
             return
         if not pin_workflow_plan(task_context, materialized_plan.plan, selection):
-            from django_ray.workflow_plans import WorkflowPlanMismatchError
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
 
             raise WorkflowPlanMismatchError(
                 "The durable task attempt is stale; workflow plan pinning was rejected"
@@ -616,7 +617,7 @@ class _RayExecutor(_Executor):
         requested_policy: str,
         reporting_policy: str = "full",
     ) -> None:
-        from django_ray.workflow_plans import prepare_materialized_plan_for_ray
+        from django_ray.workflow.plans import prepare_materialized_plan_for_ray
 
         super().bind_plan(
             materialized_plan,
@@ -633,7 +634,7 @@ class _RayExecutor(_Executor):
         ):
             self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
             return
-        from django_ray.workflow_progress import allocate_workflow_run
+        from django_ray.workflow.progress.runs import allocate_workflow_run
 
         selection = materialized_plan.plan.eligibility.select(
             "dynamic_tasks",
@@ -646,16 +647,16 @@ class _RayExecutor(_Executor):
             selection=selection,
         )
         if identity is None:
-            from django_ray.workflow_plans import WorkflowPlanMismatchError
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
 
             raise WorkflowPlanMismatchError(
                 "The durable task attempt is stale; workflow plan claim was rejected"
             )
         prepared_plan = prepare_materialized_plan_for_ray(materialized_plan)
-        from django_ray.workflow_progress import refresh_workflow_run_activity
+        from django_ray.workflow.progress.runs import refresh_workflow_run_activity
 
         if not refresh_workflow_run_activity(identity):
-            from django_ray.workflow_plans import WorkflowPlanMismatchError
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
 
             raise WorkflowPlanMismatchError(
                 "The durable workflow run became stale during RuntimeEnv preparation"
@@ -669,7 +670,7 @@ class _RayExecutor(_Executor):
             WORKFLOW_PROGRESS_LIMITS_V1,
             WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
         )
-        from django_ray.workflow_progress_protocol import (
+        from django_ray.workflow.progress.protocol import (
             WorkflowProgressEventKind,
             prepare_workflow_progress_event,
         )
@@ -709,7 +710,7 @@ class _RayExecutor(_Executor):
         identity = self.workflow_run_identity
         if identity is None:
             raise AssertionError("a workflow progress actor requires a complete run identity")
-        from django_ray.workflow_progress_protocol import send_workflow_progress_event
+        from django_ray.workflow.progress.protocol import send_workflow_progress_event
 
         try:
             send_workflow_progress_event(
@@ -736,7 +737,7 @@ class _RayExecutor(_Executor):
         """Send dependency edges in independently bounded protocol batches."""
         if actor is None or not dependencies:
             return
-        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+        from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
         edge_batch: list[dict[str, str]] = []
         for dependency in dependencies:
@@ -900,7 +901,7 @@ class _RayExecutor(_Executor):
             plan_node = (
                 materialized_plan.node_for_id(node_id) if materialized_plan is not None else None
             )
-            from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+            from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
             self._send_progress_event(
                 progress_actor,
@@ -1560,7 +1561,7 @@ class _RayExecutor(_Executor):
     ) -> None:
         if self.progress_actor is None or self._progress_suppression_depth:
             return
-        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+        from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
         sent = self._send_progress_event(
             self.progress_actor,
@@ -1600,7 +1601,7 @@ class _RayExecutor(_Executor):
         last_sent = self._map_progress_sent_at.get(node_id, 0.0)
         if not force and now - last_sent < flush_seconds:
             return
-        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+        from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
         if self._send_progress_event(
             self.progress_actor,
@@ -1628,7 +1629,7 @@ class _RayExecutor(_Executor):
     ) -> None:
         if self.progress_actor is None or self._progress_suppression_depth:
             return
-        from django_ray.workflow_progress_protocol import WorkflowProgressEventKind
+        from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
         self._send_progress_event(
             self.progress_actor,
@@ -1719,7 +1720,7 @@ class _RayExecutor(_Executor):
             False,
         )
         if revision != self.last_progress_revision or (failed and not already_persisted_failed):
-            from django_ray.workflow_progress import persist_workflow_progress
+            from django_ray.workflow.progress.runs import persist_workflow_progress
 
             try:
                 accepted = persist_workflow_progress(
@@ -1824,7 +1825,7 @@ class _RayExecutor(_Executor):
             return False
         self._terminal_progress_publication_attempted = True
         try:
-            from django_ray.workflow_progress_publication import (
+            from django_ray.workflow.progress.publication import (
                 publish_terminal_workflow_progress,
             )
 
@@ -1850,6 +1851,11 @@ class _RayExecutor(_Executor):
 
 class WorkflowSignature(ABC):
     """A lazy, reusable workflow expression."""
+
+    @property
+    def _workflow_definition_kind(self) -> WorkflowDefinitionKind | None:
+        """Return the compiler kind for built-in definitions."""
+        return None
 
     @abstractmethod
     def _submit(
@@ -1898,7 +1904,7 @@ class WorkflowSignature(ABC):
     ) -> Any:
         """Execute with package-owned options separate from application kwargs."""
         from django_ray.runtime.context import get_current_task_context
-        from django_ray.workflow_plans import materialize_workflow_plan
+        from django_ray.workflow.plans import materialize_workflow_plan
 
         reporting_policy = _workflow_progress_policy(reporting_policy)
         materialized_plan = materialize_workflow_plan(
@@ -1960,6 +1966,10 @@ class Step(WorkflowSignature):
     ray_options: Mapping[str, Any] = field(default_factory=dict)
     runtime_env: str | Mapping[str, Any] | None = None
     output_preview_path: str | None = None
+
+    @property
+    def _workflow_definition_kind(self) -> WorkflowDefinitionKind:
+        return WorkflowDefinitionKind.STEP
 
     def __post_init__(self) -> None:
         # Bound values are invocation data, not plan metadata. Freeze only the
@@ -2041,6 +2051,10 @@ class Chain(WorkflowSignature):
 
     signatures: tuple[WorkflowSignature, ...]
 
+    @property
+    def _workflow_definition_kind(self) -> WorkflowDefinitionKind:
+        return WorkflowDefinitionKind.CHAIN
+
     def _submit(
         self,
         executor: _Executor,
@@ -2077,6 +2091,10 @@ class Group(WorkflowSignature):
     """Fan out the same input to several signatures and gather their results."""
 
     signatures: tuple[WorkflowSignature, ...]
+
+    @property
+    def _workflow_definition_kind(self) -> WorkflowDefinitionKind:
+        return WorkflowDefinitionKind.GROUP
 
     def _submit(
         self,
@@ -2140,6 +2158,10 @@ class Map(WorkflowSignature):
     cancel_timeout_seconds: float = 1.0
     result_buffer: _MapResultBuffer | None = None
     result_fold: _MapResultFold | None = None
+
+    @property
+    def _workflow_definition_kind(self) -> WorkflowDefinitionKind:
+        return WorkflowDefinitionKind.MAP
 
     def __post_init__(self) -> None:
         _validate_map_limit("max_concurrency", self.max_concurrency, minimum=1)

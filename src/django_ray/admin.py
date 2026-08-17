@@ -47,16 +47,6 @@ from django.utils.html import format_html
 from django.utils.http import quote, unquote
 from django.utils.text import Truncator
 
-from django_ray.admin_workflow_graph import (
-    ADMIN_WORKFLOW_GRAPH_MAX_DETAILS,
-    ADMIN_WORKFLOW_GRAPH_MAX_EDGES,
-    ADMIN_WORKFLOW_GRAPH_MAX_NODES,
-    ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES,
-    AdminWorkflowGraphError,
-    build_admin_workflow_graph,
-    degraded_admin_workflow_graph,
-    inspect_admin_workflow_graph_summary,
-)
 from django_ray.conf.settings import get_settings
 from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
 from django_ray.lifecycle import (
@@ -75,17 +65,22 @@ from django_ray.models import (
 from django_ray.protocol_status import annotate_execution_protocol_availability
 from django_ray.redaction import normalize_terminal_text, redact_text, safe_json_dumps
 from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
-from django_ray.workflow.progress.summary import (
-    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
-    WORKFLOW_PROGRESS_TERMINAL_STATES,
+from django_ray.workflow.admin_graph import (
+    ADMIN_WORKFLOW_GRAPH_MAX_DETAILS,
+    ADMIN_WORKFLOW_GRAPH_MAX_EDGES,
+    ADMIN_WORKFLOW_GRAPH_MAX_NODES,
+    ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES,
+    AdminWorkflowGraphError,
+    build_admin_workflow_graph,
+    degraded_admin_workflow_graph,
+    inspect_admin_workflow_graph_summary,
 )
-from django_ray.workflow_plans import (
+from django_ray.workflow.plans import (
     MAX_PLAN_BYTES,
     effective_plan_selection_reporting_policy,
     validate_plan_selection_manifest,
 )
-from django_ray.workflow_progress import MAX_PLAN_SELECTION_BYTES
-from django_ray.workflow_progress_reads import (
+from django_ray.workflow.progress.reads import (
     WorkflowProgressReadError,
     WorkflowProgressReadErrorCode,
     get_workflow_node_detail,
@@ -93,6 +88,11 @@ from django_ray.workflow_progress_reads import (
     list_workflow_node_details,
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
+)
+from django_ray.workflow.progress.runs import MAX_PLAN_SELECTION_BYTES
+from django_ray.workflow.progress.summary import (
+    WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
+    WORKFLOW_PROGRESS_TERMINAL_STATES,
 )
 
 _DJANGO_RAY_ADMIN_USES_UNFOLD = apps.is_installed("unfold")

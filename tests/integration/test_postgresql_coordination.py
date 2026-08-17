@@ -27,7 +27,7 @@ from django.urls import resolve, reverse
 from django.utils import timezone
 
 import django_ray.admin as django_ray_admin
-import django_ray.workflow_progress as workflow_progress_module
+import django_ray.workflow.progress.runs as workflow_progress_module
 from django_ray import __version__ as django_ray_version
 from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.input_storage import (
@@ -67,16 +67,16 @@ from django_ray.runner.leasing import WorkerLeaseIdentity, get_active_workers
 from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
 from django_ray.runner.reconciliation import mark_task_lost, mark_task_timed_out
 from django_ray.runtime.context import DurableTaskContext, WorkflowRunIdentity
-from django_ray.workflow.progress.summary import (
-    deserialize_workflow_progress_summary,
-    serialize_workflow_progress_summary,
-)
-from django_ray.workflow_progress import (
+from django_ray.workflow.progress.runs import (
     WorkflowProgressDiagnosticCode,
     allocate_workflow_run,
     persist_workflow_progress,
     persist_workflow_progress_summary,
     read_workflow_progress,
+)
+from django_ray.workflow.progress.summary import (
+    deserialize_workflow_progress_summary,
+    serialize_workflow_progress_summary,
 )
 from testproject import api as testproject_api
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
@@ -3945,7 +3945,7 @@ def test_rq2_public_submit_enforces_utf8_request_boundary_on_postgresql(
     from django_ray.runner.ray_job import RayJobRunner
     from django_ray.runtime.runtime_env import normalize_runtime_env
     from django_ray.runtime.serialization import serialize_args
-    from django_ray.workflow_plans import runtime_env_plan_identity
+    from django_ray.workflow.plans import runtime_env_plan_identity
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,

@@ -19,7 +19,7 @@ from django_ray.models import (
     WorkflowProgressTopologyManifestPage,
     WorkflowProgressTopologyPage,
 )
-from django_ray.workflow_progress_storage import (
+from django_ray.workflow.progress.storage import (
     WorkflowProgressStorageConflictError,
     persist_workflow_progress_publication,
     prepare_workflow_progress_node_detail,

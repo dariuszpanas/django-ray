@@ -7596,7 +7596,7 @@ from django_ray.runtime.runtime_env import (
     resolve_runtime_env_profile,
     snapshot_local_runtime_env,
 )
-from django_ray.workflow_plans import runtime_env_plan_identity
+from django_ray.workflow.plans import runtime_env_plan_identity
 
 if not ray.is_initialized():
     ray.init(address=os.environ["RAY_ADDRESS"], ignore_reinit_error=True)
