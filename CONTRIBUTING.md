@@ -133,32 +133,44 @@ base change, or title- or body-only edit requires a new Codex outcome after that
 records do not bind the base SHA, so even an existing exact-head connector review is not reusable
 after an edit. The Codex gate also verifies that its Actions run is the newest run for this pull
 request and head; manually rerunning an older lifecycle event cannot supersede a later edit. Before
-success, it rejects evidence when the live pull request was updated after the accepted connector
-signal, closing any workflow-history indexing lag. A prior pull-request root clean reaction is also
-deliberately not reusable. For an edited pull request, wait for a fresh exact-head connector review
-or a new `+1` on a SHA-bound maintainer request comment. `Codex Review` otherwise waits for a fresh
-exact-head connector review or a clean reaction bound to the new candidate. After every push, base
-change, or edit, post a fresh `@codex review` request with the current full head SHA marker and wait
-for the new `Codex Review` result:
+success, it rechecks the exact live head and base. Review comments and reaction transitions may update
+pull-request activity timestamps, but they do not replace candidate identity or workflow lineage.
+
+The trusted `Codex Review` workflow posts one full-SHA `@codex review` request for every eligible
+pull-request event and passes its immutable comment ID to the polling gate. Contributors do not need
+to post a second request. A workflow rerun creates a new request after that attempt starts rather than
+reusing review state from an earlier attempt. The request body is:
 
 ```text
 @codex review
 
-<!-- django-ray:codex-review-head=<full current head SHA> -->
+<!-- django-ray:codex-review-head=<full head SHA>;run=<workflow run ID>;attempt=<run attempt>;metadata=<title/body digest>;lifecycle=<event digest> -->
 ```
 
-After a push or edit, only a fresh exact-head Codex review or the connector's `+1` on that SHA-bound
-maintainer request comment counts; a pull-request root reaction never counts. An earlier request or
-review does not cover the new event candidate. Draft pull requests fail both review checks. GitHub's
-native required review-conversation resolution remains enabled separately, so every actionable
-thread must also be resolved before merge. Reply to each actionable thread with the implemented fix
-and its validation, or with the explicit reason for declining it, before resolving the conversation.
+Only an `eyes` reaction from the immutable Codex connector identity counts; reactions from Actions,
+maintainers, or other users are ignored. The gate must first observe Codex `eyes` on the exact
+attempt-bound request. It then waits while connector `eyes` remains on that request or the pull-request
+root. After the request's connector `eyes` disappears, two consecutive eye-free polling observations
+settle the review, followed by workflow-lineage and exact live head/base confirmation. The gate does
+not interpret `+1`, formal review state, or any other reaction as completion evidence. A workflow
+attempt waits up to 30 minutes so the observed review can finish without losing its state to a rerun;
+if the connector never acknowledges that exact request with `eyes`, the attempt fails closed.
+The workflow reads title and body from the runner-provided `GITHUB_EVENT_PATH` with a bounded
+file-backed parser; it never places the potentially large body in an environment variable or command
+argument. The request's metadata digest binds those values through final confirmation, so either field
+changing invalidates the attempt without relying on reaction-driven pull-request activity timestamps.
+The request also binds a canonical digest of bounded close, reopen, draft-conversion, and ready events
+through the trigger. Final confirmation brackets a lifecycle re-read with two live pull-request reads
+and requires a stable activity timestamp across that short window, so a lifecycle round trip cannot
+restore the old predicates and satisfy a superseded attempt.
 
-Only the first automatic opened or ready run may accept a fresh pull-request root clean reaction.
-Every rerun ignores pull-request root reactions and requires either an exact-head review or the
-connector's `+1` on the SHA-bound maintainer request comment. If the bounded Codex poll times out on
-an unchanged candidate, post that request and rerun the latest failed `Codex Review` check. A rerun
-of a workflow event superseded by a later pull-request event fails closed.
+`Codex Review` proves that the requested review settled; it does not reinterpret findings as an
+approval. GitHub's native required review-conversation resolution remains enabled separately, so a
+completed Codex review with findings cannot merge until every actionable thread is resolved. Reply to
+each actionable thread with the implemented fix and its validation, or with the explicit reason for
+declining it, before resolving the conversation. An earlier request or review does not cover a newer
+event candidate, draft pull requests fail both review checks, and a workflow event superseded by a
+later pull-request event fails closed.
 
 ## Rebase auto-merge
 
@@ -206,8 +218,8 @@ retain each one as a focused commit with its own descriptive body. Run the valid
 PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
-conflicts, run `uv run make ci`, and push. Post a fresh `@codex review` request after that push;
-auto-merge will wait for the new head's checks. The merge policy's steady state requires
+conflicts, run `uv run make ci`, and push. The trusted workflow posts the fresh exact-head Codex
+request; auto-merge waits for the new head's checks. The merge policy's steady state requires
 `Commit Messages`, `CI Gate`, `Maintainer Approval`, and `Codex Review` from GitHub Actions, requires
 native review conversation resolution, and permits rebase merges only. Activate a new required
 context only after its workflow is merged and a ready canary pull request reports that exact context

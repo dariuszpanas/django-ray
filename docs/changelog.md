@@ -153,9 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the installed-version RuntimeEnv requirement and minimum-dependency CI, without
   stale duplicate literals.
 - Required Codex review evidence is now fresh after every pull-request edit as well as every push or
-  base change. Superseded workflow reruns and connector signals followed by later pull-request
-  activity fail closed, preventing an older same-head review from being reused for a later event
-  candidate.
+  base change. Superseded workflow reruns and exact head/base drift fail closed, while ordinary review
+  comments and reaction transitions no longer impersonate a candidate change.
+- The trusted Codex gate now posts its own attempt-bound full-SHA review request, requires the
+  connector's authenticated `eyes` on that exact comment, and settles only after connector `eyes`
+  disappears from both the request and pull-request root for consecutive polls. It does not infer an
+  outcome from other reactions, and a bounded event-file reader binds the title/body digest through
+  final confirmation without placing the potentially large body in process environment or arguments;
+  a bounded lifecycle-event digest and stable final snapshot also reject close/reopen and draft/ready
+  round trips. Findings remain subject to native required conversation resolution.
 - GitHub workflows now declare least-privilege token permissions, and manual TestPyPI rehearsals
   check out only the trusted default branch before proving its exact authorized candidate identity.
 
@@ -180,7 +186,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creates its generation evidence, and Ray Job remains unsupported.
 - Required `Maintainer Approval` and `Codex Review` merge checks now let the repository owner merge
   without self-approval while requiring the owner's current-head approval for every other author, a
-  fresh base-and-head-bound Codex review signal, and native resolution of every review conversation.
+  fresh base-and-head-bound Codex review request cycle, and native resolution of every review
+  conversation.
   Their staged ruleset activation also requires strict status freshness and separate owner plus
   external-or-bot canaries before rollout is considered complete.
 - A Django-free, versioned target-attestation contract now defines bounded canonical
