@@ -2,7 +2,7 @@ name: Codex Review
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, closed]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
 
 permissions:
   actions: read
@@ -27,8 +27,7 @@ jobs:
 
       - name: Request an exact-head Codex review
         if: >-
-          github.event.action != 'converted_to_draft' &&
-          github.event.action != 'closed'
+          github.event.action != 'converted_to_draft'
         id: request
         env:
           ACTION: ${{ github.event.action }}

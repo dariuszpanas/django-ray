@@ -138,6 +138,41 @@ Before success, it rechecks the exact live head and base. Review comments and re
 may update pull-request activity timestamps, but they do not replace candidate identity or workflow
 lineage.
 
+Maintainer approval events cross an explicit privilege boundary. The unprivileged `Maintainer
+Approval Event` workflow observes lifecycle and review events without checking out pull-request code
+or receiving a write token. Trusted lifecycle run names and GitHub's immutable review source-run head
+let the default-branch `Maintainer Approval Publisher` identify the affected heads without a fallible
+parser job. Review-triggered publication derives the current head from that source-run field and
+ignores both the untrusted review run name and its volatile pull-request association list. For every
+affected current, displaced, or closed head, the candidate job's first no-checkout step replaces the
+prior `Maintainer Approval` context with `pending` before checkout or any policy API read. It then
+validates the source workflow path, event, head, and unique open pull-request association before
+replacing that same context with the live policy's `success` or `failure`; approval, dismissal,
+reapproval, and unrelated reviews therefore update one required state instead of creating ambiguous
+same-named check runs. The publisher trusts no upstream artifact or pull-request code and checks out
+the exact default-branch commit bound to its dispatch, so a later default-branch advance cannot
+replace the evaluator mid-run.
+
+Current-head evaluation and synchronize-only displaced-head recovery run as independent jobs. Each
+job is serialized by its candidate head, the actual commit-status scope, so cancellation for one head
+cannot suppress evaluation for another. Later owner events supersede displaced-head recovery from a
+different pull request on the same head. Closure events also re-evaluate the closed head, allowing a
+remaining pull request to recover when shared-head ownership becomes unique. A closed head, or a
+delayed older event for a head with durable but no longer owning PR associations, returns to terminal
+success only after the capacity read and a final no-owner confirmation. An uncorroborated empty
+association lookup remains pending. Before publishing policy, the publisher alternates live-policy
+evaluation with exact-head ownership confirmation, rechecks an approved result after the final
+preliminary ownership read, and gates every final state on one last same-owner confirmation.
+Associations whose current head has advanced do not count as shared ownership. The observer conclusion
+never becomes a final status directly; even a failed or delayed source run publishes only a fresh
+live-policy evaluation. Pending and final states link to the exact publisher run attempt, so a manual
+rerun cannot mistake an earlier attempt's pending state for its own.
+Before final publication, the publisher counts this context. When one final publication slot remains,
+it uses that slot for a failure requiring a new head; if invalidation has already consumed the limit,
+`pending` remains the latest state. Its own event stream therefore cannot exhaust the API while
+leaving `success` current.
+Approval event observation is nonblocking; the trusted publisher owns the required state.
+
 The trusted `Codex Review` workflow posts one full-SHA `@codex review` request for every eligible
 pull-request event and passes its immutable comment ID to the polling gate. Contributors do not need
 to post a second request. A workflow rerun creates a new request after that attempt starts rather than
@@ -165,6 +200,8 @@ The request also binds a canonical digest of bounded close, reopen, draft-conver
 through the trigger. Final confirmation brackets a lifecycle re-read with two live pull-request reads
 and requires a stable activity timestamp across that short window, so a lifecycle round trip cannot
 restore the old predicates and satisfy a superseded attempt.
+Closing or merging a pull request does not trigger a new `Codex Review` run; closure remains lifecycle
+evidence for an already-running attempt without publishing a failed post-merge check.
 
 `Codex Review` proves that the requested review settled; it does not reinterpret findings as an
 approval. GitHub's native required review-conversation resolution remains a separate merge condition,
@@ -602,10 +639,13 @@ docs, typing, all supported Python tests, PostgreSQL coordination, live-cluster 
 testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and package build all
 report `success`. Its `always()` condition
 makes a failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead of a
-successful skip. `Maintainer Approval` and `Codex Review` use read-only permissions and check out only
-the default branch, never pull-request code. This repository uses rebase auto-merge rather than a
-merge queue: auto-merge waits for all four required checks and native required review-conversation
-resolution, then applies the rebase method.
+successful skip. `Codex Review` checks out only default-branch code with bounded permissions.
+Maintainer approval review events execute only the unprivileged observer; the separate
+`workflow_run` publisher alone receives permission to update commit statuses. Each status-writing job
+invalidates the old state before that same job checks out default-branch code and evaluates policy.
+Neither path executes pull-request code with a write token. This repository uses
+rebase auto-merge rather than a merge queue: auto-merge waits for all four required checks and native
+required review-conversation resolution, then applies the rebase method.
 
 Native Compiled Graph evidence is produced only by the guarded local KubeRay pilot, not a public
 hosted workflow. Coverage-debt review and benchmark workflows are evidence producers, not merge
@@ -645,9 +685,12 @@ successfully; GitHub does not retroactively create a newly required check. Stage
 must also enable strict required-status freshness so a changed base cannot reuse results from an
 older candidate. An owner-authored canary proves the contexts but does not exercise the
 review-submission trigger. Treat rollout as incomplete until an external or bot-authored canary is
-available and proves the current-head maintainer approval path. The native approval count remains
-zero so the owner does not need self-approval; `Maintainer Approval` requires the owner's
-current-head approval for every other author. The current owner `pull_request` bypass remains
+available and proves that approval, dismissal, reapproval, synchronization, and an unrelated
+`COMMENTED` review replace the single current-head `Maintainer Approval` status without leaving a
+second required result. Existing pull requests with legacy same-named check runs must move to a new
+head before serving as that canary. The native approval count remains zero so the owner does not need
+self-approval; `Maintainer Approval` requires the owner's current-head approval for every other author.
+The current owner `pull_request` bypass remains
 explicit break-glass recovery, not absolute enforcement against an intentional owner bypass. Routine
 merges remain gated, and emergency use requires the explicit
 `gh pr merge --admin --rebase <PR-number>` command.

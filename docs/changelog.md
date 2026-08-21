@@ -108,6 +108,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Maintainer approval lifecycle and review events now replace one authoritative commit status instead
+  of creating contradictory same-named check runs. The trusted publisher invalidates every affected
+  head before evaluation and isolates shared-head recovery so cancellation for one commit cannot
+  suppress another commit's result. At GitHub's per-context status limit it leaves either `pending` or
+  an explicit failure as the latest state, requiring a new head instead of preserving stale success;
+  delayed source events restore an already closed head once live association reads complete.
+- Closing or merging a pull request no longer starts a second `Codex Review` workflow that can attach
+  a failed required check after the pull request has already merged.
 - Runtime dependency floors now require Django 6.0.8 and sqlparse 0.6.0, preventing fresh
   and locked installs from resolving versions covered by current security advisories. Minimum
   dependency and benchmark lanes exercise the same patched pair, while the Admin breadcrumb
