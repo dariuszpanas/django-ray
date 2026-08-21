@@ -25,10 +25,15 @@ REQUIRED_CHECK_JOBS = {
     ("ci.yml", "ci-gate"): "CI Gate",
     ("codex-review.yml", "codex-review"): "Codex Review",
     ("commit-messages.yml", "conventional-commits"): "Commit Messages",
-    ("maintainer-approval.yml", "maintainer-approval"): "Maintainer Approval",
 }
-REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values())
-EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {}
+PUBLISHED_REQUIRED_CHECKS = {"Maintainer Approval"}
+REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values()) | PUBLISHED_REQUIRED_CHECKS
+EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
+    (
+        "maintainer-approval-event.yml",
+        "observe-maintainer-approval",
+    ): "Approval event observation is nonblocking; the trusted publisher owns the required state."
+}
 
 
 def _workflow_paths() -> list[Path]:
@@ -843,7 +848,7 @@ def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
     ci = _workflow()
     codex_review = _workflow(WORKFLOWS / "codex-review.yml")
     commit_messages = _workflow(WORKFLOWS / "commit-messages.yml")
-    maintainer_approval = _workflow(WORKFLOWS / "maintainer-approval.yml")
+    maintainer_publisher = _workflow(WORKFLOWS / "maintainer-approval.yml")
 
     assert ci["concurrency"] == {
         "group": "ci-${{ github.event.pull_request.number || github.run_id }}",
@@ -853,8 +858,22 @@ def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
         "group": "commit-messages-${{ github.event.pull_request.number }}",
         "cancel-in-progress": "true",
     }
-    assert maintainer_approval["concurrency"] == {
-        "group": "maintainer-approval-${{ github.event.pull_request.number }}",
+    assert "concurrency" not in maintainer_publisher
+    maintainer_jobs = _jobs(WORKFLOWS / "maintainer-approval.yml")
+    assert maintainer_jobs["publish-current-maintainer-approval"]["concurrency"] == {
+        "group": (
+            "maintainer-approval-head-${{ github.event.workflow_run.event == "
+            "'pull_request_review' && "
+            "github.event.workflow_run.head_sha || "
+            "fromJSON(github.event.workflow_run.display_title).head }}"
+        ),
+        "cancel-in-progress": "true",
+    }
+    assert maintainer_jobs["recover-displaced-maintainer-approval"]["concurrency"] == {
+        "group": (
+            "maintainer-approval-head-"
+            "${{ fromJSON(github.event.workflow_run.display_title).previous }}"
+        ),
         "cancel-in-progress": "true",
     }
     assert codex_review["concurrency"] == {
@@ -864,7 +883,7 @@ def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
 
 
 def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
-    lifecycle_types = [
+    common_lifecycle_types = [
         "opened",
         "synchronize",
         "reopened",
@@ -872,84 +891,222 @@ def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
         "ready_for_review",
         "converted_to_draft",
     ]
-    maintainer_events = _workflow(WORKFLOWS / "maintainer-approval.yml")["on"]
+    maintainer_events = _workflow(WORKFLOWS / "maintainer-approval-event.yml")["on"]
     codex_events = _workflow(WORKFLOWS / "codex-review.yml")["on"]
 
     assert maintainer_events == {
-        "pull_request_target": {"types": lifecycle_types},
+        "pull_request_target": {"types": [*common_lifecycle_types, "closed"]},
         "pull_request_review": {"types": ["submitted", "dismissed"]},
     }
-    assert codex_events == {"pull_request_target": {"types": [*lifecycle_types, "closed"]}}
+    assert codex_events == {"pull_request_target": {"types": common_lifecycle_types}}
+    assert "closed" not in codex_events["pull_request_target"]["types"]
 
 
 @pytest.mark.parametrize(
-    ("workflow_name", "job_id", "timeout_minutes"),
+    ("workflow_name", "job_id", "timeout_minutes", "checkout_index"),
     [
-        ("maintainer-approval.yml", "maintainer-approval", "5"),
-        ("codex-review.yml", "codex-review", "35"),
+        ("maintainer-approval.yml", "publish-current-maintainer-approval", "5", 1),
+        ("maintainer-approval.yml", "recover-displaced-maintainer-approval", "5", 1),
+        ("codex-review.yml", "codex-review", "35", 0),
     ],
 )
 def test_review_policy_workflows_execute_only_trusted_default_branch_code(
     workflow_name: str,
     job_id: str,
     timeout_minutes: str,
+    checkout_index: int,
 ) -> None:
     path = WORKFLOWS / workflow_name
     workflow = _workflow(path)
     job = _jobs(path)[job_id]
 
     expected_permissions = {"contents": "read", "pull-requests": "read"}
-    if workflow_name == "codex-review.yml":
+    if workflow_name == "maintainer-approval.yml":
+        expected_permissions["actions"] = "read"
+    else:
         expected_permissions["actions"] = "read"
         expected_permissions["pull-requests"] = "write"
     assert workflow["permissions"] == expected_permissions
-    assert set(_jobs(path)) == {job_id}
+    expected_jobs = (
+        {
+            "publish-current-maintainer-approval",
+            "recover-displaced-maintainer-approval",
+        }
+        if workflow_name == "maintainer-approval.yml"
+        else {job_id}
+    )
+    assert set(_jobs(path)) == expected_jobs
     assert job["timeout-minutes"] == timeout_minutes
-    assert "if" not in job
+    if job_id == "publish-current-maintainer-approval":
+        assert job["if"] == (
+            "github.event.workflow_run.path == "
+            "'.github/workflows/maintainer-approval-event.yml' && "
+            "(github.event.workflow_run.event == 'pull_request_target' || "
+            "github.event.workflow_run.event == 'pull_request_review')"
+        )
+    elif job_id == "recover-displaced-maintainer-approval":
+        assert job["if"] == (
+            "github.event.workflow_run.path == "
+            "'.github/workflows/maintainer-approval-event.yml' && "
+            "github.event.workflow_run.event == 'pull_request_target' && "
+            "fromJSON(github.event.workflow_run.display_title).action == 'synchronize' && "
+            "fromJSON(github.event.workflow_run.display_title).previous != "
+            "fromJSON(github.event.workflow_run.display_title).head"
+        )
+    else:
+        assert "if" not in job
     assert "continue-on-error" not in job
-    assert "needs" not in job
+    if workflow_name == "maintainer-approval.yml":
+        assert "needs" not in job
+        assert job["permissions"] == {
+            "actions": "read",
+            "contents": "read",
+            "pull-requests": "read",
+            "statuses": "write",
+        }
+    else:
+        assert "needs" not in job
 
     steps = job["steps"]
     assert isinstance(steps, list)
-    checkout = steps[0]
+    checkout = steps[checkout_index]
     assert checkout["uses"] == CHECKOUT_ACTION
+    expected_checkout_ref = (
+        "${{ github.sha }}"
+        if workflow_name == "maintainer-approval.yml"
+        else "${{ github.event.repository.default_branch }}"
+    )
     assert checkout["with"] == {
         "fetch-depth": "1",
-        "ref": "${{ github.event.repository.default_branch }}",
+        "ref": expected_checkout_ref,
         "persist-credentials": "false",
     }
     if workflow_name == "codex-review.yml":
-        assert steps[1]["if"] == (
-            "github.event.action != 'converted_to_draft' && github.event.action != 'closed'"
-        )
+        assert steps[1]["if"] == "github.event.action != 'converted_to_draft'"
         assert all("if" not in step for step in (steps[0], *steps[2:]))
     else:
         assert all("if" not in step for step in steps)
     assert not _contains_key(steps, "continue-on-error")
 
-    validation = steps[1]
+    validation = steps[checkout_index + 1]
     assert validation["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-    assert "scripts/check_pr_review_policy.py" in validation["run"]
+    expected_script = (
+        "scripts/publish_maintainer_approval.py"
+        if workflow_name == "maintainer-approval.yml"
+        else "scripts/check_pr_review_policy.py"
+    )
+    assert expected_script in validation["run"]
     assert "${{" not in validation["run"]
     assert "git fetch" not in validation["run"]
 
 
-def test_maintainer_approval_invokes_exact_base_and_head_policy() -> None:
-    step = _jobs(WORKFLOWS / "maintainer-approval.yml")["maintainer-approval"]["steps"][1]
+def test_maintainer_approval_uses_independent_head_scoped_status_publishers() -> None:
+    workflow = _workflow(WORKFLOWS / "maintainer-approval.yml")
+    jobs = _jobs(WORKFLOWS / "maintainer-approval.yml")
+    current = jobs["publish-current-maintainer-approval"]
+    displaced = jobs["recover-displaced-maintainer-approval"]
+    current_invalidation = current["steps"][0]
+    displaced_invalidation = displaced["steps"][0]
+    current_step = current["steps"][2]
+    displaced_step = displaced["steps"][2]
 
-    assert step["env"] == {
-        "BASE_REF": "${{ github.event.pull_request.base.ref }}",
-        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-        "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
-        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
-        "PR_NUMBER": "${{ github.event.pull_request.number }}",
+    assert workflow["on"] == {
+        "workflow_run": {
+            "workflows": ["Maintainer Approval Event"],
+            "types": ["completed"],
+        }
     }
-    assert "--mode maintainer" in step["run"]
-    assert '--repository "$GITHUB_REPOSITORY"' in step["run"]
-    assert '--pull-request "$PR_NUMBER"' in step["run"]
-    assert '--expected-base-ref "$BASE_REF"' in step["run"]
-    assert '--expected-base-sha "$BASE_SHA"' in step["run"]
-    assert '--expected-head "$HEAD_SHA"' in step["run"]
+    assert "concurrency" not in workflow
+    assert "strategy" not in current
+    assert "strategy" not in displaced
+    assert "needs" not in current
+    assert "needs" not in displaced
+    trusted_current_head = (
+        "${{ github.event.workflow_run.event == 'pull_request_review' && "
+        "github.event.workflow_run.head_sha || "
+        "fromJSON(github.event.workflow_run.display_title).head }}"
+    )
+    trusted_previous_head = (
+        "${{ github.event.workflow_run.event == 'pull_request_review' && "
+        "github.event.workflow_run.head_sha || "
+        "fromJSON(github.event.workflow_run.display_title).previous }}"
+    )
+    common_invalidation_env = {
+        "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+        "PUBLISHER_RUN_ID": "${{ github.run_id }}",
+        "PUBLISHER_RUN_ATTEMPT": "${{ github.run_attempt }}",
+    }
+    assert current_invalidation["env"] == {
+        **common_invalidation_env,
+        "HEAD_SHA": trusted_current_head,
+    }
+    assert displaced_invalidation["env"] == {
+        **common_invalidation_env,
+        "HEAD_SHA": "${{ fromJSON(github.event.workflow_run.display_title).previous }}",
+    }
+    for invalidation in (current_invalidation, displaced_invalidation):
+        assert "gh api --method POST" in invalidation["run"]
+        assert "state=pending" in invalidation["run"]
+        assert "context='Maintainer Approval'" in invalidation["run"]
+        assert "/attempts/$PUBLISHER_RUN_ATTEMPT" in invalidation["run"]
+        assert "${{" not in invalidation["run"]
+
+    common_env = {
+        "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+        "PUBLISHER_RUN_ID": "${{ github.run_id }}",
+        "PUBLISHER_RUN_ATTEMPT": "${{ github.run_attempt }}",
+        "SOURCE_RUN_ID": "${{ github.event.workflow_run.id }}",
+    }
+    assert current_step["env"] == {
+        **common_env,
+        "CANDIDATE_HEAD": trusted_current_head,
+        "EXPECTED_HEAD": trusted_current_head,
+        "EXPECTED_PREVIOUS_HEAD": trusted_previous_head,
+        "EXPECTED_SOURCE_ACTION": (
+            "${{ github.event.workflow_run.event == 'pull_request_review' && "
+            "'review' || fromJSON(github.event.workflow_run.display_title).action }}"
+        ),
+    }
+    assert displaced_step["env"] == {
+        **common_env,
+        "CANDIDATE_HEAD": "${{ fromJSON(github.event.workflow_run.display_title).previous }}",
+        "EXPECTED_HEAD": "${{ fromJSON(github.event.workflow_run.display_title).head }}",
+        "EXPECTED_PREVIOUS_HEAD": (
+            "${{ fromJSON(github.event.workflow_run.display_title).previous }}"
+        ),
+        "EXPECTED_SOURCE_ACTION": (
+            "${{ fromJSON(github.event.workflow_run.display_title).action }}"
+        ),
+    }
+    for step in (current_step, displaced_step):
+        assert '--repository "$GITHUB_REPOSITORY"' in step["run"]
+        assert '--candidate-head "$CANDIDATE_HEAD"' in step["run"]
+        assert '--expected-head "$EXPECTED_HEAD"' in step["run"]
+        assert '--expected-previous-head "$EXPECTED_PREVIOUS_HEAD"' in step["run"]
+        assert '--expected-source-action "$EXPECTED_SOURCE_ACTION"' in step["run"]
+        assert '--source-workflow-run-id "$SOURCE_RUN_ID"' in step["run"]
+        assert '--publisher-workflow-run-id "$PUBLISHER_RUN_ID"' in step["run"]
+        assert '--publisher-workflow-run-attempt "$PUBLISHER_RUN_ATTEMPT"' in step["run"]
+        assert "${{" not in step["run"]
+
+
+def test_maintainer_approval_event_is_unprivileged_and_executes_no_pr_code() -> None:
+    path = WORKFLOWS / "maintainer-approval-event.yml"
+    workflow = _workflow(path)
+    job = _jobs(path)["observe-maintainer-approval"]
+
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["run-name"] == (
+        '{"pr":${{ github.event.pull_request.number }}, '
+        '"head":"${{ github.event.pull_request.head.sha }}", '
+        '"previous":"${{ github.event.before || github.event.pull_request.head.sha }}", '
+        '"action":"${{ github.event.action }}"}'
+    )
+    assert job["name"] == "Observe Maintainer Approval Event"
+    assert job["timeout-minutes"] == "1"
+    assert len(job["steps"]) == 1
+    assert set(job["steps"][0]) == {"name", "run"}
+    assert "actions/checkout" not in path.read_text(encoding="utf-8")
 
 
 def test_codex_review_requests_and_polls_one_attempt_bound_comment() -> None:
@@ -1031,8 +1188,17 @@ def test_required_check_names_are_globally_unique() -> None:
         if isinstance(job.get("name"), str)
     ]
 
-    for required_name in REQUIRED_CHECK_NAMES:
+    for required_name in set(REQUIRED_CHECK_JOBS.values()):
         assert check_names.count(required_name) == 1
+    for published_name in PUBLISHED_REQUIRED_CHECKS:
+        assert check_names.count(published_name) == 0
+
+    publisher = (WORKFLOWS / "maintainer-approval.yml").read_text(encoding="utf-8")
+    for published_name in PUBLISHED_REQUIRED_CHECKS:
+        assert f'STATUS_CONTEXT = "{published_name}"' in (
+            PROJECT_ROOT / "scripts" / "publish_maintainer_approval.py"
+        ).read_text(encoding="utf-8")
+        assert published_name in publisher
 
 
 def test_blocking_ci_jobs_cannot_tolerate_job_or_step_failures() -> None:

@@ -172,11 +172,13 @@
       "selection": {
         "paths": [
           "tests/unit/test_check_conventional_commits.py",
+          "tests/unit/test_check_pr_review_policy.py",
           "tests/unit/test_ci_workflow_policy.py",
           "tests/unit/test_coverage_debt.py",
           "tests/unit/test_docs_theme.py",
           "tests/unit/test_makefile_test_targets.py",
           "tests/unit/test_package_metadata.py",
+          "tests/unit/test_publish_maintainer_approval.py",
           "tests/unit/test_release.py",
           "tests/unit/test_target_package.py",
           "tests/unit/test_test_suite_inventory.py",

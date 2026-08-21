@@ -1,0 +1,24 @@
+name: Maintainer Approval Event
+run-name: >-
+  {"pr":${{ github.event.pull_request.number }},
+  "head":"${{ github.event.pull_request.head.sha }}",
+  "previous":"${{ github.event.before || github.event.pull_request.head.sha }}",
+  "action":"${{ github.event.action }}"}
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, closed]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+
+jobs:
+  observe-maintainer-approval:
+    name: Observe Maintainer Approval Event
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Record the unprivileged event boundary
+        run: echo "The trusted publisher will evaluate live pull-request state."
