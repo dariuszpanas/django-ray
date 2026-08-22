@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,6 +24,7 @@ HEAD_BRANCH = "fix/maintainer-approval-state"
 STATUS_PATH = f"/repos/{REPOSITORY}/statuses/{HEAD}"
 SOURCE_RUN_PATH = f"/repos/{REPOSITORY}/actions/runs/{SOURCE_RUN_ID}"
 REVIEWS_PATH = f"/repos/{REPOSITORY}/pulls/{PULL_REQUEST}/reviews"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _actor(user_id: int, login: str) -> dict[str, object]:
@@ -742,3 +746,16 @@ def test_pull_request_target_base_sha_does_not_replace_the_marked_pr_head() -> N
 
     assert _publish(api, source_action="opened").startswith("success for")
     assert _states(api) == ["success"]
+
+
+def test_publisher_module_entrypoint_imports_from_repository_checkout() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "scripts.publish_maintainer_approval", "--help"],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--publisher-workflow-run-attempt" in completed.stdout

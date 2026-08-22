@@ -113,7 +113,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   head before evaluation and isolates shared-head recovery so cancellation for one commit cannot
   suppress another commit's result. At GitHub's per-context status limit it leaves either `pending` or
   an explicit failure as the latest state, requiring a new head instead of preserving stale success;
-  delayed source events restore an already closed head once live association reads complete.
+  delayed source events restore an already closed head once live association reads complete. The
+  publisher runs as a repository module so its default-branch checkout can import the shared review
+  policy during live workflow execution.
 - Closing or merging a pull request no longer starts a second `Codex Review` workflow that can attach
   a failed required check after the pull request has already merged.
 - Runtime dependency floors now require Django 6.0.8 and sqlparse 0.6.0, preventing fresh

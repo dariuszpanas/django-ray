@@ -78,7 +78,7 @@ jobs:
           PUBLISHER_RUN_ATTEMPT: ${{ github.run_attempt }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          python scripts/publish_maintainer_approval.py \
+          python -m scripts.publish_maintainer_approval \
             --repository "$GITHUB_REPOSITORY" \
             --candidate-head "$CANDIDATE_HEAD" \
             --expected-head "$EXPECTED_HEAD" \
@@ -140,7 +140,7 @@ jobs:
           PUBLISHER_RUN_ATTEMPT: ${{ github.run_attempt }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          python scripts/publish_maintainer_approval.py \
+          python -m scripts.publish_maintainer_approval \
             --repository "$GITHUB_REPOSITORY" \
             --candidate-head "$CANDIDATE_HEAD" \
             --expected-head "$EXPECTED_HEAD" \

@@ -990,12 +990,15 @@ def test_review_policy_workflows_execute_only_trusted_default_branch_code(
 
     validation = steps[checkout_index + 1]
     assert validation["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-    expected_script = (
-        "scripts/publish_maintainer_approval.py"
+    expected_invocation = (
+        "python -m scripts.publish_maintainer_approval"
         if workflow_name == "maintainer-approval.yml"
-        else "scripts/check_pr_review_policy.py"
+        else "python scripts/check_pr_review_policy.py"
     )
-    assert expected_script in validation["run"]
+    if workflow_name == "maintainer-approval.yml":
+        assert validation["run"].startswith(f"{expected_invocation} \\\n")
+    else:
+        assert expected_invocation in validation["run"]
     assert "${{" not in validation["run"]
     assert "git fetch" not in validation["run"]
 
