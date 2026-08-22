@@ -4147,7 +4147,7 @@ class TestTaskAttemptAdmin:
         assert inline.has_change_permission(request) is False
         assert inline.has_delete_permission(request) is False
         assert inline.can_delete is False
-        assert inline.hide_title is True
+        assert inline.show_title is False
         assert inline.show_change_link is False
         assert inline.fields == (
             "attempt_detail_link",

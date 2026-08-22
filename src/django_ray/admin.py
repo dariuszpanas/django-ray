@@ -1085,7 +1085,7 @@ class TaskAttemptInline(DjangoRayTabularInline):
     ordering = ("-attempt_number",)
     extra = 0
     can_delete = False
-    hide_title = True
+    show_title = False
     show_change_link = False
     verbose_name_plural = "Attempt history"
 
