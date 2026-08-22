@@ -876,9 +876,9 @@ def test_profile_pins_every_runtime_and_resource_dimension() -> None:
     )
     assert profile["dependency_profile"] == {
         "django-ray": source_version,
-        "django": "6.0.7",
+        "django": "6.0.8",
         "asgiref": "3.11.1",
-        "sqlparse": "0.5.5",
+        "sqlparse": "0.6.0",
         "ray": "2.56.0",
         "numpy": "1.26.4",
         "pyarrow": "19.0.1",
@@ -960,7 +960,7 @@ def test_dockerfile_keeps_runtime_dependencies_on_the_pinned_base() -> None:
         "rayproject/ray@sha256:"
         "2951c07de396a8b746f9c678b52c6e2282e614e00f80e6846a9ccd12945ae6b0" in dockerfile
     )
-    assert "django==6.0.7 asgiref==3.11.1 sqlparse==0.5.5 fastrlock==0.8.3" in dockerfile
+    assert "django==6.0.8 asgiref==3.11.1 sqlparse==0.6.0 fastrlock==0.8.3" in dockerfile
     assert "pip install --disable-pip-version-check --no-cache-dir --no-deps ." in dockerfile
     assert 'project_version = tomllib.load(project_file)["project"]["version"]' in dockerfile
     assert '"django-ray": project_version' in dockerfile

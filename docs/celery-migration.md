@@ -15,7 +15,7 @@ been drained.
 
 The best first django-ray cohort is made of coarse, idempotent tasks that:
 
-- already run on Python 3.12 through 3.14 and Django 6.0 or newer;
+- already run on Python 3.12 through 3.14 and Django 6.0.8 or newer;
 - accept and return JSON-compatible values;
 - need an earliest-run time rather than a recurring schedule or expiry;
 - can use exception-driven, deployment-wide retry policy;
@@ -37,7 +37,7 @@ django-ray's current supported boundary is:
 | Component | Migration requirement |
 |---|---|
 | Python | 3.12, 3.13, or 3.14 |
-| Django | 6.0 or a newer compatible release, including Django's Tasks framework |
+| Django | 6.0.8 or a newer compatible release, including Django's Tasks framework |
 | Database | PostgreSQL for production; SQLite is suitable for a local walkthrough |
 | Task manager | At least one `python manage.py django_ray_worker ...` process for each selected queue |
 | Ray | Ray 2.56.0 or a newer compatible release; align Ray and Python versions across task managers and Ray nodes |
@@ -62,7 +62,7 @@ until the corresponding workloads have moved and drained.
 
 ## Use Django's Tasks API as a bridge
 
-For a Django 6.0 or newer project, the safest default is usually a two-stage
+For a Django 6.0.8 or newer project, the safest default is usually a two-stage
 migration:
 
 1. Keep Celery as the execution backend, but move the portable cohort's task

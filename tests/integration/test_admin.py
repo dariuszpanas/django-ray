@@ -2956,7 +2956,7 @@ class TestRayTaskExecutionAdmin:
         assert "django-ray-execution-change" in body_match.group("classes").split()
         assert f"<h2>{execution}</h2>" in content
         breadcrumbs_match = re.search(
-            r'<div class="breadcrumbs">(?P<body>.*?)</div>',
+            r'<(?P<tag>div|ol) class="breadcrumbs">(?P<body>.*?)</(?P=tag)>',
             content,
             flags=re.DOTALL,
         )

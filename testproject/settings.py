@@ -359,7 +359,8 @@ DJANGO_RAY = {
             ],
             "pip": [
                 "cryptography>=42.0.8",
-                "django>=6.0",
+                "django>=6.0.8",
+                "sqlparse>=0.6.0",
                 _DJANGO_UNFOLD_REQUIREMENT,
                 "psycopg[binary]>=3.1",
                 "django-ninja>=1.5.1",

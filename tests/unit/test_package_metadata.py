@@ -380,6 +380,29 @@ def test_pyasn1_security_floor_is_an_unconditional_runtime_dependency() -> None:
     assert locked_versions == ["0.6.4"]
 
 
+def test_django_and_sqlparse_security_floors_are_runtime_dependencies() -> None:
+    """Fresh installs must not resolve either known-vulnerable dependency range."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = config["project"]
+
+    assert project["dependencies"].count("django>=6.0.8") == 1
+    assert project["dependencies"].count("sqlparse>=0.6.0") == 1
+    assert all(
+        all("sqlparse" not in requirement for requirement in requirements)
+        for requirements in project["optional-dependencies"].values()
+    )
+
+    lock = tomllib.loads((project_root / "uv.lock").read_text(encoding="utf-8"))
+    locked_versions = {
+        package["name"]: package["version"]
+        for package in lock["package"]
+        if package["name"] in {"django", "sqlparse"}
+    }
+    assert Version(locked_versions["django"]) >= Version("6.0.8")
+    assert Version(locked_versions["sqlparse"]) >= Version("0.6.0")
+
+
 def test_ray_security_floor_is_an_unconditional_runtime_dependency() -> None:
     """Fresh installs must not resolve Ray releases below upstream security fixes."""
     project_root = Path(__file__).parents[2]

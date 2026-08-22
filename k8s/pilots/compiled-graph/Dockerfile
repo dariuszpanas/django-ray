@@ -26,7 +26,7 @@ COPY k8s/pilots/compiled-graph/ k8s/pilots/compiled-graph/
 # only the exact Django import boundary required by django_ray.runtime and this
 # source tree, with dependency resolution disabled.
 RUN python -m pip install --disable-pip-version-check --no-cache-dir --no-deps \
-        django==6.0.7 asgiref==3.11.1 sqlparse==0.5.5 fastrlock==0.8.3 && \
+        django==6.0.8 asgiref==3.11.1 sqlparse==0.6.0 fastrlock==0.8.3 && \
     python -m pip install --disable-pip-version-check --no-cache-dir --no-deps . && \
     python - <<'PY'
 from importlib import metadata
@@ -38,9 +38,9 @@ with open("pyproject.toml", "rb") as project_file:
 
 expected = {
     "django-ray": project_version,
-    "django": "6.0.7",
+    "django": "6.0.8",
     "asgiref": "3.11.1",
-    "sqlparse": "0.5.5",
+    "sqlparse": "0.6.0",
     "ray": "2.56.0",
     "numpy": "1.26.4",
     "pyarrow": "19.0.1",

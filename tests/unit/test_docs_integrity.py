@@ -69,6 +69,20 @@ def test_repository_llms_guide_matches_published_copy() -> None:
     assert (ROOT / "llms.txt").read_bytes() == (DOCS / "llms.txt").read_bytes()
 
 
+def test_current_support_docs_share_the_django_security_floor() -> None:
+    support_docs = (
+        DOCS / "compatibility.md",
+        DOCS / "getting-started.md",
+        DOCS / "celery-migration.md",
+        DOCS / "contributing.md",
+    )
+
+    for document in support_docs:
+        content = document.read_text(encoding="utf-8")
+        assert "Django 6.0.8" in content
+        assert "Django 6.0 or" not in content
+
+
 def test_contributor_guides_use_checkpoint_based_local_validation() -> None:
     contributor_guides = (
         ROOT / "AGENTS.md",

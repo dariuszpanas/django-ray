@@ -38,9 +38,10 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=42.0.8",
-    "django>=6.0",
+    "django>=6.0.8",
     "pyasn1>=0.6.4",
     "ray[default]>=2.56.0",
+    "sqlparse>=0.6.0",
 ]
 
 [project.urls]
