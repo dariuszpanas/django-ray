@@ -543,7 +543,7 @@ required permission. These credentials are local-only examples. Remove the conta
 docker rm --force django-ray-postgres-tests
 ```
 
-CI runs this gate on Python 3.12 and Django 6.0, keeps it separate from coverage, and prints server
+CI runs this gate on Python 3.12 and Django 6.0.8, keeps it separate from coverage, and prints server
 version and connection activity when the gate fails.
 
 ### Local Testing

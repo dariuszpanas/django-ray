@@ -258,7 +258,7 @@ jobs:
       - name: Install dependencies with PostgreSQL support
         run: |
           uv sync --frozen --extra postgres --python 3.12
-          uv pip install --python .venv/bin/python "django==6.0"
+          uv pip install --python .venv/bin/python "django==6.0.8" "sqlparse==0.6.0"
 
       - name: Report database test versions
         run: >-
@@ -641,9 +641,10 @@ jobs:
           uv pip install --python .venv/bin/python \
             -e ".[sample]" \
             "cryptography==42.0.8" \
-            "django==6.0" \
+            "django==6.0.8" \
             "pyasn1==0.6.4" \
             "ray[default]==2.56.0" \
+            "sqlparse==0.6.0" \
             "django-ninja==1.5.1" \
             "gunicorn==23.0" \
             "whitenoise==6.6" \

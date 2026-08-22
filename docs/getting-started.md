@@ -6,7 +6,7 @@ name used below is either imported in the snippet or defined in the indicated fi
 ## Requirements
 
 - Python 3.12, 3.13, or 3.14
-- Django 6.0+
+- Django 6.0.8+
 - Ray 2.56.0+
 - PostgreSQL for production; SQLite is sufficient for a local walkthrough
 

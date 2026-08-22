@@ -389,6 +389,8 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
 
     assert '"pyasn1==0.6.4"' in minimum_install["run"]
     assert '"ray[default]==2.56.0"' in minimum_install["run"]
+    assert '"django==6.0.8"' in minimum_install["run"]
+    assert '"sqlparse==0.6.0"' in minimum_install["run"]
     assert audit_job["name"] == (
         "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
     )
@@ -420,6 +422,27 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     )
     assert "dependency-audit" in _needs(_jobs()["build"])
     assert "dependency-audit" in _needs(_gate_job())
+
+
+@pytest.mark.parametrize(
+    ("workflow_name", "job_id"),
+    [
+        ("ci.yml", "postgresql-coordination"),
+        ("polling-benchmark.yml", "benchmark"),
+        ("workflow-progress-benchmark.yml", "benchmark"),
+    ],
+)
+def test_postgresql_workflows_pin_patched_django_and_sqlparse(
+    workflow_name: str,
+    job_id: str,
+) -> None:
+    install = next(
+        step["run"]
+        for step in _jobs(WORKFLOWS / workflow_name)[job_id]["steps"]
+        if step.get("name") == "Install dependencies with PostgreSQL support"
+    )
+
+    assert '"django==6.0.8" "sqlparse==0.6.0"' in install
 
 
 def test_release_dependency_audit_rechecks_every_supported_environment() -> None:

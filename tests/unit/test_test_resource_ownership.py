@@ -256,6 +256,8 @@ def test_live_submission_tracks_declared_testproject_runtime_packages(monkeypatc
     assert isinstance(runtime_packages, list)
     assert all(isinstance(requirement, str) for requirement in runtime_packages)
     parsed_requirements = [Requirement(requirement) for requirement in runtime_packages]
+    assert Requirement("django>=6.0.8") in parsed_requirements
+    assert Requirement("sqlparse>=0.6.0") in parsed_requirements
     unfold_requirements = [
         requirement
         for requirement in parsed_requirements

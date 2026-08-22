@@ -111,7 +111,7 @@ DJANGO_RAY = {
     "RUNTIME_ENV_PROFILES": {
         "project": {
             "working_dir": "s3://deployments/myapp/7f3a2c1.zip",
-            "pip": ["django>=6.0"],
+            "pip": ["django>=6.0.8", "sqlparse>=0.6.0"],
         },
         "numpy": {
             "extends": "project",

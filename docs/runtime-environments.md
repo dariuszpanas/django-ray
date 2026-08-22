@@ -78,7 +78,11 @@ DJANGO_RAY = {
                 str(BASE_DIR),
             ),
             "excludes": [".git", ".venv"],
-            "pip": ["django>=6.0", "psycopg[binary]>=3.1"],
+            "pip": [
+                "django>=6.0.8",
+                "sqlparse>=0.6.0",
+                "psycopg[binary]>=3.1",
+            ],
             "env_vars": {
                 "DJANGO_SETTINGS_MODULE": "config.settings",
                 "PYTHONPATH": "src",
@@ -99,7 +103,7 @@ DJANGO_RAY = {
     "RUNTIME_ENV_PROFILES": {
         "project": {
             "working_dir": "s3://deployments/myapp/7f3a2c1.zip",
-            "pip": ["django>=6.0"],
+            "pip": ["django>=6.0.8", "sqlparse>=0.6.0"],
             "env_vars": {"DJANGO_SETTINGS_MODULE": "config.settings"},
         },
         "numpy-2-2": {

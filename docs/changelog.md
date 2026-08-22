@@ -108,6 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Runtime dependency floors now require Django 6.0.8 and sqlparse 0.6.0, preventing fresh
+  and locked installs from resolving versions covered by current security advisories. Minimum
+  dependency and benchmark lanes exercise the same patched pair, while the Admin breadcrumb
+  assertion accepts both Django 6.0 and 6.1's equivalent semantic markup.
 - The test-only real-Ray ownership lock now opens its shared path without following symlinks or
   Windows reparse points and verifies a stable, owned regular file before writing diagnostics.
 - The local KubeRay gate now validates its pinned v0.4.0 commit and tree even when tags were not

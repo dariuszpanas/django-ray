@@ -52,7 +52,7 @@ jobs:
       - name: Install dependencies with PostgreSQL support
         run: |
           uv sync --frozen --extra postgres --python 3.12
-          uv pip install --python .venv/bin/python "django==6.0"
+          uv pip install --python .venv/bin/python "django==6.0.8" "sqlparse==0.6.0"
 
       - name: Report benchmark versions
         run: |
