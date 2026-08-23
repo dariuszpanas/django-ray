@@ -152,7 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because changing a variable cannot revoke queued work. Activation also freezes new pull requests
   and auto-merge at zero open pull requests; a fresh post-flag canary creates the lifecycle boundary
   that a CI rerun on an older PR cannot supply. The expanded native contexts become required only
-  after exact-head green evidence.
+  after an owner canary proves that failed CI posts no review request, its amended green head posts
+  exactly one marked request and no post-merge request, and an external-author canary proves protected
+  approval.
 - The raw JSON `Review Policy Event` run title feeds Maintainer Approval and the inverse-gated v1
   publisher during bootstrap. After cutover it remains temporary transport only for Maintainer
   Approval, including close and displaced-head recovery, until a separate human-readable protocol
