@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Invalidate Review Policy
-        uses: dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a
+        uses: dariuszpanas/yaga@d2eedbe0267231ee8ccc7711a9b2ff6290e29c5e
         with:
           gate: codex-review
           operation: invalidate
