@@ -46,7 +46,7 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ): "`Review Policy Boundary` remains nonblocking during the staged YAGA v2 bootstrap.",
 }
 YAGA_V1_ACTION = "dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889"
-YAGA_ACTION = "dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a"
+YAGA_ACTION = "dariuszpanas/yaga@d2eedbe0267231ee8ccc7711a9b2ff6290e29c5e"
 
 
 def _workflow_paths() -> list[Path]:
