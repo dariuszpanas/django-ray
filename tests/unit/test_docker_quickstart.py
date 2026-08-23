@@ -145,7 +145,7 @@ def test_compose_smoke_is_a_blocking_ci_job() -> None:
     assert "scripts/bounded_redact.py" in smoke_commands
     assert "--max-chars 65536" in smoke_commands
     assert "docker-compose-smoke" in jobs["build"]["needs"]
-    assert "docker-compose-smoke" in jobs["ci-gate"]["needs"]
+    assert "docker-compose-smoke" in jobs["ci-prerequisites"]["needs"]
 
 
 def test_runtime_image_seeds_pip_after_the_final_uv_sync() -> None:

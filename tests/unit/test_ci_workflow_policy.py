@@ -21,19 +21,32 @@ TEST_SUITE_TAXONOMY = PROJECT_ROOT / ".github" / "test-suite-taxonomy.json"
 CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
 CONTRIBUTING_DOCS = PROJECT_ROOT / "docs" / "contributing.md"
 CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+LEGACY_CI_GATE_JOB_NAME = (
+    "${{ vars.YAGA_CODEX_V2_ENABLED == 'true' && 'Legacy CI Gate' || 'CI Gate' }}"
+)
 REQUIRED_CHECK_JOBS = {
-    ("ci.yml", "ci-gate"): "CI Gate",
+    ("ci.yml", "legacy-ci-gate"): LEGACY_CI_GATE_JOB_NAME,
     ("commit-messages.yml", "conventional-commits"): "Commit Messages",
 }
 PUBLISHED_REQUIRED_CHECKS = {"Maintainer Approval", "Codex Review"}
-REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values()) | PUBLISHED_REQUIRED_CHECKS
+REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate"} | PUBLISHED_REQUIRED_CHECKS
+RESERVED_PUBLISHED_CONTEXTS = PUBLISHED_REQUIRED_CHECKS | {"CI Gate"}
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
+    (
+        "ci.yml",
+        "ci-prerequisites",
+    ): "`CI Prerequisites` remains nonblocking during the staged YAGA v2 bootstrap.",
     (
         "review-policy-event.yml",
         "observe-review-policy",
-    ): "Review event observation is nonblocking; trusted publishers own the required states."
+    ): "Review event observation is nonblocking; trusted publishers own the required states.",
+    (
+        "review-policy.yml",
+        "invalidate",
+    ): "`Review Policy Boundary` remains nonblocking during the staged YAGA v2 bootstrap.",
 }
-YAGA_ACTION = "dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889"
+YAGA_V1_ACTION = "dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889"
+YAGA_ACTION = "dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405"
 
 
 def _workflow_paths() -> list[Path]:
@@ -256,7 +269,7 @@ def test_release_never_checks_out_dispatch_input_or_persists_credentials() -> No
 
 
 def _gate_job() -> dict[str, Any]:
-    return _jobs()["ci-gate"]
+    return _jobs()["ci-prerequisites"]
 
 
 def _gate_script() -> str:
@@ -276,7 +289,7 @@ def _gate_script() -> str:
 def _execute_gate(monkeypatch: pytest.MonkeyPatch, results: dict[str, str]) -> None:
     payload = {job_id: {"result": result} for job_id, result in results.items()}
     monkeypatch.setenv("BLOCKING_JOB_RESULTS_JSON", json.dumps(payload))
-    exec(compile(_gate_script(), "<ci-gate>", "exec"))
+    exec(compile(_gate_script(), "<ci-prerequisites>", "exec"))
 
 
 def _all_successful_results() -> dict[str, str]:
@@ -291,20 +304,38 @@ def _contains_key(value: object, key: str) -> bool:
     return False
 
 
-def test_ci_gate_covers_every_pr_ci_job_and_runs_after_failures() -> None:
+def test_ci_prerequisites_cover_every_pr_ci_job_and_preserve_bootstrap_gate() -> None:
     jobs = _jobs()
-    gate = jobs["ci-gate"]
-    blocking = set(jobs) - {"build", "ci-gate"}
+    gate = jobs["ci-prerequisites"]
+    blocking = set(jobs) - {"build", "ci-prerequisites", "legacy-ci-gate"}
 
-    assert gate["name"] == "CI Gate"
+    assert gate["name"] == "CI Prerequisites"
     assert gate["if"] == "always()"
     assert gate["steps"][0]["env"]["BLOCKING_JOB_RESULTS_JSON"] == "${{ toJSON(needs) }}"
     assert _needs(gate) == blocking | {"build"}
     assert _needs(jobs["build"]) == blocking
 
+    legacy = jobs["legacy-ci-gate"]
+    assert legacy["name"] == LEGACY_CI_GATE_JOB_NAME
+    assert legacy["if"] == "always()"
+    assert _needs(legacy) == {"ci-prerequisites"}
+    assert legacy["steps"][0]["env"] == {
+        "PREREQUISITES_RESULT": "${{ needs.ci-prerequisites.result }}"
+    }
+
 
 def test_ci_runs_the_broad_matrix_for_every_open_pr_push() -> None:
-    assert _workflow()["on"]["pull_request"] == {"branches": ["main"]}
+    workflow = _workflow()
+    assert workflow["on"]["pull_request"] == {
+        "branches": ["main"],
+        "types": ["opened", "synchronize", "reopened", "ready_for_review"],
+    }
+    assert workflow["run-name"] == (
+        "${{ github.event_name == 'pull_request' && "
+        "format('YAGA CI {0} for #{1} at base {2}', github.event.action, "
+        "github.event.pull_request.number, github.event.pull_request.base.sha) || "
+        "format('CI {0} on {1}', github.event_name, github.ref_name) }}"
+    )
 
 
 def test_manual_ci_has_no_obsolete_xdist_retention_controls_or_jobs() -> None:
@@ -847,6 +878,7 @@ def test_release_matrix_verifies_wheel_and_sdist_metadata() -> None:
 def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
     ci = _workflow()
     codex_review = _workflow(WORKFLOWS / "codex-review.yml")
+    legacy_codex_review = _workflow(WORKFLOWS / "codex-review-v1.yml")
     commit_messages = _workflow(WORKFLOWS / "commit-messages.yml")
     maintainer_publisher = _workflow(WORKFLOWS / "maintainer-approval.yml")
 
@@ -877,18 +909,45 @@ def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
         "cancel-in-progress": "true",
     }
     assert "concurrency" not in codex_review
+    assert "concurrency" not in legacy_codex_review
     codex_jobs = _jobs(WORKFLOWS / "codex-review.yml")
-    assert codex_jobs["lifecycle"]["concurrency"] == {
+    worker_group = (
+        "yaga-codex-worker-${{ github.repository_id }}-"
+        "${{ needs.prepare.outputs.pull_request_number }}"
+    )
+    for job_id in ("observe", "request-owner", "request-external"):
+        assert codex_jobs[job_id]["concurrency"] == {
+            "group": worker_group,
+            "cancel-in-progress": "false",
+        }
+    assert codex_jobs["authorize-external"]["concurrency"] == {
+        "group": (
+            "yaga-codex-approval-${{ github.repository_id }}-"
+            "${{ needs.prepare.outputs.pull_request_number }}"
+        ),
+        "cancel-in-progress": "true",
+    }
+    legacy_jobs = _jobs(WORKFLOWS / "codex-review-v1.yml")
+    assert legacy_jobs["lifecycle"]["concurrency"] == {
         "group": "yaga-codex-review-${{ github.event.workflow_run.head_sha }}",
     }
-    assert codex_jobs["reconcile"]["concurrency"] == {
+    assert legacy_jobs["reconcile"]["concurrency"] == {
         "group": "yaga-codex-review-${{ matrix.candidate.head }}",
     }
-    assert codex_jobs["repair"]["concurrency"] == {
+    assert legacy_jobs["repair"]["concurrency"] == {
         "group": "yaga-codex-review-repair-${{ github.repository }}",
     }
-    assert codex_jobs["reconcile-repair"]["concurrency"] == {
+    assert legacy_jobs["reconcile-repair"]["concurrency"] == {
         "group": "yaga-codex-review-${{ matrix.candidate.head }}",
+    }
+    lifecycle = _workflow(WORKFLOWS / "review-policy.yml")
+    assert lifecycle["concurrency"] == {
+        "group": (
+            "yaga-review-policy-${{ github.event.pull_request.number }}-"
+            "${{ github.event.action == 'edited' && github.event.changes.base == null && "
+            "github.run_id || 'boundary' }}"
+        ),
+        "cancel-in-progress": "true",
     }
 
 
@@ -902,13 +961,27 @@ def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
         "converted_to_draft",
     ]
     observer_events = _workflow(WORKFLOWS / "review-policy-event.yml")["on"]
+    lifecycle_events = _workflow(WORKFLOWS / "review-policy.yml")["on"]
     codex_events = _workflow(WORKFLOWS / "codex-review.yml")["on"]
+    legacy_codex_events = _workflow(WORKFLOWS / "codex-review-v1.yml")["on"]
 
     assert observer_events == {
         "pull_request_target": {"types": [*lifecycle_types, "closed"]},
         "pull_request_review": {"types": ["submitted", "edited", "dismissed"]},
     }
+    assert lifecycle_events == {
+        "pull_request_target": {
+            "branches": ["main"],
+            "types": lifecycle_types,
+        }
+    }
     assert codex_events == {
+        "workflow_run": {
+            "workflows": ["CI", "YAGA Review Policy"],
+            "types": ["completed"],
+        },
+    }
+    assert legacy_codex_events == {
         "issue_comment": {"types": ["created"]},
         "workflow_run": {
             "workflows": ["Review Policy Event"],
@@ -1108,12 +1181,180 @@ def test_review_policy_event_is_unprivileged_and_executes_no_pr_code() -> None:
     assert "actions/checkout" not in path.read_text(encoding="utf-8")
 
 
-def test_yaga_publisher_is_pinned_read_only_and_never_requests_a_review() -> None:
-    path = WORKFLOWS / "codex-review.yml"
+def test_yaga_v2_workflows_are_pinned_closed_and_quota_guarded() -> None:
+    publisher_path = WORKFLOWS / "codex-review.yml"
+    publisher = _workflow(publisher_path)
+    jobs = _jobs(publisher_path)
+
+    assert publisher["name"] == "YAGA Codex Review Publisher"
+    assert publisher["run-name"] == (
+        "${{ format('YAGA review wake from {0} run #{1}', "
+        "github.event.workflow_run.name, github.event.workflow_run.run_number) }}"
+    )
+    assert publisher["permissions"] == {}
+    assert set(jobs) == {
+        "prepare",
+        "observe",
+        "request-owner",
+        "authorize-external",
+        "request-external",
+        "finalize",
+    }
+    operations = {
+        "prepare": "prepare",
+        "observe": "observe",
+        "request-owner": "request",
+        "authorize-external": "authorize",
+        "request-external": "request",
+        "finalize": "finalize",
+    }
+    expected_conditions = {
+        "prepare": (
+            "vars.YAGA_CODEX_V2_ENABLED == 'true' && "
+            "((github.event.workflow_run.path == '.github/workflows/ci.yml' && "
+            "github.event.workflow_run.event == 'pull_request') || "
+            "(github.event.workflow_run.path == '.github/workflows/review-policy.yml' && "
+            "github.event.workflow_run.event == 'pull_request_target'))"
+        ),
+        "observe": (
+            "vars.YAGA_CODEX_V2_ENABLED == 'true' && needs.prepare.outputs.route == 'observe'"
+        ),
+        "request-owner": (
+            "vars.YAGA_CODEX_V2_ENABLED == 'true' && needs.prepare.outputs.route == 'owner'"
+        ),
+        "authorize-external": (
+            "vars.YAGA_CODEX_V2_ENABLED == 'true' && needs.prepare.outputs.route == 'external'"
+        ),
+        "request-external": (
+            "always() && vars.YAGA_CODEX_V2_ENABLED == 'true' && "
+            "needs.prepare.result == 'success' && "
+            "(needs.prepare.outputs.route == 'approved' || "
+            "(needs.prepare.outputs.route == 'external' && "
+            "needs.authorize-external.result == 'success'))"
+        ),
+        "finalize": (
+            "always() && vars.YAGA_CODEX_V2_ENABLED == 'true' && "
+            "needs.prepare.result == 'success' && needs.prepare.outputs.route != 'skip'"
+        ),
+    }
+    expected_needs = {
+        "prepare": None,
+        "observe": "prepare",
+        "request-owner": "prepare",
+        "authorize-external": "prepare",
+        "request-external": ["prepare", "authorize-external"],
+        "finalize": [
+            "prepare",
+            "observe",
+            "request-owner",
+            "authorize-external",
+            "request-external",
+        ],
+    }
+    read_status_permissions = {
+        "actions": "read",
+        "contents": "read",
+        "issues": "read",
+        "pull-requests": "read",
+        "statuses": "write",
+    }
+    request_permissions = read_status_permissions | {"issues": "write"}
+    expected_permissions = {
+        "prepare": read_status_permissions,
+        "observe": read_status_permissions,
+        "request-owner": request_permissions,
+        "authorize-external": request_permissions | {"statuses": "read"},
+        "request-external": request_permissions,
+        "finalize": read_status_permissions,
+    }
+    for job_id, operation in operations.items():
+        job = jobs[job_id]
+        assert job["if"] == expected_conditions[job_id]
+        assert job.get("needs") == expected_needs[job_id]
+        assert job["permissions"] == expected_permissions[job_id]
+        assert job["timeout-minutes"] == "15"
+        assert len(job["steps"]) == 1
+        step = job["steps"][0]
+        assert step["uses"] == YAGA_ACTION
+        assert step["with"] == {
+            "gate": "codex-review",
+            "operation": operation,
+            "github-token": "${{ secrets.GITHUB_TOKEN }}",
+            "prerequisite-workflow": ".github/workflows/ci.yml",
+            "lifecycle-workflow": ".github/workflows/review-policy.yml",
+            "owner-id": "${{ vars.YAGA_CODEX_OWNER_ID }}",
+            "job-timeout-minutes": "15",
+            **(
+                {"approval-marker": "${{ vars.YAGA_CODEX_APPROVAL_MARKER }}"}
+                if job_id == "authorize-external"
+                else {}
+            ),
+        }
+        if job_id == "prepare":
+            assert step["id"] == "prepare"
+        else:
+            assert "id" not in step
+    assert jobs["prepare"]["outputs"] == {
+        "route": "${{ steps.prepare.outputs.route }}",
+        "pull_request_number": "${{ steps.prepare.outputs.pull_request_number }}",
+    }
+    assert jobs["authorize-external"]["environment"] == {
+        "name": "codex-review-approval",
+        "deployment": "false",
+    }
+    lifecycle_path = WORKFLOWS / "review-policy.yml"
+    lifecycle = _workflow(lifecycle_path)
+    invalidator = _jobs(lifecycle_path)["invalidate"]
+    assert lifecycle["name"] == "YAGA Review Policy"
+    assert lifecycle["run-name"] == (
+        "${{ github.event.action == 'edited' && github.event.changes.base == null && "
+        "format('YAGA metadata edit for #{0}', github.event.pull_request.number) || "
+        "format('YAGA {0} boundary for #{1}', github.event.action, "
+        "github.event.pull_request.number) }}"
+    )
+    assert lifecycle["permissions"] == {}
+    assert invalidator["if"] == "vars.YAGA_CODEX_V2_ENABLED == 'true'"
+    assert invalidator["name"] == (
+        "${{ github.event.action == 'edited' && github.event.changes.base == null && "
+        "'Review Policy Metadata' || 'Review Policy Boundary' }}"
+    )
+    assert invalidator["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+        "statuses": "write",
+    }
+    assert len(invalidator["steps"]) == 1
+    invalidation = invalidator["steps"][0]
+    assert invalidation["uses"] == YAGA_ACTION
+    assert invalidation["with"] == {
+        "gate": "codex-review",
+        "operation": "invalidate",
+        "github-token": "${{ secrets.GITHUB_TOKEN }}",
+        "prerequisite-workflow": ".github/workflows/ci.yml",
+        "lifecycle-workflow": ".github/workflows/review-policy.yml",
+        "owner-id": "${{ vars.YAGA_CODEX_OWNER_ID }}",
+        "job-timeout-minutes": "15",
+    }
+
+    combined = publisher_path.read_text(encoding="utf-8") + lifecycle_path.read_text(
+        encoding="utf-8"
+    )
+    assert "actions/checkout" not in combined
+    assert "issue_comment:" not in combined
+    assert "pull_request_review:" not in combined
+    assert "schedule:" not in combined
+    assert "merge_group:" not in combined
+    assert "fromJSON(" not in combined
+    assert "toJSON(" not in combined
+
+
+def test_yaga_v1_remains_pinned_and_active_only_before_v2_cutover() -> None:
+    path = WORKFLOWS / "codex-review-v1.yml"
     workflow = _workflow(path)
     jobs = _jobs(path)
 
-    assert workflow["name"] == "YAGA Publisher"
+    assert workflow["name"] == "YAGA v1 Publisher"
     assert set(jobs) == {
         "invalidate",
         "lifecycle",
@@ -1130,16 +1371,52 @@ def test_yaga_publisher_is_pinned_read_only_and_never_requests_a_review() -> Non
         "statuses": "read",
     }
     terminal_jobs = {"lifecycle", "reconcile", "reconcile-repair"}
+    expected_conditions = {
+        "invalidate": (
+            "vars.YAGA_CODEX_V2_ENABLED != 'true' && "
+            "github.event_name == 'workflow_run' && "
+            "github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' && "
+            "github.event.workflow_run.event == 'pull_request_target' && "
+            '!contains(github.event.workflow_run.display_title, \'"action":"closed"\')'
+        ),
+        "lifecycle": (
+            "vars.YAGA_CODEX_V2_ENABLED != 'true' && needs.invalidate.outputs.eligible == 'true'"
+        ),
+        "resolve": (
+            "vars.YAGA_CODEX_V2_ENABLED != 'true' && "
+            "((github.event_name == 'issue_comment' && "
+            "github.event.issue.pull_request != null && "
+            "github.event.issue.state == 'open' && "
+            "((github.event.comment.user.id == 199175422 && "
+            "github.event.comment.user.login == 'chatgpt-codex-connector[bot]') || "
+            "(github.event.comment.author_association == 'OWNER' && "
+            "github.event.comment.body == '@codex review'))) || "
+            "(github.event_name == 'workflow_run' && "
+            "github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' && "
+            "github.event.workflow_run.event == 'pull_request_review' && "
+            "github.event.workflow_run.actor.id == 199175422 && "
+            "github.event.workflow_run.actor.login == 'chatgpt-codex-connector[bot]'))"
+        ),
+        "repair": ("vars.YAGA_CODEX_V2_ENABLED != 'true' && github.event_name == 'schedule'"),
+        "reconcile": (
+            "vars.YAGA_CODEX_V2_ENABLED != 'true' && needs.resolve.outputs.eligible == 'true'"
+        ),
+        "reconcile-repair": (
+            "vars.YAGA_CODEX_V2_ENABLED != 'true' && needs.repair.outputs.eligible == 'true'"
+        ),
+    }
     modes: set[str] = set()
     for job_id, job in jobs.items():
+        assert job["if"] == expected_conditions[job_id]
         assert job["timeout-minutes"] == ("15" if job_id in terminal_jobs else "5")
-        steps = job["steps"]
-        assert len(steps) == 1
-        step = steps[0]
-        assert step["uses"] == YAGA_ACTION
+        assert len(job["steps"]) == 1
+        step = job["steps"][0]
+        assert step["uses"] == YAGA_V1_ACTION
         assert step["with"]["gate"] == "codex-review"
         assert step["with"]["github-token"] == "${{ secrets.GITHUB_TOKEN }}"
-        assert step["with"]["observer-workflow-path"] == ".github/workflows/review-policy-event.yml"
+        assert step["with"]["observer-workflow-path"] == (
+            ".github/workflows/review-policy-event.yml"
+        )
         if job_id in terminal_jobs:
             assert step["with"]["job-timeout-minutes"] == "15"
         else:
@@ -1157,42 +1434,26 @@ def test_yaga_publisher_is_pinned_read_only_and_never_requests_a_review() -> Non
         "candidate": "${{ steps.yaga.outputs.candidate }}",
         "eligible": "${{ steps.yaga.outputs.eligible }}",
     }
-    assert jobs["resolve"]["outputs"] == {
-        "candidates": "${{ steps.yaga.outputs.candidates }}",
-        "eligible": "${{ steps.yaga.outputs.eligible }}",
-    }
-    assert jobs["repair"]["outputs"] == {
-        "candidates": "${{ steps.yaga.outputs.candidates }}",
-        "eligible": "${{ steps.yaga.outputs.eligible }}",
-    }
-    assert "schedule" not in jobs["resolve"]["if"]
-    assert jobs["repair"]["if"] == "github.event_name == 'schedule'"
+    for job_id in ("resolve", "repair"):
+        assert jobs[job_id]["outputs"] == {
+            "candidates": "${{ steps.yaga.outputs.candidates }}",
+            "eligible": "${{ steps.yaga.outputs.eligible }}",
+        }
     assert jobs["repair"]["permissions"]["statuses"] == "write"
     assert "statuses" not in jobs["resolve"].get("permissions", {})
-    assert jobs["invalidate"]["if"] == (
-        "github.event_name == 'workflow_run' && "
-        "github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' && "
-        "github.event.workflow_run.event == 'pull_request_target' && "
-        '!contains(github.event.workflow_run.display_title, \'"action":"closed"\')'
-    )
     for job_id in ("reconcile", "reconcile-repair"):
+        source_job = "resolve" if job_id == "reconcile" else "repair"
         assert jobs[job_id]["strategy"] == {
             "fail-fast": "false",
             "max-parallel": "4",
-            "matrix": {
-                "candidate": (
-                    "${{ fromJSON(needs.resolve.outputs.candidates) }}"
-                    if job_id == "reconcile"
-                    else "${{ fromJSON(needs.repair.outputs.candidates) }}"
-                )
-            },
+            "matrix": {"candidate": f"${{{{ fromJSON(needs.{source_job}.outputs.candidates) }}}}"},
         }
+
     workflow_text = path.read_text(encoding="utf-8")
     assert "actions/checkout" not in workflow_text
     assert "gh api" not in workflow_text
     assert "/comments" not in workflow_text
     assert "/reactions" not in workflow_text
-    assert "@codex review" in workflow_text  # owner-authored wake condition only
 
 
 def test_public_workflows_do_not_invoke_native_compiled_graph() -> None:
@@ -1228,6 +1489,22 @@ def test_required_check_names_are_globally_unique() -> None:
         assert check_names.count(required_name) == 1
     for published_name in PUBLISHED_REQUIRED_CHECKS:
         assert check_names.count(published_name) == 0
+
+    configured_names = [
+        (path.name, "workflow", None, workflow["name"])
+        for path in _workflow_paths()
+        if isinstance((workflow := _workflow(path)).get("name"), str)
+    ]
+    configured_names.extend(
+        (path.name, "job", job_id, job["name"])
+        for path in _workflow_paths()
+        for job_id, job in _jobs(path).items()
+        if isinstance(job.get("name"), str)
+    )
+    reserved_aliases = {name.casefold() for name in RESERVED_PUBLISHED_CONTEXTS}
+    collisions = [entry for entry in configured_names if entry[3].casefold() in reserved_aliases]
+    assert collisions == []
+    assert _jobs(CI_WORKFLOW)["legacy-ci-gate"]["name"] == LEGACY_CI_GATE_JOB_NAME
 
     maintainer_publisher = (WORKFLOWS / "maintainer-approval.yml").read_text(encoding="utf-8")
     maintainer_script = (PROJECT_ROOT / "scripts" / "publish_maintainer_approval.py").read_text(
@@ -1271,7 +1548,7 @@ def test_pull_request_jobs_are_gated_required_or_explicitly_nonblocking() -> Non
     assert observed_nonblocking == set(EXPLICIT_NONBLOCKING_PR_JOBS)
 
 
-def test_ci_gate_accepts_only_complete_success(
+def test_ci_prerequisites_accept_only_complete_success(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1284,25 +1561,25 @@ def test_ci_gate_accepts_only_complete_success(
 
 
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "timed_out"])
-def test_ci_gate_rejects_every_non_success_result(
+def test_ci_prerequisites_reject_every_non_success_result(
     monkeypatch: pytest.MonkeyPatch,
     result: str,
 ) -> None:
     results = _all_successful_results()
     results["lint"] = result
 
-    with pytest.raises(SystemExit, match=rf"CI Gate blocked: lint={result}"):
+    with pytest.raises(SystemExit, match=rf"CI Prerequisites blocked: lint={result}"):
         _execute_gate(monkeypatch, results)
 
 
-def test_ci_gate_fails_closed_without_dependency_results(
+def test_ci_prerequisites_fail_closed_without_dependency_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.raises(SystemExit, match="CI Gate blocked: no blocking job results"):
+    with pytest.raises(SystemExit, match="CI Prerequisites blocked: no blocking job results"):
         _execute_gate(monkeypatch, {})
 
 
-def test_ci_gate_rejects_partial_or_unexpected_result_inventory(
+def test_ci_prerequisites_reject_partial_or_unexpected_result_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     partial = _all_successful_results()
@@ -1330,37 +1607,89 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
         assert "current-head approval for every other author" in documentation
         assert "`Review Policy Event`" in documentation
         assert "versioned run-name JSON" in normalized_documentation
-        assert "`YAGA Publisher`" in documentation
+        assert "temporary maintainer-only transport" in normalized_documentation
+        assert "`YAGA Review Policy`" in documentation
+        assert "`YAGA Codex Review Publisher`" in documentation
+        assert "`CI Prerequisites`" in documentation
         assert "immutable YAGA commit" in normalized_documentation
-        assert "never requests one, posts a comment, or adds or removes reactions" in (
+        assert "Failed CI publishes terminal gate errors and never requests a review" in (
             normalized_documentation
         )
-        assert "owner deliberately post exactly `@codex review`" in normalized_documentation
-        assert "only a reconciliation wake-up" in normalized_documentation
+        assert "one marked `@codex review` request" in normalized_documentation
+        assert "protected `codex-review-approval` environment" in normalized_documentation
+        assert "Only its exact candidate-bound marker authorizes" in normalized_documentation
+        assert "`YAGA_CODEX_OWNER_ID`" in documentation
+        assert "`YAGA_CODEX_OWNER_ID=15094983`" in documentation
+        assert "`YAGA_CODEX_APPROVAL_MARKER=codex-review-approval:v1`" in documentation
+        assert "`YAGA_CODEX_V2_ENABLED`" in documentation
+        assert "prevents self-review and administrator bypass" in normalized_documentation
+        assert "zero open pull requests" in normalized_documentation
+        assert "a CI rerun alone does not create the missing lifecycle boundary" in (
+            normalized_documentation
+        )
+        assert "second cancel-and-drain check" in normalized_documentation
+        assert "all outstanding Codex provider tasks to drain" in normalized_documentation
+        assert "Automatic Codex reviews are disabled before v2 is activated" in (
+            normalized_documentation
+        )
+        assert "YAGA is the sole legitimate automatic requester" in normalized_documentation
+        assert "re-enable automatic reviews after the drain" in normalized_documentation
+        assert "direct human or app `@codex review` comment" in normalized_documentation
+        assert "no repository gate can prevent provider execution" in normalized_documentation
+        assert "can race between YAGA's final provider-evidence read and request POST" in (
+            normalized_documentation
+        )
+        assert "can appear temporally correlated" in normalized_documentation
+        assert "fails closed and does not post a duplicate" in normalized_documentation
+        assert "never retroactively authorizes or reuses unsolicited activity" in (
+            normalized_documentation
+        )
         assert "clean connector issue comment" in normalized_documentation
         assert "formal connector findings review" in normalized_documentation
-        assert "`+1` reaction on the initial ready `opened` candidate" in (normalized_documentation)
-        assert "never reuses it for a later synchronized head" in normalized_documentation
-        assert "thirty-minute schedule" in normalized_documentation
-        assert "at most 40 open pull requests" in normalized_documentation
-        assert "at most four already-pending" in normalized_documentation
-        assert "710 GitHub REST requests per hour" in normalized_documentation
-        assert "two 163-request repair passes" in normalized_documentation
-        assert "up-to-date/strict required status" in normalized_documentation
-        assert "Merge queues are unsupported in v1" in normalized_documentation
-        assert "no `merge_group` trigger" in normalized_documentation
-        assert "GitHub commit-status writes are not transactional" in normalized_documentation
-        assert "15-minute terminal jobs run YAGA as their first and only step" in (
+        assert "`+1` reaction on the pull-request body" in normalized_documentation
+        assert "Every accepted eyes reaction or terminal outcome" in normalized_documentation
+        assert "including evidence for the ready `opened` candidate" in normalized_documentation
+        assert "exact current-boundary Actions-owned YAGA request" in normalized_documentation
+        assert "must be strictly after that request" in normalized_documentation
+        assert "Same-second evidence is ambiguous and fails closed" in normalized_documentation
+        assert "only available temporal correlation, not native provider binding" in (
             normalized_documentation
         )
-        assert "window through `job-timeout-minutes`" in normalized_documentation
-        assert "current PR-specific YAGA boundary" in normalized_documentation
+        assert "never accepts the reaction before or without that request" in (
+            normalized_documentation
+        )
+        assert "There is no schedule, issue-comment, review, `closed`" in normalized_documentation
+        assert "Rerun current CI after a temporary provider, API, or runner failure" in (
+            normalized_documentation
+        )
+        assert "100 or more comments, reviews, or reactions" in normalized_documentation
+        assert "require a new pull request" in normalized_documentation
+        assert "fewer than 100 visible statuses" in normalized_documentation
+        assert "reserve the final two slots" in normalized_documentation
+        assert "requires a new head" in normalized_documentation
+        assert "Merge queues remain unsupported" in normalized_documentation
+        assert "GitHub comment and commit-status writes are not transactional" in (
+            normalized_documentation
+        )
+        assert "15-minute action-only jobs" in normalized_documentation
+        assert "through `job-timeout-minutes`" in normalized_documentation
+        assert "cannot guarantee zero post-close writes" in normalized_documentation
+        assert "lifecycle wake run on the `main` base branch" in normalized_documentation
+        assert "post-merge `push` completion skips every publisher job" in (
+            normalized_documentation
+        )
+        assert "external fork whose head branch is literally named `main`" in (
+            normalized_documentation
+        )
         assert "every case-insensitive alias" in normalized_documentation
         assert "colliding workflow, job, check" in normalized_documentation
         assert "base change remains pending" in normalized_documentation
-        assert "cleanly performs no status or review write after close" in (
+        assert "delivery of every configured lifecycle event" in normalized_documentation
+        assert "missing delivery is an activation blocker" in normalized_documentation
+        assert "both exact classic contexts, `Codex Review` and `CI Gate`" in (
             normalized_documentation
         )
+        assert "maintainer-only observer includes `closed`" in normalized_documentation
         assert "does not reinterpret review completion as approval" in normalized_documentation
         assert "completed Codex review with findings cannot merge" in documentation
         assert "strict required-status freshness" in documentation
