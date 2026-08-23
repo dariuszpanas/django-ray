@@ -46,7 +46,7 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ): "`Review Policy Boundary` remains nonblocking during the staged YAGA v2 bootstrap.",
 }
 YAGA_V1_ACTION = "dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889"
-YAGA_ACTION = "dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405"
+YAGA_ACTION = "dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a"
 
 
 def _workflow_paths() -> list[Path]:
@@ -1258,7 +1258,12 @@ def test_yaga_v2_workflows_are_pinned_closed_and_quota_guarded() -> None:
         "pull-requests": "read",
         "statuses": "write",
     }
-    request_permissions = read_status_permissions | {"issues": "write"}
+    request_permissions = {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "write",
+        "statuses": "write",
+    }
     expected_permissions = {
         "prepare": read_status_permissions,
         "observe": read_status_permissions,

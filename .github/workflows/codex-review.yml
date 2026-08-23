@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Prepare Codex Review
         id: prepare
-        uses: dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405
+        uses: dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a
         with:
           gate: codex-review
           operation: prepare
@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Observe Codex Review
-        uses: dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405
+        uses: dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a
         with:
           gate: codex-review
           operation: observe
@@ -88,14 +88,13 @@ jobs:
     permissions:
       actions: read
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
       statuses: write
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Request Owner Codex Review
-        uses: dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405
+        uses: dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a
         with:
           gate: codex-review
           operation: request
@@ -122,14 +121,13 @@ jobs:
     permissions:
       actions: read
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
       statuses: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Record Protected Approval
-        uses: dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405
+        uses: dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a
         with:
           gate: codex-review
           operation: authorize
@@ -158,14 +156,13 @@ jobs:
     permissions:
       actions: read
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
       statuses: write
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Request Approved Codex Review
-        uses: dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405
+        uses: dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a
         with:
           gate: codex-review
           operation: request
@@ -193,7 +190,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Finalize Review Policy
-        uses: dariuszpanas/yaga@1cd83146d8881049adc00b092904e3ed6892f405
+        uses: dariuszpanas/yaga@40b96a698da053a5b1d018efce3be635abc7a55a
         with:
           gate: codex-review
           operation: finalize
