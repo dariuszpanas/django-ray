@@ -2,7 +2,7 @@ name: Maintainer Approval Publisher
 
 on:
   workflow_run:
-    workflows: [Maintainer Approval Event]
+    workflows: [Review Policy Event]
     types: [completed]
 
 permissions:
@@ -14,7 +14,7 @@ jobs:
   publish-current-maintainer-approval:
     name: Publish Current Maintainer Approval State
     if: >-
-      github.event.workflow_run.path == '.github/workflows/maintainer-approval-event.yml' &&
+      github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' &&
       (github.event.workflow_run.event == 'pull_request_target' ||
       github.event.workflow_run.event == 'pull_request_review')
     concurrency:
@@ -91,7 +91,7 @@ jobs:
   recover-displaced-maintainer-approval:
     name: Recover Displaced Maintainer Approval State
     if: >-
-      github.event.workflow_run.path == '.github/workflows/maintainer-approval-event.yml' &&
+      github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' &&
       github.event.workflow_run.event == 'pull_request_target' &&
       fromJSON(github.event.workflow_run.display_title).action == 'synchronize' &&
       fromJSON(github.event.workflow_run.display_title).previous !=

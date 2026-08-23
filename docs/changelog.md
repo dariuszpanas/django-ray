@@ -128,8 +128,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delayed source events restore an already closed head once live association reads complete. The
   publisher runs as a repository module so its default-branch checkout can import the shared review
   policy during live workflow execution.
-- Closing or merging a pull request no longer starts a second `Codex Review` workflow that can attach
-  a failed required check after the pull request has already merged.
+- Review policy observation is now one unprivileged, versioned workflow shared by Maintainer Approval
+  and the pinned YAGA Codex publisher. YAGA observes existing connector outcomes instead of creating
+  `@codex review` comments or manipulating reactions, and publishes the single required `Codex Review`
+  commit status without a same-named job. Clean comments and formal findings remain commit-bound;
+  only the initial ready opened candidate may use the connector's pull-request-body `+1`, with a
+  thirty-minute reconciliation schedule providing bounded repair for reaction-only completion and
+  missed event delivery. Each pass repairs lifecycle boundaries for at most 40 open pull requests
+  before selecting at most four already-pending terminal candidates, keeping modeled scheduled work
+  at no more than 710 GitHub REST requests per hour under the shipped fixed budgets. YAGA v1 requires
+  the status to be up-to-date/strict; merge queues and `merge_group` candidates are unsupported. Its
+  15-minute terminal jobs run YAGA as the sole step and declare the same internal success window, and
+  rollout reserves every case-insensitive alias of the `Codex Review` context.
+- Closing or merging still runs the shared observer so Maintainer Approval can recover a remaining
+  unique same-head owner immediately. The Codex adapter validates close as a clean no-op, so it never
+  requests a post-merge review or attaches a new failed `Codex Review` result; scheduled reconciliation
+  may settle a newly unique remaining owner later.
 - Runtime dependency floors now require Django 6.0.8 and sqlparse 0.6.0, preventing fresh
   and locked installs from resolving versions covered by current security advisories. Minimum
   dependency and benchmark lanes exercise the same patched pair, while the Admin breadcrumb
@@ -178,16 +192,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `django-unfold` handling now keeps its exact sample/dev and lockfile pin synchronized
   with the installed-version RuntimeEnv requirement and minimum-dependency CI, without
   stale duplicate literals.
-- Required Codex review evidence is now fresh after every pull-request edit as well as every push or
-  base change. Superseded workflow reruns and exact head/base drift fail closed, while ordinary review
-  comments and reaction transitions no longer impersonate a candidate change.
-- The trusted Codex gate now posts its own attempt-bound full-SHA review request, requires the
-  connector's authenticated `eyes` on that exact comment, and settles only after connector `eyes`
-  disappears from both the request and pull-request root for consecutive polls. It does not infer an
-  outcome from other reactions, and a bounded event-file reader binds the title/body digest through
-  final confirmation without placing the potentially large body in process environment or arguments;
-  a bounded lifecycle-event digest and stable final snapshot also reject close/reopen and draft/ready
-  round trips. Findings remain subject to native required conversation resolution.
+- Required Codex review evidence now fails closed across synchronized heads, changed bases, drafts,
+  ambiguous shared heads, displaced ownership, malformed observer provenance, and publication races.
+  The publisher never treats an Actions comment or a lingering `eyes` reaction as proof of review;
+  findings remain subject to native required conversation resolution.
 - Contributor validation now uses fast static and focused pre-push checks plus one explicit full-gate
   checkpoint for executable package/runtime, dependency, packaging, build, CI-composition, release,
   break-glass, and required local KubeRay boundaries. Documentation-, test-, and PR/commit-metadata-only
@@ -217,7 +225,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creates its generation evidence, and Ray Job remains unsupported.
 - Required `Maintainer Approval` and `Codex Review` merge checks now let the repository owner merge
   without self-approval while requiring the owner's current-head approval for every other author, a
-  fresh base-and-head-bound Codex review request cycle, and native resolution of every review
+  trusted current-candidate Codex outcome, and native resolution of every review
   conversation.
   Their staged ruleset activation also requires strict status freshness and separate owner plus
   external-or-bot canaries before rollout is considered complete.
