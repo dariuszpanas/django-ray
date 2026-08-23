@@ -128,22 +128,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delayed source events restore an already closed head once live association reads complete. The
   publisher runs as a repository module so its default-branch checkout can import the shared review
   policy during live workflow execution.
-- Review policy observation is now one unprivileged, versioned workflow shared by Maintainer Approval
-  and the pinned YAGA Codex publisher. YAGA observes existing connector outcomes instead of creating
-  `@codex review` comments or manipulating reactions, and publishes the single required `Codex Review`
-  commit status without a same-named job. Clean comments and formal findings remain commit-bound;
-  only the initial ready opened candidate may use the connector's pull-request-body `+1`, with a
-  thirty-minute reconciliation schedule providing bounded repair for reaction-only completion and
-  missed event delivery. Each pass repairs lifecycle boundaries for at most 40 open pull requests
-  before selecting at most four already-pending terminal candidates, keeping modeled scheduled work
-  at no more than 710 GitHub REST requests per hour under the shipped fixed budgets. YAGA v1 requires
-  the status to be up-to-date/strict; merge queues and `merge_group` candidates are unsupported. Its
-  15-minute terminal jobs run YAGA as the sole step and declare the same internal success window, and
-  rollout reserves every case-insensitive alias of the `Codex Review` context.
-- Closing or merging still runs the shared observer so Maintainer Approval can recover a remaining
-  unique same-head owner immediately. The Codex adapter validates close as a clean no-op, so it never
-  requests a post-merge review or attaches a new failed `Codex Review` result; scheduled reconciliation
-  may settle a newly unique remaining owner later.
+- Codex review gating now uses an immutable YAGA v2 action that separates lifecycle invalidation from
+  quota-consuming requests. Exact-title native CI must succeed first; a failed prerequisite publishes
+  a terminal gate error without requesting Codex. Owner-authored pull requests can receive one marked
+  request directly, while every other author first crosses a protected, owner-only GitHub Environment
+  whose exact candidate-bound marker authorizes the serialized request worker. Deterministic wake
+  election prevents the CI and lifecycle completions from both writing or requesting. Bounded polling
+  accepts exact-head connector comments, formal reviews, and pull-request-body `+1` reactions only
+  when they are strictly later than the exact current-boundary Actions-owned YAGA request. The same
+  request-first rule covers eyes reactions and the initial ready opened candidate; same-second or
+  unsolicited evidence fails closed without a duplicate request. There are no schedule, comment,
+  review, close, or merge-group publisher triggers. Post-merge `push` completions skip every publisher
+  job before YAGA runs, so merging cannot start another Codex request.
+- The staged YAGA v2 bootstrap adds native `CI Prerequisites` while retaining the currently required
+  native `CI Gate` compatibility bridge. With `YAGA_CODEX_V2_ENABLED` absent or not exactly `true`,
+  every v2 entry job skips and the pinned v1 publisher remains active behind the inverse condition.
+  After the owner variables and protected environment are verified, enabling the flag renames the
+  bridge to `Legacy CI Gate`, lets YAGA alone publish classic `CI Gate`, and starts the owner and
+  external-author canaries. Automatic Codex reviews are disabled before activation, making YAGA the
+  sole legitimate automatic requester from the first canary. Both publisher queues,
+  protected-environment waits, and all outstanding provider review tasks must be cancelled or drained
+  before either flag transition
+  because changing a variable cannot revoke queued work. Activation also freezes new pull requests
+  and auto-merge at zero open pull requests; a fresh post-flag canary creates the lifecycle boundary
+  that a CI rerun on an older PR cannot supply. The expanded native contexts become required only
+  after exact-head green evidence.
+- The raw JSON `Review Policy Event` run title feeds Maintainer Approval and the inverse-gated v1
+  publisher during bootstrap. After cutover it remains temporary transport only for Maintainer
+  Approval, including close and displaced-head recovery, until a separate human-readable protocol
+  replaces it. YAGA's v2 lifecycle never handles `closed`, and a direct human or app
+  `@codex review` comment remains a provider-side quota loophole that repository workflows cannot
+  prevent. Visible unsolicited connector activity fails closed without a duplicate YAGA request, and
+  protected external approval never retroactively authorizes or reuses it; approval can authorize
+  only a strictly later current-boundary marked request.
 - Runtime dependency floors now require Django 6.0.8 and sqlparse 0.6.0, preventing fresh
   and locked installs from resolving versions covered by current security advisories. Minimum
   dependency and benchmark lanes exercise the same patched pair, while the Admin breadcrumb

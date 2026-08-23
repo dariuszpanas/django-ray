@@ -1,0 +1,189 @@
+name: YAGA v1 Publisher
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: [Review Policy Event]
+    types: [completed]
+  schedule:
+    - cron: "17,47 * * * *"
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  invalidate:
+    name: Record Codex Review Boundary
+    if: >-
+      vars.YAGA_CODEX_V2_ENABLED != 'true' &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' &&
+      github.event.workflow_run.event == 'pull_request_target' &&
+      !contains(github.event.workflow_run.display_title, '"action":"closed"')
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidate: ${{ steps.yaga.outputs.candidate }}
+      eligible: ${{ steps.yaga.outputs.eligible }}
+    steps:
+      - id: yaga
+        uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited v1 commit
+        with:
+          gate: codex-review
+          mode: invalidate-boundary
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  lifecycle:
+    name: Reconcile Codex Review Boundary
+    needs: invalidate
+    if: >-
+      vars.YAGA_CODEX_V2_ENABLED != 'true' &&
+      needs.invalidate.outputs.eligible == 'true'
+    concurrency:
+      group: yaga-codex-review-${{ github.event.workflow_run.head_sha }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited v1 commit
+        with:
+          gate: codex-review
+          job-timeout-minutes: 15
+          mode: reconcile-boundary
+          candidate: ${{ needs.invalidate.outputs.candidate }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  resolve:
+    name: Resolve Codex Review Candidates
+    if: >-
+      vars.YAGA_CODEX_V2_ENABLED != 'true' &&
+      ((github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      github.event.issue.state == 'open' &&
+      ((github.event.comment.user.id == 199175422 &&
+      github.event.comment.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event.comment.author_association == 'OWNER' &&
+      github.event.comment.body == '@codex review'))) ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' &&
+      github.event.workflow_run.event == 'pull_request_review' &&
+      github.event.workflow_run.actor.id == 199175422 &&
+      github.event.workflow_run.actor.login == 'chatgpt-codex-connector[bot]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidates: ${{ steps.yaga.outputs.candidates }}
+      eligible: ${{ steps.yaga.outputs.eligible }}
+    steps:
+      - id: yaga
+        uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited v1 commit
+        with:
+          gate: codex-review
+          mode: resolve
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  repair:
+    name: Repair Codex Review Boundaries
+    if: >-
+      vars.YAGA_CODEX_V2_ENABLED != 'true' &&
+      github.event_name == 'schedule'
+    concurrency:
+      group: yaga-codex-review-repair-${{ github.repository }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidates: ${{ steps.yaga.outputs.candidates }}
+      eligible: ${{ steps.yaga.outputs.eligible }}
+    steps:
+      - id: yaga
+        uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited v1 commit
+        with:
+          gate: codex-review
+          mode: repair-boundaries
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  reconcile:
+    name: Reconcile Codex Review Candidate
+    needs: resolve
+    if: >-
+      vars.YAGA_CODEX_V2_ENABLED != 'true' &&
+      needs.resolve.outputs.eligible == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        candidate: ${{ fromJSON(needs.resolve.outputs.candidates) }}
+    concurrency:
+      group: yaga-codex-review-${{ matrix.candidate.head }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited v1 commit
+        with:
+          gate: codex-review
+          job-timeout-minutes: 15
+          mode: reconcile-candidate
+          candidate: ${{ toJSON(matrix.candidate) }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  reconcile-repair:
+    name: Reconcile Scheduled Codex Review Candidate
+    needs: repair
+    if: >-
+      vars.YAGA_CODEX_V2_ENABLED != 'true' &&
+      needs.repair.outputs.eligible == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        candidate: ${{ fromJSON(needs.repair.outputs.candidates) }}
+    concurrency:
+      group: yaga-codex-review-${{ matrix.candidate.head }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited v1 commit
+        with:
+          gate: codex-review
+          job-timeout-minutes: 15
+          mode: reconcile-repair-candidate
+          candidate: ${{ toJSON(matrix.candidate) }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
