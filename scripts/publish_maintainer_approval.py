@@ -9,15 +9,15 @@ GitHub data, and replaces one commit-status context for each affected head.
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import re
 import sys
 import urllib.parse
 from dataclasses import dataclass
 
 from scripts import check_pr_review_policy as review_policy
 
-EVENT_WORKFLOW_PATH = ".github/workflows/maintainer-approval-event.yml"
+EVENT_WORKFLOW_PATH = ".github/workflows/review-policy-event.yml"
 EVENT_WORKFLOW_EVENTS = frozenset({"pull_request_review", "pull_request_target"})
 TARGET_EVENT_ACTIONS = frozenset(
     {
@@ -31,15 +31,25 @@ TARGET_EVENT_ACTIONS = frozenset(
     }
 )
 REVIEW_SOURCE_ACTION = "review"
+REVIEW_EVENT_ACTIONS = frozenset({"dismissed", "edited", "submitted"})
 EXPECTED_SOURCE_ACTIONS = TARGET_EVENT_ACTIONS | {REVIEW_SOURCE_ACTION}
 STATUS_CONTEXT = "Maintainer Approval"
 MAX_STATUS_DESCRIPTION_CHARS = 140
 MAX_STATUSES_PER_CONTEXT = 1_000
-SOURCE_DISPLAY_TITLE = re.compile(
-    r'\A\{"pr":(?P<number>[1-9][0-9]*), '
-    r'"head":"(?P<head>[0-9a-f]{40})", '
-    r'"previous":"(?P<previous_head>[0-9a-f]{40})", '
-    r'"action":"(?P<action>[a-z_]+)"\}\Z'
+MAX_SOURCE_DISPLAY_TITLE_BYTES = 1_024
+SOURCE_TITLE_KEYS = frozenset(
+    {
+        "action",
+        "base",
+        "base_changed",
+        "base_ref",
+        "boundary",
+        "event",
+        "head",
+        "pr",
+        "previous",
+        "v",
+    }
 )
 
 
@@ -63,6 +73,80 @@ class HeadOwnership:
     association_count: int
 
 
+@dataclass(frozen=True)
+class SourceTitle:
+    """Validated fields from the shared review-policy observer title."""
+
+    pull_request_number: int
+    head: str
+    previous_head: str
+    action: str
+    event: str
+
+
+def _source_title(value: object, *, event: str) -> SourceTitle:
+    if not isinstance(value, str):
+        raise review_policy.ReviewPolicyError("review policy event workflow run title is invalid")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise review_policy.ReviewPolicyError(
+            "review policy event workflow run title is invalid"
+        ) from error
+    if len(encoded) > MAX_SOURCE_DISPLAY_TITLE_BYTES:
+        raise review_policy.ReviewPolicyError("review policy event workflow run title is invalid")
+    try:
+        title = review_policy._record(json.loads(value), "review policy event workflow run title")
+    except json.JSONDecodeError as error:
+        raise review_policy.ReviewPolicyError(
+            "review policy event workflow run title is invalid"
+        ) from error
+    if (
+        set(title) != SOURCE_TITLE_KEYS
+        or type(title.get("v")) is not int
+        or title.get("v") != 1
+        or title.get("event") != event
+    ):
+        raise review_policy.ReviewPolicyError(
+            "review policy event workflow run title fields are invalid"
+        )
+
+    action = title.get("action")
+    allowed_actions = (
+        TARGET_EVENT_ACTIONS if event == "pull_request_target" else REVIEW_EVENT_ACTIONS
+    )
+    base_changed = title.get("base_changed")
+    if (
+        not isinstance(action, str)
+        or action not in allowed_actions
+        or not isinstance(base_changed, bool)
+        or (action != "edited" and base_changed)
+    ):
+        raise review_policy.ReviewPolicyError(
+            "review policy event workflow run has an unexpected action"
+        )
+    head = review_policy._commit_sha(title.get("head"), "review policy event pull request head")
+    previous_head = review_policy._commit_sha(
+        title.get("previous"), "review policy event previous pull request head"
+    )
+    if action != "synchronize" and previous_head != head:
+        raise review_policy.ReviewPolicyError(
+            "review policy event previous head is invalid for the action"
+        )
+    review_policy._commit_sha(title.get("base"), "review policy event pull request base")
+    review_policy._base_ref(title.get("base_ref"))
+    review_policy._timestamp(title.get("boundary"), "review policy event boundary")
+    return SourceTitle(
+        pull_request_number=review_policy._positive_int(
+            title.get("pr"), "review policy event pull request number"
+        ),
+        head=head,
+        previous_head=previous_head,
+        action=action,
+        event=event,
+    )
+
+
 def _source_workflow_run(
     api: review_policy.RestApi,
     *,
@@ -74,83 +158,77 @@ def _source_workflow_run(
 ) -> SourceWorkflowRun:
     payload = review_policy._record(
         api.get(f"/repos/{repository}/actions/runs/{run_id}"),
-        "maintainer approval event workflow run",
+        "review policy event workflow run",
     )
     payload_id = review_policy._positive_int(
-        payload.get("id"), "maintainer approval event workflow run ID"
+        payload.get("id"), "review policy event workflow run ID"
     )
     if payload_id != run_id:
         raise review_policy.ReviewPolicyError(
-            "GitHub returned a different maintainer approval event workflow run"
+            "GitHub returned a different review policy event workflow run"
         )
     if payload.get("path") != EVENT_WORKFLOW_PATH:
         raise review_policy.ReviewPolicyError(
-            "maintainer approval event workflow run has an unexpected path"
+            "review policy event workflow run has an unexpected path"
         )
     event = payload.get("event")
     if event not in EVENT_WORKFLOW_EVENTS:
         raise review_policy.ReviewPolicyError(
-            "maintainer approval event workflow run has an unexpected event"
+            "review policy event workflow run has an unexpected event"
         )
     if payload.get("status") != "completed":
+        raise review_policy.ReviewPolicyError("review policy event workflow run is not complete")
+    source_repository = review_policy._record(
+        payload.get("repository"), "review policy event workflow repository"
+    )
+    if source_repository.get("full_name") != repository:
         raise review_policy.ReviewPolicyError(
-            "maintainer approval event workflow run is not complete"
+            "review policy event workflow run belongs to another repository"
         )
     conclusion = payload.get("conclusion")
     if not isinstance(conclusion, str) or not conclusion or len(conclusion) > 32:
         raise review_policy.ReviewPolicyError(
-            "maintainer approval event workflow run conclusion is invalid"
+            "review policy event workflow run conclusion is invalid"
+        )
+    source_title = _source_title(payload.get("display_title"), event=event)
+    source_head = review_policy._commit_sha(
+        payload.get("head_sha"), "review policy event workflow run head SHA"
+    )
+    if source_title.head != source_head:
+        raise review_policy.ReviewPolicyError(
+            "review policy event workflow run identifies a different head"
         )
     if event == "pull_request_review":
         if expected_source_action != REVIEW_SOURCE_ACTION:
             raise review_policy.ReviewPolicyError(
                 "maintainer approval review workflow run has an unexpected action marker"
             )
-        pull_request_head = review_policy._commit_sha(
-            payload.get("head_sha"),
-            "maintainer approval review workflow run head SHA",
-        )
+        pull_request_head = source_head
         previous_pull_request_head = pull_request_head
-        if pull_request_head != expected_head or expected_previous_head != pull_request_head:
+        if (
+            source_title.previous_head != pull_request_head
+            or pull_request_head != expected_head
+            or expected_previous_head != pull_request_head
+        ):
             raise review_policy.ReviewPolicyError(
-                "maintainer approval review workflow run has an unexpected head"
+                "review policy review workflow run has an unexpected head"
             )
         action = REVIEW_SOURCE_ACTION
     else:
-        display_title = payload.get("display_title")
-        if not isinstance(display_title, str):
-            raise review_policy.ReviewPolicyError(
-                "maintainer approval event workflow run title is invalid"
-            )
-        title_match = SOURCE_DISPLAY_TITLE.fullmatch(display_title)
-        if title_match is None:
-            raise review_policy.ReviewPolicyError(
-                "maintainer approval event workflow run title is invalid"
-            )
-        review_policy._positive_int(
-            int(title_match.group("number")),
-            "maintainer approval event pull request number",
-        )
-        pull_request_head = review_policy._commit_sha(
-            title_match.group("head"),
-            "maintainer approval event pull request head",
-        )
+        pull_request_head = source_title.head
         if pull_request_head != expected_head:
             raise review_policy.ReviewPolicyError(
-                "maintainer approval event workflow run has an unexpected head"
+                "review policy event workflow run has an unexpected head"
             )
-        previous_pull_request_head = review_policy._commit_sha(
-            title_match.group("previous_head"),
-            "maintainer approval event previous pull request head",
-        )
+        previous_pull_request_head = source_title.previous_head
         if previous_pull_request_head != expected_previous_head:
             raise review_policy.ReviewPolicyError(
-                "maintainer approval event workflow run has an unexpected previous head"
+                "review policy event workflow run has an unexpected previous head"
             )
-        action = title_match.group("action")
-        if action not in TARGET_EVENT_ACTIONS or action != expected_source_action:
+        action = source_title.action
+        if action != expected_source_action:
             raise review_policy.ReviewPolicyError(
-                "maintainer approval event workflow run has an unexpected action"
+                "review policy event workflow run has an unexpected action"
             )
     return SourceWorkflowRun(
         run_id=payload_id,
@@ -411,7 +489,7 @@ def publish_maintainer_approval(
         candidate_heads.add(source.previous_pull_request_head)
     if candidate_head not in candidate_heads:
         raise review_policy.ReviewPolicyError(
-            "candidate head is not affected by the maintainer approval event"
+            "candidate head is not affected by the review policy event"
         )
     try:
         ownership = _head_ownership(

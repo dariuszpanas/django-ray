@@ -1,96 +1,179 @@
-name: Codex Review
+name: YAGA Publisher
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: [Review Policy Event]
+    types: [completed]
+  schedule:
+    - cron: "17,47 * * * *"
 
 permissions:
   actions: read
   contents: read
-  pull-requests: write
-
-concurrency:
-  group: codex-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  issues: read
+  pull-requests: read
+  statuses: read
 
 jobs:
-  codex-review:
-    name: Codex Review
+  invalidate:
+    name: Record Codex Review Boundary
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' &&
+      github.event.workflow_run.event == 'pull_request_target' &&
+      !contains(github.event.workflow_run.display_title, '"action":"closed"')
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      statuses: write
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 5
+    outputs:
+      candidate: ${{ steps.yaga.outputs.candidate }}
+      eligible: ${{ steps.yaga.outputs.eligible }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: yaga
+        uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited pre-release commit
         with:
-          fetch-depth: 1
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
+          gate: codex-review
+          mode: invalidate-boundary
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
 
-      - name: Request an exact-head Codex review
-        if: >-
-          github.event.action != 'converted_to_draft'
-        id: request
-        env:
-          ACTION: ${{ github.event.action }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BASELINE_TIME: ${{ github.event.pull_request.updated_at }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          REQUEST_COMMENT_ID="$(
-            python scripts/check_pr_review_policy.py \
-              --mode codex-request \
-              --repository "$GITHUB_REPOSITORY" \
-              --pull-request "$PR_NUMBER" \
-              --expected-base-ref "$BASE_REF" \
-              --expected-base-sha "$BASE_SHA" \
-              --expected-head "$HEAD_SHA" \
-              --event-path "$GITHUB_EVENT_PATH" \
-              --action "$ACTION" \
-              --baseline-time "$BASELINE_TIME" \
-              --workflow-run-id "$RUN_ID" \
-              --run-attempt "$RUN_ATTEMPT"
-          )"
-          case "$REQUEST_COMMENT_ID" in
-            ''|*[!0-9]*)
-              echo "Codex request did not return a numeric comment ID" >&2
-              exit 1
-              ;;
-          esac
-          printf 'comment-id=%s\n' "$REQUEST_COMMENT_ID" >> "$GITHUB_OUTPUT"
+  lifecycle:
+    name: Reconcile Codex Review Boundary
+    needs: invalidate
+    if: needs.invalidate.outputs.eligible == 'true'
+    concurrency:
+      group: yaga-codex-review-${{ github.event.workflow_run.head_sha }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited pre-release commit
+        with:
+          gate: codex-review
+          job-timeout-minutes: 15
+          mode: reconcile-boundary
+          candidate: ${{ needs.invalidate.outputs.candidate }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
 
-      - name: Wait for the exact-head Codex request to settle
-        env:
-          ACTION: ${{ github.event.action }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BASELINE_TIME: ${{ github.event.pull_request.updated_at }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REQUEST_COMMENT_ID: ${{ steps.request.outputs.comment-id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          REQUEST_COMMENT_ARGS=()
-          if [[ -n "$REQUEST_COMMENT_ID" ]]; then
-            REQUEST_COMMENT_ARGS=(--request-comment-id "$REQUEST_COMMENT_ID")
-          fi
-          python scripts/check_pr_review_policy.py \
-            --mode codex \
-            --repository "$GITHUB_REPOSITORY" \
-            --pull-request "$PR_NUMBER" \
-            --expected-base-ref "$BASE_REF" \
-            --expected-base-sha "$BASE_SHA" \
-            --expected-head "$HEAD_SHA" \
-            --event-path "$GITHUB_EVENT_PATH" \
-            --action "$ACTION" \
-            --baseline-time "$BASELINE_TIME" \
-            --workflow-run-id "$RUN_ID" \
-            --run-attempt "$RUN_ATTEMPT" \
-            "${REQUEST_COMMENT_ARGS[@]}" \
-            --poll-timeout 1800 \
-            --poll-interval 15
+  resolve:
+    name: Resolve Codex Review Candidates
+    if: >-
+      (github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      github.event.issue.state == 'open' &&
+      ((github.event.comment.user.id == 199175422 &&
+      github.event.comment.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event.comment.author_association == 'OWNER' &&
+      github.event.comment.body == '@codex review'))) ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' &&
+      github.event.workflow_run.event == 'pull_request_review' &&
+      github.event.workflow_run.actor.id == 199175422 &&
+      github.event.workflow_run.actor.login == 'chatgpt-codex-connector[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidates: ${{ steps.yaga.outputs.candidates }}
+      eligible: ${{ steps.yaga.outputs.eligible }}
+    steps:
+      - id: yaga
+        uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited pre-release commit
+        with:
+          gate: codex-review
+          mode: resolve
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  repair:
+    name: Repair Codex Review Boundaries
+    if: github.event_name == 'schedule'
+    concurrency:
+      group: yaga-codex-review-repair-${{ github.repository }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidates: ${{ steps.yaga.outputs.candidates }}
+      eligible: ${{ steps.yaga.outputs.eligible }}
+    steps:
+      - id: yaga
+        uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited pre-release commit
+        with:
+          gate: codex-review
+          mode: repair-boundaries
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  reconcile:
+    name: Reconcile Codex Review Candidate
+    needs: resolve
+    if: needs.resolve.outputs.eligible == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        candidate: ${{ fromJSON(needs.resolve.outputs.candidates) }}
+    concurrency:
+      group: yaga-codex-review-${{ matrix.candidate.head }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited pre-release commit
+        with:
+          gate: codex-review
+          job-timeout-minutes: 15
+          mode: reconcile-candidate
+          candidate: ${{ toJSON(matrix.candidate) }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml
+
+  reconcile-repair:
+    name: Reconcile Scheduled Codex Review Candidate
+    needs: repair
+    if: needs.repair.outputs.eligible == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        candidate: ${{ fromJSON(needs.repair.outputs.candidates) }}
+    concurrency:
+      group: yaga-codex-review-${{ matrix.candidate.head }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889 # audited pre-release commit
+        with:
+          gate: codex-review
+          job-timeout-minutes: 15
+          mode: reconcile-repair-candidate
+          candidate: ${{ toJSON(matrix.candidate) }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          observer-workflow-path: .github/workflows/review-policy-event.yml

@@ -128,88 +128,84 @@ commit or line.
 
 The two required review checks apply conditional policy without forcing the repository owner to
 self-approve. `Maintainer Approval` passes a pull request authored by `dariuszpanas`; every other
-author needs an `APPROVED` review from `dariuszpanas` on the current head commit. Both gates validate
-the live pull request against the trusted event base ref, base SHA, and head SHA before passing. A
-push, base change, or title- or body-only edit requires a new Codex outcome after that event. GitHub
-review records do not bind the base SHA, so even an existing exact-head connector review is not
-reusable after an edit. The Codex gate also verifies that its Actions run is the newest run for this
-pull request and head; manually rerunning an older lifecycle event cannot supersede a later edit.
-Before success, it rechecks the exact live head and base. Review comments and reaction transitions
-may update pull-request activity timestamps, but they do not replace candidate identity or workflow
-lineage.
+author needs an `APPROVED` review from `dariuszpanas` on the current head commit. `Codex Review`
+requires a trusted Codex outcome for the exact current candidate. Both publishers recheck the live
+head and base before passing. A synchronized head needs a new commit-bound Codex outcome. A base
+change remains pending until the pull request moves to a new head because GitHub's connector evidence
+does not bind the reviewed base. Strict required-status freshness prevents a default-branch advance
+from reusing an older candidate's result.
 
-Maintainer approval events cross an explicit privilege boundary. The unprivileged `Maintainer
-Approval Event` workflow observes lifecycle and review events without checking out pull-request code
-or receiving a write token. Trusted lifecycle run names and GitHub's immutable review source-run head
-let the default-branch `Maintainer Approval Publisher` identify the affected heads without a fallible
-parser job. Review-triggered publication derives the current head from that source-run field and
-ignores both the untrusted review run name and its volatile pull-request association list. For every
-affected current, displaced, or closed head, the candidate job's first no-checkout step replaces the
-prior `Maintainer Approval` context with `pending` before checkout or any policy API read. It then
-validates the source workflow path, event, head, and unique open pull-request association before
-replacing that same context with the live policy's `success` or `failure`; approval, dismissal,
-reapproval, and unrelated reviews therefore update one required state instead of creating ambiguous
-same-named check runs. The publisher trusts no upstream artifact or pull-request code and checks out
-the exact default-branch commit bound to its dispatch, so a later default-branch advance cannot
-replace the evaluator mid-run.
+Review events cross an explicit privilege boundary. The shared unprivileged `Review Policy Event`
+workflow observes lifecycle and review events with no token permissions, checkout, artifact, or
+pull-request code execution. Its versioned run-name JSON records bounded head, base, previous-head,
+action, and event-time data. The default-branch `Maintainer Approval Publisher` validates that schema
+and publishes the maintainer policy, while the separate `YAGA Publisher` executes one audited,
+immutable YAGA commit. Review event observation is nonblocking; trusted publishers own the required
+states.
 
-Current-head evaluation and synchronize-only displaced-head recovery run as independent jobs. Each
-job is serialized by its candidate head, the actual commit-status scope, so cancellation for one head
-cannot suppress evaluation for another. Later owner events supersede displaced-head recovery from a
-different pull request on the same head. Closure events also re-evaluate the closed head, allowing a
-remaining pull request to recover when shared-head ownership becomes unique. A closed head, or a
-delayed older event for a head with durable but no longer owning PR associations, returns to terminal
-success only after the capacity read and a final no-owner confirmation. An uncorroborated empty
-association lookup remains pending. Before publishing policy, the publisher alternates live-policy
-evaluation with exact-head ownership confirmation, rechecks an approved result after the final
-preliminary ownership read, and gates every final state on one last same-owner confirmation.
-Associations whose current head has advanced do not count as shared ownership. The observer conclusion
-never becomes a final status directly; even a failed or delayed source run publishes only a fresh
-live-policy evaluation. Pending and final states link to the exact publisher run attempt, so a manual
-rerun cannot mistake an earlier attempt's pending state for its own.
-Before final publication, the publisher counts this context. When one final publication slot remains,
-it uses that slot for a failure requiring a new head; if invalidation has already consumed the limit,
-`pending` remains the latest state. Its own event stream therefore cannot exhaust the API while
-leaving `success` current.
-Approval event observation is nonblocking; the trusted publisher owns the required state.
+For every affected current, displaced, or closed head, the maintainer publisher first replaces the
+prior `Maintainer Approval` context with `pending`. It then validates the source workflow path,
+repository, event, head, and unique open pull-request association before publishing the fresh live
+policy. Approval, dismissal, reapproval, and unrelated reviews update one required status instead of
+creating ambiguous same-named checks. Synchronize-only displaced-head recovery and current-head
+evaluation remain independent, head-serialized jobs. A close immediately reevaluates a remaining
+unique same-head owner; if no owner remains, bounded association and capacity checks allow the stale
+pending state to return to terminal success. Ambiguous or uncorroborated ownership remains pending.
+The maintainer publisher trusts no upstream artifact or pull-request code and checks out only the
+exact default-branch commit bound to its dispatch.
 
-The trusted `Codex Review` workflow posts one full-SHA `@codex review` request for every eligible
-pull-request event and passes its immutable comment ID to the polling gate. Contributors do not need
-to post a second request. A workflow rerun creates a new request after that attempt starts rather than
-reusing review state from an earlier attempt. The request body is:
+YAGA observes Codex reviews; it never requests one, posts a comment, or adds or removes reactions.
+Configure Codex automatic reviews in repository settings, or have an owner deliberately post exactly
+`@codex review` when a review is needed. An owner request is only a reconciliation wake-up; the
+publisher does not create it. YAGA accepts these bounded connector outcomes:
 
-```text
-@codex review
+- a clean connector issue comment from the official GitHub App with a reviewed-commit marker that
+  resolves to the current head;
+- a formal connector findings review whose native commit ID and reviewed-commit marker identify the
+  current head; or
+- the official connector's `+1` reaction on the initial ready `opened` candidate.
 
-<!-- django-ray:codex-review-head=<full head SHA>;run=<workflow run ID>;attempt=<run attempt>;metadata=<title/body digest>;lifecycle=<event digest> -->
-```
+A pull-request-body reaction has no commit or base identifier, so YAGA never reuses it for a later
+synchronized head. Reaction-only later reviews and draft-to-ready reviews remain pending until Codex
+emits commit-bound evidence. GitHub schedules may be delayed or dropped. The thirty-minute schedule
+is a bounded repair path for reaction-only initial clean reviews and missed event delivery, not a
+completion-time guarantee. Connector comments and formal reviews wake reconciliation immediately.
+Uncertainty fails closed as `pending`.
 
-Only an `eyes` reaction from the immutable Codex connector identity counts; reactions from Actions,
-maintainers, or other users are ignored. The gate must first observe Codex `eyes` on the exact
-attempt-bound request. It then waits while connector `eyes` remains on that request or the pull-request
-root. After the request's connector `eyes` disappears, two consecutive eye-free polling observations
-settle the review, followed by workflow-lineage and exact live head/base confirmation. The gate does
-not interpret `+1`, formal review state, or any other reaction as completion evidence. A workflow
-attempt waits up to 30 minutes so the observed review can finish without losing its state to a rerun;
-if the connector never acknowledges that exact request with `eyes`, the attempt fails closed.
-The workflow reads title and body from the runner-provided `GITHUB_EVENT_PATH` with a bounded
-file-backed parser; it never places the potentially large body in an environment variable or command
-argument. The request's metadata digest binds those values through final confirmation, so either field
-changing invalidates the attempt without relying on reaction-driven pull-request activity timestamps.
-The request also binds a canonical digest of bounded close, reopen, draft-conversion, and ready events
-through the trigger. Final confirmation brackets a lifecycle re-read with two live pull-request reads
-and requires a stable activity timestamp across that short window, so a lifecycle round trip cannot
-restore the old predicates and satisfy a superseded attempt.
-Closing or merging a pull request does not trigger a new `Codex Review` run; closure remains lifecycle
-evidence for an already-running attempt without publishing a failed post-merge check.
+Each scheduled pass scans at most 40 open pull requests and writes `pending` for every detected lost,
+newer, or base-mismatched boundary before selecting a rotating window of at most four already-pending
+candidates for terminal reconciliation. The shipped limits model scheduled work at no more than 710
+GitHub REST requests per hour: two 163-request repair passes plus four 48-request terminal jobs per
+pass. This is not a total repository guarantee under arbitrary event traffic; API or rate-limit
+uncertainty leaves an already-observed boundary pending. The bounded beta repair pass rejects a
+repository with more than 40 open pull requests.
 
-`Codex Review` proves that the requested review settled; it does not reinterpret findings as an
-approval. GitHub's native required review-conversation resolution remains a separate merge condition,
-so a completed Codex review with findings cannot merge until every actionable thread is resolved.
-Reply to each actionable thread with the implemented fix and its validation, or with the explicit
-reason for declining it, before resolving the conversation. Requests and reviews from an older event
-candidate do not count, draft pull requests fail both review checks, and a workflow event superseded
-by a later pull-request event fails closed.
+YAGA v1 requires `Codex Review` to be an up-to-date/strict required status. Merge queues are
+unsupported in v1: the shipped workflows have no `merge_group` trigger or combined-head contract.
+Scheduled repair is defense in depth for missed observer delivery and shared heads, not a substitute
+for strict branch currency.
+
+GitHub commit-status writes are not transactional. YAGA reserves enough local request budget and
+wall-clock window before publishing success to run its bounded validation and compensating-pending
+tail. The shipped 15-minute terminal jobs run YAGA as their first and only step, declare that same
+window through `job-timeout-minutes`, and reserve an additional cleanup margin. The REST timeout
+bounds socket inactivity rather than total response time, and runner termination remains external to
+the process. If GitHub accepts success and a network, rate-limit, trickled-response, or runner outage
+then rejects or prevents every repair write, that status can remain ambiguous until a later event or
+scheduled repair succeeds. A new pull request can likewise briefly inherit status on a reused SHA
+before its asynchronous observer boundary is published. Privileged merge automation must wait for
+the current PR-specific YAGA boundary instead of acting on inherited green immediately.
+
+The repository token writes statuses as the shared GitHub Actions integration. Reserve the exact
+`Codex Review` context and every case-insensitive alias, and reject any colliding workflow, job, check,
+or other status publisher before making it required.
+
+The shared observer includes `closed` because Maintainer Approval needs immediate shared-head
+recovery. The Codex adapter validates that event and cleanly performs no status or review write after
+close; scheduled reconciliation may settle a newly unique remaining same-head owner on its next
+bounded pass. GitHub's native required review-conversation resolution remains enabled separately, so
+a completed Codex review with findings cannot merge until every actionable thread is answered and
+resolved. YAGA does not reinterpret review completion as approval.
 
 For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs
 enough body context to explain the retained change. Invalid titles or commit headers fail with the
@@ -639,11 +635,12 @@ docs, typing, all supported Python tests, PostgreSQL coordination, live-cluster 
 testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and package build all
 report `success`. Its `always()` condition
 makes a failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead of a
-successful skip. `Codex Review` checks out only default-branch code with bounded permissions.
-Maintainer approval review events execute only the unprivileged observer; the separate
-`workflow_run` publisher alone receives permission to update commit statuses. Each status-writing job
-invalidates the old state before that same job checks out default-branch code and evaluates policy.
-Neither path executes pull-request code with a write token. This repository uses
+successful skip. The Codex publisher executes only the immutable YAGA action with bounded permissions
+and no checkout. Review events execute only the unprivileged shared observer; the separate
+default-branch publishers alone receive permission to update commit statuses. Maintainer status jobs
+invalidate the old state before checking out trusted default-branch code, while YAGA writes only
+through its head-serialized publisher jobs. Neither path executes pull-request code with a write
+token. This repository uses
 rebase auto-merge rather than a merge queue: auto-merge waits for all four required checks and native
 required review-conversation resolution, then applies the rebase method.
 
@@ -675,8 +672,9 @@ focused commits with their own descriptive bodies. Validate the final PR title t
 range before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
-conflicts, rerun the affected checks, re-evaluate the full-gate triggers above, and push. The trusted
-workflow posts the fresh exact-head Codex request; auto-merge recalculates the required checks. The
+conflicts, rerun the affected checks, re-evaluate the full-gate triggers above, and push. Repository
+Codex settings or an owner request must produce a fresh exact-head outcome; YAGA evaluates it without
+creating another request. Auto-merge recalculates the required checks. The
 merge policy's steady state requires
 `Commit Messages`, `CI Gate`, `Maintainer Approval`, and `Codex Review` from GitHub Actions, requires
 native review conversation resolution, and allows rebase merges only. Activate a new required

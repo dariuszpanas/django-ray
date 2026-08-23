@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,7 @@ def _source_run(
     previous_head: str = HEAD,
     pull_request_number: int = PULL_REQUEST,
     head: str = HEAD,
+    base_changed: bool = False,
     associated_pull_requests: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     if associated_pull_requests is None:
@@ -74,16 +76,29 @@ def _source_run(
         )
     return {
         "id": SOURCE_RUN_ID,
-        "display_title": (
-            f'{{"pr":{pull_request_number}, "head":"{head}", '
-            f'"previous":"{previous_head}", "action":"{action}"}}'
+        "display_title": json.dumps(
+            {
+                "v": 1,
+                "pr": pull_request_number,
+                "event": event,
+                "head": head,
+                "previous": previous_head,
+                "base": BASE_SHA,
+                "base_ref": "main",
+                "base_changed": base_changed,
+                "boundary": "2026-08-20T12:00:00Z",
+                "action": action,
+            },
+            separators=(",", ":"),
         ),
         "event": event,
         "path": publisher.EVENT_WORKFLOW_PATH,
         "status": "completed",
         "conclusion": conclusion,
-        "head_sha": HEAD,
+        "head_sha": head,
         "head_branch": HEAD_BRANCH,
+        "created_at": "2026-08-20T12:00:01Z",
+        "repository": {"full_name": REPOSITORY},
         "pull_requests": associated_pull_requests,
     }
 
@@ -294,8 +309,8 @@ def test_irrelevant_commented_review_does_not_override_maintainer_approval() -> 
             review_id=2,
             state="COMMENTED",
             submitted_at="2026-08-20T12:02:00Z",
-            user_id=review_policy.CODEX_CONNECTOR_USER_ID,
-            login=review_policy.CODEX_CONNECTOR_LOGIN,
+            user_id=199_175_422,
+            login="chatgpt-codex-connector[bot]",
         ),
     ]
     api = FakeApi(review_sequences=[reviews])
@@ -703,7 +718,7 @@ def test_review_source_does_not_require_a_stable_github_pr_association(
     assert _states(api) == ["success"]
 
 
-def test_review_source_ignores_untrusted_title_markers() -> None:
+def test_review_source_rejects_an_untrusted_title() -> None:
     source_run = _source_run(
         action="synchronize",
         pull_request_number=PULL_REQUEST + 1,
@@ -716,9 +731,9 @@ def test_review_source_ignores_untrusted_title_markers() -> None:
         pull_request=_pull_request(author_id=review_policy.MAINTAINER_USER_ID),
     )
 
-    assert _publish(api).startswith("success for")
-    assert _states(api) == ["success"]
-    assert {path for path, _payload in api.posts} == {STATUS_PATH}
+    with pytest.raises(review_policy.ReviewPolicyError, match="title is invalid"):
+        _publish(api)
+    assert _states(api) == []
 
 
 def test_review_source_uses_the_github_run_head() -> None:
@@ -726,7 +741,7 @@ def test_review_source_uses_the_github_run_head() -> None:
     source_run["head_sha"] = OTHER_HEAD
     api = FakeApi(source_run=source_run)
 
-    with pytest.raises(review_policy.ReviewPolicyError, match="unexpected head"):
+    with pytest.raises(review_policy.ReviewPolicyError, match="different head"):
         _publish(api)
     assert _states(api) == []
 
@@ -736,7 +751,7 @@ def test_malformed_status_response_fails_closed() -> None:
         _publish(FakeApi(malformed_status=True))
 
 
-def test_pull_request_target_base_sha_does_not_replace_the_marked_pr_head() -> None:
+def test_pull_request_target_run_head_must_match_the_marked_pr_head() -> None:
     source_run = _source_run(event="pull_request_target", action="opened")
     source_run.update({"head_sha": BASE_SHA, "head_branch": "main"})
     api = FakeApi(
@@ -744,8 +759,62 @@ def test_pull_request_target_base_sha_does_not_replace_the_marked_pr_head() -> N
         pull_request=_pull_request(author_id=review_policy.MAINTAINER_USER_ID),
     )
 
-    assert _publish(api, source_action="opened").startswith("success for")
-    assert _states(api) == ["success"]
+    with pytest.raises(review_policy.ReviewPolicyError, match="different head"):
+        _publish(api, source_action="opened")
+    assert _states(api) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("v", 2, "title fields"),
+        ("v", True, "title fields"),
+        ("event", "push", "title fields"),
+        ("pr", 0, "positive integer"),
+        ("head", "A" * 40, "lowercase commit SHA"),
+        ("previous", OTHER_HEAD, "previous head"),
+        ("base", "x" * 40, "lowercase commit SHA"),
+        ("base_ref", "", "base ref"),
+        ("base_changed", "false", "unexpected action"),
+        ("boundary", "not-a-time", "ISO-8601"),
+        ("action", "delete", "unexpected action"),
+        ("action", {"submitted": True}, "unexpected action"),
+    ],
+)
+def test_shared_observer_title_fields_fail_closed(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    source_run = _source_run(event="pull_request_target", action="opened")
+    title = json.loads(str(source_run["display_title"]))
+    title[field] = value
+    source_run["display_title"] = json.dumps(title, separators=(",", ":"))
+
+    with pytest.raises(review_policy.ReviewPolicyError, match=message):
+        _publish(FakeApi(source_run=source_run), source_action="opened")
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra"])
+def test_shared_observer_title_requires_exact_keys(mutation: str) -> None:
+    source_run = _source_run(event="pull_request_target", action="opened")
+    title = json.loads(str(source_run["display_title"]))
+    if mutation == "missing":
+        title.pop("boundary")
+    else:
+        title["unexpected"] = True
+    source_run["display_title"] = json.dumps(title, separators=(",", ":"))
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="title fields"):
+        _publish(FakeApi(source_run=source_run), source_action="opened")
+
+
+def test_source_workflow_repository_must_match_the_requested_repository() -> None:
+    source_run = _source_run()
+    source_run["repository"] = {"full_name": "someone/else"}
+
+    with pytest.raises(review_policy.ReviewPolicyError, match="another repository"):
+        _publish(FakeApi(source_run=source_run))
 
 
 def test_publisher_module_entrypoint_imports_from_repository_checkout() -> None:

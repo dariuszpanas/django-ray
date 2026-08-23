@@ -23,17 +23,17 @@ CONTRIBUTING_DOCS = PROJECT_ROOT / "docs" / "contributing.md"
 CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 REQUIRED_CHECK_JOBS = {
     ("ci.yml", "ci-gate"): "CI Gate",
-    ("codex-review.yml", "codex-review"): "Codex Review",
     ("commit-messages.yml", "conventional-commits"): "Commit Messages",
 }
-PUBLISHED_REQUIRED_CHECKS = {"Maintainer Approval"}
+PUBLISHED_REQUIRED_CHECKS = {"Maintainer Approval", "Codex Review"}
 REQUIRED_CHECK_NAMES = set(REQUIRED_CHECK_JOBS.values()) | PUBLISHED_REQUIRED_CHECKS
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     (
-        "maintainer-approval-event.yml",
-        "observe-maintainer-approval",
-    ): "Approval event observation is nonblocking; the trusted publisher owns the required state."
+        "review-policy-event.yml",
+        "observe-review-policy",
+    ): "Review event observation is nonblocking; trusted publishers own the required states."
 }
+YAGA_ACTION = "dariuszpanas/yaga@04319c90e7cc0525144e05d53a2309a57eaf5889"
 
 
 def _workflow_paths() -> list[Path]:
@@ -876,14 +876,24 @@ def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
         ),
         "cancel-in-progress": "true",
     }
-    assert codex_review["concurrency"] == {
-        "group": "codex-review-${{ github.event.pull_request.number }}",
-        "cancel-in-progress": "true",
+    assert "concurrency" not in codex_review
+    codex_jobs = _jobs(WORKFLOWS / "codex-review.yml")
+    assert codex_jobs["lifecycle"]["concurrency"] == {
+        "group": "yaga-codex-review-${{ github.event.workflow_run.head_sha }}",
+    }
+    assert codex_jobs["reconcile"]["concurrency"] == {
+        "group": "yaga-codex-review-${{ matrix.candidate.head }}",
+    }
+    assert codex_jobs["repair"]["concurrency"] == {
+        "group": "yaga-codex-review-repair-${{ github.repository }}",
+    }
+    assert codex_jobs["reconcile-repair"]["concurrency"] == {
+        "group": "yaga-codex-review-${{ matrix.candidate.head }}",
     }
 
 
 def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
-    common_lifecycle_types = [
+    lifecycle_types = [
         "opened",
         "synchronize",
         "reopened",
@@ -891,15 +901,21 @@ def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
         "ready_for_review",
         "converted_to_draft",
     ]
-    maintainer_events = _workflow(WORKFLOWS / "maintainer-approval-event.yml")["on"]
+    observer_events = _workflow(WORKFLOWS / "review-policy-event.yml")["on"]
     codex_events = _workflow(WORKFLOWS / "codex-review.yml")["on"]
 
-    assert maintainer_events == {
-        "pull_request_target": {"types": [*common_lifecycle_types, "closed"]},
-        "pull_request_review": {"types": ["submitted", "dismissed"]},
+    assert observer_events == {
+        "pull_request_target": {"types": [*lifecycle_types, "closed"]},
+        "pull_request_review": {"types": ["submitted", "edited", "dismissed"]},
     }
-    assert codex_events == {"pull_request_target": {"types": common_lifecycle_types}}
-    assert "closed" not in codex_events["pull_request_target"]["types"]
+    assert codex_events == {
+        "issue_comment": {"types": ["created"]},
+        "workflow_run": {
+            "workflows": ["Review Policy Event"],
+            "types": ["completed"],
+        },
+        "schedule": [{"cron": "17,47 * * * *"}],
+    }
 
 
 @pytest.mark.parametrize(
@@ -907,7 +923,6 @@ def test_review_policy_workflows_cover_current_head_lifecycle_events() -> None:
     [
         ("maintainer-approval.yml", "publish-current-maintainer-approval", "5", 1),
         ("maintainer-approval.yml", "recover-displaced-maintainer-approval", "5", 1),
-        ("codex-review.yml", "codex-review", "35", 0),
     ],
 )
 def test_review_policy_workflows_execute_only_trusted_default_branch_code(
@@ -920,85 +935,59 @@ def test_review_policy_workflows_execute_only_trusted_default_branch_code(
     workflow = _workflow(path)
     job = _jobs(path)[job_id]
 
-    expected_permissions = {"contents": "read", "pull-requests": "read"}
-    if workflow_name == "maintainer-approval.yml":
-        expected_permissions["actions"] = "read"
-    else:
-        expected_permissions["actions"] = "read"
-        expected_permissions["pull-requests"] = "write"
+    expected_permissions = {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+    }
     assert workflow["permissions"] == expected_permissions
-    expected_jobs = (
-        {
-            "publish-current-maintainer-approval",
-            "recover-displaced-maintainer-approval",
-        }
-        if workflow_name == "maintainer-approval.yml"
-        else {job_id}
-    )
+    expected_jobs = {
+        "publish-current-maintainer-approval",
+        "recover-displaced-maintainer-approval",
+    }
     assert set(_jobs(path)) == expected_jobs
     assert job["timeout-minutes"] == timeout_minutes
     if job_id == "publish-current-maintainer-approval":
         assert job["if"] == (
             "github.event.workflow_run.path == "
-            "'.github/workflows/maintainer-approval-event.yml' && "
+            "'.github/workflows/review-policy-event.yml' && "
             "(github.event.workflow_run.event == 'pull_request_target' || "
             "github.event.workflow_run.event == 'pull_request_review')"
         )
     elif job_id == "recover-displaced-maintainer-approval":
         assert job["if"] == (
             "github.event.workflow_run.path == "
-            "'.github/workflows/maintainer-approval-event.yml' && "
+            "'.github/workflows/review-policy-event.yml' && "
             "github.event.workflow_run.event == 'pull_request_target' && "
             "fromJSON(github.event.workflow_run.display_title).action == 'synchronize' && "
             "fromJSON(github.event.workflow_run.display_title).previous != "
             "fromJSON(github.event.workflow_run.display_title).head"
         )
-    else:
-        assert "if" not in job
     assert "continue-on-error" not in job
-    if workflow_name == "maintainer-approval.yml":
-        assert "needs" not in job
-        assert job["permissions"] == {
-            "actions": "read",
-            "contents": "read",
-            "pull-requests": "read",
-            "statuses": "write",
-        }
-    else:
-        assert "needs" not in job
+    assert "needs" not in job
+    assert job["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "read",
+        "statuses": "write",
+    }
 
     steps = job["steps"]
     assert isinstance(steps, list)
     checkout = steps[checkout_index]
     assert checkout["uses"] == CHECKOUT_ACTION
-    expected_checkout_ref = (
-        "${{ github.sha }}"
-        if workflow_name == "maintainer-approval.yml"
-        else "${{ github.event.repository.default_branch }}"
-    )
     assert checkout["with"] == {
         "fetch-depth": "1",
-        "ref": expected_checkout_ref,
+        "ref": "${{ github.sha }}",
         "persist-credentials": "false",
     }
-    if workflow_name == "codex-review.yml":
-        assert steps[1]["if"] == "github.event.action != 'converted_to_draft'"
-        assert all("if" not in step for step in (steps[0], *steps[2:]))
-    else:
-        assert all("if" not in step for step in steps)
+    assert all("if" not in step for step in steps)
     assert not _contains_key(steps, "continue-on-error")
 
     validation = steps[checkout_index + 1]
     assert validation["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-    expected_invocation = (
-        "python -m scripts.publish_maintainer_approval"
-        if workflow_name == "maintainer-approval.yml"
-        else "python scripts/check_pr_review_policy.py"
-    )
-    if workflow_name == "maintainer-approval.yml":
-        assert validation["run"].startswith(f"{expected_invocation} \\\n")
-    else:
-        assert expected_invocation in validation["run"]
+    expected_invocation = "python -m scripts.publish_maintainer_approval"
+    assert validation["run"].startswith(f"{expected_invocation} \\\n")
     assert "${{" not in validation["run"]
     assert "git fetch" not in validation["run"]
 
@@ -1015,7 +1004,7 @@ def test_maintainer_approval_uses_independent_head_scoped_status_publishers() ->
 
     assert workflow["on"] == {
         "workflow_run": {
-            "workflows": ["Maintainer Approval Event"],
+            "workflows": ["Review Policy Event"],
             "types": ["completed"],
         }
     }
@@ -1093,73 +1082,117 @@ def test_maintainer_approval_uses_independent_head_scoped_status_publishers() ->
         assert "${{" not in step["run"]
 
 
-def test_maintainer_approval_event_is_unprivileged_and_executes_no_pr_code() -> None:
-    path = WORKFLOWS / "maintainer-approval-event.yml"
+def test_review_policy_event_is_unprivileged_and_executes_no_pr_code() -> None:
+    path = WORKFLOWS / "review-policy-event.yml"
     workflow = _workflow(path)
-    job = _jobs(path)["observe-maintainer-approval"]
+    job = _jobs(path)["observe-review-policy"]
 
-    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["name"] == "Review Policy Event"
+    assert workflow["permissions"] == {}
     assert workflow["run-name"] == (
-        '{"pr":${{ github.event.pull_request.number }}, '
+        '{"v":1, '
+        '"action":"${{ github.event.action }}", '
+        '"pr":${{ github.event.pull_request.number }}, '
+        '"event":"${{ github.event_name }}", '
         '"head":"${{ github.event.pull_request.head.sha }}", '
         '"previous":"${{ github.event.before || github.event.pull_request.head.sha }}", '
-        '"action":"${{ github.event.action }}"}'
+        '"base":"${{ github.event.pull_request.base.sha }}", '
+        '"base_ref":${{ toJSON(github.event.pull_request.base.ref) }}, '
+        '"base_changed":${{ github.event.changes.base != null }}, '
+        '"boundary":"${{ github.event.pull_request.updated_at }}"}'
     )
-    assert job["name"] == "Observe Maintainer Approval Event"
+    assert job["name"] == "Record Review Policy Event"
     assert job["timeout-minutes"] == "1"
     assert len(job["steps"]) == 1
     assert set(job["steps"][0]) == {"name", "run"}
     assert "actions/checkout" not in path.read_text(encoding="utf-8")
 
 
-def test_codex_review_requests_and_polls_one_attempt_bound_comment() -> None:
-    steps = _jobs(WORKFLOWS / "codex-review.yml")["codex-review"]["steps"]
-    request = steps[1]
-    step = steps[2]
+def test_yaga_publisher_is_pinned_read_only_and_never_requests_a_review() -> None:
+    path = WORKFLOWS / "codex-review.yml"
+    workflow = _workflow(path)
+    jobs = _jobs(path)
 
-    common_env = {
-        "ACTION": "${{ github.event.action }}",
-        "BASE_REF": "${{ github.event.pull_request.base.ref }}",
-        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-        "BASELINE_TIME": "${{ github.event.pull_request.updated_at }}",
-        "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
-        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
-        "PR_NUMBER": "${{ github.event.pull_request.number }}",
-        "RUN_ATTEMPT": "${{ github.run_attempt }}",
-        "RUN_ID": "${{ github.run_id }}",
+    assert workflow["name"] == "YAGA Publisher"
+    assert set(jobs) == {
+        "invalidate",
+        "lifecycle",
+        "resolve",
+        "repair",
+        "reconcile",
+        "reconcile-repair",
     }
-    assert request["env"] == common_env
-    assert request["id"] == "request"
-    assert "--mode codex-request" in request["run"]
-    assert '--workflow-run-id "$RUN_ID"' in request["run"]
-    assert '--run-attempt "$RUN_ATTEMPT"' in request["run"]
-    assert '--event-path "$GITHUB_EVENT_PATH"' in request["run"]
-    assert "printf 'comment-id=%s\\n'" in request["run"]
-    assert '>> "$GITHUB_OUTPUT"' in request["run"]
-    assert step["env"] == {
-        **common_env,
-        "REQUEST_COMMENT_ID": "${{ steps.request.outputs.comment-id }}",
+    assert workflow["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "issues": "read",
+        "pull-requests": "read",
+        "statuses": "read",
     }
-    assert "--mode codex" in step["run"]
-    assert '--expected-base-ref "$BASE_REF"' in step["run"]
-    assert '--expected-base-sha "$BASE_SHA"' in step["run"]
-    assert '--expected-head "$HEAD_SHA"' in step["run"]
-    assert '--action "$ACTION"' in step["run"]
-    assert '--baseline-time "$BASELINE_TIME"' in step["run"]
-    assert '--workflow-run-id "$RUN_ID"' in step["run"]
-    assert '--run-attempt "$RUN_ATTEMPT"' in step["run"]
-    assert '--event-path "$GITHUB_EVENT_PATH"' in step["run"]
-    assert 'REQUEST_COMMENT_ARGS=(--request-comment-id "$REQUEST_COMMENT_ID")' in step["run"]
-    assert "--poll-timeout 1800" in step["run"]
-    assert "--poll-interval 15" in step["run"]
-    assert "BASE_CHANGED" not in step["run"]
-    assert "--base-changed" not in step["run"]
-    assert "eval " not in step["run"]
-    for command in (request["run"], step["run"]):
-        assert "PR_TITLE" not in command
-        assert "PR_BODY" not in command
-        assert "--expected-title" not in command
-        assert "--expected-body" not in command
+    terminal_jobs = {"lifecycle", "reconcile", "reconcile-repair"}
+    modes: set[str] = set()
+    for job_id, job in jobs.items():
+        assert job["timeout-minutes"] == ("15" if job_id in terminal_jobs else "5")
+        steps = job["steps"]
+        assert len(steps) == 1
+        step = steps[0]
+        assert step["uses"] == YAGA_ACTION
+        assert step["with"]["gate"] == "codex-review"
+        assert step["with"]["github-token"] == "${{ secrets.GITHUB_TOKEN }}"
+        assert step["with"]["observer-workflow-path"] == ".github/workflows/review-policy-event.yml"
+        if job_id in terminal_jobs:
+            assert step["with"]["job-timeout-minutes"] == "15"
+        else:
+            assert "job-timeout-minutes" not in step["with"]
+        modes.add(step["with"]["mode"])
+    assert modes == {
+        "invalidate-boundary",
+        "reconcile-boundary",
+        "resolve",
+        "repair-boundaries",
+        "reconcile-candidate",
+        "reconcile-repair-candidate",
+    }
+    assert jobs["invalidate"]["outputs"] == {
+        "candidate": "${{ steps.yaga.outputs.candidate }}",
+        "eligible": "${{ steps.yaga.outputs.eligible }}",
+    }
+    assert jobs["resolve"]["outputs"] == {
+        "candidates": "${{ steps.yaga.outputs.candidates }}",
+        "eligible": "${{ steps.yaga.outputs.eligible }}",
+    }
+    assert jobs["repair"]["outputs"] == {
+        "candidates": "${{ steps.yaga.outputs.candidates }}",
+        "eligible": "${{ steps.yaga.outputs.eligible }}",
+    }
+    assert "schedule" not in jobs["resolve"]["if"]
+    assert jobs["repair"]["if"] == "github.event_name == 'schedule'"
+    assert jobs["repair"]["permissions"]["statuses"] == "write"
+    assert "statuses" not in jobs["resolve"].get("permissions", {})
+    assert jobs["invalidate"]["if"] == (
+        "github.event_name == 'workflow_run' && "
+        "github.event.workflow_run.path == '.github/workflows/review-policy-event.yml' && "
+        "github.event.workflow_run.event == 'pull_request_target' && "
+        '!contains(github.event.workflow_run.display_title, \'"action":"closed"\')'
+    )
+    for job_id in ("reconcile", "reconcile-repair"):
+        assert jobs[job_id]["strategy"] == {
+            "fail-fast": "false",
+            "max-parallel": "4",
+            "matrix": {
+                "candidate": (
+                    "${{ fromJSON(needs.resolve.outputs.candidates) }}"
+                    if job_id == "reconcile"
+                    else "${{ fromJSON(needs.repair.outputs.candidates) }}"
+                )
+            },
+        }
+    workflow_text = path.read_text(encoding="utf-8")
+    assert "actions/checkout" not in workflow_text
+    assert "gh api" not in workflow_text
+    assert "/comments" not in workflow_text
+    assert "/reactions" not in workflow_text
+    assert "@codex review" in workflow_text  # owner-authored wake condition only
 
 
 def test_public_workflows_do_not_invoke_native_compiled_graph() -> None:
@@ -1196,12 +1229,15 @@ def test_required_check_names_are_globally_unique() -> None:
     for published_name in PUBLISHED_REQUIRED_CHECKS:
         assert check_names.count(published_name) == 0
 
-    publisher = (WORKFLOWS / "maintainer-approval.yml").read_text(encoding="utf-8")
-    for published_name in PUBLISHED_REQUIRED_CHECKS:
-        assert f'STATUS_CONTEXT = "{published_name}"' in (
-            PROJECT_ROOT / "scripts" / "publish_maintainer_approval.py"
-        ).read_text(encoding="utf-8")
-        assert published_name in publisher
+    maintainer_publisher = (WORKFLOWS / "maintainer-approval.yml").read_text(encoding="utf-8")
+    maintainer_script = (PROJECT_ROOT / "scripts" / "publish_maintainer_approval.py").read_text(
+        encoding="utf-8"
+    )
+    codex_publisher = (WORKFLOWS / "codex-review.yml").read_text(encoding="utf-8")
+    assert 'STATUS_CONTEXT = "Maintainer Approval"' in maintainer_script
+    assert "Maintainer Approval" in maintainer_publisher
+    assert "Codex Review" in codex_publisher
+    assert "gate: codex-review" in codex_publisher
 
 
 def test_blocking_ci_jobs_cannot_tolerate_job_or_step_failures() -> None:
@@ -1291,51 +1327,41 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
         for check_name in REQUIRED_CHECK_NAMES:
             assert f"`{check_name}`" in documentation
         assert "native required review-conversation resolution" in documentation
-        assert (
-            "django-ray:codex-review-head=<full head SHA>;run=<workflow run ID>;"
-            "attempt=<run attempt>;metadata=<title/body digest>;lifecycle=<event digest>"
-            in normalized_documentation
-        )
         assert "current-head approval for every other author" in documentation
-        assert "trusted event base ref, base SHA, and head SHA" in documentation
-        assert (
-            "base change, or title- or body-only edit requires a new Codex outcome" in documentation
+        assert "`Review Policy Event`" in documentation
+        assert "versioned run-name JSON" in normalized_documentation
+        assert "`YAGA Publisher`" in documentation
+        assert "immutable YAGA commit" in normalized_documentation
+        assert "never requests one, posts a comment, or adds or removes reactions" in (
+            normalized_documentation
         )
-        assert "existing exact-head connector review is not reusable" in normalized_documentation
-        assert "trusted `Codex Review` workflow posts one full-SHA" in documentation
-        assert "immutable comment ID" in documentation
-        assert "Contributors do not need to post a second request" in normalized_documentation
-        assert "Only an `eyes` reaction from the immutable Codex connector" in documentation
-        assert (
-            "reactions from Actions, maintainers, or other users are ignored"
-            in normalized_documentation
+        assert "owner deliberately post exactly `@codex review`" in normalized_documentation
+        assert "only a reconciliation wake-up" in normalized_documentation
+        assert "clean connector issue comment" in normalized_documentation
+        assert "formal connector findings review" in normalized_documentation
+        assert "`+1` reaction on the initial ready `opened` candidate" in (normalized_documentation)
+        assert "never reuses it for a later synchronized head" in normalized_documentation
+        assert "thirty-minute schedule" in normalized_documentation
+        assert "at most 40 open pull requests" in normalized_documentation
+        assert "at most four already-pending" in normalized_documentation
+        assert "710 GitHub REST requests per hour" in normalized_documentation
+        assert "two 163-request repair passes" in normalized_documentation
+        assert "up-to-date/strict required status" in normalized_documentation
+        assert "Merge queues are unsupported in v1" in normalized_documentation
+        assert "no `merge_group` trigger" in normalized_documentation
+        assert "GitHub commit-status writes are not transactional" in normalized_documentation
+        assert "15-minute terminal jobs run YAGA as their first and only step" in (
+            normalized_documentation
         )
-        assert "that request or the pull-request root" in normalized_documentation
-        assert "must first observe Codex `eyes`" in normalized_documentation
-        assert "two consecutive eye-free polling observations" in normalized_documentation
-        assert "does not interpret `+1`, formal review state" in normalized_documentation
-        assert "attempt waits up to 30 minutes" in normalized_documentation
-        assert (
-            "reads title and body from the runner-provided `GITHUB_EVENT_PATH`"
-            in normalized_documentation
+        assert "window through `job-timeout-minutes`" in normalized_documentation
+        assert "current PR-specific YAGA boundary" in normalized_documentation
+        assert "every case-insensitive alias" in normalized_documentation
+        assert "colliding workflow, job, check" in normalized_documentation
+        assert "base change remains pending" in normalized_documentation
+        assert "cleanly performs no status or review write after close" in (
+            normalized_documentation
         )
-        assert (
-            "never places the potentially large body in an environment variable or command argument"
-            in normalized_documentation
-        )
-        assert "metadata digest binds those values" in normalized_documentation
-        assert (
-            "canonical digest of bounded close, reopen, draft-conversion, and ready events"
-            in normalized_documentation
-        )
-        assert (
-            "brackets a lifecycle re-read with two live pull-request reads"
-            in normalized_documentation
-        )
-        assert "stable activity timestamp" in normalized_documentation
-        assert "reaction-driven pull-request activity timestamps" in normalized_documentation
-        assert "proves that the requested review settled" in normalized_documentation
-        assert "does not reinterpret findings as an approval" in normalized_documentation
+        assert "does not reinterpret review completion as approval" in normalized_documentation
         assert "completed Codex review with findings cannot merge" in documentation
         assert "strict required-status freshness" in documentation
         assert "external or bot-authored canary" in documentation
@@ -1344,4 +1370,4 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
     assert "benchmark workflows" in combined
     for reason in EXPLICIT_NONBLOCKING_PR_JOBS.values():
         assert reason.strip()
-        assert all(reason in documentation for documentation in documents)
+        assert all(reason in " ".join(documentation.split()) for documentation in documents)
