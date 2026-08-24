@@ -1723,6 +1723,7 @@ def test_real_ray_item_overflow_stops_admission_and_preserves_actor_error() -> N
 @pytest.mark.real_ray
 def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> None:
     import ray
+    from ray._private.state import actors
     from ray.exceptions import RayActorError
 
     if ray.is_initialized():
@@ -1765,6 +1766,9 @@ def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> Non
             reducer_node_id="0.reducer",
             initial=0,
         )
+        actor_state = actors(actor_id=session.actor._actor_id.hex())
+        assert actor_state["IsDetached"] is False
+        assert actor_state["NumRestarts"] == 0
 
         assert (
             executor.append_result_fold(
