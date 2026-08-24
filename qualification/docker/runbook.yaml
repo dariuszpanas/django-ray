@@ -1,0 +1,21 @@
+namespace: django-ray
+name: result-fold-real-ray-qualification
+description: One exact installed-wheel result-fold test on a disposable local Ray runtime.
+revision: v1
+schema_version: 1
+definition:
+  executor:
+    kind: command
+    payload:
+      argv: [python, -m, qualification.docker.scenario]
+  requirements:
+    capabilities: [docker, linux, python, ray]
+  timeout_seconds: 420
+  evidence:
+    max_artifacts: 3
+    max_bytes_per_artifact: 1048576
+    max_total_bytes: 3145728
+    required_kinds: [junit, log, manifest]
+  cleanup:
+    policy: always
+    timeout_seconds: 180

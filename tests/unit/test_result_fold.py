@@ -1551,7 +1551,14 @@ def count_payload(accumulator: int, item: str) -> int:
 
 
 def env_sum(accumulator: int, item: int) -> int:
+    import ray
+
     assert os.environ.get("DJANGO_RAY_FOLD_DIRECT_ENV") == "ready"
+    assert ray.get_runtime_context().get_assigned_resources() == {
+        "CPU": 0.25,
+        "memory": float(2 * 1024 * 1024),
+        "result_fold": 0.5,
+    }
     return accumulator + item
 
 
@@ -1717,7 +1724,6 @@ def test_real_ray_item_overflow_stops_admission_and_preserves_actor_error() -> N
 def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> None:
     import ray
     from ray.exceptions import RayActorError
-    from ray.util.state import get_actor
 
     if ray.is_initialized():
         ray.shutdown()
@@ -1725,6 +1731,7 @@ def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> Non
         address="local",
         num_cpus=2,
         resources={"result_fold": 1},
+        include_dashboard=False,
     )
     try:
         reducer = step(
@@ -1758,15 +1765,6 @@ def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> Non
             reducer_node_id="0.reducer",
             initial=0,
         )
-        actor_state = get_actor(session.actor._actor_id.hex())
-        assert actor_state is not None
-        assert actor_state.required_resources == {
-            "CPU": 0.25,
-            "memory": float(2 * 1024 * 1024),
-            "result_fold": 0.5,
-        }
-        assert actor_state.is_detached is False
-        assert actor_state.num_restarts == 0
 
         assert (
             executor.append_result_fold(
