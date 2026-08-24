@@ -1,9 +1,4 @@
 name: CI
-run-name: >-
-  ${{ github.event_name == 'pull_request' &&
-  format('YAGA CI {0} for #{1} at base {2}', github.event.action,
-  github.event.pull_request.number, github.event.pull_request.base.sha) ||
-  format('CI {0} on {1}', github.event_name, github.ref_name) }}
 
 on:
   push:
@@ -754,8 +749,8 @@ jobs:
           name: dist
           path: dist/
 
-  ci-prerequisites:
-    name: CI Prerequisites
+  ci-gate:
+    name: CI Gate
     if: always()
     needs:
       - lint
@@ -787,7 +782,7 @@ jobs:
               ).items()
           }
           if not results:
-            raise SystemExit("CI Prerequisites blocked: no blocking job results")
+            raise SystemExit("CI Gate blocked: no blocking job results")
 
           expected_jobs = {
               "build",
@@ -808,7 +803,7 @@ jobs:
               missing = ",".join(sorted(expected_jobs - received_jobs)) or "-"
               unexpected = ",".join(sorted(received_jobs - expected_jobs)) or "-"
               raise SystemExit(
-                  "CI Prerequisites blocked: result jobs mismatch; "
+                  "CI Gate blocked: result jobs mismatch; "
                   f"missing={missing}; unexpected={unexpected}"
               )
 
@@ -822,24 +817,7 @@ jobs:
           ]
           if unsuccessful:
               raise SystemExit(
-                  "CI Prerequisites blocked: " + ", ".join(unsuccessful)
+                  "CI Gate blocked: " + ", ".join(unsuccessful)
               )
           PY
-
-  legacy-ci-gate:
-    name: >-
-      ${{ vars.YAGA_CODEX_V2_ENABLED == 'true' &&
-      'Legacy CI Gate' || 'CI Gate' }}
-    if: always()
-    needs: [ci-prerequisites]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Preserve the bootstrap CI Gate
-        env:
-          PREREQUISITES_RESULT: ${{ needs.ci-prerequisites.result }}
-        run: |
-          if [[ "$PREREQUISITES_RESULT" != "success" ]]; then
-            echo "CI Gate blocked: CI Prerequisites=$PREREQUISITES_RESULT" >&2
-            exit 1
-          fi
 

@@ -128,39 +128,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delayed source events restore an already closed head once live association reads complete. The
   publisher runs as a repository module so its default-branch checkout can import the shared review
   policy during live workflow execution.
-- Codex review gating now uses an immutable YAGA v2 action that separates lifecycle invalidation from
-  quota-consuming requests. Exact-title native CI must succeed first; a failed prerequisite publishes
-  a terminal gate error without requesting Codex. Owner-authored pull requests can receive one marked
-  request directly, while every other author first crosses a protected, owner-only GitHub Environment
-  whose exact candidate-bound marker authorizes the serialized request worker. Deterministic wake
-  election prevents the CI and lifecycle completions from both writing or requesting. Bounded polling
-  accepts exact-head connector comments, formal reviews, and pull-request-body `+1` reactions only
-  when they are strictly later than the exact current-boundary Actions-owned YAGA request. The same
-  request-first rule covers eyes reactions and the initial ready opened candidate; same-second or
-  unsolicited evidence fails closed without a duplicate request. There are no schedule, comment,
-  review, close, or merge-group publisher triggers. Post-merge `push` completions skip every publisher
-  job before YAGA runs, so merging cannot start another Codex request.
-- The staged YAGA v2 bootstrap adds native `CI Prerequisites` while retaining the currently required
-  native `CI Gate` compatibility bridge. With `YAGA_CODEX_V2_ENABLED` absent or not exactly `true`,
-  every v2 entry job skips and the pinned v1 publisher remains active behind the inverse condition.
-  After the owner variables and protected environment are verified, enabling the flag renames the
-  bridge to `Legacy CI Gate`, lets YAGA alone publish classic `CI Gate`, and starts the owner and
-  external-author canaries. Automatic Codex reviews are disabled before activation, making YAGA the
-  sole legitimate automatic requester from the first canary. Both publisher queues,
-  protected-environment waits, and all outstanding provider review tasks must be cancelled or drained
-  before either flag transition
-  because changing a variable cannot revoke queued work. Activation also freezes new pull requests
-  and auto-merge at zero open pull requests; a fresh post-flag canary creates the lifecycle boundary
-  that a CI rerun on an older PR cannot supply. The expanded native contexts become required only
-  after exact-head green evidence.
-- The raw JSON `Review Policy Event` run title feeds Maintainer Approval and the inverse-gated v1
-  publisher during bootstrap. After cutover it remains temporary transport only for Maintainer
-  Approval, including close and displaced-head recovery, until a separate human-readable protocol
-  replaces it. YAGA's v2 lifecycle never handles `closed`, and a direct human or app
-  `@codex review` comment remains a provider-side quota loophole that repository workflows cannot
-  prevent. Visible unsolicited connector activity fails closed without a duplicate YAGA request, and
-  protected external approval never retroactively authorizes or reuses it; approval can authorize
-  only a strictly later current-boundary marked request.
+- Pull-request CI again exposes one native `CI Gate` at the end of its complete job graph. The
+  experimental Codex/YAGA publishers, lifecycle workflow, compatibility bridge, and scheduled repair
+  runs have been removed from django-ray; provider-integration experiments belong in an isolated test
+  repository and are not a required product merge check.
 - Runtime dependency floors now require Django 6.0.8 and sqlparse 0.6.0, preventing fresh
   and locked installs from resolving versions covered by current security advisories. Minimum
   dependency and benchmark lanes exercise the same patched pair, while the Admin breadcrumb
@@ -240,12 +211,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on active write protocol `1` with `1..1` package support and
   worker leases: no backend enqueues protocol `2`, no worker claims it, no capability producer
   creates its generation evidence, and Ray Job remains unsupported.
-- Required `Maintainer Approval` and `Codex Review` merge checks now let the repository owner merge
-  without self-approval while requiring the owner's current-head approval for every other author, a
-  trusted current-candidate Codex outcome, and native resolution of every review
-  conversation.
-  Their staged ruleset activation also requires strict status freshness and separate owner plus
-  external-or-bot canaries before rollout is considered complete.
+- Required `Maintainer Approval` lets the repository owner merge without self-approval while
+  requiring the owner's current-head approval for every other author. Native review-conversation
+  resolution remains required separately.
 - A Django-free, versioned target-attestation contract now defines bounded canonical
   target expectations, exact Ray/Python runtime tuples, per-node observations, and a
   before/after resource-state boundary. Its dormant Ray 2.56.0 probe hard-pins one
