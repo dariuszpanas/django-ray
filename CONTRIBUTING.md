@@ -125,23 +125,17 @@ check enforces meaningful body context, validation evidence or a specific not-ru
 wrappable commit-prose line limit without prescribing section headings. A failed check prints the
 offending title, commit, or line and the expected correction.
 
-Two required review checks apply the repository's conditional review policy. `Maintainer Approval`
+The required `Maintainer Approval` check applies the repository's conditional review policy. It
 passes the owner's own pull requests without self-approval; a pull request from any other author
-requires an `APPROVED` review by `dariuszpanas` on the current head commit. `Codex Review` requires a
-trusted Codex outcome for the exact current candidate. Both publishers recheck the live head and base
-before passing. A synchronized head needs a new commit-bound Codex outcome. A base change remains
-pending until the pull request moves to a new head because GitHub's connector evidence does not bind
-the reviewed base. Strict required-status freshness prevents a default-branch advance from reusing an
-older candidate's result.
+requires an `APPROVED` review by `dariuszpanas` on the current head commit. The publisher rechecks the
+live head and pull-request ownership before passing. Strict required-status freshness prevents a
+default-branch advance from reusing an older candidate's result.
 
 Maintainer review events cross an explicit privilege boundary. The unprivileged
-`Review Policy Event` workflow still records lifecycle, review, close, and displaced-head data. It
-feeds both Maintainer Approval and the inverse-gated YAGA v1 publisher during bootstrap; after v2
-cutover, it remains temporary maintainer-only transport until that protocol receives a human-readable
-replacement. It has no token permissions, checkout, artifact, or pull-request code execution. Its
-versioned run-name JSON remains visible meanwhile. Review event observation is nonblocking; trusted
-publishers own the required states. `Review Policy Boundary` remains nonblocking during the staged
-YAGA v2 bootstrap. `CI Prerequisites` remains nonblocking during the staged YAGA v2 bootstrap.
+`Review Policy Event` workflow records lifecycle, review, close, and displaced-head data. It has no
+token permissions, checkout, artifact, or pull-request code execution. Its versioned run-name JSON
+remains visible. Review event observation is nonblocking; the trusted maintainer publisher owns the
+required state.
 
 For every affected current, displaced, or closed head, the maintainer publisher first replaces the
 prior `Maintainer Approval` context with `pending`. It then validates the source workflow path,
@@ -152,102 +146,9 @@ evaluation remain independent, head-serialized jobs. A close immediately reevalu
 unique same-head owner; if no owner remains, bounded association and capacity checks allow the stale
 pending state to return to terminal success. Ambiguous or uncorroborated ownership remains pending.
 The maintainer publisher trusts no upstream artifact or pull-request code and checks out only the
-exact default-branch commit bound to its dispatch.
-
-YAGA v2 separates lifecycle invalidation from quota-consuming review requests. The trusted
-`YAGA Review Policy` workflow publishes the exact current boundary without checking out pull-request
-code. Unprivileged PR CI uses an exact bounded run title, ends at native `CI Prerequisites`, and
-completes before the `YAGA Codex Review Publisher` may request or observe Codex. The publisher pins one
-immutable YAGA commit. Failed CI publishes terminal gate errors and never requests a review. Both
-authenticated workflow completions are reconcile wakes; YAGA deterministically elects only one
-processor before any write, so their completion order cannot create duplicate requests.
-
-The bootstrap is fail-safe when the repository variable `YAGA_CODEX_V2_ENABLED` is absent or not
-exactly `true`: every v2 entry job skips and the pinned v1 jobs remain active behind the inverse
-condition. CI still publishes native `CI Prerequisites`, but the compatibility bridge retains the
-required native `CI Gate`. After the variables and protected environment are verified, setting the
-flag to `true` skips v1, renames the bridge to non-colliding `Legacy CI Gate`, and makes YAGA the sole
-publisher of classic `CI Gate`. A variable change does not revoke an already queued job: before
-enabling or rolling back, freeze new pull requests and auto-merge, reach zero open pull requests,
-cancel every in-progress v1 and v2 publisher run including jobs waiting on the protected environment,
-and wait for both workflow queues and all outstanding Codex provider tasks to drain. Automatic Codex
-reviews are disabled before v2 is activated, so YAGA is the sole legitimate automatic requester from
-the first canary.
-Change the flag only at that boundary, then open a fresh canary only after a second cancel-and-drain
-check catches any v1 schedule or provider task that started during the transition. The fresh canary
-lets v2 record its lifecycle event before CI can authorize anything. An emergency transition with an
-open PR must keep its auto-merge disabled and move it to a new head after the flag change; a CI rerun
-alone does not create the missing lifecycle boundary. A rollback must re-enable automatic reviews
-after the drain or explicitly accept manual owner requests because v1 observes reviews but never
-requests one. Remove both the flag and v1 workflow only after the complete canary.
-
-Owner-authored PRs may receive one marked `@codex review` request after successful CI. Every other
-author must first receive approval through the protected `codex-review-approval` environment. Only
-its exact candidate-bound marker authorizes the separately serialized request worker. The immutable
-owner ID is configured through `YAGA_CODEX_OWNER_ID`; the environment has Dariusz as sole reviewer,
-prevents self-review and administrator bypass, contains no secrets, and exposes the exact
-`YAGA_CODEX_APPROVAL_MARKER` environment variable. The required repository value is
-`YAGA_CODEX_OWNER_ID=15094983`; the environment-only value is
-`YAGA_CODEX_APPROVAL_MARKER=codex-review-approval:v1`. Verify those exact values and every protection
-setting before enabling v2. A direct human or app `@codex review` comment remains a provider-side
-loophole: it can consume provider quota outside YAGA, and no repository gate can prevent provider
-execution. Such a comment can race between YAGA's final provider-evidence read and request POST, so a
-later provider outcome can appear temporally correlated even when another comment triggered it. If
-trusted connector activity is already visible without the exact current-boundary Actions-owned YAGA
-request, YAGA fails closed and does not post a duplicate. Protected external approval never
-retroactively authorizes or reuses unsolicited activity; it authorizes only a strictly later
-current-boundary YAGA request.
-
-YAGA accepts these bounded connector outcomes:
-
-- a clean connector issue comment from the official GitHub App with a reviewed-commit marker that
-  resolves to the current head;
-- a formal connector findings review whose native commit ID and reviewed-commit marker identify the
-  current head; or
-- the official connector's `+1` reaction on the pull-request body.
-
-Every accepted eyes reaction or terminal outcome, including evidence for the ready `opened`
-candidate, requires the exact current-boundary Actions-owned YAGA request and must be strictly after
-that request. Same-second evidence is ambiguous and fails closed. A pull-request-body reaction has no
-commit or base identifier. The request provides the only available temporal correlation, not native
-provider binding; YAGA never accepts the reaction before or without that request. There is no
-schedule, issue-comment, review, `closed`, or
-`merge_group` publisher trigger. Bounded polling settles the current request; timeout or runner loss
-leaves an explicit error or pending result. Rerun current CI after a temporary provider, API, or
-runner failure. Capacity failures have stricter recovery: 100 or more comments, reviews, or reactions
-make that evidence page incomplete and require a new pull request. Commit-status reads require fewer
-than 100 visible statuses across all contexts and reserve the final two slots for terminal and repair
-writes; approaching either status ceiling requires a new head, and another same-head CI rerun can
-make recovery harder. Merge queues remain unsupported because the shipped workflows have no
-combined-head contract.
-
-GitHub comment and commit-status writes are not transactional. YAGA revalidates the exact source CI,
-lifecycle boundary, live PR, unique head ownership, approval, provider evidence, and status lineage
-around each authority-changing write. The 15-minute action-only jobs reserve bounded REST request,
-wall-clock, terminal-error, and compensating-pending tails through `job-timeout-minutes`. A close can
-race the final live read and comment/status POST, so YAGA cannot guarantee zero post-close writes.
-The publisher admits `pull_request` completions only from `.github/workflows/ci.yml` and
-`pull_request_target` completions only from `.github/workflows/review-policy.yml`. This lets the
-lifecycle wake run on the `main` base branch while a post-merge `push` completion skips every
-publisher job before YAGA runs. Path-and-event routing also permits an external fork whose head
-branch is literally named `main`.
-
-The beta assumes delivery of every configured lifecycle event. A missed reopen or other same-head
-transition can leave an older green status visible because no native boundary check was created.
-Canaries must verify lifecycle delivery; any missing delivery is an activation blocker rather than a
-case for scheduled repair.
-
-The repository token writes statuses as the shared GitHub Actions integration. Reserve both exact
-classic contexts, `Codex Review` and `CI Gate`, and every case-insensitive alias of either. Reject any
-colliding workflow, job, check, or other status publisher before making them required; the dynamic
-bootstrap bridge is the only temporary job allowed to expose native `CI Gate` while v2 is disabled.
-
-The maintainer-only observer includes `closed` because Maintainer Approval needs immediate
-shared-head recovery. YAGA's separate lifecycle workflow deliberately does not. GitHub's native
-required review-conversation resolution remains enabled separately, so a
-completed Codex review with findings cannot merge until every actionable thread is answered and
-resolved. YAGA does not
-reinterpret review completion as approval.
+exact default-branch commit bound to its dispatch. GitHub's native required review-conversation
+resolution remains enabled separately, so actionable review threads must be answered and resolved
+before merge.
 
 ## Rebase auto-merge
 
@@ -258,24 +159,15 @@ inside the PR. Do not squash a PR. After CI is green, enable auto-merge with the
 gh pr merge --auto --rebase <PR-number>
 ```
 
-During bootstrap, auto-merge waits for `Commit Messages`, native `CI Gate`, `Maintainer Approval`, and
-`Codex Review`, plus GitHub's native required review-conversation resolution. After the canaried
-cutover, it also waits for native `CI Prerequisites` and `Review Policy Boundary`, while YAGA alone
-publishes classic `CI Gate` last. The rebase method preserves each descriptive commit on `main`. The
-`Commit Messages` workflow validates the PR title and ordinary PR commits from a base-branch checkout
-with read-only repository permission. Its title-only Dependabot path is limited by trusted
-`pull_request_target` event metadata to the bot's same-repository branch namespace. Native
-`CI Prerequisites` runs with `always()` and rejects failed, cancelled, timed-out, or skipped blocking
-jobs, including a package build skipped after an upstream failure. The bootstrap compatibility job
-derives native `CI Gate` from that result; after cutover it is named `Legacy CI Gate` and YAGA derives
-the final classic `CI Gate` from prerequisites plus exact-head review evidence.
-The Codex publisher executes only the immutable YAGA action with bounded permissions and no checkout.
-V1 review events use the unprivileged shared observer before trusted default-branch publishers write
-statuses. V2 instead uses a trusted, status-writing `pull_request_target` lifecycle invalidator with
-no issue-write permission or checkout. Its prepare and finalize jobs use authenticated wake election
-and exact-state revalidation; only observe and request workers are serialized per pull request.
-Maintainer status jobs invalidate the old state before checking out trusted default-branch code.
-Neither policy path executes pull-request code with a write token.
+Auto-merge waits for `Commit Messages`, `CI Gate`, and `Maintainer Approval`, plus GitHub's native
+required review-conversation resolution. The rebase method preserves each descriptive commit on
+`main`. The `Commit Messages` workflow validates the PR title and ordinary PR commits from a
+base-branch checkout with read-only repository permission. Its title-only Dependabot path is limited
+by trusted `pull_request_target` event metadata to the bot's same-repository branch namespace. Native
+`CI Gate` runs with `always()` and rejects failed, cancelled, timed-out, or skipped blocking jobs,
+including a package build skipped after an upstream failure. Maintainer status jobs invalidate the old
+state before checking out trusted default-branch code; they never execute pull-request code with a
+write token.
 
 Native Compiled Graph validation is not run on public GitHub-hosted runners; use the guarded local
 KubeRay pilot when issue #102 requires that evidence. Coverage-debt review and benchmark workflows,
@@ -304,25 +196,12 @@ retain each one as a focused commit with its own descriptive body. Run the valid
 PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
-conflicts, rerun the affected checks, re-evaluate the full-gate triggers below, and push. After native
-CI succeeds, YAGA requires one exact current-boundary marked request, creating at most one through the
-owner or protected external-author path and accepting only strictly later connector evidence.
-Auto-merge waits for the new head's checks. The merge
-policy's steady state requires `Commit Messages`, `CI Prerequisites`, `Review Policy Boundary`,
-`CI Gate`, `Maintainer Approval`, and `Codex Review` from GitHub Actions, requires
-native review conversation resolution, and permits rebase merges only. Activate a new required
-context only after its workflow is merged and a ready canary pull request reports that exact context
-successfully; GitHub does not retroactively create a newly required check. Staged ruleset activation
-must also enable strict required-status freshness so a changed base cannot reuse results from an
-older candidate. An owner-authored canary proves the contexts but does not exercise the
-protected request-approval path. Treat rollout as incomplete until an external or bot-authored canary
-is available and proves both that quota approval precedes the marked Codex request and that approval,
-dismissal, reapproval, synchronization, and an unrelated `COMMENTED` review replace the single
-current-head `Maintainer Approval` status without leaving a second required result. Existing pull
-requests with legacy same-named check runs must move to a new head before serving as that canary. The
-native approval count remains zero so the owner is not forced
-to self-approve; `Maintainer Approval` supplies the conditional rule that requires the owner's
-current-head approval for every other author. The current owner
+conflicts, rerun the affected checks, re-evaluate the full-gate triggers below, and push. Auto-merge
+waits for the new head's checks. The merge policy requires `Commit Messages`, `CI Gate`, and
+`Maintainer Approval`, requires native review-conversation resolution, and permits rebase merges only.
+The native approval count remains zero so the owner is not forced to self-approve; `Maintainer
+Approval` supplies the conditional rule that requires the owner's current-head approval for every
+other author. The current owner
 `pull_request` bypass remains explicit break-glass recovery, not absolute enforcement against an
 intentional owner bypass; ordinary merges remain gated and emergency use requires the explicit
 `gh pr merge --admin --rebase <PR-number>` path.
