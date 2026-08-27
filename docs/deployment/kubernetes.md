@@ -62,8 +62,9 @@ The Django Web URL opens the bundled testproject landing page:
 
 ![django-ray testproject landing page](../assets/images/testproject-landing.png)
 
-The `dev`, `local`, `dev-tls`, `kuberay-kind`, and `kong-local` overlays are local-demo
-examples. Their health probes are public, but all other API routes require the bearer token
+The `dev`, `local`, `dev-tls`, `co-resident`, `kuberay-kind`, and `kong-local` overlays are
+local-demo examples. Their health probes are public when an overlay supplies an external route,
+but all other API routes require the bearer token
 from `DJANGO_API_TOKEN`:
 
 ```bash
@@ -227,42 +228,83 @@ workers. The optional `kong-local` overlay explicitly restores two default task
 managers and four fixed three-CPU Ray workers, alongside its larger web and
 PostgreSQL settings, for backlog and capacity work.
 
+The `co-resident` overlay is a separate five-pod local smoke profile for a
+shared developer-controlled cluster. It retains PostgreSQL, Django web, one
+default task manager at concurrency one, one zero-CPU Ray head, and one
+single-CPU Ray worker. It excludes monitoring, sync, ML, and Ray Job capacity.
+All Services remain `ClusterIP`, and the render contains no Ingress,
+`NodePort`, `hostPort`, or host networking. Optional browser access uses a
+caller-owned, temporary port-forward.
+
+The application ResourceQuota is capped at 1.6 CPU: steady pods permit 1.45
+CPU, and the setup Job can raise concurrent limits to 1.55 CPU. The pinned
+KubeRay v1.6.2 operator policy permits 0.2 CPU so its single 100m pod can roll
+once. Those two foreign-namespace ceilings total 1.8 CPU. This contract is
+intended to fit beside django-ray-testing under its documented 50% host policy;
+the other local profiles do not fit that envelope. The application namespace
+also has a 5 GiB memory-limit ceiling, including a known-good 2 GiB Ray-head
+limit, while the operator namespace is capped at 1 GiB.
+
 Rendered steady-state totals exclude the completed setup Job, the KubeRay
 operator, the Kong controller/gateway, and Kubernetes/Docker overhead:
 
 | Profile | `django-ray` pods | CPU requests | Memory requests | CPU limits | Memory limits |
 |---|---:|---:|---:|---:|---:|
+| Co-resident | 5 | 0.5 | 2,176 MiB | 1.45 | 4,736 MiB |
 | Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 12,160 MiB |
 | Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,272 MiB |
 
 ### 1. Install Operator + Deploy
 
 ```bash
+# Preserve the live Secret and PVC data while foreground-removing only
+# superseded sample workloads and routes. The context is mandatory.
+make k8s-deploy-co-resident K8S_CONTEXT=docker-desktop
+
+# Optional temporary access. Stop the command to remove the listener.
+kubectl port-forward -n django-ray service/django-web-svc 8000:80
+
 # Build app images, load them into kind, install/upgrade KubeRay, deploy overlay
-make k8s-deploy-kuberay-kind
+make k8s-deploy-kuberay-kind K8S_CONTEXT=docker-desktop
 ```
+
+The co-resident target pins the KubeRay chart and image tag to v1.6.2, applies
+the bounded `kuberay-system` quota before the Helm upgrade, deletes only the
+named full-profile Deployments, Services, routes, monitoring configuration, and
+completed setup Job, and then applies the five-pod render. It requires an
+explicit `docker-desktop` or `kind-<name>` context and passes that context to
+every cluster command. On first install it creates the checked-in local
+placeholder Secret; later transitions detect and preserve the live Secret
+instead of rendering credentials. The profile-managed application ConfigMap is
+converged deliberately. The target never deletes the `django-ray` Namespace or
+any PVC.
+
+This is not a replacement for `k8s-final-gate`; deployment-sensitive changes
+require an exact co-resident transition and smoke plus the guarded full-profile
+gate described in the trigger matrix. Before applying the direct full profile,
+the guarded gate and `k8s-deploy-kuberay-kind` explicitly remove the
+co-resident application ResourceQuota and LimitRange that Kustomize omission
+cannot prune. The Kong local target does the same before applying its larger
+profile. All three preserve the existing Secret rather than rendering the
+checked-in placeholders.
 
 The direct target leaves any existing Kong release and ingress routes untouched. It does not invoke
 the Kong uninstall target because a release named `kong` in the `kong` namespace may belong to a
 different local workload.
 
-If you also want the host-based Kong routes used by the Docker Desktop managed kind setup,
-install Kong and apply the local ingress overlay:
+If you also want the host-based Kong routes used by the Docker Desktop managed kind setup, use the
+guarded target so the bootstrap-only Secret, policy removal, image/operator prerequisites, and
+explicit context remain part of one transition:
 
 ```bash
-# One command path
-make k8s-deploy-kong-local
-
-# Equivalent manual path
-helm upgrade --install kong kong/ingress \
-  --namespace kong \
-  --create-namespace \
-  -f k8s/overlays/kong-local/kong-values.yaml
-
-kubectl apply -k k8s/overlays/kong-local
+make k8s-deploy-kong-local K8S_CONTEXT=docker-desktop
 ```
 
-`make k8s-uninstall-kong-local` is an explicit, destructive cleanup for the conventional `kong`
+Do not replace this target with a raw `kubectl apply -k k8s/overlays/kong-local`: the
+credential-free render deliberately assumes a separately provisioned live Secret, and an existing
+co-resident namespace must have its bounded application policy removed first.
+
+`make k8s-uninstall-kong-local K8S_CONTEXT=docker-desktop` is an explicit, destructive cleanup for the conventional `kong`
 release and the three sample ingress routes. Run it only after verifying that those resources were
 installed for this project; switching to the direct profile never runs it automatically.
 
@@ -289,7 +331,7 @@ make k8s-delete-kuberay-kind
 - Default kind cluster name is `kind`. Override when needed:
 
 ```bash
-make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
+make k8s-deploy-kuberay-kind K8S_CONTEXT=kind-my-kind KIND_CLUSTER_NAME=my-kind
 ```
 
 ## Architecture

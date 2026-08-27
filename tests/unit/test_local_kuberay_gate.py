@@ -643,10 +643,14 @@ def _ray_cluster(
     namespace: str = EXPECTED_NAMESPACE,
     uid: str | None = None,
     workers: int = 1,
+    head_sidecar: bool = False,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {"name": RAY_CLUSTER_NAME, "namespace": namespace}
     if uid is not None:
         metadata["uid"] = uid
+    head_containers = [{"name": "ray-head", "image": "rayproject/ray:2.56.0-py312"}]
+    if head_sidecar:
+        head_containers.append({"name": "dashboard-importer", "image": "python:3.12-slim"})
     return {
         "apiVersion": "ray.io/v1",
         "kind": "RayCluster",
@@ -657,11 +661,7 @@ def _ray_cluster(
             "headGroupSpec": {
                 "serviceType": "NodePort",
                 "rayStartParams": {"num-cpus": "1"},
-                "template": {
-                    "spec": {
-                        "containers": [{"name": "ray-head", "image": "rayproject/ray:2.56.0-py312"}]
-                    }
-                },
+                "template": {"spec": {"containers": head_containers}},
             },
             "workerGroupSpecs": [
                 {
@@ -807,6 +807,7 @@ def _ray_pod(
     uid: str,
     *,
     image: str = "rayproject/ray:2.56.0-py312",
+    head_sidecar: bool = False,
 ) -> dict[str, object]:
     container_name = "ray-head" if component == "head" else "ray-worker"
     labels = {
@@ -828,6 +829,16 @@ def _ray_pod(
             }
         ],
     }
+    if component == "head" and head_sidecar:
+        sidecar = {"name": "dashboard-importer", "image": "python:3.12-slim"}
+        spec["containers"].append(sidecar)
+        cast(list[dict[str, object]], status["containerStatuses"]).append(
+            {
+                **sidecar,
+                "imageID": f"containerd://sha256:{'d' * 64}",
+                "ready": True,
+            }
+        )
     if component == "worker":
         spec["initContainers"] = [
             {
@@ -2211,6 +2222,7 @@ def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Pat
         for resource in resources
     )
     assert not any(resource["kind"].startswith("ClusterRole") for resource in resources)
+    assert not any(resource["kind"] == "Secret" for resource in resources)
 
     ray_cluster = next(resource for resource in resources if resource.get("kind") == "RayCluster")
     head = ray_cluster["spec"]["headGroupSpec"]["template"]["spec"]["containers"][0]
@@ -2247,10 +2259,17 @@ def test_runtime_env_encryption_overlay_rejects_shared_or_ray_selectors(location
             "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE": "encrypted",
         }
     elif location == "secret":
-        secret = next(resource for resource in resources if resource.get("kind") == "Secret")
-        secret["data"] = {
-            "DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE": "ZW5jcnlwdGVk",
-        }
+        resources.append(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": "injected-runtime-env",
+                    "namespace": EXPECTED_NAMESPACE,
+                },
+                "data": {"DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE": "ZW5jcnlwdGVk"},
+            }
+        )
     elif location == "unknown-envfrom":
         target = next(
             resource
@@ -2513,11 +2532,12 @@ def test_render_guard_rejects_floating_application_images() -> None:
         inspect_rendered_resources(resources, namespace=EXPECTED_NAMESPACE, tag=TAG)
 
 
-def test_setup_job_is_separated_and_live_secret_is_preserved() -> None:
+def test_setup_job_is_separated_from_secret_free_apply_stream() -> None:
     resources = _resources()
 
     prerequisites, setup, workloads = split_apply_resources(resources)  # type: ignore[arg-type]
 
+    assert not any(resource.get("kind") == "Secret" for resource in resources)
     assert setup["metadata"]["name"] == SETUP_JOB
     assert all(resource.get("kind") != "Job" for resource in prerequisites)
     assert not any(resource.get("kind") == "Secret" for resource in prerequisites)
@@ -2530,6 +2550,52 @@ def test_setup_job_is_separated_and_live_secret_is_preserved() -> None:
         and resource.get("metadata", {}).get("name") in {*APP_DEPLOYMENTS, RAY_CLUSTER_NAME}
         for resource in prerequisites
     )
+
+
+def test_rendered_bootstrap_secret_is_rejected_from_every_apply_phase() -> None:
+    resources = _resources()
+    resources.append(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "django-ray-secret",
+                "namespace": EXPECTED_NAMESPACE,
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="not in the guarded inventory"):
+        inspect_rendered_resources(resources, namespace=EXPECTED_NAMESPACE, tag=TAG)
+    with pytest.raises(ValueError, match="has no guarded apply phase"):
+        split_apply_resources(resources)  # type: ignore[arg-type]
+
+
+def test_full_gate_removes_co_resident_policy_before_applying_prerequisites(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.temp_root = tmp_path
+    gate.resources = _resources()
+    calls: list[tuple[str, ...]] = []
+
+    def kubectl(*args: str, **_kwargs: object) -> CommandResult:
+        calls.append(args)
+        return CommandResult("", "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+
+    gate._apply_overlay()
+
+    assert calls[0] == (
+        "delete",
+        *gate_module.CO_RESIDENT_APPLICATION_POLICY_OBJECTS,
+        "--ignore-not-found=true",
+        "--wait=true",
+    )
+    apply_index = next(index for index, call in enumerate(calls) if call[0] == "apply")
+    assert apply_index > 0
 
 
 def test_request_reference_payload_storage_has_exact_writer_reader_boundaries() -> None:
@@ -5926,7 +5992,10 @@ def test_required_restart_discovers_owned_old_images_then_requires_new_effective
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = LocalKubeRayGate(_config())
-    _set_ray_topology(gate)
+    desired_cluster = _ray_cluster(uid="cluster-owner", head_sidecar=True)
+    gate.rendered_ray_topology = normalize_ray_topology(cast(dict[str, Any], desired_cluster))
+    gate.expected_ray_head_count = 1
+    gate.expected_ray_worker_count = 1
     old_pods = [
         _ray_pod(
             "ray-head-old",
@@ -5942,7 +6011,7 @@ def test_required_restart_discovers_owned_old_images_then_requires_new_effective
         ),
     ]
     new_pods = [
-        _ray_pod("ray-head-new", "head", "new-head-uid"),
+        _ray_pod("ray-head-new", "head", "new-head-uid", head_sidecar=True),
         _ray_pod("ray-worker-new", "worker", "new-worker-uid"),
     ]
     calls: list[tuple[str, ...]] = []
@@ -5950,7 +6019,7 @@ def test_required_restart_discovers_owned_old_images_then_requires_new_effective
     def kubectl(*args: str, **kwargs: object) -> CommandResult:
         calls.append(args)
         if args[:3] == ("get", "raycluster", RAY_CLUSTER_NAME):
-            return CommandResult(json.dumps(_ray_cluster(uid="cluster-owner")), "", 0)
+            return CommandResult(json.dumps(desired_cluster), "", 0)
         if args[:2] == ("get", "pods"):
             return CommandResult(json.dumps({"items": old_pods}), "", 0)
         if args[:2] == ("delete", "pod"):
@@ -5979,6 +6048,46 @@ def test_required_restart_discovers_owned_old_images_then_requires_new_effective
         "new-head-uid",
         "new-worker-uid",
     }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing-ray-head", "co-resident-plus-foreign", "full-plus-foreign", "head-init"),
+)
+def test_restart_discovery_rejects_unknown_co_resident_head_inventory(mutation: str) -> None:
+    gate = LocalKubeRayGate(_config())
+    desired_cluster = _ray_cluster(uid="cluster-owner", head_sidecar=True)
+    gate.rendered_ray_topology = normalize_ray_topology(cast(dict[str, Any], desired_cluster))
+    head = _ray_pod(
+        "ray-head-old",
+        "head",
+        "old-head-uid",
+        head_sidecar=mutation == "full-plus-foreign",
+    )
+    spec = cast(dict[str, Any], head["spec"])
+    containers = cast(list[dict[str, str]], spec["containers"])
+    if mutation == "missing-ray-head":
+        containers.clear()
+    elif mutation in {"co-resident-plus-foreign", "full-plus-foreign"}:
+        containers.append({"name": "foreign-sidecar", "image": "busybox:1.36"})
+    else:
+        spec["initContainers"] = [{"name": "foreign-init", "image": "busybox:1.36"}]
+
+    with pytest.raises(ValueError, match="supported KubeRay inventory"):
+        gate._validate_restart_discovery_pod(head)
+
+
+def test_restart_discovery_keeps_worker_inventory_exact() -> None:
+    gate = LocalKubeRayGate(_config())
+    _set_ray_topology(gate)
+    worker = _ray_pod("ray-worker-old", "worker", "old-worker-uid")
+    spec = cast(dict[str, Any], worker["spec"])
+    cast(list[dict[str, str]], spec["containers"]).append(
+        {"name": "foreign-sidecar", "image": "busybox:1.36"}
+    )
+
+    with pytest.raises(ValueError, match="supported KubeRay inventory"):
+        gate._validate_restart_discovery_pod(worker)
 
 
 def test_restart_discovery_accepts_bounded_owned_scale_down_inventory(

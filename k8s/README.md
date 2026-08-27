@@ -23,7 +23,10 @@ k8s/
 │   ├── ray-tls-secret.yaml  # TLS certificate secret template
 │   ├── django-web.yaml      # Django web application
 │   └── django-ray-worker.yaml  # Task worker
+├── operators/
+│   └── kuberay-co-resident/ # Pinned operator values and shared quota
 └── overlays/
+    ├── co-resident/         # Five-pod profile for a shared local cluster
     ├── dev/                 # Development overlay (no TLS)
     │   └── kustomization.yaml
     ├── dev-tls/             # Development overlay with TLS
@@ -131,6 +134,37 @@ database access is required.
 
 ### Local capacity profiles
 
+The `co-resident` overlay is the smallest stable-namespace profile. It is
+designed for keeping django-ray available while another application, such as
+django-ray-testing, uses the same developer-controlled cluster. It retains
+PostgreSQL, Django web, one default task manager at concurrency one, one Ray
+head, and one Ray worker. Monitoring, sync, ML, and Ray Job task managers are
+absent. Every Service is `ClusterIP`; the render contains no Ingress,
+`NodePort`, `hostPort`, or host networking.
+
+The application namespace has one unscoped seven-coordinate quota capped at
+1.6 CPU. Its five steady pods use at most 1.45 CPU, and the setup Job raises the
+maximum concurrent limit to 1.55 CPU. The separately rendered
+`kuberay-system` policy pins the operator chart and container to v1.6.2 and
+allows a 100m operator plus one 100m rollout surge. The two hard quota ceilings
+therefore total exactly 1.8 CPU. The application memory-limit ceiling is 5 GiB,
+including a 2 GiB Ray-head limit, and the operator namespace is capped at 1 GiB.
+LimitRanges supply bounded CPU, memory, and ephemeral-storage coordinates to
+the inherited init containers.
+
+This profile is local smoke capacity, not the guarded full KubeRay gate and not
+the isolated multi-session experiment tracked by issue #418. Its switch target
+requires an explicit `docker-desktop` or `kind-<name>` context and
+foreground-removes only the named sample workloads and routes that are absent
+from the profile. It retains the `django-ray` Namespace, the existing Secret
+values, and all three PVCs. A first install creates the checked-in local
+placeholder Secret; subsequent transitions never render it. The application
+ConfigMap remains profile-managed and is converged intentionally. A transition
+back to the direct full or Kong local profile first removes the co-resident
+application quota and LimitRange, which an ordinary Kustomize apply would
+otherwise retain. Those KubeRay profiles use the same bootstrap-only Secret
+boundary and never render checked-in credentials over a live object.
+
 The direct `kuberay-kind` overlay is the laptop-oriented exploratory baseline. It
 runs one default task manager for `default,high-priority,low-priority`, one
 synchronous task manager, one ML task manager, one Ray Job task manager for
@@ -150,13 +184,20 @@ Desktop/Kubernetes overhead:
 
 | Profile | Pods in `django-ray` | CPU requests | Memory requests | CPU limits | Memory limits |
 |---|---:|---:|---:|---:|---:|
+| Co-resident | 5 | 0.5 | 2,176 MiB | 1.45 | 4,736 MiB |
 | Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 12,160 MiB |
 | Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,272 MiB |
 
 ```bash
+# Preserve the existing Secret and PVCs while converging to five pods.
+make k8s-deploy-co-resident K8S_CONTEXT=docker-desktop
+
+# Optional, caller-owned temporary browser access; no listener is retained.
+kubectl port-forward -n django-ray service/django-web-svc 8000:80
+
 # Build app images, load them into kind, install operator, deploy KubeRay overlay.
 # Ray head/workers use the upstream image; RuntimeEnv supplies project code.
-make k8s-deploy-kuberay-kind
+make k8s-deploy-kuberay-kind K8S_CONTEXT=docker-desktop
 
 # Check status (includes RayCluster list)
 make k8s-status
@@ -168,7 +209,7 @@ make k8s-delete-kuberay-kind
 If your local kind cluster has a non-default name:
 
 ```bash
-make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
+make k8s-deploy-kuberay-kind K8S_CONTEXT=kind-my-kind KIND_CLUSTER_NAME=my-kind
 ```
 
 ## Kong Ingress Controller Path
@@ -176,24 +217,15 @@ make k8s-deploy-kuberay-kind KIND_CLUSTER_NAME=my-kind
 To evaluate Kong as a candidate ingress, validate the ingress class locally with KubeRay plus Kong
 Ingress Controller.
 
-This path requires `helm`; the one-command path shares the KubeRay build,
+This path requires `helm`; the guarded target shares the KubeRay build,
 image-load, and operator prerequisites but applies only the `kong-local`
 workload render. It expects `kind` unless your environment provides an
-equivalent image-loading path.
+equivalent image-loading path. Use the target rather than a raw Kustomize apply
+so the bootstrap-only Secret, co-resident policy removal, and explicit context
+remain part of the transition.
 
 ```bash
-# One command path
-make k8s-deploy-kong-local
-
-# Equivalent manual path
-# Install Kong Gateway + Kong Ingress Controller
-helm upgrade --install kong kong/ingress \
-  --namespace kong \
-  --create-namespace \
-  -f k8s/overlays/kong-local/kong-values.yaml
-
-# Deploy django-ray with Kong-specific ingress/service patches
-kubectl apply -k k8s/overlays/kong-local
+make k8s-deploy-kong-local K8S_CONTEXT=docker-desktop
 ```
 
 This overlay:

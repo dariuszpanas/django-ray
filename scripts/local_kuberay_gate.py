@@ -97,6 +97,8 @@ RAY_CLUSTER_NAME = "ray"
 RAY_CLUSTER_LABEL = "ray.io/cluster"
 RAY_GROUP_LABEL = "ray.io/group"
 KUBERAY_WAIT_GCS_INIT = "wait-gcs-ready"
+CO_RESIDENT_RAY_HEAD_CONTAINER_NAMES = ((), ("ray-head",))
+GUARDED_GATE_RAY_HEAD_CONTAINER_NAMES = ((), ("ray-head", "dashboard-importer"))
 RAY_IMAGE_PYTHON_VERSION_PATTERN = re.compile(r"3\.12\.(?:0|[1-9][0-9]*)\Z")
 MAX_RAY_DISCOVERY_PODS = 128
 MAX_RAY_POD_CONTAINERS = 16
@@ -107,6 +109,10 @@ MAX_APPLICATION_REPLICASETS = 512
 MAX_APPLICATION_PODS = 512
 SETUP_JOB = "django-setup"
 SETUP_CONTAINER = "django-setup"
+CO_RESIDENT_APPLICATION_POLICY_OBJECTS = (
+    "resourcequota/django-ray-co-resident-budget",
+    "limitrange/django-ray-co-resident-defaults",
+)
 APP_IMAGE_NAME = "django-ray"
 LEGACY_WORKER_IMAGE_NAME = "django-ray-worker"
 APP_IMAGE_REPOSITORY = "django-ray"
@@ -616,7 +622,6 @@ WORKLOAD_RESOURCE_IDENTITIES = frozenset(
 EXPECTED_RESOURCE_IDENTITIES = frozenset(
     {
         *PREREQUISITE_RESOURCE_IDENTITIES,
-        PRESERVED_SECRET_IDENTITY,
         SETUP_RESOURCE_IDENTITY,
         *WORKLOAD_RESOURCE_IDENTITIES,
     }
@@ -1534,6 +1539,10 @@ def inspect_runtime_env_encryption_overlay(resources: Sequence[Mapping[str, Any]
         for resource in resources
         if (identity := _resource_identity(resource))[1] in {"ConfigMap", "Secret"}
     }
+    allowed_sources = {
+        *rendered_sources,
+        (PRESERVED_SECRET_IDENTITY[1], PRESERVED_SECRET_IDENTITY[2]),
+    }
     carriers: dict[tuple[str, str, str], dict[str, str]] = {}
     for resource in resources:
         identity = _resource_identity(resource)
@@ -1600,7 +1609,7 @@ def inspect_runtime_env_encryption_overlay(resources: Sequence[Mapping[str, Any]
                         if (
                             not isinstance(source_name, str)
                             or not source_name
-                            or (kind, source_name) not in rendered_sources
+                            or (kind, source_name) not in allowed_sources
                         ):
                             raise ValueError(
                                 f"{workload} {container_name} envFrom source is not rendered"
@@ -2295,9 +2304,8 @@ def inspect_rendered_resources(
 def split_apply_resources(
     resources: Sequence[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
-    """Stage prerequisites, setup, then application and Ray workloads."""
+    """Stage secret-free prerequisites, setup, then application and Ray workloads."""
     setup: dict[str, Any] | None = None
-    secret_found = False
     prerequisites: list[dict[str, Any]] = []
     workloads: list[dict[str, Any]] = []
     for resource in resources:
@@ -2306,10 +2314,6 @@ def split_apply_resources(
             if setup is not None:
                 raise ValueError(f"expected exactly one rendered Job/{SETUP_JOB}")
             setup = resource
-        elif identity == PRESERVED_SECRET_IDENTITY:
-            if secret_found:
-                raise ValueError("expected exactly one rendered Secret/django-ray-secret")
-            secret_found = True
         elif identity in WORKLOAD_RESOURCE_IDENTITIES:
             workloads.append(resource)
         elif identity in PREREQUISITE_RESOURCE_IDENTITIES:
@@ -2321,11 +2325,8 @@ def split_apply_resources(
             )
     if setup is None:
         raise ValueError(f"expected exactly one rendered Job/{SETUP_JOB}")
-    if not secret_found:
-        raise ValueError("expected exactly one rendered Secret/django-ray-secret")
     observed = {
         *(_resource_identity(resource) for resource in prerequisites),
-        PRESERVED_SECRET_IDENTITY,
         SETUP_RESOURCE_IDENTITY,
         *(_resource_identity(resource) for resource in workloads),
     }
@@ -3849,6 +3850,16 @@ class LocalKubeRayGate:
             newline="\n",
         )
         self.mutated = True
+        # Kustomize apply does not prune objects omitted by the authoritative
+        # full profile. Remove the bounded co-resident application policy
+        # before admitting its larger containers; the operator policy remains
+        # compatible with both profiles.
+        self._kubectl(
+            "delete",
+            *CO_RESIDENT_APPLICATION_POLICY_OBJECTS,
+            "--ignore-not-found=true",
+            "--wait=true",
+        )
         self._kubectl("apply", "-f", str(prerequisites_file))
         self._kubectl("rollout", "restart", "deployment/prometheus")
         self._kubectl(
@@ -4085,15 +4096,19 @@ class LocalKubeRayGate:
         )
 
     def _validate_restart_discovery_pod(self, pod: Mapping[str, Any]) -> None:
-        """Validate a bounded old-generation pod without requiring new images."""
+        """Validate a bounded supported old-generation pod without requiring new images."""
 
         name = _metadata(pod).get("name")
         if not isinstance(name, str) or not 1 <= len(name) <= MAX_RAY_POD_NAME_CHARACTERS:
             raise ValueError("restart-discovery Ray pod has no bounded stable name")
         spec = _mapping(pod.get("spec"), field_name=f"Pod/{name} spec")
         observed = pod_image_contract(spec)
-        _, expected = self._ray_pod_contract(pod)
-        if self._contract_names(observed) != self._contract_names(expected):
+        role, expected = self._ray_pod_contract(pod)
+        expected_names = self._contract_names(expected)
+        supported_names = {expected_names}
+        if role == "head" and expected_names == GUARDED_GATE_RAY_HEAD_CONTAINER_NAMES:
+            supported_names.add(CO_RESIDENT_RAY_HEAD_CONTAINER_NAMES)
+        if self._contract_names(observed) not in supported_names:
             raise ValueError(
                 f"Pod/{name} container names do not match the supported KubeRay inventory; "
                 "refusing deletion"

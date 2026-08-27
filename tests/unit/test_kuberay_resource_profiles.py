@@ -11,8 +11,14 @@ from typing import Any
 import pytest
 import yaml
 
+from scripts.local_kuberay_gate import (
+    CO_RESIDENT_RAY_HEAD_CONTAINER_NAMES,
+    GUARDED_GATE_RAY_HEAD_CONTAINER_NAMES,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE_PATHS = {
+    "co_resident": Path("k8s/overlays/co-resident"),
     "direct": Path("k8s/overlays/kuberay-kind"),
     "kong": Path("k8s/overlays/kong-local"),
 }
@@ -30,7 +36,7 @@ def _kubectl_executable() -> str:
 
 @pytest.fixture(scope="module")
 def rendered_profiles() -> dict[str, list[dict[str, Any]]]:
-    """Render both local profiles through the same Kustomize implementation users run."""
+    """Render local profiles through the same Kustomize implementation users run."""
 
     kubectl = _kubectl_executable()
 
@@ -187,6 +193,229 @@ def _profile_totals(resources: list[dict[str, Any]]) -> dict[str, int]:
     return totals
 
 
+def _job_container(resources: list[dict[str, Any]], job_name: str) -> dict[str, Any]:
+    job = _resource(resources, kind="Job", name=job_name)
+    containers = job["spec"]["template"]["spec"]["containers"]
+    assert len(containers) == 1
+    return containers[0]
+
+
+def _shared_memory_volume(group: dict[str, Any]) -> dict[str, Any]:
+    volumes = group["template"]["spec"]["volumes"]
+    matches = [volume for volume in volumes if volume["name"] == "shared-memory"]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _contains_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(item, key) for item in value)
+    return False
+
+
+def test_co_resident_profile_has_exact_five_pod_topology(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    resources = rendered_profiles["co_resident"]
+    actual: dict[str, set[str]] = {}
+    for resource in resources:
+        actual.setdefault(str(resource["kind"]), set()).add(str(resource["metadata"]["name"]))
+
+    assert actual == {
+        "ConfigMap": {"django-ray-config"},
+        "Deployment": {"django-ray-worker", "django-web", "postgres"},
+        "Job": {"django-setup"},
+        "LimitRange": {"django-ray-co-resident-defaults"},
+        "Namespace": {"django-ray"},
+        "PersistentVolumeClaim": {
+            "payload-storage-pvc",
+            "postgres-pvc",
+            "runtime-env-pvc",
+        },
+        "RayCluster": {"ray"},
+        "ResourceQuota": {"django-ray-co-resident-budget"},
+        "Service": {"django-web-svc", "postgres-svc"},
+    }
+    for resource in resources:
+        if resource["kind"] != "Namespace":
+            assert resource["metadata"]["namespace"] == "django-ray"
+
+    config = _resource(resources, kind="ConfigMap", name="django-ray-config")
+    assert config["data"]["DJANGO_DEPLOYMENT_MODE"] == "demo"
+    assert _profile_totals(resources)["pods"] == 5
+
+
+def test_co_resident_profile_manages_config_without_rendering_credentials(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    resources = rendered_profiles["co_resident"]
+
+    assert _resource_names(resources, kind="Secret") == set()
+    config = _resource(resources, kind="ConfigMap", name="django-ray-config")
+    assert config["data"]["DJANGO_DEPLOYMENT_MODE"] == "demo"
+    assert config["data"]["RAY_DASHBOARD_URL"] == "http://ray-head-svc:8265"
+
+
+def test_co_resident_profile_pins_single_unit_execution_capacity(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    resources = rendered_profiles["co_resident"]
+    task_manager = _deployment_container(resources, "django-ray-worker")
+    assert _env_value(task_manager, "DJANGO_RAY_QUEUE") == "default"
+    assert _env_value(task_manager, "DJANGO_RAY_CONCURRENCY") == "1"
+
+    head = _ray_head_group(resources)
+    worker = _ray_worker_group(resources)
+    assert head["serviceType"] == "ClusterIP"
+    assert head["rayStartParams"]["num-cpus"] == "0"
+    assert head["rayStartParams"]["object-store-memory"] == "268435456"
+    assert int(worker["replicas"]) == 1
+    assert int(worker["minReplicas"]) == 1
+    assert int(worker["maxReplicas"]) == 1
+    assert worker["rayStartParams"]["num-cpus"] == "1"
+    assert worker["rayStartParams"]["object-store-memory"] == "268435456"
+
+    head_container = head["template"]["spec"]["containers"][0]
+    assert head_container["resources"] == {
+        "requests": {"cpu": "100m", "memory": "1Gi"},
+        "limits": {"cpu": "350m", "memory": "2Gi"},
+    }
+
+    for group, container_name in ((head, "ray-head"), (worker, "ray-worker")):
+        containers = group["template"]["spec"]["containers"]
+        assert [container["name"] for container in containers] == [container_name]
+        assert containers[0]["envFrom"] == [
+            {"configMapRef": {"name": "django-ray-config"}},
+            {"secretRef": {"name": "django-ray-secret"}},
+        ]
+        mounts = containers[0]["volumeMounts"]
+        assert {mount["mountPath"] for mount in mounts if mount["name"] == "shared-memory"} == {
+            "/dev/shm"
+        }
+        assert _shared_memory_volume(group)["emptyDir"] == {
+            "medium": "Memory",
+            "sizeLimit": "512Mi",
+        }
+
+
+def test_co_resident_profile_fits_setup_below_namespace_resource_quota(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    resources = rendered_profiles["co_resident"]
+    totals = _profile_totals(resources)
+    assert totals == {
+        "pods": 5,
+        "requested_millicores": 500,
+        "requested_mibibytes": 2176,
+        "limit_millicores": 1450,
+        "limit_mibibytes": 4736,
+    }
+
+    quota = _resource(resources, kind="ResourceQuota", name="django-ray-co-resident-budget")
+    hard = quota["spec"]["hard"]
+    assert hard == {
+        "limits.cpu": "1600m",
+        "limits.ephemeral-storage": "2Gi",
+        "limits.memory": "5Gi",
+        "requests.cpu": "600m",
+        "requests.ephemeral-storage": "512Mi",
+        "requests.memory": "3Gi",
+        "requests.storage": "2Gi",
+    }
+
+    setup_resources = _job_container(resources, "django-setup")["resources"]
+    assert setup_resources == {
+        "limits": {"cpu": "100m", "memory": "256Mi"},
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+    }
+    quota_limit = _cpu_millicores(hard["limits.cpu"])
+    setup_limit = _cpu_millicores(setup_resources["limits"]["cpu"])
+    assert setup_limit == 100
+    assert totals["limit_millicores"] + setup_limit == 1550
+    assert quota_limit - totals["limit_millicores"] - setup_limit == 50
+    quota_memory = _memory_mibibytes(hard["limits.memory"])
+    setup_memory = _memory_mibibytes(setup_resources["limits"]["memory"])
+    assert totals["limit_mibibytes"] + setup_memory == 4992
+    assert quota_memory - totals["limit_mibibytes"] - setup_memory == 128
+
+    pvc_storage = {
+        resource["metadata"]["name"]: resource["spec"]["resources"]["requests"]["storage"]
+        for resource in resources
+        if resource["kind"] == "PersistentVolumeClaim"
+    }
+    assert pvc_storage == {
+        "payload-storage-pvc": "256Mi",
+        "postgres-pvc": "1Gi",
+        "runtime-env-pvc": "256Mi",
+    }
+
+
+def test_co_resident_profile_defaults_all_container_quota_dimensions(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    resources = rendered_profiles["co_resident"]
+    limit_range = _resource(
+        resources,
+        kind="LimitRange",
+        name="django-ray-co-resident-defaults",
+    )
+    assert limit_range["spec"]["limits"] == [
+        {
+            "type": "Container",
+            "defaultRequest": {
+                "cpu": "25m",
+                "memory": "32Mi",
+                "ephemeral-storage": "64Mi",
+            },
+            "default": {
+                "cpu": "100m",
+                "memory": "256Mi",
+                "ephemeral-storage": "256Mi",
+            },
+            "max": {
+                "cpu": "500m",
+                "memory": "2Gi",
+                "ephemeral-storage": "256Mi",
+            },
+        }
+    ]
+
+    init_container_names: set[str] = set()
+    for resource in resources:
+        if resource["kind"] not in {"Deployment", "Job"}:
+            continue
+        pod_spec = resource["spec"]["template"]["spec"]
+        init_container_names.update(
+            container["name"] for container in pod_spec.get("initContainers", [])
+        )
+    assert init_container_names == {
+        "collect-static",
+        "run-migrations",
+        "wait-for-postgres",
+        "wait-for-ray",
+        "wait-for-runtime-env",
+    }
+
+
+def test_co_resident_profile_is_cluster_internal_and_recreate_only(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    resources = rendered_profiles["co_resident"]
+    for name in ("django-ray-worker", "django-web", "postgres"):
+        deployment = _resource(resources, kind="Deployment", name=name)
+        assert int(deployment["spec"]["replicas"]) == 1
+        assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+
+    assert _resource_names(resources, kind="Ingress") == set()
+    services = [resource for resource in resources if resource["kind"] == "Service"]
+    assert services
+    assert {service["spec"].get("type", "ClusterIP") for service in services} == {"ClusterIP"}
+    for forbidden in ("hostNetwork", "hostPort", "nodePort"):
+        assert not _contains_key(resources, forbidden)
+
+
 @pytest.mark.parametrize("profile", ("direct", "kong"))
 def test_local_profiles_keep_every_queue_consumer(
     rendered_profiles: dict[str, list[dict[str, Any]]],
@@ -223,6 +452,26 @@ def test_local_profiles_pin_distinct_capacity_contracts(
     assert _ray_worker_group(kong)["rayStartParams"]["num-cpus"] == "3"
 
 
+def test_guarded_restart_head_inventories_match_rendered_profiles(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    co_resident_names = tuple(
+        container["name"]
+        for container in _ray_head_group(rendered_profiles["co_resident"])["template"]["spec"][
+            "containers"
+        ]
+    )
+    direct_names = tuple(
+        container["name"]
+        for container in _ray_head_group(rendered_profiles["direct"])["template"]["spec"][
+            "containers"
+        ]
+    )
+
+    assert ((), co_resident_names) == CO_RESIDENT_RAY_HEAD_CONTAINER_NAMES
+    assert ((), direct_names) == GUARDED_GATE_RAY_HEAD_CONTAINER_NAMES
+
+
 def test_local_profiles_pin_distinct_routing_contracts(
     rendered_profiles: dict[str, list[dict[str, Any]]],
 ) -> None:
@@ -238,6 +487,14 @@ def test_local_profiles_pin_distinct_routing_contracts(
     assert _ray_head_group(kong)["serviceType"] == "ClusterIP"
     assert _resource_names(direct, kind="Ingress").isdisjoint(dashboard_ingresses)
     assert dashboard_ingresses <= _resource_names(kong, kind="Ingress")
+
+
+@pytest.mark.parametrize("profile", ("direct", "kong"))
+def test_local_profiles_do_not_render_bootstrap_credentials(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+    profile: str,
+) -> None:
+    assert _resource_names(rendered_profiles[profile], kind="Secret") == set()
 
 
 def test_direct_profile_retains_per_pod_resource_contracts(
@@ -329,12 +586,15 @@ def test_kong_deploy_does_not_apply_the_lean_profile_first() -> None:
     assert "k8s-deploy-kuberay-kind" not in prerequisite_line
 
     recipe = _make_target_block(makefile, "k8s-deploy-kong-local")
-    assert recipe.index("k8s-delete-local-raycluster") < recipe.index(
-        "kubectl apply -k k8s/overlays/kong-local"
+    assert recipe.index("k8s-delete-co-resident-policy") < recipe.index(
+        "k8s-delete-local-raycluster"
     )
-    assert "kubectl apply -k k8s/overlays/kong-local" in recipe
-    assert "kubectl apply -k k8s/overlays/kuberay-kind" not in recipe
-    assert "kubectl delete pod -l app=ray,component=head" not in recipe
+    assert recipe.index("k8s-delete-local-raycluster") < recipe.index(
+        "apply -k k8s/overlays/kong-local"
+    )
+    assert 'kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/kong-local' in recipe
+    assert "apply -k k8s/overlays/kuberay-kind" not in recipe
+    assert "delete pod -l app=ray,component=head" not in recipe
     assert "status.desiredWorkerReplicas}'=4" in recipe
     assert "status.readyWorkerReplicas}'=4" in recipe
     assert "status.availableWorkerReplicas}'=4" in recipe
@@ -358,9 +618,10 @@ def test_direct_deploy_cold_replaces_ray_without_uninstalling_kong() -> None:
     makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
     recipe = _make_target_block(makefile, "k8s-deploy-kuberay-kind")
 
+    policy_index = recipe.index("k8s-delete-co-resident-policy")
     delete_index = recipe.index("k8s-delete-local-raycluster")
-    apply_index = recipe.index("kubectl apply -k k8s/overlays/kuberay-kind")
-    assert delete_index < apply_index
+    apply_index = recipe.index("apply -k k8s/overlays/kuberay-kind")
+    assert policy_index < delete_index < apply_index
     assert "k8s-uninstall-kong-local" not in recipe
     assert "helm uninstall" not in recipe
     assert "kubectl delete ingress/" not in recipe
@@ -386,23 +647,23 @@ def test_local_raycluster_delete_is_foreground_and_removes_generated_service() -
     makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
     recipe = _make_target_block(makefile, "k8s-delete-local-raycluster")
 
-    assert "kubectl delete raycluster/ray -n django-ray" in recipe
+    assert "kubectl $(KUBECTL_CONTEXT_ARG) delete raycluster/ray -n django-ray" in recipe
     assert "--ignore-not-found" in recipe
     assert "--cascade=foreground" in recipe
     assert "--wait=true" in recipe
     assert "--timeout=240s" in recipe
-    assert "kubectl delete service/ray-head-svc -n django-ray" in recipe
+    assert "kubectl $(KUBECTL_CONTEXT_ARG) delete service/ray-head-svc -n django-ray" in recipe
 
 
 def test_local_kong_uninstall_targets_the_documented_release_and_routes() -> None:
     makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
     recipe = _make_target_block(makefile, "k8s-uninstall-kong-local")
 
-    assert "helm uninstall kong --namespace kong" in recipe
+    assert "helm uninstall $(HELM_CONTEXT_ARG) kong --namespace kong" in recipe
     assert "--ignore-not-found" in recipe
     assert "--wait" in recipe
     assert "--timeout 180s" in recipe
-    assert "kubectl delete" in recipe
+    assert 'kubectl --context "$(K8S_CONTEXT)" delete' in recipe
     for ingress in (
         "ingress/grafana-ingress",
         "ingress/prometheus-ingress",
