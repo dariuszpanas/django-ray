@@ -1,0 +1,313 @@
+# Bounded KubeRay profile for running django-ray beside another local control
+# plane. This is a local validation topology, not a production template.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: django-ray
+
+resources:
+  - ../../base
+  - resource-policy.yaml
+  - ray-cluster.yaml
+
+patches:
+  # Select only the bounded application topology from the evaluation base.
+  # Monitoring and the legacy static-Ray Deployments are deliberately absent.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: prometheus
+        namespace: django-ray
+    target:
+      kind: ServiceAccount
+      name: prometheus
+
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: prometheus-django-ray
+        namespace: django-ray
+    target:
+      kind: Role
+      name: prometheus-django-ray
+
+  - patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: prometheus-django-ray
+        namespace: django-ray
+    target:
+      kind: RoleBinding
+      name: prometheus-django-ray
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grafana-dashboard-import-script
+        namespace: django-ray
+    target:
+      kind: ConfigMap
+      name: grafana-dashboard-import-script
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grafana-dashboards
+        namespace: django-ray
+    target:
+      kind: ConfigMap
+      name: grafana-dashboards
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grafana-dashboards-provider
+        namespace: django-ray
+    target:
+      kind: ConfigMap
+      name: grafana-dashboards-provider
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grafana-datasources
+        namespace: django-ray
+    target:
+      kind: ConfigMap
+      name: grafana-datasources
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: prometheus-config
+        namespace: django-ray
+    target:
+      kind: ConfigMap
+      name: prometheus-config
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: grafana-svc
+        namespace: django-ray
+    target:
+      kind: Service
+      name: grafana-svc
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: prometheus-svc
+        namespace: django-ray
+    target:
+      kind: Service
+      name: prometheus-svc
+
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: grafana
+        namespace: django-ray
+    target:
+      kind: Deployment
+      name: grafana
+
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: prometheus
+        namespace: django-ray
+    target:
+      kind: Deployment
+      name: prometheus
+
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ray-head
+        namespace: django-ray
+    target:
+      kind: Deployment
+      name: ray-head
+
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ray-worker
+        namespace: django-ray
+    target:
+      kind: Deployment
+      name: ray-worker
+
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: ray-head-svc
+        namespace: django-ray
+    target:
+      kind: Service
+      name: ray-head-svc
+
+  # Live credentials are provisioned separately and survive an ordinary
+  # co-resident apply. Never render the base's local-only placeholder Secret
+  # into this transition profile.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: django-ray-secret
+        namespace: django-ray
+    target:
+      kind: Secret
+      name: django-ray-secret
+
+  # The non-sensitive application settings remain explicitly profile-managed,
+  # including the local demo-mode boundary and the KubeRay dashboard address.
+  - patch: |-
+      - op: replace
+        path: /data/DJANGO_DEPLOYMENT_MODE
+        value: "demo"
+      - op: replace
+        path: /data/RAY_DASHBOARD_URL
+        value: "http://ray-head-svc:8265"
+    target:
+      kind: ConfigMap
+      name: django-ray-config
+
+  # Keep every long-running application Deployment at one pod and prevent a
+  # rollout from temporarily exceeding the namespace CPU budget.
+  - patch: |-
+      - op: add
+        path: /spec/strategy
+        value:
+          type: Recreate
+    target:
+      kind: Deployment
+
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "384Mi"
+    target:
+      kind: Deployment
+      name: postgres
+
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "384Mi"
+    target:
+      kind: Deployment
+      name: django-web
+
+  # One task-manager process consumes only the default queue. Ray itself owns
+  # the sole unit of task execution capacity in this profile.
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: RAY_ADDRESS
+            value: "ray://ray-head-svc:10001"
+          - name: DJANGO_RAY_QUEUE
+            value: "default"
+          - name: DJANGO_RAY_CONCURRENCY
+            value: "1"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "384Mi"
+    target:
+      kind: Deployment
+      name: django-ray-worker
+
+  # The setup Job is transient and fits below the remaining 150m steady-state
+  # CPU headroom, leaving another 50m beneath the namespace quota while it runs.
+  - patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "50m"
+            memory: "128Mi"
+          limits:
+            cpu: "100m"
+            memory: "256Mi"
+    target:
+      kind: Job
+      name: django-setup
+
+  # The co-resident profile is cluster-internal. External access, when needed,
+  # uses an explicit port-forward owned by the caller.
+  - patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP
+      - op: remove
+        path: /spec/ports/0/nodePort
+    target:
+      kind: Service
+      name: django-web-svc
+
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: django-ray-ingress
+        namespace: django-ray
+    target:
+      kind: Ingress
+      name: django-ray-ingress
+
+images:
+  - name: django-ray
+    newName: django-ray
+    newTag: latest

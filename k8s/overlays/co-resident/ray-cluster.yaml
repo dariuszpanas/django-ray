@@ -1,0 +1,122 @@
+# One-head, one-worker KubeRay cluster for the bounded co-resident profile.
+# KubeRay creates only an internal ClusterIP head Service for this resource.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray
+  namespace: django-ray
+  labels:
+    app: ray
+    component: cluster
+spec:
+  rayVersion: "2.56.0"
+  enableInTreeAutoscaling: false
+
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      dashboard-port: "8265"
+      disable-usage-stats: "true"
+      num-cpus: "0"
+      object-store-memory: "268435456"
+    template:
+      metadata:
+        labels:
+          app: ray
+          component: head
+      spec:
+        containers:
+          - name: ray-head
+            image: rayproject/ray:2.56.0-py312
+            imagePullPolicy: IfNotPresent
+            envFrom:
+              - configMapRef:
+                  name: django-ray-config
+              - secretRef:
+                  name: django-ray-secret
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+            resources:
+              requests:
+                cpu: "100m"
+                memory: "1Gi"
+              limits:
+                cpu: "350m"
+                memory: "2Gi"
+            volumeMounts:
+              - name: shared-memory
+                mountPath: /dev/shm
+              - name: runtime-env
+                mountPath: /runtime-env
+                readOnly: true
+              - name: payload-storage
+                mountPath: /payload-storage
+                readOnly: true
+        volumes:
+          - name: shared-memory
+            emptyDir:
+              medium: Memory
+              sizeLimit: "512Mi"
+          - name: runtime-env
+            persistentVolumeClaim:
+              claimName: runtime-env-pvc
+          - name: payload-storage
+            persistentVolumeClaim:
+              claimName: payload-storage-pvc
+
+  workerGroupSpecs:
+    - groupName: worker-group
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams:
+        num-cpus: "1"
+        object-store-memory: "268435456"
+      template:
+        metadata:
+          labels:
+            app: ray
+            component: worker
+        spec:
+          containers:
+            - name: ray-worker
+              image: rayproject/ray:2.56.0-py312
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef:
+                    name: django-ray-config
+                - secretRef:
+                    name: django-ray-secret
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "768Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "1536Mi"
+              volumeMounts:
+                - name: shared-memory
+                  mountPath: /dev/shm
+                - name: runtime-env
+                  mountPath: /runtime-env
+                  readOnly: true
+                - name: payload-storage
+                  mountPath: /payload-storage
+                  readOnly: true
+          volumes:
+            - name: shared-memory
+              emptyDir:
+                medium: Memory
+                sizeLimit: "512Mi"
+            - name: runtime-env
+              persistentVolumeClaim:
+                claimName: runtime-env-pvc
+            - name: payload-storage
+              persistentVolumeClaim:
+                claimName: payload-storage-pvc

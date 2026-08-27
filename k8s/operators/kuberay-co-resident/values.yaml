@@ -1,0 +1,16 @@
+replicas: 1
+
+image:
+  repository: quay.io/kuberay/operator
+  tag: v1.6.2
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+    ephemeral-storage: 64Mi
+  limits:
+    cpu: 100m
+    memory: 512Mi
+    ephemeral-storage: 256Mi

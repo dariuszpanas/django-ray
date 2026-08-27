@@ -3,7 +3,8 @@
 
 .PHONY: k8s-build k8s-deploy k8s-deploy-local k8s-deploy-tls k8s-delete k8s-status k8s-reset k8s-urls k8s-urls-kong
 .PHONY: k8s-check-prometheus-targets k8s-final-gate-preflight k8s-final-gate
-.PHONY: k8s-install-kuberay k8s-uninstall-kuberay k8s-kind-load k8s-prepare-kuberay-kind k8s-delete-local-raycluster k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
+.PHONY: k8s-require-local-context k8s-install-kuberay k8s-install-kuberay-co-resident k8s-uninstall-kuberay k8s-kind-load k8s-prepare-kuberay-kind k8s-delete-local-raycluster k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
+.PHONY: k8s-bootstrap-django-ray-secret k8s-prepare-co-resident k8s-delete-co-resident-policy k8s-delete-co-resident-superseded k8s-deploy-co-resident
 .PHONY: k8s-install-kong-local k8s-uninstall-kong-local k8s-deploy-kong-local
 .PHONY: k8s-logs k8s-logs-web k8s-logs-worker k8s-logs-ray k8s-logs-ray-head k8s-logs-ray-workers
 .PHONY: k8s-evaluation-warning
@@ -37,11 +38,22 @@ K8S_CONTEXT ?=
 K8S_NAMESPACE ?= django-ray
 K8S_RAY_RESTART ?=
 K8S_FINAL_GATE_EXTRA_ARGS ?=
+KUBERAY_OPERATOR_CHART_VERSION ?= 1.6.2
+KUBERAY_OPERATOR_VALUES ?= k8s/operators/kuberay-co-resident/values.yaml
+KUBECTL_CONTEXT_ARG = $(if $(strip $(K8S_CONTEXT)),--context "$(K8S_CONTEXT)")
+HELM_CONTEXT_ARG = $(if $(strip $(K8S_CONTEXT)),--kube-context "$(K8S_CONTEXT)")
 
 k8s-evaluation-warning:
 	@echo "WARNING: the checked-in Kubernetes manifests are for trusted, disposable local evaluation only."
 	@echo "They are maintainer-validation assets, not a production-ready deployment."
 	@echo "The requested target may create, update, restart, scale, or delete local cluster resources."
+
+# Destructive local-profile transitions must name their target explicitly.
+# Passing the context to every cluster command avoids relying on mutable global
+# kubectl state; the guarded final gate additionally verifies the local API URL.
+k8s-require-local-context:
+	$(if $(strip $(K8S_CONTEXT)),,$(error K8S_CONTEXT is required (docker-desktop or kind-<name>)))
+	$(if $(filter docker-desktop kind-%,$(K8S_CONTEXT)),,$(error K8S_CONTEXT must be docker-desktop or kind-<name>))
 
 # Build Docker images for Kubernetes
 k8s-build:
@@ -93,10 +105,19 @@ k8s-deploy-tls: k8s-evaluation-warning k8s-build k8s-create-tls-secret
 k8s-install-kuberay: k8s-evaluation-warning
 	helm repo add kuberay https://ray-project.github.io/kuberay-helm/ || true
 	helm repo update
-	helm upgrade --install kuberay-operator kuberay/kuberay-operator \
+	helm upgrade --install $(HELM_CONTEXT_ARG) kuberay-operator kuberay/kuberay-operator \
+		--version $(KUBERAY_OPERATOR_CHART_VERSION) \
 		--namespace kuberay-system \
-		--create-namespace
-	kubectl wait --for=condition=available deployment -l app.kubernetes.io/name=kuberay-operator -n kuberay-system --timeout=180s
+		--create-namespace \
+		-f $(KUBERAY_OPERATOR_VALUES)
+	kubectl $(KUBECTL_CONTEXT_ARG) wait --for=condition=available deployment -l app.kubernetes.io/name=kuberay-operator -n kuberay-system --timeout=180s
+
+# Bound the shared operator before installing or upgrading it. The 200m
+# namespace ceiling admits one 100m rollout surge while keeping the complete
+# co-resident foreign-workload budget at 1.8 CPU.
+k8s-install-kuberay-co-resident: k8s-evaluation-warning k8s-require-local-context
+	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/operators/kuberay-co-resident
+	$(MAKE) --no-print-directory k8s-install-kuberay K8S_CONTEXT="$(K8S_CONTEXT)"
 
 # Uninstall KubeRay operator
 k8s-uninstall-kuberay: k8s-evaluation-warning
@@ -112,75 +133,122 @@ k8s-kind-load: k8s-evaluation-warning
 # Shared non-applying prerequisites for both local KubeRay capacity profiles.
 k8s-prepare-kuberay-kind: k8s-build k8s-kind-load k8s-install-kuberay
 
+# Prepare the image and bounded shared operator for the five-pod co-resident
+# profile. This target does not apply application resources.
+k8s-prepare-co-resident: k8s-require-local-context k8s-build k8s-kind-load k8s-install-kuberay-co-resident
+
 # Replace the package-owned local RayCluster instead of trusting an in-place
 # profile edit to recreate worker pods or the generated head Service.
 k8s-delete-local-raycluster: k8s-evaluation-warning
-	kubectl delete raycluster/ray -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=240s
-	kubectl delete service/ray-head-svc -n django-ray --ignore-not-found --wait=true
+	kubectl $(KUBECTL_CONTEXT_ARG) delete raycluster/ray -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=240s
+	kubectl $(KUBECTL_CONTEXT_ARG) delete service/ray-head-svc -n django-ray --ignore-not-found --wait=true
 
 # Deploy using KubeRay operator on kind. Leave any existing Kong release and
 # routes untouched because this target cannot prove that it owns them.
-k8s-deploy-kuberay-kind: k8s-evaluation-warning k8s-prepare-kuberay-kind
-	$(MAKE) --no-print-directory k8s-delete-local-raycluster
-	kubectl apply -k k8s/overlays/kuberay-kind
+k8s-deploy-kuberay-kind: k8s-evaluation-warning k8s-require-local-context k8s-prepare-kuberay-kind k8s-bootstrap-django-ray-secret
+	$(MAKE) --no-print-directory k8s-delete-co-resident-policy K8S_CONTEXT="$(K8S_CONTEXT)"
+	$(MAKE) --no-print-directory k8s-delete-local-raycluster K8S_CONTEXT="$(K8S_CONTEXT)"
+	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/kuberay-kind
 	@echo "Waiting for deployments and Ray pods..."
-	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
-	kubectl wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
-	kubectl wait --for=create service/ray-head-svc -n django-ray --timeout=240s
-	kubectl wait --for=create pod -l app=ray,component=head -n django-ray --timeout=240s
-	kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
-	kubectl wait --for=create pod -l app=ray,component=worker -n django-ray --timeout=240s
-	kubectl wait --for=jsonpath='{.status.desiredWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
-	kubectl wait --for=jsonpath='{.status.readyWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
-	kubectl wait --for=jsonpath='{.status.availableWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
-	kubectl wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create service/ray-head-svc -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create pod -l app=ray,component=worker -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.desiredWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.readyWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.availableWorkerReplicas}'=2 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
 	@echo ""
 	@echo "KubeRay deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls
 	@echo "  For Kong subdomain routing on Docker Desktop managed kind:"
 	@echo "    make k8s-deploy-kong-local"
 
+# Remove only package-owned workloads that are deliberately absent from the
+# co-resident profile. Retain the namespace, live Secret, and all PVCs.
+k8s-delete-co-resident-superseded: k8s-evaluation-warning k8s-require-local-context
+	$(MAKE) --no-print-directory k8s-delete-local-raycluster K8S_CONTEXT="$(K8S_CONTEXT)"
+	kubectl --context "$(K8S_CONTEXT)" delete deployment/ray-head deployment/ray-worker deployment/django-ray-worker-sync deployment/django-ray-worker-ml deployment/django-ray-worker-ray-job deployment/prometheus deployment/grafana -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" delete service/ray-dashboard-svc service/prometheus-svc service/grafana-svc -n django-ray --ignore-not-found --wait=true
+	kubectl --context "$(K8S_CONTEXT)" delete ingress/django-ray-ingress ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true
+	kubectl --context "$(K8S_CONTEXT)" delete configmap/prometheus-config configmap/grafana-datasources configmap/grafana-dashboards-provider configmap/grafana-dashboards configmap/grafana-dashboard-import-script -n django-ray --ignore-not-found --wait=true
+	kubectl --context "$(K8S_CONTEXT)" delete serviceaccount/prometheus role/prometheus-django-ray rolebinding/prometheus-django-ray -n django-ray --ignore-not-found --wait=true
+	kubectl --context "$(K8S_CONTEXT)" delete job/django-setup -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=180s
+
+# Create the local placeholder Secret only for a first install. An existing
+# Secret is never rendered or applied by the co-resident transition.
+k8s-bootstrap-django-ray-secret: k8s-evaluation-warning k8s-require-local-context
+	kubectl --context "$(K8S_CONTEXT)" apply -f k8s/base/namespace.yaml
+	@kubectl --context "$(K8S_CONTEXT)" get secret/django-ray-secret -n django-ray || kubectl --context "$(K8S_CONTEXT)" create -f k8s/base/secret.yaml
+
+# Larger application profiles must remove the bounded policy first. Kustomize
+# omission does not prune live ResourceQuota or LimitRange objects.
+k8s-delete-co-resident-policy: k8s-evaluation-warning k8s-require-local-context
+	kubectl --context "$(K8S_CONTEXT)" delete resourcequota/django-ray-co-resident-budget limitrange/django-ray-co-resident-defaults -n django-ray --ignore-not-found --wait=true
+
+# Switch the retained django-ray namespace to the bounded five-pod profile.
+# The explicit cleanup converges prior sample profiles without deleting data.
+k8s-deploy-co-resident: k8s-evaluation-warning k8s-require-local-context k8s-prepare-co-resident k8s-bootstrap-django-ray-secret
+	$(MAKE) --no-print-directory k8s-delete-co-resident-superseded K8S_CONTEXT="$(K8S_CONTEXT)"
+	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/co-resident
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=complete job/django-setup -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-web -n django-ray --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create service/ray-head-svc -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create pod -l app=ray,component=worker -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.desiredWorkerReplicas}'=1 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.readyWorkerReplicas}'=1 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.availableWorkerReplicas}'=1 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
+	@echo "Co-resident KubeRay deployment complete: five steady pods, ClusterIP only."
+
 # Install Kong Gateway + Kong Ingress Controller for the local overlay
-k8s-install-kong-local: k8s-evaluation-warning
+k8s-install-kong-local: k8s-evaluation-warning k8s-require-local-context
 	helm repo add kong https://charts.konghq.com/ || true
 	helm repo update
-	helm upgrade --install kong kong/ingress \
+	helm upgrade --install $(HELM_CONTEXT_ARG) kong kong/ingress \
 		--namespace kong \
 		--create-namespace \
 		-f k8s/overlays/kong-local/kong-values.yaml
-	kubectl rollout status deployment/kong-controller -n kong --timeout=180s
-	kubectl rollout status deployment/kong-gateway -n kong --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/kong-controller -n kong --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/kong-gateway -n kong --timeout=180s
 
 # Explicit cleanup for the conventional local Kong release and sample routes.
 # Verify ownership before invoking it; direct deployment never calls this target.
-k8s-uninstall-kong-local: k8s-evaluation-warning
-	helm uninstall kong --namespace kong --ignore-not-found --wait --timeout 180s
-	kubectl delete ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true
+k8s-uninstall-kong-local: k8s-evaluation-warning k8s-require-local-context
+	helm uninstall $(HELM_CONTEXT_ARG) kong --namespace kong --ignore-not-found --wait --timeout 180s
+	kubectl --context "$(K8S_CONTEXT)" delete ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true
 
 # Deploy KubeRay plus Kong host-based local routes
-k8s-deploy-kong-local: k8s-evaluation-warning k8s-prepare-kuberay-kind k8s-install-kong-local
-	$(MAKE) --no-print-directory k8s-delete-local-raycluster
-	kubectl apply -k k8s/overlays/kong-local
-	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s
-	kubectl wait --for=create service/ray-head-svc -n django-ray --timeout=240s
-	kubectl wait --for=create pod -l app=ray,component=head -n django-ray --timeout=240s
-	kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
-	kubectl wait --for=create pod -l app=ray,component=worker -n django-ray --timeout=240s
-	kubectl wait --for=jsonpath='{.status.desiredWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
-	kubectl wait --for=jsonpath='{.status.readyWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
-	kubectl wait --for=jsonpath='{.status.availableWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
-	kubectl wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
-	kubectl rollout restart deployment/django-web -n django-ray
-	kubectl rollout restart deployment/django-ray-worker -n django-ray
-	-kubectl rollout restart deployment/django-ray-worker-sync -n django-ray
-	-kubectl rollout restart deployment/django-ray-worker-ml -n django-ray
-	kubectl rollout restart deployment/django-ray-worker-ray-job -n django-ray
-	kubectl rollout status deployment/django-web -n django-ray --timeout=180s
-	kubectl rollout status deployment/django-ray-worker -n django-ray --timeout=180s
-	-kubectl rollout status deployment/django-ray-worker-sync -n django-ray --timeout=180s
-	-kubectl rollout status deployment/django-ray-worker-ml -n django-ray --timeout=180s
-	kubectl rollout status deployment/django-ray-worker-ray-job -n django-ray --timeout=180s
+k8s-deploy-kong-local: k8s-evaluation-warning k8s-require-local-context k8s-prepare-kuberay-kind k8s-bootstrap-django-ray-secret k8s-install-kong-local
+	$(MAKE) --no-print-directory k8s-delete-co-resident-policy K8S_CONTEXT="$(K8S_CONTEXT)"
+	$(MAKE) --no-print-directory k8s-delete-local-raycluster K8S_CONTEXT="$(K8S_CONTEXT)"
+	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/kong-local
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=120s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create service/ray-head-svc -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=create pod -l app=ray,component=worker -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.desiredWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.readyWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=jsonpath='{.status.availableWorkerReplicas}'=4 raycluster/ray -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
+	kubectl --context "$(K8S_CONTEXT)" rollout restart deployment/django-web -n django-ray
+	kubectl --context "$(K8S_CONTEXT)" rollout restart deployment/django-ray-worker -n django-ray
+	-kubectl --context "$(K8S_CONTEXT)" rollout restart deployment/django-ray-worker-sync -n django-ray
+	-kubectl --context "$(K8S_CONTEXT)" rollout restart deployment/django-ray-worker-ml -n django-ray
+	kubectl --context "$(K8S_CONTEXT)" rollout restart deployment/django-ray-worker-ray-job -n django-ray
+	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/django-web -n django-ray --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/django-ray-worker -n django-ray --timeout=180s
+	-kubectl --context "$(K8S_CONTEXT)" rollout status deployment/django-ray-worker-sync -n django-ray --timeout=180s
+	-kubectl --context "$(K8S_CONTEXT)" rollout status deployment/django-ray-worker-ml -n django-ray --timeout=180s
+	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/django-ray-worker-ray-job -n django-ray --timeout=180s
 	@echo ""
 	@echo "Kong local deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls-kong

@@ -101,6 +101,21 @@ patches:
       kind: Service
       name: ray-head-svc
 
+  # The guarded local gate requires this live Secret to be provisioned before
+  # it starts, hashes its complete data during preflight, and verifies that the
+  # data is unchanged after the run. Never render the base placeholder into an
+  # authoritative direct or inherited Kong apply stream.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: django-ray-secret
+        namespace: django-ray
+    target:
+      kind: Secret
+      name: django-ray-secret
+
   # Enable Django debug mode for local iteration.
   - patch: |-
       - op: replace

@@ -1,0 +1,38 @@
+# Namespace-wide admission defaults and a hard co-resident resource ceiling.
+# Container defaults apply to regular and init containers, including the
+# base manifests' small readiness init containers and transient setup Job.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: django-ray-co-resident-budget
+  namespace: django-ray
+spec:
+  hard:
+    requests.cpu: 600m
+    requests.memory: 3Gi
+    requests.ephemeral-storage: 512Mi
+    limits.cpu: 1600m
+    limits.memory: 5Gi
+    limits.ephemeral-storage: 2Gi
+    requests.storage: 2Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: django-ray-co-resident-defaults
+  namespace: django-ray
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 25m
+        memory: 32Mi
+        ephemeral-storage: 64Mi
+      default:
+        cpu: 100m
+        memory: 256Mi
+        ephemeral-storage: 256Mi
+      max:
+        cpu: 500m
+        memory: 2Gi
+        ephemeral-storage: 256Mi
