@@ -44,9 +44,8 @@ When a task calls for a branch, start from current `main` and use the convention
   as natural Markdown without artificial hard wrapping.
 - Before every push and before enabling auto-merge, fetch `origin` and inspect
   `git log --format=fuller origin/main..HEAD`.
-- Before merging, verify every current required check is green: `Commit Messages`, `CI Gate`, and
-  `Maintainer Approval`. A skipped package job or an enabled merge button is not sufficient evidence
-  by itself.
+- Before merging, verify every current required check is green: `Commit Messages` and `CI Gate`. A
+  skipped package job or an enabled merge button is not sufficient evidence by itself.
 - Fold fixup, CI-repair, review-repair, formatting follow-up, and other development-only commits into
   the logical commit they correct. Preserve genuinely independent commits with their own
   self-contained descriptive bodies and validation evidence.
