@@ -126,31 +126,6 @@ The check enforces meaningful body context, validation evidence or a specific no
 wrappable commit-prose line limit without prescribing section headings. It reports the offending
 commit or line.
 
-The required `Maintainer Approval` check applies conditional policy without forcing the repository
-owner to self-approve. It passes a pull request authored by `dariuszpanas`; every other author needs an
-`APPROVED` review from `dariuszpanas` on the current head commit. The publisher rechecks the live head
-and pull-request ownership before passing. Strict required-status freshness prevents a default-branch
-advance from reusing an older candidate's result.
-
-Maintainer review events cross an explicit privilege boundary. The unprivileged
-`Review Policy Event` workflow records lifecycle, review, close, and displaced-head data. It has no
-token permissions, checkout, artifact, or pull-request code execution. Its versioned run-name JSON
-remains visible. Review event observation is nonblocking; the trusted maintainer publisher owns the
-required state.
-
-For every affected current, displaced, or closed head, the maintainer publisher first replaces the
-prior `Maintainer Approval` context with `pending`. It then validates the source workflow path,
-repository, event, head, and unique open pull-request association before publishing the fresh live
-policy. Approval, dismissal, reapproval, and unrelated reviews update one required status instead of
-creating ambiguous same-named checks. Synchronize-only displaced-head recovery and current-head
-evaluation remain independent, head-serialized jobs. A close immediately reevaluates a remaining
-unique same-head owner; if no owner remains, bounded association and capacity checks allow the stale
-pending state to return to terminal success. Ambiguous or uncorroborated ownership remains pending.
-The maintainer publisher trusts no upstream artifact or pull-request code and checks out only the
-exact default-branch commit bound to its dispatch. GitHub's native required review-conversation
-resolution remains enabled separately, so actionable review threads must be answered and resolved
-before merge.
-
 For example, `fix(worker): preserve task ownership` is a valid header, but its commit still needs
 enough body context to explain the retained change. Invalid titles or commit headers fail with the
 exact offending value and expected format.
@@ -578,10 +553,9 @@ namespace. Native `CI Gate` runs after every blocking job and passes only when l
 supported Python tests, PostgreSQL coordination, live-cluster faults, testproject, the tracked Docker
 Compose smoke, minimum/latest dependencies, and package build all report `success`. Its `always()`
 condition makes a failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead
-of a successful skip. Maintainer status jobs invalidate the old state before checking out trusted
-default-branch code; they never execute pull-request code with a write token. This repository uses
-rebase auto-merge rather than a merge queue: auto-merge waits for all current required checks and
-native required review-conversation resolution, then applies the rebase method.
+of a successful skip. This repository uses rebase auto-merge rather than a merge queue: auto-merge
+waits for `Commit Messages` and `CI Gate`, then applies the rebase method. Approval and
+review-conversation state do not block merges in this single-maintainer repository.
 
 Native Compiled Graph evidence is produced only by the guarded local KubeRay pilot, not a public
 hosted workflow. Coverage-debt review and benchmark workflows are evidence producers, not merge
@@ -612,11 +586,9 @@ range before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
 conflicts, rerun the affected checks, re-evaluate the full-gate triggers above, and push. Auto-merge
-recalculates the required checks. The merge policy requires `Commit Messages`, `CI Gate`, and
-`Maintainer Approval`, requires native review-conversation resolution, and allows rebase merges only.
-The native approval count remains zero so the owner does not need self-approval; `Maintainer Approval`
-requires the owner's current-head approval for every other author.
-The current owner `pull_request` bypass remains
+recalculates the required checks. The merge policy requires `Commit Messages` and `CI Gate`, does not
+require approvals or resolved review conversations, and allows rebase merges only. The current owner
+`pull_request` bypass remains
 explicit break-glass recovery, not absolute enforcement against an intentional owner bypass. Routine
 merges remain gated, and emergency use requires the explicit
 `gh pr merge --admin --rebase <PR-number>` command.

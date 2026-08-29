@@ -125,31 +125,6 @@ check enforces meaningful body context, validation evidence or a specific not-ru
 wrappable commit-prose line limit without prescribing section headings. A failed check prints the
 offending title, commit, or line and the expected correction.
 
-The required `Maintainer Approval` check applies the repository's conditional review policy. It
-passes the owner's own pull requests without self-approval; a pull request from any other author
-requires an `APPROVED` review by `dariuszpanas` on the current head commit. The publisher rechecks the
-live head and pull-request ownership before passing. Strict required-status freshness prevents a
-default-branch advance from reusing an older candidate's result.
-
-Maintainer review events cross an explicit privilege boundary. The unprivileged
-`Review Policy Event` workflow records lifecycle, review, close, and displaced-head data. It has no
-token permissions, checkout, artifact, or pull-request code execution. Its versioned run-name JSON
-remains visible. Review event observation is nonblocking; the trusted maintainer publisher owns the
-required state.
-
-For every affected current, displaced, or closed head, the maintainer publisher first replaces the
-prior `Maintainer Approval` context with `pending`. It then validates the source workflow path,
-repository, event, head, and unique open pull-request association before publishing the fresh live
-policy. Approval, dismissal, reapproval, and unrelated reviews update one required status instead of
-creating ambiguous same-named checks. Synchronize-only displaced-head recovery and current-head
-evaluation remain independent, head-serialized jobs. A close immediately reevaluates a remaining
-unique same-head owner; if no owner remains, bounded association and capacity checks allow the stale
-pending state to return to terminal success. Ambiguous or uncorroborated ownership remains pending.
-The maintainer publisher trusts no upstream artifact or pull-request code and checks out only the
-exact default-branch commit bound to its dispatch. GitHub's native required review-conversation
-resolution remains enabled separately, so actionable review threads must be answered and resolved
-before merge.
-
 ## Rebase auto-merge
 
 The repository uses pull requests for every change, but merges should preserve the descriptive commits
@@ -159,15 +134,13 @@ inside the PR. Do not squash a PR. After CI is green, enable auto-merge with the
 gh pr merge --auto --rebase <PR-number>
 ```
 
-Auto-merge waits for `Commit Messages`, `CI Gate`, and `Maintainer Approval`, plus GitHub's native
-required review-conversation resolution. The rebase method preserves each descriptive commit on
-`main`. The `Commit Messages` workflow validates the PR title and ordinary PR commits from a
-base-branch checkout with read-only repository permission. Its title-only Dependabot path is limited
-by trusted `pull_request_target` event metadata to the bot's same-repository branch namespace. Native
-`CI Gate` runs with `always()` and rejects failed, cancelled, timed-out, or skipped blocking jobs,
-including a package build skipped after an upstream failure. Maintainer status jobs invalidate the old
-state before checking out trusted default-branch code; they never execute pull-request code with a
-write token.
+Auto-merge waits for `Commit Messages` and `CI Gate`. Approval and review-conversation state do not
+block merges in this single-maintainer repository. The rebase method preserves each descriptive
+commit on `main`. The `Commit Messages` workflow validates the PR title and ordinary PR commits from
+a base-branch checkout with read-only repository permission. Its title-only Dependabot path is
+limited by trusted `pull_request_target` event metadata to the bot's same-repository branch namespace.
+Native `CI Gate` runs with `always()` and rejects failed, cancelled, timed-out, or skipped blocking
+jobs, including a package build skipped after an upstream failure.
 
 Native Compiled Graph validation is not run on public GitHub-hosted runners; use the guarded local
 KubeRay pilot when issue #102 requires that evidence. Coverage-debt review and benchmark workflows,
@@ -197,11 +170,8 @@ PR title as well before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
 conflicts, rerun the affected checks, re-evaluate the full-gate triggers below, and push. Auto-merge
-waits for the new head's checks. The merge policy requires `Commit Messages`, `CI Gate`, and
-`Maintainer Approval`, requires native review-conversation resolution, and permits rebase merges only.
-The native approval count remains zero so the owner is not forced to self-approve; `Maintainer
-Approval` supplies the conditional rule that requires the owner's current-head approval for every
-other author. The current owner
+waits for the new head's checks. The merge policy requires `Commit Messages` and `CI Gate`, does not
+require approvals or resolved review conversations, and permits rebase merges only. The current owner
 `pull_request` bypass remains explicit break-glass recovery, not absolute enforcement against an
 intentional owner bypass; ordinary merges remain gated and emergency use requires the explicit
 `gh pr merge --admin --rebase <PR-number>` path.

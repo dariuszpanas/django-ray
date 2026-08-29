@@ -118,16 +118,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protocol `2` binds the ID and digest together in both its request and observed proof. This
   package-private codec does not persist claims or authorize execution.
 
+### Changed
+
+- Pull-request merges no longer depend on automated review, maintainer approval, or resolved review
+  conversations in this single-maintainer repository. The review-event observer, approval publisher,
+  and their policy implementation have been removed; `Commit Messages` and `CI Gate` remain the
+  required merge checks.
+
 ### Fixed
 
-- Maintainer approval lifecycle and review events now replace one authoritative commit status instead
-  of creating contradictory same-named check runs. The trusted publisher invalidates every affected
-  head before evaluation and isolates shared-head recovery so cancellation for one commit cannot
-  suppress another commit's result. At GitHub's per-context status limit it leaves either `pending` or
-  an explicit failure as the latest state, requiring a new head instead of preserving stale success;
-  delayed source events restore an already closed head once live association reads complete. The
-  publisher runs as a repository module so its default-branch checkout can import the shared review
-  policy during live workflow execution.
 - Pull-request CI again exposes one native `CI Gate` at the end of its complete job graph. The
   experimental Codex/YAGA publishers, lifecycle workflow, compatibility bridge, and scheduled repair
   runs have been removed from django-ray; provider-integration experiments belong in an isolated test
@@ -180,10 +179,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `django-unfold` handling now keeps its exact sample/dev and lockfile pin synchronized
   with the installed-version RuntimeEnv requirement and minimum-dependency CI, without
   stale duplicate literals.
-- Required Codex review evidence now fails closed across synchronized heads, changed bases, drafts,
-  ambiguous shared heads, displaced ownership, malformed observer provenance, and publication races.
-  The publisher never treats an Actions comment or a lingering `eyes` reaction as proof of review;
-  findings remain subject to native required conversation resolution.
 - Contributor validation now uses fast static and focused pre-push checks plus one explicit full-gate
   checkpoint for executable package/runtime, dependency, packaging, build, CI-composition, release,
   break-glass, and required local KubeRay boundaries. Documentation-, test-, and PR/commit-metadata-only
@@ -211,9 +206,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on active write protocol `1` with `1..1` package support and
   worker leases: no backend enqueues protocol `2`, no worker claims it, no capability producer
   creates its generation evidence, and Ray Job remains unsupported.
-- Required `Maintainer Approval` lets the repository owner merge without self-approval while
-  requiring the owner's current-head approval for every other author. Native review-conversation
-  resolution remains required separately.
 - A Django-free, versioned target-attestation contract now defines bounded canonical
   target expectations, exact Ray/Python runtime tuples, per-node observations, and a
   before/after resource-state boundary. Its dormant Ray 2.56.0 probe hard-pins one
