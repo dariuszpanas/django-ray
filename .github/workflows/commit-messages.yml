@@ -8,7 +8,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: commit-messages-${{ github.event.pull_request.number }}
+  # Keep stale event heads from cancelling the current-head proof.
+  group: commit-messages-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
 jobs:

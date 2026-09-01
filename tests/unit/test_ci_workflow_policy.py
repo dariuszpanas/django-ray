@@ -841,7 +841,7 @@ def test_release_matrix_verifies_wheel_and_sdist_metadata() -> None:
     assert '"${{ needs.build.outputs.version }}"' in smoke
 
 
-def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
+def test_pr_concurrency_isolates_commit_message_head_revisions() -> None:
     ci = _workflow()
     commit_messages = _workflow(WORKFLOWS / "commit-messages.yml")
 
@@ -850,7 +850,10 @@ def test_pr_concurrency_cancels_only_stale_pr_workflows() -> None:
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
     assert commit_messages["concurrency"] == {
-        "group": "commit-messages-${{ github.event.pull_request.number }}",
+        "group": (
+            "commit-messages-${{ github.event.pull_request.number }}-"
+            "${{ github.event.pull_request.head.sha }}"
+        ),
         "cancel-in-progress": "true",
     }
 
