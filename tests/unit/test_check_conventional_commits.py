@@ -201,7 +201,7 @@ def test_workflow_verifies_the_exact_head_before_range_lint() -> None:
     assert fetch < resolve < compare < verify_base < range_lint
 
 
-def test_workflow_skips_range_lint_only_for_exact_trusted_dependabot_prs() -> None:
+def test_workflow_skips_message_lint_only_for_exact_trusted_dependabot_prs() -> None:
     workflow = _read(".github/workflows/commit-messages.yml")
     compact = _compact(workflow)
     trusted_dependabot_negation = (
@@ -212,8 +212,21 @@ def test_workflow_skips_range_lint_only_for_exact_trusted_dependabot_prs() -> No
         ")"
     )
 
-    assert compact.count(trusted_dependabot_negation) == 1
+    assert compact.count(trusted_dependabot_negation) == 2
+    title_step = workflow[
+        workflow.index("- name: Validate PR title") : workflow.index(
+            "- name: Fetch and verify PR commits"
+        )
+    ]
+    fetch_step = workflow[
+        workflow.index("- name: Fetch and verify PR commits") : workflow.index(
+            "- name: Validate ordinary PR commits"
+        )
+    ]
     ordinary_step = workflow[workflow.index("- name: Validate ordinary PR commits") :]
+    assert trusted_dependabot_negation in _compact(title_step)
+    assert "run: make commit-title-check" in title_step
+    assert "\n        if:" not in fetch_step
     assert trusted_dependabot_negation in _compact(ordinary_step)
     assert "run: make commit-check" in ordinary_step
     assert workflow.count("run: make commit-title-check") == 1

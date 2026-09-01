@@ -108,11 +108,12 @@ check and hosted required check. Compose the message in the configured editor wi
 prepare a complete message file and use `git commit --file <path>`. Do not assemble prose with
 repeated `-m` flags, which create separate paragraphs, and do not bypass the hook with `--no-verify`.
 
-The required `Commit Messages` GitHub Actions check validates the PR title and, for ordinary pull
-requests, the full message of every commit. Trusted same-repository Dependabot pull requests keep the
-required check but validate only their Conventional Commit PR title; the required `CI Gate` still
-validates their complete change. The hosted commit check runs the same authoritative commitlint
-configuration as the tracked local hook and `make commit-check`.
+The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
+every commit for ordinary pull requests. Trusted same-repository Dependabot pull requests keep the
+required check but are excluded from title and commit-message linting; the workflow still fetches and
+verifies their exact event head, and the required `CI Gate` validates their complete change. For
+ordinary pull requests, the hosted commit check runs the same authoritative commitlint configuration
+as the tracked local hook and `make commit-check`.
 
 Before editing, inspect `git status --short`, the current branch, and `HEAD`. Preserve unrelated work,
 stage explicit paths instead of `git add .`, and review both the working and staged diffs. Repository
@@ -530,14 +531,15 @@ containing only exempt deltas does not require a local full gate. Current-head `
 broad merge proof. Do not rerun the local full gate merely because an exempt focused follow-up changed
 the commit hash: retain the checkpoint result and add exact delta evidence.
 
-The `Commit Messages` workflow runs on `pull_request_target`, validates the PR title and ordinary PR
-commit messages, and reports a required status check without needing secrets from the PR. Its
-title-only Dependabot path is limited by trusted event metadata to the bot's same-repository branch
-namespace. Native `CI Gate` runs after every blocking job and passes only when lint, docs, typing, all
-supported Python tests, PostgreSQL coordination, live-cluster faults, testproject, the tracked Docker
-Compose smoke, minimum/latest dependencies, and package build all report `success`. Its `always()`
-condition makes a failed, cancelled, timed-out, or skipped dependency visible as a failed gate instead
-of a successful skip. This repository uses rebase auto-merge rather than a merge queue: auto-merge
+The `Commit Messages` workflow runs on `pull_request_target`, validates ordinary PR titles and commit
+messages, and reports a required status check without needing secrets from the PR. Its Dependabot
+exclusion still verifies the exact event head and is limited by trusted event metadata to the bot's
+same-repository branch namespace. Native `CI Gate` runs after every blocking job and passes only when
+lint, docs, typing, all supported Python tests, PostgreSQL coordination, live-cluster faults,
+testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and package build all
+report `success`. Its `always()` condition makes a failed, cancelled, timed-out, or skipped dependency
+visible as a failed gate instead of a successful skip. This repository uses rebase auto-merge rather
+than a merge queue: auto-merge
 waits for `Commit Messages` and `CI Gate`, then applies the rebase method. Approval and
 review-conversation state do not block merges in this single-maintainer repository.
 
