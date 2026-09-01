@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
+.PHONY: all install configure-git commit-check commit-title-check commit-policy-test format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
@@ -37,6 +37,32 @@ all: check test
 # Install dependencies
 install:
 	uv sync
+	npm ci --ignore-scripts
+	$(MAKE) configure-git
+
+# Configure this worktree to use the tracked commit template and hook.
+configure-git:
+	git config extensions.worktreeConfig true
+	git config --worktree commit.template "$(CURDIR)/.gitmessage"
+	git config --worktree core.commentChar ";"
+	git config --worktree core.hooksPath "$(CURDIR)/.githooks"
+
+# Validate every retained commit after the base and through the head.
+COMMIT_BASE ?= origin/main
+COMMIT_HEAD ?= HEAD
+commit-check:
+	npm run --silent commitlint -- \
+		--from "$(COMMIT_BASE)" \
+		--to "$(COMMIT_HEAD)" \
+		--git-log-args="--no-merges"
+
+# Validate a PR title from the PR_TITLE environment variable.
+commit-title-check:
+	@node -e "const title = process.env.PR_TITLE; if (!title) { console.error('PR_TITLE is required.'); process.exit(2); } process.stdout.write(title + '\n');" | npm run --silent commitlint:title
+
+# Exercise the repository-owned commit policy fixtures.
+commit-policy-test:
+	npm test --silent
 
 # Format code with Ruff
 format:
@@ -151,6 +177,7 @@ coverage-debt:
 
 # Run formatting, lint, and type checks without modifying files
 check:
+	$(MAKE) commit-policy-test
 	ruff format --check .
 	ruff check .
 	ty check
@@ -158,6 +185,7 @@ check:
 # CI check - current-interpreter equivalents of required CI jobs, without modifications.
 # Invoke as `uv run make ci` so Ray inherits one uv-managed environment.
 ci:
+	$(MAKE) commit-policy-test
 	ruff format --check .
 	ruff check .
 	ty check
@@ -244,7 +272,8 @@ help:
 	@echo "Django-Ray Development Commands"
 	@echo ""
 	@echo "Setup:"
-	@echo "  install        - Install dependencies with uv"
+	@echo "  install        - Install Python and commit-policy dependencies"
+	@echo "  configure-git  - Install the tracked commit template and hook"
 	@echo "  migrate        - Run Django migrations"
 	@echo ""
 	@echo "Development:"
@@ -253,7 +282,8 @@ help:
 	@echo "  lint           - Lint code with Ruff (no modifications)"
 	@echo "  typecheck      - Type check with ty"
 	@echo "  audit-dependencies - Audit the exact locked runtime dependency graph"
-	@echo "  check          - Check formatting, lint, and types (no modifications)"
+	@echo "  check          - Test policy; check formatting, lint, and types"
+	@echo "  commit-policy-test - Exercise commit message policy fixtures"
 	@echo ""
 	@echo "Testing:"
 	@echo "  test           - Run all tests"
@@ -285,6 +315,8 @@ help:
 	@echo "  worker-cluster - Connect to ray://localhost:10001"
 	@echo ""
 	@echo "CI/CD:"
+	@echo "  commit-check   - Validate commits from COMMIT_BASE through COMMIT_HEAD"
+	@echo "  commit-title-check - Validate the PR_TITLE environment variable"
 	@echo "  all            - Run non-mutating checks and tests"
 	@echo "  ci             - Run current-interpreter CI checks, coverage, docs, and build"
 	@echo "  build          - Build the package"

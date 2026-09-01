@@ -36,12 +36,14 @@ When a task calls for a branch, start from current `main` and use the convention
 - Review `git diff` and `git diff --cached` before reporting completion.
 - Report the exact validation commands run, their results, and anything not run.
 - Treat each material retained logical commit as a portable, PR-grade change record. One large atomic
-  commit is valid, headings are optional, and its body must preserve the applicable behavior,
-  motivation, boundaries, rollout impact, validation, and useful repository-local investigation
-  paths without relying on GitHub metadata.
+  commit is valid. Its descriptive body must explain the observable behavior and motivation, contain
+  at least 100 characters excluding footers, and add material boundaries, rollout impact, or useful
+  repository-local investigation paths when they help a future reader.
+- End every retained commit with a `Validation:` trailer containing exact commands and results or a
+  specific reason validation was not run.
 - Before every push and before enabling auto-merge, compare each material commit body with the PR
-  description for the same material facts. Wrap commit prose at 72 columns; format PR descriptions
-  as natural Markdown without artificial hard wrapping.
+  description for the same material facts. Wrap the commit header and body prose at 72 columns;
+  format PR descriptions as natural Markdown without artificial hard wrapping.
 - Before every push and before enabling auto-merge, fetch `origin` and inspect
   `git log --format=fuller origin/main..HEAD`.
 - Before merging, verify every current required check is green: `Commit Messages` and `CI Gate`. A
@@ -49,11 +51,15 @@ When a task calls for a branch, start from current `main` and use the convention
 - Fold fixup, CI-repair, review-repair, formatting follow-up, and other development-only commits into
   the logical commit they correct. Preserve genuinely independent commits with their own
   self-contained descriptive bodies and validation evidence.
-- Validate the retained range with
-  `uv run python scripts/check_conventional_commits.py --range origin/main..HEAD`.
+- Validate the retained range with `make commit-check` and validate the final PR title with
+  `PR_TITLE='feat: describe the pull request' make commit-title-check`.
 
-Use Conventional Commit syntax for commit messages and PR titles. See `CONTRIBUTING.md` for examples
-and the canonical `.gitmessage` template.
+Use Conventional Commit syntax for commit messages and PR titles. The tracked commitlint
+configuration is the authoritative structural policy. Run `make install` to install dependencies,
+the tracked template, and the `commit-msg` hook; use `make configure-git` to reinstall the template
+and hook configuration in an existing environment. Write commit messages in an editor or a prepared
+message file. Do not assemble prose with repeated `-m` flags, and do not bypass the hook with
+`--no-verify`. See `CONTRIBUTING.md` for examples and the canonical `.gitmessage` template.
 
 Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
 schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head

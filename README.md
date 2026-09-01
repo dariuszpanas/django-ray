@@ -219,13 +219,14 @@ guidance.
 ### Prerequisites
 - Python 3.12, 3.13, or 3.14
 - [uv](https://github.com/astral-sh/uv) package manager
+- Node.js matching `.node-version` with npm (development only)
 
 ### Installation
 
 ```bash
 git clone https://github.com/dariuszpanas/django-ray.git
 cd django-ray
-uv sync
+make install
 ```
 
 ### Development Commands
@@ -234,7 +235,7 @@ Run development targets through `uv run` unless the virtual environment is alrea
 named `lint`, `check`, and `ci` are non-mutating; use `format` or `fix` when files should change.
 
 ```bash
-uv sync               # Install locked dependencies
+make install          # Install locked Python and commit-policy dependencies
 uv run make format    # Format code with Ruff
 uv run make fix       # Format and apply safe Ruff lint fixes
 uv run make lint      # Check lint without modifying files

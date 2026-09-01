@@ -1,27 +1,22 @@
 <type>[optional scope][!]: <imperative summary>
 
-; This retained logical commit is the portable change record for Git-only consumers.
-; Headings are optional, and one large atomic commit is valid. Keep detail proportional.
-## Summary
-
-- <Describe the observable durable change and why it is needed.>
-
-## Boundaries and rollout
-
-- <Describe important invariants, non-goals, and compatibility impact.>
-- <Describe migration, rollout, or activation details when applicable.>
-
-## Investigation
-
-- <Describe repository-local ADRs, modules, tests, or docs to open.>
-
-## Validation
-
-- `<command>`: <result>
-
-; Or replace Validation with: Validation: not run because <specific reason>.
-; Delete optional sections that do not apply; do not leave template tokens behind.
-; PR metadata supplements this body. Wrap commit prose at 72 columns, but use
-; natural Markdown without artificial hard wrapping in the PR description.
-; Add `BREAKING CHANGE: <impact and migration>` below Validation when
-; more migration detail is useful. Add issue trailers such as `Closes #60` last.
+; Use a summary of at least 10 characters. Explain the observable change
+; and why it is needed. The body is required
+; and must contain at least 100 characters of useful prose. Keep
+; related sentences together in coherent paragraphs and wrap prose
+; at 72 columns.
+;
+; Add important boundaries, non-goals, compatibility, rollout, or
+; useful investigation paths when they materially help a future reader.
+; Keep the detail proportional to the change.
+;
+; End with a Git trailer that records exact validation or a specific
+; reason it was not run. Examples:
+;
+; Validation: `uv run make check` passed.
+; Validation: not run because this changes documentation only.
+;
+; Use `BREAKING CHANGE: <impact and migration>` as an additional
+; trailer when the history needs more detail than the `!` marker. Put
+; issue trailers such as `Closes #60` last. Do not assemble prose with
+; repeated `-m` flags.

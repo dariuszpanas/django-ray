@@ -29,71 +29,54 @@ Follow an explicit maintainer-requested branch name when one is provided.
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages and PR titles:
 
 ```text
-<type>[optional scope]: <imperative summary>
+<type>[optional scope][!]: <imperative summary>
 ```
 
-Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`. Keep
-commits focused and use `!` for an intentional breaking change; add a `BREAKING CHANGE:` footer when
-the history needs additional migration detail.
+Use one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or
+`test`. Keep commits focused and use `!` for an intentional breaking change; add a
+`BREAKING CHANGE:` footer when the history needs additional migration detail.
+
 For a material change, treat each retained logical commit as the portable, PR-grade change record.
 Its body must stand on its own in `git log`, mirrors, archives, changelog tooling, and other systems
-without GitHub metadata. Record the observable behavior and motivation; important invariants,
-boundaries, and non-goals; compatibility, migration, rollout, or activation details when applicable;
-exact validation or a specific reason it was not run; and repository-local documentation, ADRs,
-modules, migrations, or tests that are useful investigation starting points. One large atomic commit
-is valid. Use proportional detail for small mechanical changes and keep unrelated changes in separate
-logical commits.
+without GitHub metadata. Explain the observable behavior and why it is needed. Add important
+boundaries, compatibility or rollout impact, and useful repository-local investigation paths when
+they materially help a future reader. One large atomic commit is valid; use proportional detail for
+small mechanical changes and keep unrelated changes in separate logical commits.
 
-The tracked template recommends this useful layout:
+The tracked commitlint configuration is the authoritative structural policy. It requires a
+Conventional Commit header no longer than 72 characters with a summary of at least 10 characters, a
+blank line, and a descriptive body of at least 100 characters excluding footers. Wrap body prose at
+72 characters; footers use commitlint's 100-character limit. End every retained commit
+with a `Validation:` trailer that records exact commands and results or a specific reason validation
+was not run. PR titles use the same Conventional Commit header policy but do not require a body or
+trailer. Imperative wording and useful historical context remain writing guidance rather than
+semantic guesses made by the linter.
+
+A compact commit can look like this:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
 
-## Summary
+Explain the observable change and why it is needed. Include only the
+boundaries, rollout details, or investigation paths that materially help.
 
-- Describe the observable durable change and why it is needed.
-
-## Boundaries and rollout
-
-- Record important invariants, non-goals, and applicable rollout impact.
-
-## Investigation
-
-- Point to useful repository-local ADRs, modules, migrations, tests, or docs.
-
-## Validation
-
-- `<command>`: result
+Validation: `<command>` passed.
 ```
 
-The headings are guidance, not a required format. Unstructured prose is equally valid when it
-provides the same durable context. The gate requires at least eight body words outside headings,
-validation evidence, generated metadata, and trailers, plus a specific validation result or an
-explicit non-placeholder reason validation was not run. It rejects template placeholders,
-development-only prose such as "address review feedback," bodies that merely repeat the header, and
-commands with no recorded result. A non-empty `BREAKING CHANGE:` footer may follow the descriptive
-body; `!` in the header is sufficient to mark the change as breaking. Wrap ordinary **commit prose**
-at 72 characters so history remains readable in narrow terminals. This wrapping rule does not apply
-to PR descriptions, which use natural Markdown without artificial hard wrapping. Structurally
-validated generated dependency headers and metadata, URL destinations, complete Markdown tables,
-and recognized Git trailers are not required to wrap. The required hosted check validates only the
-PR title for trusted Dependabot pull requests because GitHub controls their generated commit bodies
-and does not provide body-formatting options. This exception requires the exact `dependabot[bot]`
-author, a same-repository head, and a `dependabot/*` branch; all other pull requests retain full
-commit-message validation.
-
-Install the tracked template for this checkout:
+Install dependencies and configure the tracked template and local `commit-msg` hook for this
+checkout or worktree:
 
 ```bash
-git config extensions.worktreeConfig true
-git config --worktree commit.template "$(git rev-parse --show-toplevel)/.gitmessage"
-git config --worktree core.commentChar ";"
+make install
+
+# If dependencies are already installed:
+make configure-git
 ```
 
-Worktree-specific configuration keeps each linked worktree pointed at its own tracked template. The
-comment-character setting is required: Git otherwise treats the `##` section headings as comments and
-removes them when the editor closes. Template guidance uses `;` comments, while its optional Markdown
-headings remain available in the commit message.
+The tracked hook validates the final message with the same commitlint policy used by the local range
+check and hosted required check. Compose the message in the configured editor with `git commit`, or
+prepare a complete message file and use `git commit --file <path>`. Do not assemble prose with
+repeated `-m` flags, which create separate paragraphs, and do not bypass the hook with `--no-verify`.
 
 Examples:
 
@@ -117,13 +100,8 @@ requests, the full message of every commit. Trusted same-repository Dependabot p
 required check but validate only their Conventional Commit PR title; the separate required `CI Gate`
 still validates their complete change. `CI Gate` fails unless lint, docs, typing,
 supported-Python tests, PostgreSQL, live-cluster faults, testproject, the tracked Docker Compose
-smoke, minimum/latest dependencies, and package build all succeed. Use one of `build`, `chore`, `ci`,
-`docs`, `feat`, `fix`, `perf`,
-`refactor`,
-`revert`, `style`, or `test`, optionally add a scope and `!`, and include a summary after `:`. The
-check enforces meaningful body context, validation evidence or a specific not-run reason, and the
-wrappable commit-prose line limit without prescribing section headings. A failed check prints the
-offending title, commit, or line and the expected correction.
+smoke, minimum/latest dependencies, and package build all succeed. The hosted commit check runs the
+same authoritative commitlint configuration as the tracked local hook and `make commit-check`.
 
 ## Rebase auto-merge
 
@@ -154,7 +132,8 @@ rebase merge will retain:
 ```bash
 git fetch origin
 git log --format=fuller origin/main..HEAD
-uv run python scripts/check_conventional_commits.py --range origin/main..HEAD
+make commit-check
+PR_TITLE='feat: describe the pull request' make commit-title-check
 ```
 
 For every material commit shown by that log, compare its body with the PR description before pushing
@@ -165,8 +144,8 @@ does not require copied wording, identical headings, or identical wrapping.
 Fold `fixup!`/`squash!` commits, CI repairs, review repairs, formatting-only follow-ups, and other
 development iterations into the logical commit they correct. Use an interactive rebase when needed,
 then push rewritten branches with `--force-with-lease`. Do not collapse genuinely independent changes:
-retain each one as a focused commit with its own descriptive body. Run the validator with the final
-PR title as well before enabling auto-merge.
+retain each one as a focused commit with its own descriptive body and `Validation:` trailer. Validate
+the final PR title separately before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
 conflicts, rerun the affected checks, re-evaluate the full-gate triggers below, and push. Auto-merge
@@ -178,10 +157,11 @@ intentional owner bypass; ordinary merges remain gated and emergency use require
 
 Treat the bypass as break-glass recovery for a GitHub infrastructure failure, never as permission to
 retain an invalid commit or skip local validation. Record the outage and urgency in the PR, validate
-the exact range and title with `scripts/check_conventional_commits.py`, run `uv run make ci`, and
-record both results before using it. Afterward, verify the rebased `main` history and ruleset bypass
-event, then open or link a follow-up incident. If the PR merge service itself is unavailable, export
-the ruleset, temporarily change only the named owner bypass to `always`, make the smallest recovery,
+the exact range with `make commit-check`, validate the title with
+`PR_TITLE='feat: describe the pull request' make commit-title-check`, run `uv run make ci`, and record
+the results before using it. Afterward, verify the rebased `main` history and ruleset bypass event,
+then open or link a follow-up incident. If the PR merge service itself is unavailable, export the
+ruleset, temporarily change only the named owner bypass to `always`, make the smallest recovery,
 immediately restore `pull_request`, and verify the complete ruleset through the API. Never leave an
 `always` or `exempt` bypass configured.
 
