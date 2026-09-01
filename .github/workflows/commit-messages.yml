@@ -21,17 +21,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.repository.default_branch }}
 
-      - name: Validate PR title and commits
-        if: github.event_name == 'pull_request_target'
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install commit policy
+        run: npm ci --ignore-scripts
+
+      - name: Validate PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+        run: make commit-title-check
+
+      - name: Fetch and verify PR commits
+        env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           pr_ref="refs/remotes/pull/${PR_NUMBER}/head"
           git fetch --no-tags --force origin \
@@ -44,10 +52,14 @@ jobs:
           fi
           git cat-file -e "${PR_BASE_SHA}^{commit}"
 
-          python scripts/check_conventional_commits.py \
-            --title "$PR_TITLE" \
-            --range "${PR_BASE_SHA}..${pr_ref}" \
-            --pr-author-login "$PR_AUTHOR_LOGIN" \
-            --pr-head-ref "$PR_HEAD_REF" \
-            --pr-head-repository "$PR_HEAD_REPOSITORY" \
-            --repository "$REPOSITORY"
+      - name: Validate ordinary PR commits
+        if: >-
+          !(
+            github.event.pull_request.user.login == 'dependabot[bot]' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            startsWith(github.event.pull_request.head.ref, 'dependabot/')
+          )
+        env:
+          COMMIT_BASE: ${{ github.event.pull_request.base.sha }}
+          COMMIT_HEAD: refs/remotes/pull/${{ github.event.pull_request.number }}/head
+        run: make commit-check

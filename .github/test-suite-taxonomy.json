@@ -164,7 +164,7 @@
     {
       "id": "repository-policy-and-release",
       "owner": "Repository policy, coverage review, packaging, and release",
-      "contract": "Tracks local policy parsers and release/package invariants rather than deployed runtime behavior.",
+      "contract": "Tracks repository policy and release/package invariants rather than deployed runtime behavior.",
       "skip_policy": {
         "mode": "allow",
         "reason": "Domain profiles retain explicit platform skips and expose them in timing outcomes."

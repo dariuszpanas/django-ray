@@ -8,6 +8,7 @@ build/
 .env
 .venv
 venv/
+node_modules/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
