@@ -26,9 +26,7 @@ from xml.etree import ElementTree
 _SCHEMA = "django-ray.docker-qualification"
 _SCHEMA_VERSION = 1
 _SCENARIO = "result-fold-real-ray"
-_DOCKER_DEFINITION_PATH = "qualification/docker/runbook.yaml"
-_KUBERNETES_DEFINITION_PATH = "qualification/kubernetes/runbook.yaml"
-_DEFINITION_PATHS = (_DOCKER_DEFINITION_PATH, _KUBERNETES_DEFINITION_PATH)
+_DEFINITION_PATH = "qualification/docker/runbook.yaml"
 _TEST_NODE = (
     "tests/unit/test_result_fold.py::"
     "test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup"
@@ -742,24 +740,11 @@ def _ensure_failure_junit(path: Path, code: str) -> None:
         stream.write(_failure_junit(code))
 
 
-def _validated_definition_path(value: str) -> str:
-    if value not in _DEFINITION_PATHS:
-        raise QualificationError("invalid-definition-path")
-    return value
-
-
-def _manifest(
-    candidate: Candidate | None,
-    *,
-    definition_path: str,
-    exit_code: int | None,
-    outcome: str,
-) -> bytes:
-    definition_path = _validated_definition_path(definition_path)
+def _manifest(candidate: Candidate | None, *, exit_code: int | None, outcome: str) -> bytes:
     dependencies = None if candidate is None else _dependency_manifest(candidate)
     payload = {
         "candidate": None if candidate is None else candidate.as_manifest(),
-        "definition_path": definition_path,
+        "definition_path": _DEFINITION_PATH,
         "dependencies": dependencies,
         "outcome": outcome,
         "scenario": _SCENARIO,
@@ -822,7 +807,6 @@ def _run_candidate(
 def _record_failure(
     error: Exception,
     *,
-    definition_path: str,
     evidence_root: Path,
     candidate: Candidate | None,
     exit_code: int | None,
@@ -835,12 +819,7 @@ def _record_failure(
         _ensure_failure_junit(evidence_root / "junit.xml", code)
         _write_manifest(
             evidence_root / "execution-manifest.json",
-            _manifest(
-                candidate,
-                definition_path=definition_path,
-                exit_code=exit_code,
-                outcome="failed",
-            ),
+            _manifest(candidate, exit_code=exit_code, outcome="failed"),
         )
     except (OSError, QualificationError):
         pass
@@ -866,7 +845,6 @@ def _finish_success(hold_seconds: float) -> int:
 
 def execute(  # noqa: PLR0913 - explicit injectable qualification boundaries
     *,
-    definition_path: str,
     evidence_root: Path,
     wheel_directory: Path,
     install_target: Path,
@@ -876,7 +854,6 @@ def execute(  # noqa: PLR0913 - explicit injectable qualification boundaries
     require_non_root: bool,
 ) -> int:
     """Run the exact target and retain bounded evidence for every reachable outcome."""
-    definition_path = _validated_definition_path(definition_path)
     candidate: Candidate | None = None
     exit_code: int | None = None
     print(f"qualification={_SCENARIO} phase=started", flush=True)
@@ -894,17 +871,11 @@ def execute(  # noqa: PLR0913 - explicit injectable qualification boundaries
         )
         _write_manifest(
             evidence_root / "execution-manifest.json",
-            _manifest(
-                candidate,
-                definition_path=definition_path,
-                exit_code=exit_code,
-                outcome="passed",
-            ),
+            _manifest(candidate, exit_code=exit_code, outcome="passed"),
         )
     except Exception as error:  # noqa: BLE001 - convert failures to bounded evidence
         return _record_failure(
             error,
-            definition_path=definition_path,
             evidence_root=evidence_root,
             candidate=candidate,
             exit_code=exit_code,
@@ -927,25 +898,17 @@ def _hold_seconds() -> float:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--definition-path",
-        choices=_DEFINITION_PATHS,
-        default=_DOCKER_DEFINITION_PATH,
-        help="Tracked source runbook represented by the emitted evidence manifest.",
-    )
-    return parser
+    return argparse.ArgumentParser(description=__doc__)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
-    arguments = parser.parse_args(argv)
+    parser.parse_args(argv)
     try:
         hold_seconds = _hold_seconds()
     except argparse.ArgumentTypeError as error:
         parser.error(str(error))
     return execute(
-        definition_path=arguments.definition_path,
         evidence_root=_EVIDENCE_ROOT,
         wheel_directory=_WHEEL_DIRECTORY,
         install_target=_INSTALL_TARGET,

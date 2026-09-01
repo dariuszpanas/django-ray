@@ -1,4 +1,4 @@
-"""Resource-free tests for the source-owned result-fold qualification."""
+"""Resource-free tests for the source-owned Docker qualification."""
 
 from __future__ import annotations
 
@@ -60,58 +60,6 @@ def test_runbook_selects_the_exact_real_ray_node_and_bounded_profile() -> None:
         "tests/unit/test_result_fold.py::"
         "test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup"
     )
-
-
-def test_kubernetes_runbook_selects_the_external_evidence_contract() -> None:
-    root = Path(__file__).resolve().parents[2]
-    document = yaml.safe_load(
-        (root / "qualification/kubernetes/runbook.yaml").read_text(encoding="utf-8")
-    )
-
-    assert document["namespace"] == "django-ray"
-    assert document["name"] == "result-fold-real-ray-kubernetes-qualification"
-    assert document["schema_version"] == 1
-    assert document["definition"]["executor"]["payload"]["argv"] == [
-        "python",
-        "-m",
-        "qualification.docker.scenario",
-        "--definition-path",
-        "qualification/kubernetes/runbook.yaml",
-    ]
-    assert document["definition"]["requirements"]["capabilities"] == [
-        "external-evidence-v1",
-        "kubernetes",
-        "linux",
-        "python",
-        "ray",
-    ]
-    assert document["definition"]["timeout_seconds"] == 420
-    assert document["definition"]["cleanup"] == {
-        "policy": "always",
-        "timeout_seconds": 180,
-    }
-    assert document["definition"]["evidence"] == {
-        "max_artifacts": 3,
-        "max_bytes_per_artifact": 1024 * 1024,
-        "max_total_bytes": 3 * 1024 * 1024,
-        "required_kinds": ["junit", "log", "manifest"],
-    }
-
-
-def test_definition_path_is_limited_to_tracked_runbooks() -> None:
-    parser = scenario._parser()  # noqa: SLF001 - exact command contract
-
-    assert parser.parse_args([]).definition_path == "qualification/docker/runbook.yaml"
-    assert (
-        parser.parse_args(
-            ["--definition-path", "qualification/kubernetes/runbook.yaml"]
-        ).definition_path
-        == "qualification/kubernetes/runbook.yaml"
-    )
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--definition-path", "../operator-selected.yaml"])
-    with pytest.raises(scenario.QualificationError, match="invalid-definition-path"):
-        scenario._validated_definition_path("qualification/other.yaml")  # noqa: SLF001
 
 
 def test_image_keeps_dependencies_separate_and_preserves_absolute_venv_path() -> None:
@@ -555,18 +503,8 @@ def test_manifest_is_canonical_bounded_and_contains_target_inventory(
         ],
     )
 
-    first = scenario._manifest(  # noqa: SLF001
-        candidate,
-        definition_path="qualification/kubernetes/runbook.yaml",
-        exit_code=0,
-        outcome="passed",
-    )
-    second = scenario._manifest(  # noqa: SLF001
-        candidate,
-        definition_path="qualification/kubernetes/runbook.yaml",
-        exit_code=0,
-        outcome="passed",
-    )
+    first = scenario._manifest(candidate, exit_code=0, outcome="passed")  # noqa: SLF001
+    second = scenario._manifest(candidate, exit_code=0, outcome="passed")  # noqa: SLF001
     payload = json.loads(first)
 
     assert first == second
@@ -574,7 +512,6 @@ def test_manifest_is_canonical_bounded_and_contains_target_inventory(
     assert first.endswith(b"\n")
     assert payload["candidate"]["wheel_sha256"] == "b" * 64
     assert payload["candidate"]["installed_package_tree_sha256"] == "a" * 64
-    assert payload["definition_path"] == "qualification/kubernetes/runbook.yaml"
     assert payload["dependencies"]["django_ray"] == "0.5.0"
     assert len(payload["dependencies"]["installed_distributions"]) == 4
     assert payload["target"] == {
@@ -589,12 +526,7 @@ def test_manifest_is_canonical_bounded_and_contains_target_inventory(
     assert payload["test"]["node_id"] == scenario._TEST_NODE  # noqa: SLF001
 
     pre_candidate = json.loads(
-        scenario._manifest(  # noqa: SLF001
-            None,
-            definition_path="qualification/docker/runbook.yaml",
-            exit_code=None,
-            outcome="failed",
-        )
+        scenario._manifest(None, exit_code=None, outcome="failed")  # noqa: SLF001
     )
     assert "target" not in pre_candidate
 
@@ -657,7 +589,6 @@ def test_success_emits_only_canonical_summary_and_holds_after_evidence(
     monkeypatch.setattr(scenario.time, "sleep", fake_sleep)
 
     result = scenario.execute(
-        definition_path="qualification/docker/runbook.yaml",
         evidence_root=evidence,
         wheel_directory=wheels,
         install_target=target,
@@ -689,7 +620,6 @@ def test_pre_candidate_failure_emits_bounded_junit_and_manifest(
     wheels.mkdir()
 
     result = scenario.execute(
-        definition_path="qualification/kubernetes/runbook.yaml",
         evidence_root=evidence,
         wheel_directory=wheels,
         install_target=tmp_path / "install" / "target",
@@ -704,7 +634,6 @@ def test_pre_candidate_failure_emits_bounded_junit_and_manifest(
     manifest = json.loads((evidence / "execution-manifest.json").read_bytes())
     assert 'message="expected-one-wheel"' in junit
     assert manifest["candidate"] is None
-    assert manifest["definition_path"] == "qualification/kubernetes/runbook.yaml"
     assert manifest["outcome"] == "failed"
     assert capsys.readouterr().err.endswith("code=expected-one-wheel\n")
 
@@ -749,7 +678,6 @@ def test_post_candidate_failure_retains_exact_target_provenance(
     monkeypatch.setattr(scenario, "_run_exact_test", fail_test)
 
     result = scenario.execute(
-        definition_path="qualification/docker/runbook.yaml",
         evidence_root=evidence,
         wheel_directory=wheels,
         install_target=target,

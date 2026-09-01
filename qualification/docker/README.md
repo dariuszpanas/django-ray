@@ -1,10 +1,8 @@
 # Source-owned Docker qualification
 
-This directory owns the shared bounded scenario and its Docker operational definition for an
-external validation control plane. The companion
-[Kubernetes runbook](../kubernetes/README.md) selects the same scenario through its own source-owned
-runtime contract. The scenario installs the candidate wheel into a fresh temporary target and then
-invokes the existing exact source test:
+This directory owns one bounded operational definition for an external validation control plane.
+It installs the candidate wheel into a fresh temporary target and then invokes the existing exact
+source test:
 
 `tests/unit/test_result_fold.py::test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup`
 
@@ -134,14 +132,12 @@ execution timeout; an always-run 180-second cleanup timeout; and exactly the `ju
 
 The successful JUnit file is reduced to one stable suite/case identity after pytest proves the exact
 node passed, removing host names, timestamps, durations, and captured output. The deterministic JSON
-manifest records the selected allowlisted definition path, wheel SHA-256, installed/source tree
-SHA-256, distribution and import paths, direct Python/Django/Ray/django-ray/pytest versions, and a
-bounded sorted inventory of all installed distributions. The Docker command defaults to
-`qualification/docker/runbook.yaml`; the Kubernetes runbook passes its one separately accepted
-literal path. Its generic `target` block repeats only Python and canonical dependency names and
+manifest records the wheel SHA-256, installed/source tree SHA-256, distribution and import paths,
+direct Python/Django/Ray/django-ray/pytest versions, and a bounded sorted inventory of all installed
+distributions. Its generic `target` block repeats only Python and canonical dependency names and
 versions so an adapter can expose that allowlisted summary without understanding this source-owned
-schema. Repository, full commit, schema version, normalized definition digest, image digest, and
-exact cleanup remain control-plane-owned run snapshot evidence.
+schema. Repository, full commit, definition path, schema version, normalized definition digest,
+image digest, and exact cleanup remain control-plane-owned run snapshot evidence.
 
 Pytest stdout and stderr are not replayed on success because their duration text is volatile. On
 failure they are emitted to the adapter-owned log with a 32 KiB cap per stream. The Linux wrapper
