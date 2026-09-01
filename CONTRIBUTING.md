@@ -95,13 +95,14 @@ independently. PR descriptions use natural Markdown rather than 72-column hard w
 logical commits as the change needs; one large atomic commit is valid, while unrelated cleanup belongs
 in a separate change.
 
-The required `Commit Messages` GitHub Actions check validates the PR title and, for ordinary pull
-requests, the full message of every commit. Trusted same-repository Dependabot pull requests keep the
-required check but validate only their Conventional Commit PR title; the separate required `CI Gate`
-still validates their complete change. `CI Gate` fails unless lint, docs, typing,
-supported-Python tests, PostgreSQL, live-cluster faults, testproject, the tracked Docker Compose
-smoke, minimum/latest dependencies, and package build all succeed. The hosted commit check runs the
-same authoritative commitlint configuration as the tracked local hook and `make commit-check`.
+The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
+every commit for ordinary pull requests. Trusted same-repository Dependabot pull requests keep the
+required check but are excluded from title and commit-message linting; the workflow still fetches and
+verifies their exact event head, and the separate required `CI Gate` validates their complete change.
+`CI Gate` fails unless lint, docs, typing, supported-Python tests, PostgreSQL, live-cluster faults,
+testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and package build all
+succeed. For ordinary pull requests, the hosted commit check runs the same authoritative commitlint
+configuration as the tracked local hook and `make commit-check`.
 
 ## Rebase auto-merge
 
@@ -114,9 +115,10 @@ gh pr merge --auto --rebase <PR-number>
 
 Auto-merge waits for `Commit Messages` and `CI Gate`. Approval and review-conversation state do not
 block merges in this single-maintainer repository. The rebase method preserves each descriptive
-commit on `main`. The `Commit Messages` workflow validates the PR title and ordinary PR commits from
-a base-branch checkout with read-only repository permission. Its title-only Dependabot path is
-limited by trusted `pull_request_target` event metadata to the bot's same-repository branch namespace.
+commit on `main`. The `Commit Messages` workflow validates ordinary PR titles and commit messages from
+a base-branch checkout with read-only repository permission. Its Dependabot exclusion still verifies
+the exact event head and is limited by trusted `pull_request_target` event metadata to the bot's
+same-repository branch namespace.
 Native `CI Gate` runs with `always()` and rejects failed, cancelled, timed-out, or skipped blocking
 jobs, including a package build skipped after an upstream failure.
 
