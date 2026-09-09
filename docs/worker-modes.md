@@ -157,6 +157,26 @@ provided, and resource requests (`num_cpus`/`num_gpus`) must be finite and non-n
 `(callable, args_tuple, kwargs_dict)` entries. Bounded calls use a sliding submission
 window and still return results in input order.
 
+All three helpers accept keyword-only `max_concurrency=None`; an integer selects
+the maximum outstanding submission window. The default still submits all calls.
+Request construction and scatter callable pickling happen as a slot becomes
+available. Strict operations validate and detach their invariant request context
+once; map/starmap hash their shared callable once, while scatter binds each
+prepared callable separately. Every leaf still validates its full exact request
+before callable unpickling or application setup. The wire schema is unchanged.
+
+Callability, resource/window values and all argument tuple/dictionary shapes are
+checked before submission. Map/starmap pickle their shared callable before any
+child starts. Scatter can discover a later callable's serialization error after
+earlier children started; it preserves that error and applies the owned-child
+cleanup below. It does not retry those children automatically.
+
+This bounds additional unscheduled request preparation, not the entire helper's
+memory. Inputs are still a materialized sequence, results are still an ordered
+list, and each item's arguments, callable bytes and Ray transport allocations
+need application sizing. The helper retains at most one callable digest cache
+entry for the current operation. Use an explicit window for large fanouts.
+
 If submission, result collection, or the caller is interrupted, the helpers make
 one best-effort `ray.cancel(ref, force=False, recursive=True)` request for each
 submitted result they still own. They retain the original exception, stop

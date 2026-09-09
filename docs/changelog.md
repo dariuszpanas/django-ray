@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bounded distributed preparation
+
+- Map/starmap construct strict requests inside their submission window and reuse
+  a shared callable digest. Scatter accepts optional `max_concurrency` with its
+  existing unbounded default and pickles each callable when its slot opens.
+  Validated immutable request fragments are shared within one operation; exact
+  wire bytes, item identities and full leaf-side validation are preserved.
+  A later scatter serialization failure uses owned-child cleanup and retains the
+  original error. Input/result lists and Ray argument transport are not streamed.
+
 ### Distributed failure cleanup
 
 - Map, starmap, and scatter collectors request non-force recursive cancellation

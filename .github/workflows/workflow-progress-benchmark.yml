@@ -2,6 +2,16 @@ name: Workflow Progress Benchmark
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Benchmark to run
+        type: choice
+        options: [workflow-progress, distributed-preparation]
+        default: workflow-progress
+      baseline_ref:
+        description: Git baseline for distributed preparation
+        type: string
+        default: main
 
 permissions:
   contents: read
@@ -12,6 +22,7 @@ concurrency:
 
 jobs:
   benchmark:
+    if: inputs.target != 'distributed-preparation'
     name: PostgreSQL Workflow Progress Benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -102,4 +113,35 @@ jobs:
             artifacts/workflow-progress-benchmark.json
             artifacts/workflow-progress-benchmark.md
           if-no-files-found: warn
+          retention-days: 14
+
+  distributed-preparation:
+    if: inputs.target == 'distributed-preparation'
+    name: Distributed Preparation Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASELINE_REF: ${{ inputs.baseline_ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest
+          enable-cache: "false"
+      - name: Install supported Python and dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Compare exact-source sender preparation
+        run: >-
+          uv run --no-sync --python 3.12 python scripts/benchmark_distributed_preparation.py
+          --baseline-ref "$BASELINE_REF" --items 100 1000 --window 8 --repetitions 3
+          --case-timeout 120 --output artifacts/distributed-preparation.json
+      - name: Upload sender preparation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: distributed-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/distributed-preparation.json
+          if-no-files-found: error
           retention-days: 14

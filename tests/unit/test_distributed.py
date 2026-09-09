@@ -30,6 +30,18 @@ def _square(x: int) -> int:
     return x * x
 
 
+def _sum_pair(left: int, right: int) -> int:
+    return left + right
+
+
+class _UnpickleableLeaf:
+    def __call__(self) -> None:
+        raise AssertionError("unpickleable leaf must not execute")
+
+    def __reduce__(self):
+        raise pickle.PicklingError("late leaf cannot be serialized")
+
+
 class _FanoutLifecycleProbe:
     """Observe application effects independently of collector cancellation calls."""
 
@@ -48,10 +60,12 @@ def _fanout_lifecycle_item(item: tuple[Any, str]) -> str:
 
     probe, kind = item
     deadline = time.monotonic() + 20
-    if kind == "fail":
+    if kind in {"fail", "complete"}:
         while time.monotonic() < deadline:
             if ray.get(probe.snapshot.remote(), timeout=5)["started"]:
-                raise ValueError("fanout primary failure")
+                if kind == "fail":
+                    raise ValueError("fanout primary failure")
+                return "completed-peer"
             time.sleep(0.02)
         raise TimeoutError("sibling did not start")
 
@@ -382,6 +396,50 @@ class TestDistributedWithRay:
                     for ref in submitted:
                         cancel(ref, force=True, recursive=True)
                     ray.kill(probe)
+
+    def test_bounded_strict_fanout_success_and_late_preparation_failure(self) -> None:
+        """Exercise all prepared helpers and a later pickle failure on one runtime."""
+        import ray
+
+        with _strict_execution_context():
+            assert distributed.parallel_map(_square, list(range(7)), max_concurrency=2) == [
+                i * i for i in range(7)
+            ]
+            assert distributed.parallel_starmap(
+                _sum_pair, [(i, 1) for i in range(7)], max_concurrency=2
+            ) == list(range(1, 8))
+            assert distributed.scatter_gather(
+                [(_square, (i,), {}) if i % 2 else (_sum_pair, (i, 1), {}) for i in range(7)],
+                max_concurrency=2,
+            ) == [1, 1, 3, 9, 5, 25, 7]
+
+        probe = ray.remote(num_cpus=0)(_FanoutLifecycleProbe).remote()
+        try:
+            with (
+                _strict_execution_context(),
+                pytest.raises(pickle.PicklingError, match="late leaf"),
+            ):
+                distributed.scatter_gather(
+                    [
+                        (_fanout_lifecycle_item, ((probe, "complete"),), {}),
+                        (_fanout_lifecycle_item, ((probe, "sibling"),), {}),
+                        (_UnpickleableLeaf(), (), {}),
+                    ],
+                    max_concurrency=2,
+                )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if ray.get(probe.snapshot.remote(), timeout=5)["stopped"]:
+                    break
+                time.sleep(0.02)
+            assert ray.get(probe.snapshot.remote(), timeout=5) == {
+                "started": True,
+                "released": False,
+                "completed": False,
+                "stopped": True,
+            }
+        finally:
+            ray.kill(probe)
 
     def test_strict_parallel_map_round_trip_installs_exact_context(self) -> None:
         expected_runtime_env = _strict_runtime_env_identity()
