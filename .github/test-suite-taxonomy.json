@@ -180,6 +180,7 @@
           "tests/unit/test_require_linux.py",
           "tests/unit/test_package_metadata.py",
           "tests/unit/test_release.py",
+          "tests/unit/test_runtime_qualification.py",
           "tests/unit/test_target_package.py",
           "tests/unit/test_test_suite_inventory.py",
           "tests/unit/test_verify_wheel.py",
