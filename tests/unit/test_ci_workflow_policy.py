@@ -688,6 +688,22 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     assert "tests/unit/test_verify_wheel.py" in repository_policy["selection"]["paths"]
 
 
+def test_testproject_inventory_matches_the_executed_make_selection() -> None:
+    target = re.search(
+        r"(?m)^test-testproject:\n(?P<recipe>(?:\t.*\n)+)",
+        MAKEFILE.read_text(encoding="utf-8"),
+    )
+    assert target is not None
+    paths = re.findall(r"tests/[^\s\\]+\.py", target.group("recipe"))
+    assert len(paths) == len(set(paths))
+    taxonomy = json.loads(TEST_SUITE_TAXONOMY.read_text(encoding="utf-8"))
+    lane = next(lane for lane in taxonomy["ci_lanes"] if lane["id"] == "testproject-contract")
+
+    assert lane["selection"] == {"paths": paths}
+    assert "tests/unit/test_ray_data_golden_path.py" in paths
+    assert lane["skip_policy"]["mode"] == "forbid"
+
+
 def test_live_cluster_scenarios_are_process_isolated_bounded_and_visible() -> None:
     live_cluster = _jobs()["live-cluster"]
     assert live_cluster["env"]["PYTHONUNBUFFERED"] == "1"
