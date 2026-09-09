@@ -7376,7 +7376,10 @@ def test_preflight_registers_secret_before_any_mutation_or_diagnostics(
         assert not ({key.upper() for key in environment} & removed)
 
 
-def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("standalone", [False, True])
+def test_api_smoke_requires_401_200_and_durable_five(
+    monkeypatch: pytest.MonkeyPatch, standalone: bool
+) -> None:
     gate = LocalKubeRayGate(_config())
     token = "local-token-that-must-never-be-printed-123456"
     calls: list[tuple[str, str, bool]] = []
@@ -7460,16 +7463,24 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(gate, "_http", request)
 
-    gate._verify_api()
+    def verify():
+        if standalone:
+            return gate_module.api_assertions.verify_application_api(
+                request, get_token=lambda: token, task_timeout=gate.config.task_timeout
+            )
+        gate._verify_api()
+        return gate.evidence
 
-    assert gate.evidence.task_id == TASK_ID
-    assert gate.evidence.task_state == "SUCCEEDED"
-    assert gate.evidence.task_result == 5
-    assert gate.evidence.api_task_status_bounded is True
-    assert gate.evidence.api_bulk_reset_absent is True
-    assert gate.evidence.api_legacy_workflow_node_absent is True
-    assert gate.evidence.api_execution_delete_rejected is True
-    assert gate.evidence.api_legacy_workflow_graph_absent is True
+    observations = verify()
+
+    assert observations.task_id == TASK_ID
+    assert observations.task_state == "SUCCEEDED"
+    assert observations.task_result == 5
+    assert observations.api_task_status_bounded is True
+    assert observations.api_bulk_reset_absent is True
+    assert observations.api_legacy_workflow_node_absent is True
+    assert observations.api_execution_delete_rejected is True
+    assert observations.api_legacy_workflow_graph_absent is True
     assert calls[:5] == [
         ("/api/enqueue/add/2/3", "POST", False),
         ("/api/executions/stats", "GET", False),
@@ -7484,12 +7495,12 @@ def test_api_smoke_requires_401_200_and_durable_five(monkeypatch: pytest.MonkeyP
 
     detail_response["response_max_bytes"] = None
     with pytest.raises(ValueError, match="lost its bounded projection contract"):
-        gate._verify_api()
+        verify()
 
     detail_response["response_max_bytes"] = 262_144
     task_status_response["input_omission_reason"] = "invented"
     with pytest.raises(ValueError, match="unknown input omission reason"):
-        gate._verify_api()
+        verify()
 
 
 def test_api_smoke_rejects_an_openapi_execution_delete() -> None:
