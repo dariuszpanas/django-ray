@@ -142,6 +142,20 @@ reconciliation, timeout checks, cancellation recovery, and lease cleanup use ind
 monotonic schedules; idle claim backoff does not postpone them. Graceful-shutdown signals
 interrupt the current idle wait, so an opted-in maximum does not extend worker handoff.
 
+Active Ray Jobs also have a 250 ms durable-completion poll, independent of the slower
+status/orphan recovery schedule. Each pass inspects at most 32 tracked task identities
+with one candidate query; an idle worker performs no such query. Receipt consumption
+still locks the exact live lease, checks its supported protocol range and revalidates
+the task, attempt, generation, job and completion bytes before persistence or retry.
+When a valid receipt frees capacity, the worker can claim again in the same iteration.
+The batch cursor revisits older tasks even while newer tasks arrive continuously.
+
+This fast pass never asks the Jobs API for status, logs or cancellation. Missing or
+malformed receipts, ownerless rows and orphan adoption remain on the recovery path.
+The 250 ms schedule is not a latency guarantee: larger active sets need multiple
+batches, and database locks, result storage or a blocking recovery RPC can delay the
+single worker loop. It does not change at-least-once execution or retry eligibility.
+
 ### Retry Policy
 
 | Setting | Type | Default | Description |
