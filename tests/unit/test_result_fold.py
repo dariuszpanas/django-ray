@@ -52,6 +52,7 @@ from django_ray.workflows import (
     map_step,
     step,
 )
+from tests.local_ray import init_local_ray
 
 SIDE_EFFECTS: list[int] = []
 
@@ -1663,7 +1664,7 @@ def test_real_ray_strict_fold_ready_rejection_is_typed_and_has_no_effects(
 def test_real_ray_production_summary_stays_out_of_coordinator_until_final_result() -> None:
     import ray
 
-    ray.init(ignore_reinit_error=True, num_cpus=4)
+    init_local_ray(num_cpus=4)
     try:
         payload_bytes = 64 * 1024
         reducer = step(
@@ -1698,7 +1699,7 @@ def test_real_ray_item_overflow_stops_admission_and_preserves_actor_error() -> N
     import ray
     from ray.exceptions import RayTaskError
 
-    ray.init(ignore_reinit_error=True, num_cpus=3)
+    init_local_ray(num_cpus=3)
     try:
         tracker = ray.remote(num_cpus=0)(_RealEventTracker).remote()
         workflow = chain(
@@ -1726,14 +1727,7 @@ def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> Non
     from ray._private.state import actors
     from ray.exceptions import RayActorError
 
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(
-        address="local",
-        num_cpus=2,
-        resources={"result_fold": 1},
-        include_dashboard=False,
-    )
+    init_local_ray(num_cpus=2, resources={"result_fold": 1})
     try:
         reducer = step(
             env_sum,
@@ -1808,7 +1802,7 @@ def test_real_ray_non_detached_fold_dies_with_owner() -> None:
     import ray
     from ray.exceptions import RayActorError, RayTaskError
 
-    ray.init(ignore_reinit_error=True, num_cpus=2)
+    init_local_ray(num_cpus=2)
     try:
         owner = ray.remote(num_cpus=0.1)(_ResultFoldOwner).remote()
         child = ray.get(owner.spawn.remote())

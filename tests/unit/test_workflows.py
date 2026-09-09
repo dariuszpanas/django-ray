@@ -44,6 +44,7 @@ from django_ray.workflows import (
     report_progress,
     step,
 )
+from tests.local_ray import init_local_ray
 
 
 def make_range(limit: int) -> list[int]:
@@ -3083,7 +3084,7 @@ def test_ray_executor_disables_reporter_after_stale_write(
 def test_workflow_executes_on_real_ray() -> None:
     import ray
 
-    ray.init(ignore_reinit_error=True)
+    init_local_ray()
     try:
         outer_task = ray.remote(run_nested_workflow)
         assert ray.get(outer_task.remote(5)) == 40
@@ -3126,7 +3127,7 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
             actor_creation_attempts.append("created")
             raise AssertionError("actor-free reporting policy created a progress actor")
 
-    ray.init(ignore_reinit_error=True)
+    init_local_ray()
     try:
         remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
         monkeypatch.setattr(
@@ -3165,7 +3166,7 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
 def test_real_ray_bounded_map_preserves_order_and_limits_concurrency() -> None:
     import ray
 
-    ray.init(ignore_reinit_error=True, num_cpus=4)
+    init_local_ray(num_cpus=4)
     try:
         tracker = ray.remote(num_cpus=0)(_ConcurrencyTracker).remote()
         workflow = chain(
@@ -3189,7 +3190,7 @@ def test_real_ray_mapped_group_cleans_sibling_ref_before_failure_returns() -> No
     import ray
     from ray.exceptions import RayTaskError
 
-    ray.init(ignore_reinit_error=True, num_cpus=4)
+    init_local_ray(num_cpus=4)
     try:
         tracker = ray.remote(num_cpus=0)(_LifecycleTracker).remote()
         cancel_timeout_seconds = 1.5
@@ -3249,7 +3250,7 @@ def test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure() -> No
     import ray
     from ray.exceptions import RayTaskError
 
-    ray.init(ignore_reinit_error=True, num_cpus=4)
+    init_local_ray(num_cpus=4)
     try:
         tracker = ray.remote(num_cpus=0)(_LifecycleTracker).remote()
         workflow = chain(
@@ -3310,7 +3311,7 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
         step(multiply, factor=2),
     )
 
-    ray.init(ignore_reinit_error=True)
+    init_local_ray()
     try:
         remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
         delayed_progress_actor = ray.remote(num_cpus=0)(DelayedFirstSnapshotProgressActor)
@@ -3395,7 +3396,7 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
     )
 
     assert not ray.is_initialized()
-    ray.init(address="local", include_dashboard=False, num_cpus=2)
+    init_local_ray(num_cpus=2)
     try:
         _, _, cached_progress_actor = workflow_module._get_cached_workflow_remotes()
         assert cached_progress_actor is workflow_module._workflow_progress_actor_cached
@@ -3698,7 +3699,7 @@ def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None
     )
 
     assert not ray.is_initialized()
-    ray.init(address="local", include_dashboard=False, num_cpus=2)
+    init_local_ray(num_cpus=2)
     try:
         with durable_task_execution(
             execution.pk,

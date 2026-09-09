@@ -546,6 +546,7 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     }
 
     assert test_job["name"] == "Test (Python ${{ matrix.python-version }})"
+    assert test_job["timeout-minutes"] == "20"
     assert strategy["fail-fast"] == "false"
     assert matrix == {"python-version": ["3.12", "3.13", "3.14"]}
     assert "--lane supported-python" in steps["Run tests with suite timing"]["run"]

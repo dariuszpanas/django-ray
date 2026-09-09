@@ -18,6 +18,7 @@ from django_ray.workflow.progress.protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
 )
+from tests.local_ray import init_local_ray
 
 _RUN_IDENTITY = {
     "schema_version": 1,
@@ -108,7 +109,7 @@ def ray_runtime() -> Iterator[Any]:
     import ray
 
     assert not ray.is_initialized()
-    ray.init(address="local", include_dashboard=False, num_cpus=2)
+    init_local_ray(num_cpus=2)
     try:
         yield ray
     finally:
