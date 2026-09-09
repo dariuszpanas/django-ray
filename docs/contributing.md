@@ -557,6 +557,11 @@ containing only exempt deltas does not require a local full gate. Current-head `
 broad merge proof. Do not rerun the local full gate merely because an exempt focused follow-up changed
 the commit hash: retain the checkpoint result and add exact delta evidence.
 
+Path-selected deployed evidence is reviewed under the affected-gate policy. The supplemental
+Application Qualification workflow supplies public native Chainsaw core evidence on a disposable
+GitHub Actions Linux cluster. Required affected assertions must pass separately from `CI Gate`;
+contributors need no private test service.
+
 Run `uv run make ci` only in an explicitly bounded Linux environment. If none is available, record
 that reason and use passing exact-head hosted Linux `CI Gate` as the full-suite checkpoint. This
 does not waive a required deployed-behavior KubeRay gate. Never start, resize, or repurpose shared

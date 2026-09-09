@@ -1,0 +1,13 @@
+**
+!qualification/
+qualification/*
+!qualification/__init__.py
+!qualification/application/
+qualification/application/*
+!qualification/application/*.py
+**/__pycache__/
+**/*.pyc
+**/.env
+**/.env.*
+**/*.sqlite3
+**/*.sqlite3-*

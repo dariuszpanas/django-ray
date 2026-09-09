@@ -68,3 +68,13 @@ def test_failed_authentication_assertion_does_not_retrieve_credentials() -> None
     with pytest.raises(ValueError, match="unauthenticated.*expected 401"):
         verify_application_api(request, get_token=forbidden_token, task_timeout=1)
     assert calls == [("/api/enqueue/add/2/3", {"method": "POST"})]
+
+
+def test_current_openapi_response_fits_the_qualification_transport_budget():
+    from django.test import Client
+
+    from qualification.application.api import MAX_OPENAPI_SCHEMA_BYTES
+
+    response = Client().get("/api/openapi.json")
+    assert response.status_code == 200
+    assert len(response.content) <= MAX_OPENAPI_SCHEMA_BYTES

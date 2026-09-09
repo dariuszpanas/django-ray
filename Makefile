@@ -132,6 +132,7 @@ test-postgres:
 		tests/integration/test_request_reference_schema_migration.py \
 		tests/integration/test_task_id_uniqueness_migration.py \
 		tests/integration/test_workflow_run_allocation_migration.py \
+		tests/unit/test_application_offline_settings.py \
 		-m postgresql -vv --durations=20
 
 # Validate the bundled sample project's user-facing boundary
