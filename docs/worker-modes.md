@@ -157,6 +157,23 @@ provided, and resource requests (`num_cpus`/`num_gpus`) must be finite and non-n
 `(callable, args_tuple, kwargs_dict)` entries. Bounded calls use a sliding submission
 window and still return results in input order.
 
+If submission, result collection, or the caller is interrupted, the helpers make
+one best-effort `ray.cancel(ref, force=False, recursive=True)` request for each
+submitted result they still own. They retain the original exception, stop
+submitting new items, and do not replay work. Consumed results and unrelated task
+references are excluded. The unbounded path retains all submitted references
+until its batch result is collected; a finished task may receive a harmless
+cancellation request when another task in that batch fails.
+
+Cleanup does not wait for children to drain or force-kill workers. Its number of
+cancellation requests is bounded by the outstanding submission window (all
+submitted calls when no limit was selected), but a Ray cancellation RPC has no
+additional wall-clock timeout here. A request is not proof that application code
+or its descendants have stopped, and previously completed effects are not undone.
+Use application idempotency and reconciliation before retrying uncertain work.
+These are synchronous list-returning helpers; they expose no generator-close API.
+See [Ray's cancellation semantics](https://docs.ray.io/en/latest/ray-core/api/doc/ray.cancel.html).
+
 For dependent stages and UI-visible graphs, prefer
 [Ray-native workflows](workflows.md).
 
