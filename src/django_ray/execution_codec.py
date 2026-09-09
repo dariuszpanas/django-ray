@@ -2255,6 +2255,75 @@ def encode_nested_execution_request(request: NestedExecutionRequest) -> str:
     return canonical
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedNestedDistributedRequest:
+    """Validated immutable wire fragments; only two bounded scalar slots vary."""
+
+    prefix: str
+    middle: str
+    suffix: str
+    fixed_bytes: int
+
+    def encode(self, *, item_index: int, callable_binding: str) -> str:
+        if (
+            type(item_index) is not int
+            or not 0 <= item_index <= _MAX_COUNTER
+            or type(callable_binding) is not str
+            or _SHA256_IDENTITY.fullmatch(callable_binding) is None
+        ):
+            raise NestedExecutionRequestEncodeError from None
+        index = str(item_index)
+        # Both substitutions are ASCII scalars. Tree shape/depth/node count are
+        # invariant; account for the final index width before allocating output.
+        if (
+            self.fixed_bytes + len(index) + len(callable_binding) + 2
+            > NESTED_EXECUTION_REQUEST_MAX_BYTES
+        ):
+            raise NestedExecutionRequestEncodeError from None
+        return f'{self.prefix}"{callable_binding}"{self.middle}{index}{self.suffix}'
+
+
+def _prepare_nested_distributed_request(
+    request: NestedExecutionRequest,
+) -> _PreparedNestedDistributedRequest:
+    """Validate/detach one distributed operation before any application submission.
+
+    Build slots from parsed top-level fields, never string replacement in opaque
+    user content. The ordinary encoder validates the prototype through the same
+    strict decoder as before. Every remote leaf still performs full validation.
+    """
+    canonical = encode_nested_execution_request(request)
+    value = json.loads(canonical)
+    if (
+        request.boundary_kind is NestedExecutionBoundaryKind.WORKFLOW_STEP
+        or request.callable_binding_kind is not NestedCallableBindingKind.DIGEST
+    ):
+        raise NestedExecutionRequestEncodeError from None
+
+    fragments = ["{"]
+    slots: list[str] = []
+    for index, (key, field_value) in enumerate(value.items()):
+        fragments[-1] += ("," if index else "") + json.dumps(key) + ":"
+        if key in {"callable_binding", "item_index"}:
+            slots.append(key)
+            fragments.append("")
+        else:
+            fragments[-1] += json.dumps(
+                field_value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+    fragments[-1] += "}"
+    if slots != ["callable_binding", "item_index"]:
+        raise NestedExecutionRequestEncodeError from None
+    return _PreparedNestedDistributedRequest(
+        *fragments,
+        fixed_bytes=sum(len(fragment.encode("utf-8")) for fragment in fragments),
+    )
+
+
 __all__ = [
     "EXECUTION_COMPLETION_DIAGNOSTIC_MAX_BYTES",
     "EXECUTION_COMPLETION_MAX_BYTES",

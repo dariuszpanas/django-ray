@@ -640,6 +640,46 @@ Avoid passing large repeated values to every leaf. Put shared immutable data in 
 object store once, or load it in a preceding workflow step and pass references through
 the graph.
 
+### Measure distributed helper preparation
+
+`parallel_map()`, `parallel_starmap()` and `scatter_gather()` prepare the next
+request as a submission slot opens. Strict operations share validated invariant
+wire fragments; map/starmap reuse one callable digest. This reduces sender-side
+work before the first submission and avoids a request-sized object for every
+unscheduled item. It does not stream caller input lists, result lists or Ray
+argument transport, and leaves still perform full strict-boundary validation.
+
+Measure that boundary from a clean committed checkout on Linux:
+
+```bash
+uv run python scripts/benchmark_distributed_preparation.py \
+  --baseline-ref origin/main --items 100 1000 --window 8 --repetitions 3 \
+  --case-timeout 120 --output artifacts/distributed-preparation.json
+```
+
+Both complete `src` trees are extracted from Git into owned temporary
+directories. Each baseline/candidate case uses a fresh Python process importing the
+selected tree, with a 3 GiB address-space cap, CPU-time cap and parent-enforced
+wall timeout. BLAS thread settings are one. No Ray service, database or application
+callable runs. Cases are limited to 5,000 items; the default profile compares 100
+and 1,000 items. The parent removes its temporary source directories after the run.
+
+The report records revisions, tree identity, environment, first-submission delay,
+CPU/wall time, traced Python peak bytes, encoding/hash counts and maximum prepared
+calls ahead of consumption. It verifies identical request bytes and ordered
+results. Timings include `tracemalloc` overhead; memory includes helper-created
+input-reference copies and results, but excludes caller input allocation and Ray.
+A historical scatter baseline may have no window: that difference is explicit
+in `effective_window`. These measurements do not establish end-to-end throughput
+or remote memory consumption.
+
+The existing manual **Workflow Progress Benchmark** workflow also accepts
+`target=distributed-preparation` and a `baseline_ref`. That target runs only the
+sender benchmark on a hosted Linux runner, with a ten-minute job limit and a JSON
+artifact. The default remains the PostgreSQL workflow-progress benchmark. The
+new target does not add benchmark work to ordinary PR CI. Real-Ray success,
+failure cleanup and the applicable cold deployment gate remain separate evidence.
+
 ## Runtime Environment Cost
 
 RuntimeEnv caches are per Ray node. A four-node cold fan-out may prepare the same

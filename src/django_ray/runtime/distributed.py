@@ -27,7 +27,7 @@ import math
 import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import uuid4
 
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from django_ray.execution_codec import (
         ExecutionIdentity,
         NestedExecutionBoundaryKind,
+        _PreparedNestedDistributedRequest,
     )
 
 T = TypeVar("T")
@@ -54,6 +55,44 @@ _scatter_gather_remote_cached: Any = None
 
 
 @dataclass(frozen=True, slots=True)
+class _RemoteCalls:
+    """Prepare exactly the indexed call requested by the submission window."""
+
+    count: int
+    prepare: Callable[[int], tuple[Any, ...]]
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int) -> tuple[Any, ...]:
+        if not 0 <= index < self.count:
+            raise IndexError(index)
+        return self.prepare(index)
+
+    def __iter__(self) -> Iterator[tuple[Any, ...]]:
+        for index in range(self.count):
+            yield self[index]
+
+
+@dataclass(slots=True)
+class _NestedCallableBindingCache:
+    """Retain at most one callable, with no process-global payload cache."""
+
+    serialized: bytes | None = None
+    binding: str | None = None
+
+    def get(self, serialized: bytes) -> str:
+        if serialized is self.serialized and self.binding is not None:
+            return self.binding
+        from django_ray.execution_codec import nested_callable_digest
+
+        binding = nested_callable_digest(serialized)
+        self.serialized = serialized
+        self.binding = binding
+        return binding
+
+
+@dataclass(frozen=True, slots=True)
 class _NestedDistributedOperation:
     """Strict outer context shared by every item in one helper invocation."""
 
@@ -64,6 +103,8 @@ class _NestedDistributedOperation:
     runtime_env_plan_identity: dict[str, Any]
     runtime_env_plan_digest: str
     runtime_env_transport_digest: str
+    encoder: _PreparedNestedDistributedRequest
+    callable_cache: _NestedCallableBindingCache = field(default_factory=_NestedCallableBindingCache)
 
 
 def _validate_resources(num_cpus: float, num_gpus: float) -> None:
@@ -112,19 +153,40 @@ def _strict_nested_operation(
         return None
 
     current = require_strict_task_execution_context(current)
-    from django_ray.execution_codec import nested_runtime_env_digests
+    from django_ray.execution_codec import (
+        NestedCallableBindingKind,
+        NestedDistributedBoundaryIdentity,
+        NestedExecutionRequest,
+        _prepare_nested_distributed_request,
+        nested_runtime_env_digests,
+    )
 
     outer_identity, execution_protocol_version = nested_execution_identity(current)
     runtime_env_plan_identity = cast(dict[str, Any], current.runtime_env_plan_identity)
     plan_digest, transport_digest = nested_runtime_env_digests(runtime_env_plan_identity)
+    operation_id = uuid4().hex
+    encoder = _prepare_nested_distributed_request(
+        NestedExecutionRequest(
+            outer_identity=outer_identity,
+            execution_protocol_version=execution_protocol_version,
+            boundary_kind=boundary_kind,
+            boundary_identity=NestedDistributedBoundaryIdentity(operation_id, 0),
+            callable_binding_kind=NestedCallableBindingKind.DIGEST,
+            callable_binding="sha256:" + "0" * 64,
+            runtime_env_plan_identity=runtime_env_plan_identity,
+            runtime_env_plan_digest=plan_digest,
+            runtime_env_transport_digest=transport_digest,
+        )
+    )
     return _NestedDistributedOperation(
         outer_identity=outer_identity,
         execution_protocol_version=execution_protocol_version,
         boundary_kind=boundary_kind,
-        operation_id=uuid4().hex,
+        operation_id=operation_id,
         runtime_env_plan_identity=runtime_env_plan_identity,
         runtime_env_plan_digest=plan_digest,
         runtime_env_transport_digest=transport_digest,
+        encoder=encoder,
     )
 
 
@@ -134,39 +196,20 @@ def _nested_distributed_request(
     item_index: int,
 ) -> tuple[str, int, str, int, int, int, str, int, str, str]:
     """Bind one still-opaque callable to an exact distributed leaf identity."""
-    from django_ray.execution_codec import (
-        NestedCallableBindingKind,
-        NestedDistributedBoundaryIdentity,
-        NestedExecutionRequest,
-        encode_nested_execution_request,
-        nested_callable_digest,
-    )
-
-    boundary_identity = NestedDistributedBoundaryIdentity(
-        operation_id=operation.operation_id,
+    serialized = operation.encoder.encode(
         item_index=item_index,
-    )
-    request = NestedExecutionRequest(
-        outer_identity=operation.outer_identity,
-        execution_protocol_version=operation.execution_protocol_version,
-        boundary_kind=operation.boundary_kind,
-        boundary_identity=boundary_identity,
-        callable_binding_kind=NestedCallableBindingKind.DIGEST,
-        callable_binding=nested_callable_digest(pickled_func),
-        runtime_env_plan_identity=operation.runtime_env_plan_identity,
-        runtime_env_plan_digest=operation.runtime_env_plan_digest,
-        runtime_env_transport_digest=operation.runtime_env_transport_digest,
+        callable_binding=operation.callable_cache.get(pickled_func),
     )
     identity = operation.outer_identity
     return (
-        encode_nested_execution_request(request),
+        serialized,
         identity.task_execution_pk,
         identity.task_id,
         identity.attempt_number,
         identity.execution_generation,
         operation.execution_protocol_version,
-        boundary_identity.operation_id,
-        boundary_identity.item_index,
+        operation.operation_id,
+        item_index,
         operation.runtime_env_plan_digest,
         operation.runtime_env_transport_digest,
     )
@@ -412,7 +455,7 @@ def _get_cached_remote(kind: str) -> Any:
 def _collect_remote_results(
     ray: Any,
     remote: Any,
-    calls: list[tuple[Any, ...]],
+    calls: list[tuple[Any, ...]] | _RemoteCalls,
     max_concurrency: int | None,
 ) -> list[Any]:
     """Preserve order and request owned-child cancellation on exceptional exit.
@@ -568,18 +611,14 @@ def parallel_map[T, R](
 
     pickled_func = pickle.dumps(func)
     remote = _get_cached_remote("map").options(num_cpus=num_cpus, num_gpus=num_gpus)
-    if operation is None:
-        calls = [(pickled_func, item, kwargs) for item in materialized_items]
-    else:
-        calls = [
-            (
-                pickled_func,
-                item,
-                kwargs,
-                *_nested_distributed_request(operation, pickled_func, index),
-            )
-            for index, item in enumerate(materialized_items)
-        ]
+
+    def prepare(index: int) -> tuple[Any, ...]:
+        call = (pickled_func, materialized_items[index], kwargs)
+        if operation is None:
+            return call
+        return (*call, *_nested_distributed_request(operation, pickled_func, index))
+
+    calls = _RemoteCalls(len(materialized_items), prepare)
     return _collect_remote_results(ray, remote, calls, max_concurrency)
 
 
@@ -636,17 +675,14 @@ def parallel_starmap[R](
     # Pickle the function once
     pickled_func = pickle.dumps(func)
     remote = _get_cached_remote("starmap").options(num_cpus=num_cpus, num_gpus=num_gpus)
-    if operation is None:
-        calls = [(pickled_func, args) for args in materialized_items]
-    else:
-        calls = [
-            (
-                pickled_func,
-                args,
-                *_nested_distributed_request(operation, pickled_func, index),
-            )
-            for index, args in enumerate(materialized_items)
-        ]
+
+    def prepare(index: int) -> tuple[Any, ...]:
+        call = (pickled_func, materialized_items[index])
+        if operation is None:
+            return call
+        return (*call, *_nested_distributed_request(operation, pickled_func, index))
+
+    calls = _RemoteCalls(len(materialized_items), prepare)
     return _collect_remote_results(ray, remote, calls, max_concurrency)
 
 
@@ -655,6 +691,7 @@ def scatter_gather[R](
     *,
     num_cpus: float = 1.0,
     num_gpus: float = 0.0,
+    max_concurrency: int | None = None,
 ) -> list[R]:
     """Execute multiple different functions in parallel (scatter-gather pattern).
 
@@ -664,6 +701,7 @@ def scatter_gather[R](
         tasks: List of (function, args, kwargs) tuples.
         num_cpus: CPUs per task.
         num_gpus: GPUs per task.
+        max_concurrency: Maximum concurrent tasks (default: all at once).
 
     Returns:
         List of results in the same order as tasks.
@@ -680,6 +718,7 @@ def scatter_gather[R](
         ])
     """
     _validate_resources(num_cpus, num_gpus)
+    _validate_max_concurrency(max_concurrency)
     materialized_tasks = _materialize_items(tasks, "tasks")
     for index, task in enumerate(materialized_tasks):
         if not isinstance(task, tuple) or len(task) != 3:
@@ -705,21 +744,21 @@ def scatter_gather[R](
     import ray
 
     remote = _get_cached_remote("scatter_gather").options(num_cpus=num_cpus, num_gpus=num_gpus)
-    calls: list[tuple[Any, ...]] = []
-    for index, (func, args, kwargs) in enumerate(materialized_tasks):
+
+    def prepare(index: int) -> tuple[Any, ...]:
+        func, args, kwargs = materialized_tasks[index]
         pickled_func = pickle.dumps(func)
         if operation is None:
-            calls.append((pickled_func, args, kwargs))
-        else:
-            calls.append(
-                (
-                    pickled_func,
-                    args,
-                    kwargs,
-                    *_nested_distributed_request(operation, pickled_func, index),
-                )
-            )
-    return _collect_remote_results(ray, remote, calls, None)
+            return pickled_func, args, kwargs
+        return (
+            pickled_func,
+            args,
+            kwargs,
+            *_nested_distributed_request(operation, pickled_func, index),
+        )
+
+    calls = _RemoteCalls(len(materialized_tasks), prepare)
+    return _collect_remote_results(ray, remote, calls, max_concurrency)
 
 
 def get_num_workers() -> int:
