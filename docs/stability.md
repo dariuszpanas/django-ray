@@ -64,6 +64,8 @@ The following behavior is intended to become stable at 1.0:
 
 - the documented `RayTaskBackend` configuration and Django Tasks enqueue/result
   behavior;
+- the [same-default-connection enqueue and receipt contract](tasks.md#transactional-enqueue-and-application-receipts)
+  for `RayTaskBackend`, including outer rollback, savepoints and supported routing;
 - the documented `DJANGO_RAY` settings, queue declarations, and supported worker-mode
   selection;
 - durable task states and the documented retry, cancellation, expiry, ownership, and

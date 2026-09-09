@@ -413,7 +413,9 @@ class TestRayTaskBackend:
         monkeypatch.setattr("django_ray.backends.uuid.uuid4", candidate)
         monkeypatch.setattr(
             "django_ray.backends.register_task_input",
-            lambda _prepared: (_ for _ in ()).throw(IntegrityError("input registry failed")),
+            lambda _prepared, **_kwargs: (_ for _ in ()).throw(
+                IntegrityError("input registry failed")
+            ),
         )
 
         with pytest.raises(IntegrityError, match="input registry failed"):

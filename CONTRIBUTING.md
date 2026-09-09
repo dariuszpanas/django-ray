@@ -128,6 +128,11 @@ post-merge/manual documentation builds, and tag/manual release workflows remain 
 gate. PR-facing equivalents that protect correctness live in the blocking CI workflow; Codecov
 upload is advisory within the otherwise blocking Python 3.12 job.
 
+Path-selected deployed evidence is reviewed under the affected-gate policy. The public
+`Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
+changes. Its passing current-source result is required when the enqueue-only gate row applies,
+in addition to `CI Gate` and `Commit Messages`; it is not a repository-wide required status.
+
 Before every push and again before enabling auto-merge, fetch and inspect the exact history that the
 rebase merge will retain:
 

@@ -35,7 +35,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db import IntegrityError, connection, transaction
+from django.db import DEFAULT_DB_ALIAS, IntegrityError, connection, router, transaction
 from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
@@ -59,7 +59,7 @@ from django_ray.input_storage import (
     register_task_input,
 )
 from django_ray.logging import get_backend_logger
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, TaskInputPayload, TaskState
 from django_ray.redaction import redact_text
 from django_ray.runtime.runtime_env import (
     resolve_runtime_env_profile,
@@ -102,6 +102,23 @@ logger = get_backend_logger()
 _TASK_ID_ALLOCATION_ATTEMPTS = 3
 _TASK_ID_UNIQUE_CONSTRAINT = "ray_task_id_unique"
 _SQLITE_TASK_ID_UNIQUE_ERROR = "UNIQUE constraint failed: django_ray_raytaskexecution.task_id"
+
+
+def _require_default_enqueue_database() -> str:
+    """Validate the supported connection before preparing external task input."""
+    try:
+        supported = all(
+            route(model) == DEFAULT_DB_ALIAS
+            for model in (RayTaskExecution, TaskInputPayload)
+            for route in (router.db_for_read, router.db_for_write)
+        )
+    except Exception:
+        supported = False
+    if not supported:
+        raise ImproperlyConfigured(
+            "django-ray: enqueue requires default database routing for task and input rows"
+        ) from None
+    return DEFAULT_DB_ALIAS
 
 
 # Map our internal TaskState to Django's TaskResultStatus
@@ -242,6 +259,7 @@ class RayTaskBackend(BaseTaskBackend):
             TaskResult object with task status and metadata
         """
         _require_executable_task(task)
+        using = _require_default_enqueue_database()
         # The database is the authority for uniqueness. UUIDv4 keeps collisions
         # vanishingly rare, while the bounded retry below makes a collision a
         # recoverable allocation event instead of an ambiguous durable identity.
@@ -264,15 +282,15 @@ class RayTaskBackend(BaseTaskBackend):
             if self.queue_timeout_seconds is not None
             else None
         )
-        with transaction.atomic():
-            register_task_input(prepared_input)
+        with transaction.atomic(using=using):
+            register_task_input(prepared_input, using=using)
             for allocation_attempt in range(1, _TASK_ID_ALLOCATION_ATTEMPTS + 1):
                 try:
                     # Keep the expected unique violation inside a savepoint so
                     # PostgreSQL leaves the outer input-registration transaction
                     # usable for a replacement candidate.
-                    with transaction.atomic():
-                        execution = RayTaskExecution.objects.create(
+                    with transaction.atomic(using=using):
+                        execution = RayTaskExecution.objects.using(using).create(
                             task_id=task_id,
                             callable_path=callable_path,
                             metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
