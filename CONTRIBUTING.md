@@ -226,8 +226,12 @@ passing checkpoint and the focused delta evidence instead.
 
 Changes that cross the local deployment boundary also follow the
 [local KubeRay final-gate trigger matrix](docs/deployment/local-kuberay-gate.md). Run a required gate
-from a clean checkout after `uv run make ci`, choose `required` or `skip` for the cold-Ray step as the
-matrix specifies, and retain a concise semantic validation summary in the material commit and PR.
+from a clean checkout after the Linux full-suite checkpoint. Select all affected scenarios and
+record their assertions before execution; a reviewed source-owned DRT workload may provide the
+bounded proof. The historical full script is not required for every runtime PR. Reuse relevant
+unchanged platform qualification, while retaining exact-source product evidence. Releases and broad
+deployment changes require the full applicable matrix and the coordinated Beta upgrade rehearsal.
+Choose `required` or `skip` for the cold-Ray step as the matrix specifies, and retain a concise semantic validation summary in the material commit and PR.
 The summary records the exact gate command and result, the explicit cold-Ray decision, the verified
 source-tree match, and the relevant workload-readiness, authenticated API/task-smoke, and preservation
 outcomes. For a recommended gate, record either the same passing summary or a specific reason it was

@@ -68,8 +68,10 @@ criterion for the release candidate being evaluated.
 
 <!-- readiness-criterion: operations.protocol-fencing -->
 - `operations.protocol-fencing`: prove execution-protocol versioning,
-  mixed-worker capability fencing, compatible rolling handoff, and explicit
+  unsupported-worker rejection, current-version manager recovery and explicit
   rollback limits without using package SemVer as a durable protocol switch.
+  Mixed-version rolling handoff requires a separate product decision; it is not
+  an implicit prerequisite for the coordinated Beta upgrade contract.
 
 <!-- readiness-criterion: operations.operator-controls -->
 - `operations.operator-controls`: accept bounded diagnostics, deterministic
@@ -78,9 +80,10 @@ criterion for the release candidate being evaluated.
 
 <!-- readiness-criterion: operations.preserved-data-upgrade -->
 - `operations.preserved-data-upgrade`: retain a repository-owned upgrade
-  rehearsal from a supported 0.4.x release to the final candidate. The record
-  must identify migrations, writer/worker order, compatible queued and running
-  state, rollback boundary, and final durable outcomes.
+  rehearsal from the documented released baseline to the final candidate. The
+  record must identify completed drain, backup/restore, stopped-writer migrations,
+  coordinated component updates, readable historical data, rollback boundary and
+  final durable outcomes. No queued or running work is silently discarded.
 
 <!-- readiness-criterion: operations.soak-certification -->
 - `operations.soak-certification`: accept the versioned bounded soak and
@@ -102,8 +105,9 @@ criterion for the release candidate being evaluated.
 
 <!-- readiness-criterion: adoption.preserved-state-upgrade -->
 - `adoption.preserved-state-upgrade`: record at least one adopter upgrade that
-  retained compatible queued state. Do not count an upgrade that emptied or
-  discarded the backlog.
+  preserves historical tasks, results and referenced artifacts through the
+  documented coordinated upgrade. A completed drain is valid evidence; silently
+  deleting a backlog or unresolved execution is not.
 
 <!-- readiness-criterion: adoption.documentation-review -->
 - `adoption.documentation-review`: retain one installation and operation review

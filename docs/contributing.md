@@ -282,8 +282,12 @@ the baseline and therefore belongs in a separate follow-up. The recurring report
 For changes that affect dashboard/static assets, images or RuntimeEnv packaging, Ray Client or
 bootstrap behavior, Kubernetes resources, probes, workers, monitoring, or a cross-component task
 lifecycle, consult the [local KubeRay final-gate trigger matrix](deployment/local-kuberay-gate.md).
-Run required rows from a clean checkout after `uv run make ci`, make the cold-Ray decision explicit,
-and record a concise semantic validation summary in the material commit and PR. Include the exact
+Run the affected required scenarios from a clean checkout after the Linux full-suite checkpoint.
+Record the scenario/assertion mapping before execution. A reviewed source-owned DRT workload may
+supply bounded exact-source proof; every runtime PR does not require the historical full script.
+Reuse relevant unchanged platform qualification, not product evidence from another source tree.
+Releases and broad deployment changes require the full applicable matrix and the coordinated Beta
+upgrade rehearsal. Make the cold-Ray decision explicit, and record a concise semantic validation summary in the material commit and PR. Include the exact
 gate command and result, explicit cold-Ray decision, verified source-tree match, and relevant
 workload-readiness, authenticated API/task-smoke, and preservation outcomes. For a recommended row,
 retain either the same passing summary or a specific reason it was not run. The complete secret-free

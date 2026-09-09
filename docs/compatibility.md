@@ -4,6 +4,14 @@ This page defines the tested dependency and platform matrix. The separate
 [Stability and Deprecation Policy](stability.md) defines the proposed 1.0 public
 contract, experimental boundary, and removal process while django-ray remains Beta.
 
+Beta upgrades follow the [coordinated upgrade procedure](stability.md#coordinated-beta-upgrades):
+stop submissions, drain work, back up, stop old writers, migrate and update all components
+together. Historical data preservation and current-version failure recovery remain required;
+mixed-version managers and old-payload execution are not the Beta upgrade commitment.
+The dormant target and historical migration details below do not add a rolling-upgrade
+requirement. Transitional execution readers are retired at the announced release boundary,
+with preserved-data evidence, rather than removed by this documentation change.
+
 ## Module Path Compatibility
 
 `django_ray.workflows` remains the public defining module for workflow builders. Private

@@ -1,12 +1,59 @@
-# Local KubeRay final gate
+# Deployed validation and the local KubeRay gate
 
-The local KubeRay final gate complements, but never replaces, `uv run make ci` and the required
+## Select evidence for the changed behavior
+
+Every PR retains current-head hosted Linux `CI Gate` and `Commit Messages`. On a
+non-Linux workstation, use that hosted Linux checkpoint instead of local full CI;
+Windows remains hosted-only and advisory. Deployment-independent policy/docs/test
+changes do not need a cluster run.
+
+For a runtime PR, the required deployed gate is the union of the affected scenarios
+in the trigger matrix below, not every scenario in the historical full script. A
+source-owned, bounded DRT workload may supply that proof. Before execution, record
+the changed boundary, required assertions, exact source/image, command or committed
+workload definition, capacity/timeout, cold-Ray decision and required receipts in
+the PR. Review the mapping against the diff; a generic smoke test does not cover
+unrelated recovery, storage or transaction assertions. If no suitable workload
+exists, implement the missing bounded scenario or explicitly admit the full gate.
+Do not turn missing evidence into a passing or not-applicable result.
+
+The PR may merge only after each selected assertion and its owned cleanup pass,
+required receipts are retained, and current required hosted checks are green.
+Preserve the original failure evidence. A message-only commit amendment can reuse
+proof only when the source tree is unchanged; relevant executable/image changes
+require new affected proof. Record the scenario mapping and semantic results in
+the retained commit and PR using the evidence rules below.
+
+Release candidates and changes spanning the deployment stack require the full
+applicable application matrix and supported preserved-data upgrade rehearsal.
+Remaining Beta releases use [coordinated upgrades](../stability.md#coordinated-beta-upgrades).
+Released/current mixed-version execution, old-payload acceptance and two-cluster
+handoff are outside that commitment. Current-version manager replacement, protocol
+rejection, durable history and no-unjustified-replay checks remain required where
+affected. Testing a retained transitional reader does not renew its support promise.
+
+DRT executor/storage/receipt/deadline/cancellation/cleanup/network qualification is
+platform evidence. Reuse it across application PRs while the relevant platform
+source, images, configuration and capability assumptions remain unchanged. Repeat
+affected qualification when they change or a failure contradicts it. An application
+revision still needs its own affected product assertions. The complete DRT/cloud
+roadmap is not a merge prerequisite; the capabilities the workload actually uses
+must be proved.
+
+## Retained full-script runbook
+
+The full local KubeRay script complements, but never replaces, the Linux full-suite checkpoint and the required
 GitHub Actions matrix. It exercises the Docker Desktop or Kind deployment boundary that unit and
 disposable CI clusters cannot reproduce: locally built images, Kustomize, the setup Job, the shared
 RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP APIs, kubelet
 probes, encrypted durable RuntimeEnv storage, full and terminal-only schema-v3 workflow progress,
 multi-attempt recovery, the released-to-current execution-protocol handoff, authenticated admin
 presentation, and live Prometheus discovery.
+
+The retained script still executes its historical released-to-current handoff when
+run in full; its implementation is unchanged. The instructions below describe that
+explicit full run. They do not make every historical scenario a per-PR requirement
+or claim that a partial DRT workload completed the full script.
 
 This is a maintainer integration-validation gate for the checked-in local profile. A passing run
 is not deployment certification, a threat-model review, or evidence that the sample manifests form
@@ -33,9 +80,9 @@ Named-pipe Docker endpoints must use the local `//./pipe/` authority.
 
 ## Trigger matrix
 
-Use a narrow dormant-target exception only when all of its conditions apply. Otherwise use the
-strongest row that applies to a change. When uncertain about a cross-component boundary, run the
-gate and choose the cold Ray restart.
+Use a narrow dormant-target exception only when all of its conditions apply. Otherwise select
+every affected row and its assertions. Resolve cross-component uncertainty by adding the affected
+scenario and a cold Ray restart, or by explicitly admitting a bounded full run.
 
 | Change class | Gate | `K8S_RAY_RESTART` | Why |
 |---|---|---|---|
@@ -50,7 +97,7 @@ gate and choose the cold Ray restart.
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior other than the narrow dormant-attestation exception above | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
 | Ray Job request encoding, request-reference storage, Jobs API metadata, entrypoint transport, manager reconciliation, or pre-Django request loading | Required | `required` | Proves rq2 uses only a bounded request-reference carrier, survives a manager replacement without resubmission, and rejects a missing request before application effects or retry. |
-| Execution-protocol schema, worker capability leases, protocol filtering, rolling task-manager handoff, unsupported-protocol visibility/rejection, or the package-private protocol-`2` Ray Core target-execution transport and provenance boundary | Required | `required` | Proves a real released 0.4 schema-`0` manager can hand one protocol-`1` Ray Job to the exact current schema-`1`, `1..1` cohort without resubmission while a separate compatible queued row survives and later completes once. A synthetic queued protocol-`2` fixture must remain unclaimed and visible, and its production-default strict Ray Core request must reject before application invocation. The same cold cluster must separately prove that explicit package-private protocol-`2` support completes with exact target evidence and returns an authenticated `compatibility_rejection` with complete observed evidence and no application invocation for a target mismatch. The gate never advertises a live `1..2` capability, creates a production protocol-`2` writer, or activates protocol `2`. |
+| Execution-protocol schema, worker capability leases, protocol filtering, current-version task-manager handoff, unsupported-protocol visibility/rejection, or the package-private protocol-`2` Ray Core target-execution transport and provenance boundary | Required | `required` | Proves exact current-version ownership and same-job recovery without resubmission, and preserves visible unsupported work without application invocation. When protocol-`2` transport is affected, prove exact-target completion and authenticated mismatch rejection with no application invocation; do not advertise or activate unsupported production protocols. The Beta upgrade contract does not require a released 0.4 manager cohort. |
 | Ray Client submission, reconnect, cancellation, retry, task context, result persistence, or cross-component task lifecycle | Required | `required` | Exercises a fresh Ray session plus fresh task managers and a durable result. |
 | Workflow execution, progress capture/publication, schema-v3 bounded readers, failure diagnostics, retry identity, or the admin graph fed by workflow progress | Required | `required` | Proves a cold Ray generation can execute the same tiny nested workflow with default-full and explicit terminal-only reporting in both success and deterministic first-attempt failure modes, then preserve one recovery showcase across early-failed, mid-failed, and successful attempts. Full reporting must expose complete bounded detail; terminal-only must expose exactly one summary and no detail storage or actions. New and archived protected fields must retain the original external diagnostic evidence, every ordinary Admin/API projection must be terminal-inert and pattern-redacted, and Admin must present escaped tracebacks with preserved line separation and safe wrapping. |
 | KubeRay `RayCluster`, Ray services, Ray pod volumes/environment, or Ray metrics configuration | Required | `required` | The tested Ray pods must be cold replacements of the prior pods. |

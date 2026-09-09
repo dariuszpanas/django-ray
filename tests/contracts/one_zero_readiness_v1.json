@@ -51,7 +51,7 @@
       "owner": "external",
       "status": "pending",
       "evidence": [],
-      "disposition": "Record one adopter upgrade that retains compatible queued state rather than discarding the backlog."
+      "disposition": "Record one coordinated adopter upgrade with completed drain and preserved historical tasks, results and referenced artifacts; never silently discard queued or unresolved work."
     },
     {
       "id": "operations.operator-controls",
@@ -79,7 +79,7 @@
           "value": "https://github.com/dariuszpanas/django-ray/issues/361"
         }
       ],
-      "disposition": "Retain a repository-owned 0.4.x to release-candidate rehearsal with database and queued-state evidence."
+      "disposition": "Retain a repository-owned released-baseline to candidate rehearsal with drain, backup/restore, stopped-writer migrations, coordinated updates, historical readability and rollback evidence."
     },
     {
       "id": "operations.protocol-fencing",
@@ -93,7 +93,7 @@
           "value": "https://github.com/dariuszpanas/django-ray/issues/361"
         }
       ],
-      "disposition": "Issue 361 owns execution-protocol versioning, mixed-worker fencing, rolling handoff, and rollback boundaries."
+      "disposition": "Issue 361 owns execution-protocol versioning, unsupported-worker rejection, current-version manager recovery and rollback boundaries; mixed-version rolling handoff requires a separate product decision."
     },
     {
       "id": "operations.soak-certification",

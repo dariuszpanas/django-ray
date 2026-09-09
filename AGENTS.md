@@ -85,8 +85,12 @@ the commit and PR. Do not add nested `uv run` wrappers inside `make ci` because 
 inherit the outer environment.
 
 Before handing off deployed-behavior changes, consult the trigger matrix in
-`docs/deployment/local-kuberay-gate.md`. A required row must pass the guarded local KubeRay gate from
-a clean checkout after `uv run make ci`. Record a concise semantic validation summary in every
+`docs/deployment/local-kuberay-gate.md`. Required affected scenarios must pass from a clean checkout
+after the Linux full-suite checkpoint. A reviewed, bounded source-owned DRT workload may provide
+those results; the historical full script is not required for every runtime PR. Record the selected
+assertions and missing evidence explicitly. Reuse relevant unchanged platform qualification, not
+product proof from a different source tree. Releases and broad deployment changes need the full
+applicable matrix and the documented coordinated Beta upgrade rehearsal. Record a concise semantic validation summary in every
 applicable retained commit and PR: the exact gate command and result, the explicit cold-Ray decision,
 the verified source-tree match, and the relevant workload, API/task-smoke, and preservation outcomes.
 A recommended row needs either the same passing summary or a specific reason it was not run. Keep the
