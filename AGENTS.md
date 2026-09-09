@@ -63,14 +63,22 @@ message file. Do not assemble prose with repeated `-m` flags, and do not bypass 
 
 Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
 schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
-hosted CI matrix. A PR changing executable package or runtime behavior must pass `uv run make ci`
-once before final review or auto-merge. It is also required for release candidates, break-glass
+hosted CI matrix. A PR changing executable package or runtime behavior needs a full Linux validation
+checkpoint once before final review or auto-merge. It is also required for release candidates, break-glass
 merges, dependency, packaging, build, or CI-composition changes, and before a required local KubeRay
 gate. Later changes limited to PR or commit metadata, documentation, or tests do not invalidate that
 result; focused delta checks and green final-head hosted CI suffice. Package, dependency, and
 deployment metadata or manifests are not exempt, and a runtime-affecting review repair re-evaluates
 the triggers. A PR containing only exempt deltas does not require a local full gate. Current-head
 `CI Gate` is the final broad merge proof.
+
+Linux is the supported execution target. Never run full CI, broad test suites, or native Ray
+validation on a non-Linux workstation. Windows compatibility is hosted-only and advisory; use the
+small GitHub Actions Windows lane. Focused resource-free checks and host-side tools remain usable
+locally. Run `uv run make ci` only in an explicitly bounded Linux environment. If none is available,
+record that reason and use passing exact-head hosted Linux `CI Gate` as the full-suite checkpoint.
+This does not waive a required deployed-behavior KubeRay gate. Do not start, resize, or repurpose
+shared Docker/Kubernetes infrastructure to satisfy a checkpoint without resource admission.
 
 Record the focused commands, the checkpoint decision, and any carried-forward full-gate evidence in
 the commit and PR. Do not add nested `uv run` wrappers inside `make ci` because real-Ray workers

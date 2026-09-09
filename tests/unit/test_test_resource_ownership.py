@@ -318,6 +318,7 @@ def test_real_ray_ownership_uses_final_items_and_releases_once(
     tmp_path: Path,
     first_release_hook: str,
 ) -> None:
+    monkeypatch.setattr(conftest, "require_linux", lambda: None)
     acquired: list[dict[str, object]] = []
     release_calls: list[bool] = []
 
@@ -360,6 +361,8 @@ def test_real_ray_ownership_contention_becomes_bounded_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(conftest, "require_linux", lambda: None)
+
     class _ContendedOwnership:
         def acquire(self, owner: dict[str, object]) -> None:
             del owner
@@ -390,6 +393,8 @@ def test_unsafe_real_ray_ownership_path_becomes_bounded_usage_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(conftest, "require_linux", lambda: None)
+
     class _UnsafePathOwnership:
         def acquire(self, owner: dict[str, object]) -> None:
             del owner
@@ -413,6 +418,28 @@ def test_compiled_graph_opt_in_requires_real_ray_marker() -> None:
 
     with pytest.raises(pytest.UsageError, match="not marked 'real_ray'"):
         conftest.pytest_collection_modifyitems([item])  # type: ignore[list-item]
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_real_ray_selection_rejects_non_linux_before_acquiring_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    from scripts.require_linux import require_linux
+
+    monkeypatch.setattr(conftest, "require_linux", lambda: require_linux(platform))
+
+    def unexpected_ownership() -> None:
+        raise AssertionError("must reject before acquiring resource ownership")
+
+    monkeypatch.setattr(conftest, "RealRayOwnershipLock", unexpected_ownership)
+    session = _Session(
+        config=_Config(rootpath=tmp_path),
+        items=[_CollectedItem(markers={"real_ray"})],
+    )
+    with pytest.raises(pytest.UsageError, match="requires Linux"):
+        conftest.pytest_collection_finish(session)  # type: ignore[arg-type]
 
 
 def test_compiled_graph_opt_in_accepts_real_ray_marker() -> None:

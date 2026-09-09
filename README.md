@@ -269,11 +269,11 @@ uv run make worker-all       # All django-ray backend queues, local Ray
 uv run make worker-cluster   # Connect to cluster
 ```
 
-Linux is the production target. Ray's native Windows support is beta, so prefer WSL2 or
-the documented Docker path for repeatable development and keep one native local-Ray
-owner on a Windows host at a time. See the
+Linux is the supported execution target. Use an explicitly bounded Linux environment
+for execution and full-suite validation. Windows compatibility is best effort through
+advisory GitHub Actions checks; do not run native Ray validation on a Windows workstation. See the
 [platform compatibility boundary](https://django-ray.readthedocs.io/en/latest/compatibility/#platforms)
-before choosing native local mode.
+for host-side development options.
 
 ### Quick Start (End-to-End Testing)
 

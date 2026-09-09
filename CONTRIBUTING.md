@@ -191,13 +191,25 @@ scope.
 
 ## Validation before a pull request
 
+Linux is the supported execution target. Do not run full CI, broad test suites, or native Ray
+validation on a non-Linux workstation. Windows compatibility is hosted-only and advisory: the
+time-bounded GitHub Actions Windows lane checks package imports, distribution builds, and runtime
+dependency advisories without starting Ray. It is outside `CI Gate` and release certification;
+Linux dependency audits remain blocking. Focused resource-free checks and host-side tools remain
+available locally.
+
+Run `uv run make ci` only in an explicitly bounded Linux environment. If none is available, record
+that reason and use passing exact-head hosted Linux `CI Gate` as the full-suite checkpoint. This
+does not waive a required deployed-behavior KubeRay gate. Do not automatically start or repurpose
+shared Docker/Kubernetes infrastructure to satisfy a checkpoint.
+
 Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
 schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
 hosted CI matrix. Record the commands and results in the retained commit and PR instead of treating
 one broad command as the only valid evidence.
 
-A PR changing executable package or runtime behavior must pass `uv run make ci` once before final
-review or auto-merge. It is also required for release candidates, break-glass merges, dependency,
+A PR changing executable package or runtime behavior needs a full Linux validation checkpoint once
+before final review or auto-merge. It is also required for release candidates, break-glass merges, dependency,
 packaging, build, or CI-composition changes, and before a required local KubeRay gate. Later changes
 limited to PR or commit metadata, documentation, or tests do not invalidate that result; focused
 delta checks and green final-head hosted CI suffice. Package, dependency, and deployment metadata or
@@ -233,7 +245,7 @@ For faster iteration on documentation changes, run the strict documentation buil
 make docs-build-strict
 ```
 
-The local gate includes `real_ray` tests, which start an isolated local Ray runtime and do not require
+The Linux full gate includes `real_ray` tests, which start an isolated local Ray runtime and do not require
 the configured Kubernetes cluster. `live_cluster` tests are opt-in; follow `docs/contributing.md` when
 a change needs them. Record exact commands and results in each retained material commit and the PR;
 when a relevant check was not run, record a specific reason rather than a bare `not run` or `N/A`.

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[2]
 MAKEFILE = ROOT / "Makefile"
 
 
 def _target_body(makefile: str, target: str) -> str:
-    body = makefile.split(f"{target}:\n", maxsplit=1)[1]
+    body = re.split(rf"^{re.escape(target)}:\n", makefile, maxsplit=1, flags=re.MULTILINE)[1]
     return body.split("\n# ", maxsplit=1)[0]
 
 
@@ -21,6 +24,7 @@ def test_xdist_target_parallelizes_only_ordinary_local_tests() -> None:
     assert "TEST_XDIST_WORKERS ?= 4" in makefile
     assert "test-xdist" in phony_targets
     assert target.strip("\n").splitlines() == [
+        "\tpython scripts/require_linux.py",
         "\tpytest -n $(TEST_XDIST_WORKERS) --max-worker-restart=0 \\",
         '\t\t-m "not real_ray and not live_cluster and not postgresql"',
     ]
@@ -46,3 +50,22 @@ def test_postgres_target_includes_target_execution_evidence_migration() -> None:
         migration_test
     )
     assert "-m postgresql" in target
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "ci",
+        "test",
+        "test-cov",
+        "test-unit",
+        "test-integration",
+        "test-xdist",
+        "test-postgres",
+        "test-testproject",
+        "coverage-debt",
+    ],
+)
+def test_heavy_targets_reject_non_linux_before_launching_work(target: str) -> None:
+    body = _target_body(MAKEFILE.read_text(encoding="utf-8"), target)
+    assert body.strip().splitlines()[0] == "python scripts/require_linux.py"

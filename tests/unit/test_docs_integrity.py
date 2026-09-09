@@ -27,8 +27,9 @@ FOCUSED_PUSH_POLICY = (
     "broad exact-head hosted CI matrix."
 )
 FULL_GATE_CHECKPOINT_POLICY = (
-    "A PR changing executable package or runtime behavior must pass `uv run make ci` once before "
-    "final review or auto-merge. It is also required for release candidates, break-glass merges, "
+    "A PR changing executable package or runtime behavior needs a full Linux validation "
+    "checkpoint once before final review or auto-merge. It is also required for release "
+    "candidates, break-glass merges, "
     "dependency, packaging, build, or CI-composition changes, and before a required local KubeRay "
     "gate."
 )
@@ -83,7 +84,7 @@ def test_current_support_docs_share_the_django_security_floor() -> None:
         assert "Django 6.0 or" not in content
 
 
-def test_contributor_guides_use_checkpoint_based_local_validation() -> None:
+def test_contributor_guides_use_checkpoint_based_linux_validation() -> None:
     contributor_guides = (
         ROOT / "AGENTS.md",
         ROOT / "CONTRIBUTING.md",
@@ -97,6 +98,10 @@ def test_contributor_guides_use_checkpoint_based_local_validation() -> None:
         assert FULL_GATE_CARRY_FORWARD_POLICY in content
         assert "A PR containing only exempt deltas does not require a local full gate" in content
         assert "Current-head `CI Gate` is the final broad merge proof" in content
+        assert "Windows compatibility is hosted-only and advisory" in content
+        assert "Run `uv run make ci` only in an explicitly bounded Linux environment" in content
+        assert "passing exact-head hosted Linux `CI Gate` as the full-suite checkpoint" in content
+        assert "does not waive a required deployed-behavior KubeRay gate" in content
 
     assert "Run the full local gate as `uv run make ci`" not in (ROOT / "AGENTS.md").read_text(
         encoding="utf-8"

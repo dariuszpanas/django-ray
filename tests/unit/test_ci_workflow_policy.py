@@ -25,7 +25,9 @@ REQUIRED_CHECK_JOBS = {
     ("commit-messages.yml", "conventional-commits"): "Commit Messages",
 }
 REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate"}
-EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {}
+EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
+    ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
+}
 
 
 def _workflow_paths() -> list[Path]:
@@ -405,7 +407,6 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
                 {"os": "ubuntu-latest", "python-version": "3.12"},
                 {"os": "ubuntu-latest", "python-version": "3.13"},
                 {"os": "ubuntu-latest", "python-version": "3.14"},
-                {"os": "windows-latest", "python-version": "3.12"},
             ]
         },
     }
@@ -424,6 +425,26 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     )
     assert "dependency-audit" in _needs(_jobs()["build"])
     assert "dependency-audit" in _needs(_gate_job())
+
+
+def test_windows_compatibility_is_small_hosted_and_advisory() -> None:
+    path = WORKFLOWS / "windows-smoke.yml"
+    job = _jobs(path)["windows-smoke"]
+    assert job["runs-on"] == "windows-latest"
+    assert job["timeout-minutes"] == "10"
+    assert "strategy" not in job
+    assert _workflow(path)["permissions"] == {"contents": "read"}
+    commands = "\n".join(str(step.get("run", "")) for step in job["steps"])
+    assert "uv sync --frozen --python 3.12" in commands
+    assert "from django_ray.backends import RayTaskBackend" in commands
+    assert "DJANGO_RAY={'RAY_ADDRESS': 'local'}" in commands
+    assert "assert not ray.is_initialized()" in commands
+    assert "uv build" in commands
+    assert "scripts/audit_runtime_dependencies.py" in commands
+    for forbidden in ("ray.init(", "pytest", "make ci", "docker", "kubectl"):
+        assert forbidden not in commands
+    assert "windows-smoke" not in _needs(_gate_job())
+    assert "windows-smoke" not in _needs(_jobs(RELEASE_WORKFLOW)["build"])
 
 
 @pytest.mark.parametrize(
@@ -467,7 +488,6 @@ def test_release_dependency_audit_rechecks_every_supported_environment() -> None
                 {"os": "ubuntu-latest", "python-version": "3.12"},
                 {"os": "ubuntu-latest", "python-version": "3.13"},
                 {"os": "ubuntu-latest", "python-version": "3.14"},
-                {"os": "windows-latest", "python-version": "3.12"},
             ]
         },
     }

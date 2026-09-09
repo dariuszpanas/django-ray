@@ -143,6 +143,10 @@ uv run make check
 
 ### Running Tests
 
+The following broad test commands require an explicitly bounded Linux environment. On other
+developer hosts, use focused resource-free selections such as
+`uv run pytest tests/unit/test_makefile_test_targets.py` and hosted Linux CI.
+
 ```bash
 # All tests
 make test
@@ -169,7 +173,17 @@ uv run make test-cov
 - `src/django_ray/management/commands/django_ray_worker.py`: `>= 90%`
 - `src/django_ray/runner/ray_job.py`: `>= 90%`
 
-`uv run make ci` runs the required format, lint, type, runtime-dependency advisory,
+The broad Make test targets, `coverage-debt`, and `ci` reject non-Linux platforms before launching
+work. Direct pytest execution also rejects any final selection containing `real_ray` on non-Linux
+hosts before acquiring resource ownership or running fixtures. Collection-only inventory remains
+available. Do not run broad native Windows suites.
+
+Windows compatibility is hosted-only and advisory: the separate GitHub Actions Windows lane runs
+Python 3.12 package imports, distribution builds, and dependency advisories under a ten-minute limit.
+It starts no Ray runtime and does not block `CI Gate` or release certification. Linux is the supported
+execution target; Windows/macOS remain useful hosts for editing and explicitly admitted Linux workloads.
+
+On Linux, `uv run make ci` runs the required format, lint, type, runtime-dependency advisory,
 coverage, strict-documentation, and package-build checks for the current interpreter.
 GitHub Actions additionally repeats tests across supported Python versions and
 minimum/latest dependency resolutions. Run the advisory check alone with
@@ -178,10 +192,9 @@ runtime graph without development tools, then queries current PyPI advisory data
 command requires network access and its result can change when a new advisory is
 published. The check fails when its lock export is stale, incomplete, unpinned, or
 contaminated by the project or audit tool, and an advisory-service failure does not pass
-silently. Blocking CI repeats it under every supported Python version on Linux and on
-Python 3.12 for the documented Windows development boundary so platform markers are not
-covered only by a contributor's workstation. The release workflow repeats that same
-matrix before package building. Each scan also cross-checks its hashed requirements
+silently. Blocking CI and release workflows repeat it under every supported Python version on Linux.
+The advisory Windows workflow separately checks that platform's dependency graph.
+Each scan also cross-checks its hashed requirements
 against a second locked CycloneDX export so an omitted transitive cannot silently escape
 the advisory input.
 
@@ -521,8 +534,8 @@ Before ordinary pushes, run `uv run make check` plus the narrowest affected test
 schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
 hosted CI matrix. Record the commands and results in the retained commit and PR.
 
-A PR changing executable package or runtime behavior must pass `uv run make ci` once before final
-review or auto-merge. It is also required for release candidates, break-glass merges, dependency,
+A PR changing executable package or runtime behavior needs a full Linux validation checkpoint once
+before final review or auto-merge. It is also required for release candidates, break-glass merges, dependency,
 packaging, build, or CI-composition changes, and before a required local KubeRay gate. Later changes
 limited to PR or commit metadata, documentation, or tests do not invalidate that result; focused
 delta checks and green final-head hosted CI suffice. Package, dependency, and deployment metadata or
@@ -530,6 +543,12 @@ manifests are not exempt, and a runtime-affecting review repair re-evaluates the
 containing only exempt deltas does not require a local full gate. Current-head `CI Gate` is the final
 broad merge proof. Do not rerun the local full gate merely because an exempt focused follow-up changed
 the commit hash: retain the checkpoint result and add exact delta evidence.
+
+Run `uv run make ci` only in an explicitly bounded Linux environment. If none is available, record
+that reason and use passing exact-head hosted Linux `CI Gate` as the full-suite checkpoint. This
+does not waive a required deployed-behavior KubeRay gate. Never start, resize, or repurpose shared
+Docker/Kubernetes infrastructure automatically. Specialized external workloads must be admitted by
+their resource owner; ordinary hosted CI remains available independently of django-ray-testing.
 
 The `Commit Messages` workflow runs on `pull_request_target`, validates ordinary PR titles and commit
 messages, and reports a required status check without needing secrets from the PR. Its Dependabot
@@ -604,7 +623,8 @@ test: add unit tests for retry logic
 ### PR Checklist
 
 - [ ] Focused affected tests and applicable static/schema/docs/package checks pass
-- [ ] Full local-gate checkpoint decision is recorded; `uv run make ci` passed when triggered
+- [ ] Full Linux checkpoint is recorded: bounded Linux `uv run make ci`, or exact-head hosted
+      `CI Gate` with the reason no admitted bounded Linux environment was available
 - [ ] Exact-head hosted `CI Gate` passes before merge
 - [ ] Packaging builds when packaging or release metadata changed (`uv build`)
 - [ ] Documentation updated (if needed)
@@ -672,7 +692,7 @@ uv run python scripts/test_suite_inventory.py run \
   -- -v
 ```
 
-Any non-collection pytest session whose final selected items include `real_ray` acquires
+On Linux, any non-collection pytest session whose final selected items include `real_ray` acquires
 one OS-released host-wide django-ray test lock before executing tests. The lock spans
 processes and linked worktrees, so two agents cannot accidentally start independent local
 Ray test owners on the same machine. A contender fails before test execution with bounded
@@ -681,10 +701,9 @@ file may remain after a process exits, but the operating-system lock is released
 automatically and stale contents never establish ownership. Collect-only inventory and
 sessions with no selected `real_ray` case remain lock-free.
 
-This guard protects the validity of local evidence; it is not a workaround for Ray's
-native Windows lifecycle issue and does not prove that an upstream version fixed it. Run
-real-Ray commands serially, then interpret the supported Linux and KubeRay gates separately
-from the documented [native Windows boundary](compatibility.md#platforms).
+This lock establishes exclusive ownership, not a CPU or memory budget. Run real-Ray commands
+serially inside an explicitly bounded Linux environment. Non-Linux real-Ray execution is rejected;
+historical Windows investigation remains in the [platform boundary](compatibility.md#platforms).
 
 Tests that request `ray_cluster` or `live_ray_cluster` are checked during collection for the
 matching marker. Add a new external-resource fixture to `EXTERNAL_RESOURCE_FIXTURE_MARKERS` in

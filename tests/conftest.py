@@ -11,6 +11,7 @@ import django
 import pytest
 from django.conf import settings
 
+from scripts.require_linux import require_linux
 from tests.real_ray_ownership import (
     RealRayOwnershipLock,
     RealRayOwnershipPathError,
@@ -70,6 +71,11 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     selected_count = sum(item.get_closest_marker("real_ray") is not None for item in session.items)
     if selected_count == 0:
         return
+
+    try:
+        require_linux()
+    except SystemExit as error:
+        raise pytest.UsageError(str(error)) from error
 
     ownership = RealRayOwnershipLock()
     owner = build_owner_metadata(
