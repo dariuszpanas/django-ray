@@ -22,10 +22,11 @@ Example:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import uuid4
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 R = TypeVar("R")
+
+logger = logging.getLogger(__name__)
 
 # Track if Django has been bootstrapped in this process
 _django_bootstrapped = False
@@ -412,28 +415,53 @@ def _collect_remote_results(
     calls: list[tuple[Any, ...]],
     max_concurrency: int | None,
 ) -> list[Any]:
-    """Submit calls with an optional sliding window and preserve input order."""
-    if max_concurrency is None or max_concurrency >= len(calls):
-        return list(ray.get([remote.remote(*call) for call in calls]))
+    """Preserve order and request owned-child cancellation on exceptional exit.
 
-    results: list[Any] = [None] * len(calls)
+    Cleanup makes one non-force, recursive cancellation request per outstanding
+    ref, without draining results or replaying work. It does not prove quiescence
+    or impose a timeout on Ray's own cancellation RPC.
+    """
     pending: list[tuple[int, Any]] = []
-    next_index = 0
-    for index in range(min(max_concurrency, len(calls))):
-        pending.append((index, remote.remote(*calls[index])))
-        next_index = index + 1
+    try:
+        if max_concurrency is None or max_concurrency >= len(calls):
+            for index, call in enumerate(calls):
+                pending.append((index, remote.remote(*call)))
+            return list(ray.get([ref for _, ref in pending]))
 
-    while pending:
-        ready, _ = ray.wait([ref for _, ref in pending], num_returns=1)
-        ready_ref = ready[0]
-        ready_index = next(index for index, ref in pending if ref == ready_ref)
-        pending = [(index, ref) for index, ref in pending if index != ready_index]
-        results[ready_index] = ray.get(ready_ref)
-        if next_index < len(calls):
-            pending.append((next_index, remote.remote(*calls[next_index])))
-            next_index += 1
+        results: list[Any] = [None] * len(calls)
+        next_index = 0
+        for index in range(min(max_concurrency, len(calls))):
+            pending.append((index, remote.remote(*calls[index])))
+            next_index = index + 1
 
-    return results
+        while pending:
+            ready, _ = ray.wait([ref for _, ref in pending], num_returns=1)
+            ready_ref = ready[0]
+            ready_index = next(index for index, ref in pending if ref == ready_ref)
+            # Retain ownership until get succeeds, including caller interruption.
+            results[ready_index] = ray.get(ready_ref)
+            pending = [(index, ref) for index, ref in pending if index != ready_index]
+            if next_index < len(calls):
+                pending.append((next_index, remote.remote(*calls[next_index])))
+                next_index += 1
+
+        return results
+    except BaseException:
+        failed_cancellations = 0
+        for _, ref in pending:
+            try:
+                ray.cancel(ref, force=False, recursive=True)
+            except BaseException:
+                # A second interruption or disconnected Ray must not mask the
+                # original error or prevent attempts for the remaining siblings.
+                failed_cancellations += 1
+        if failed_cancellations:
+            with suppress(BaseException):
+                logger.warning(
+                    "Could not request cancellation for %d distributed children",
+                    failed_cancellations,
+                )
+        raise
 
 
 def _bootstrap_django_if_needed() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import time
 from typing import Any
 
 import pytest
@@ -27,6 +28,43 @@ from tests.local_ray import init_local_ray
 def _square(x: int) -> int:
     """Square a number - used in Ray parallel_map test."""
     return x * x
+
+
+class _FanoutLifecycleProbe:
+    """Observe application effects independently of collector cancellation calls."""
+
+    def __init__(self) -> None:
+        self.state = dict.fromkeys(("started", "released", "completed", "stopped"), False)
+
+    def mark(self, name: str) -> None:
+        self.state[name] = True
+
+    def snapshot(self) -> dict[str, bool]:
+        return self.state.copy()
+
+
+def _fanout_lifecycle_item(item: tuple[Any, str]) -> str:
+    import ray
+
+    probe, kind = item
+    deadline = time.monotonic() + 20
+    if kind == "fail":
+        while time.monotonic() < deadline:
+            if ray.get(probe.snapshot.remote(), timeout=5)["started"]:
+                raise ValueError("fanout primary failure")
+            time.sleep(0.02)
+        raise TimeoutError("sibling did not start")
+
+    try:
+        ray.get(probe.mark.remote("started"), timeout=5)
+        while time.monotonic() < deadline:
+            if ray.get(probe.snapshot.remote(), timeout=5)["released"]:
+                ray.get(probe.mark.remote("completed"), timeout=5)
+                return "completed"
+            time.sleep(0.02)
+        raise TimeoutError("sibling was neither released nor cancelled")
+    finally:
+        ray.get(probe.mark.remote("stopped"), timeout=5)
 
 
 def _strict_context_snapshot(value: int) -> dict[str, Any]:
@@ -259,6 +297,91 @@ class TestDistributedWithRay:
                 offset * offset,
                 (offset + 1) * (offset + 1),
             ]
+
+    def test_failed_fanout_stops_sibling_and_preserves_primary_error(self, monkeypatch) -> None:
+        """Compare a no-cancellation control with actual Ray cleanup, on one runtime."""
+        import ray
+        from ray.exceptions import GetTimeoutError, RayTaskError, TaskCancelledError
+
+        get_remote = distributed._get_cached_remote
+        cancel = ray.cancel
+        probe_type = ray.remote(num_cpus=0)(_FanoutLifecycleProbe)
+
+        class CaptureRemote:
+            def __init__(self, wrapped: Any, submitted: list[Any]) -> None:
+                self.wrapped = wrapped
+                self.submitted = submitted
+
+            def options(self, **kwargs: Any):
+                return self
+
+            def remote(self, *args: Any):
+                ref = self.wrapped.remote(*args)
+                self.submitted.append(ref)
+                return ref
+
+        for helper in ("map", "scatter_gather"):
+            for cancel_enabled in (False, True):
+                probe = probe_type.remote()
+                submitted: list[Any] = []
+                remote = get_remote(helper).options(num_cpus=1, num_gpus=0)
+                captured = CaptureRemote(remote, submitted)
+
+                try:
+                    with monkeypatch.context() as patch:
+                        patch.setattr(
+                            distributed,
+                            "_get_cached_remote",
+                            lambda _, captured=captured: captured,
+                        )
+                        if not cancel_enabled:
+                            # An explicit control proves that the sibling otherwise
+                            # survives the primary error; it is released below.
+                            patch.setattr(ray, "cancel", lambda *args, **kwargs: None)
+                        items = [(probe, "fail"), (probe, "sibling")]
+                        with pytest.raises(RayTaskError) as caught:
+                            if helper == "map":
+                                distributed.parallel_map(
+                                    _fanout_lifecycle_item,
+                                    [*items, (probe, "unsubmitted")],
+                                    max_concurrency=2,
+                                )
+                            else:
+                                distributed.scatter_gather(
+                                    [(_fanout_lifecycle_item, (item,), {}) for item in items]
+                                )
+                        assert isinstance(caught.value.cause, ValueError)
+                        assert str(caught.value.cause) == "fanout primary failure"
+
+                    assert len(submitted) == 2
+                    sibling = submitted[1]
+                    if cancel_enabled:
+                        with pytest.raises(TaskCancelledError):
+                            ray.get(sibling, timeout=10)
+                        deadline = time.monotonic() + 10
+                        while time.monotonic() < deadline:
+                            if ray.get(probe.snapshot.remote(), timeout=5)["stopped"]:
+                                break
+                            time.sleep(0.02)
+                        assert ray.get(probe.snapshot.remote(), timeout=5) == {
+                            "started": True,
+                            "released": False,
+                            "completed": False,
+                            "stopped": True,
+                        }
+                    else:
+                        with pytest.raises(GetTimeoutError):
+                            ray.get(sibling, timeout=0)
+                        assert ray.get(probe.snapshot.remote(), timeout=5)["stopped"] is False
+                        ray.get(probe.mark.remote("released"), timeout=5)
+                        assert ray.get(sibling, timeout=10) == "completed"
+                        assert ray.get(probe.snapshot.remote(), timeout=5)["completed"] is True
+                finally:
+                    # Teardown is independent of the behavior under test and owns
+                    # only this scenario's refs and observation actor.
+                    for ref in submitted:
+                        cancel(ref, force=True, recursive=True)
+                    ray.kill(probe)
 
     def test_strict_parallel_map_round_trip_installs_exact_context(self) -> None:
         expected_runtime_env = _strict_runtime_env_identity()

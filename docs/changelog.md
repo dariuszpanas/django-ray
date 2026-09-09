@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Distributed failure cleanup
+
+- Map, starmap, and scatter collectors request non-force recursive cancellation
+  for outstanding owned children after submission failure, result failure, or
+  caller interruption. Cleanup preserves the original exception and attempts the
+  remaining siblings even if a cancellation fails. Successful ordering is
+  unchanged. Cancellation does not prove quiescence, undo effects, or authorize
+  automatic replay; the helpers add no blocking result drain.
+
 ### Platform validation
 
 - Linux is the supported execution target. Broad Make test commands and direct pytest selections
