@@ -4101,12 +4101,21 @@ class Command(BaseCommand):
             return
 
         if job_info.status == JobStatus.FAILED:
-            logs = runner.get_logs(handle)
+            from django_ray.runner.job_diagnostics import (
+                LEGACY_JOB_FAILURE_MESSAGE,
+                UNAVAILABLE_JOB_DIAGNOSTIC,
+                sanitize_job_diagnostic,
+            )
+
+            # Logs and Ray's status message cannot authenticate an application
+            # outcome or authorize replay during a legacy rolling drain.
+            logs = sanitize_job_diagnostic(runner.get_logs(handle))
             handled = handle_failure_authoritatively(
-                error_message=job_info.message or "Ray job failed",
-                error_traceback=logs,
+                error_message=LEGACY_JOB_FAILURE_MESSAGE,
+                error_traceback=logs if logs is not None else UNAVAILABLE_JOB_DIAGNOSTIC,
                 exception_type="RayJobFailed",
                 expected_completion_data=completion_data,
+                retryable=False,
             )
             if handled is False:
                 return

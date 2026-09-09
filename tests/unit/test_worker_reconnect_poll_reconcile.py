@@ -3953,7 +3953,7 @@ class TestWorkerReconnectPollReconcile:
         assert json.loads(task.result_data or "null") == 3
         assert task.pk not in cmd.active_tasks
 
-    def test_reconcile_legacy_failed_job_still_uses_logs_and_retry_policy(
+    def test_reconcile_legacy_failed_job_retains_supporting_logs_without_retry(
         self,
         monkeypatch,
     ) -> None:
@@ -3993,8 +3993,10 @@ class TestWorkerReconnectPollReconcile:
 
         task.refresh_from_db()
         assert log_calls == [task.ray_job_id]
-        assert task.state == TaskState.QUEUED
-        assert task.attempt_number == 2
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
+        assert task.error_message == "Legacy Ray Job failed without an exact completion envelope"
+        assert task.error_traceback == "legacy traceback"
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_success_with_non_json_logs_waits_for_completion_envelope(

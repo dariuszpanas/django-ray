@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade from 0.4.0
 
+- Legacy Ray Jobs that report failure without an exact completion envelope no longer
+  retry automatically from their status/log fallback. Their supporting logs are bounded
+  before decoding and redacted before current or historical failure persistence; raw
+  status messages are replaced by a fixed classification. Valid completion envelopes
+  retain their retry behavior. Investigate uncertain effects before manually retrying
+  an affected legacy Job.
+
 - Private flat workflow and target implementation imports have moved without compatibility
   shims while the project remains Beta. Replace `django_ray.workflow_plans` with
   `django_ray.workflow.plans`, `django_ray.admin_workflow_graph` with

@@ -2721,6 +2721,10 @@ class TestRayJobRunnerStatusAndControl:
     def test_status_logs_and_cancellation_use_handle_address(self, monkeypatch) -> None:
         """Control-plane calls must stay on the cluster recorded in the handle."""
         addresses: list[str | None] = []
+        monkeypatch.setattr(
+            "django_ray.runner.job_diagnostics.read_job_diagnostic",
+            lambda _client, _job_id, *, timeout: "logs",
+        )
 
         class Client:
             def get_job_status(self, _job_id: str) -> str:
@@ -2728,9 +2732,6 @@ class TestRayJobRunnerStatusAndControl:
 
             def get_job_info(self, _job_id: str) -> SimpleNamespace:
                 return SimpleNamespace(message=None)
-
-            def get_job_logs(self, _job_id: str) -> str:
-                return "logs"
 
             def stop_job(self, _job_id: str) -> bool:
                 return True
@@ -2804,12 +2805,12 @@ class TestRayJobRunnerStatusAndControl:
         assert "cannot stop" in (outcome.message or "")
 
     def test_get_logs_returns_none_on_exception(self, monkeypatch) -> None:
-        class Client:
-            def get_job_logs(self, _job_id: str) -> str:
-                raise RuntimeError("logs unavailable")
+        def unavailable(_client, _job_id, *, timeout):
+            raise RuntimeError("logs unavailable")
 
         runner = RayJobRunner()
-        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: Client())
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: object())
+        monkeypatch.setattr("django_ray.runner.job_diagnostics.read_job_diagnostic", unavailable)
 
         logs = runner.get_logs(self._make_handle("raysubmit_logs_001"))
 
@@ -2817,14 +2818,17 @@ class TestRayJobRunnerStatusAndControl:
 
     def test_get_logs_returns_log_content(self, monkeypatch) -> None:
         runner = RayJobRunner()
-        monkeypatch.setattr(
-            runner,
-            "_get_client",
-            lambda _ray_address=None: SimpleNamespace(
-                get_job_logs=lambda _job_id: "line-1\nline-2"
-            ),
-        )
+        client = object()
+        observed = []
+
+        def bounded_reader(selected_client, job_id, *, timeout):
+            observed.append((selected_client, job_id, timeout))
+            return "line-1\nline-2"
+
+        monkeypatch.setattr(runner, "_get_client", lambda _ray_address=None: client)
+        monkeypatch.setattr("django_ray.runner.job_diagnostics.read_job_diagnostic", bounded_reader)
 
         logs = runner.get_logs(self._make_handle("raysubmit_logs_002"))
 
         assert logs == "line-1\nline-2"
+        assert observed == [(client, "raysubmit_logs_002", 5.0)]

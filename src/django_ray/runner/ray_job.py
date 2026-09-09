@@ -635,10 +635,13 @@ class RayJobRunner(BaseRunner):
         return self.cancel_prepared_with_status(handle, client)
 
     def get_logs(self, handle: SubmissionHandle) -> str | None:
-        """Get logs from a Ray job."""
+        """Get bounded, sanitized supporting logs from a legacy Ray job."""
+        from django_ray.runner.job_diagnostics import read_job_diagnostic
+
         try:
             client = self._get_client(handle.ray_address)
-            with _bounded_control_requests(client):
-                return client.get_job_logs(handle.ray_job_id)
+            return read_job_diagnostic(
+                client, handle.ray_job_id, timeout=_CONTROL_REQUEST_TIMEOUT_SECONDS
+            )
         except Exception:
             return None

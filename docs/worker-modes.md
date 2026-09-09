@@ -116,6 +116,28 @@ execution phase, and Ray Job logs are not compatibility authority. Nested workfl
 fold, and distributed application boundaries inherit the strict identity/protocol
 fence; exact Ray/Python/cluster attestation remains separate.
 
+### Legacy failure diagnostics
+
+For a draining legacy Job that reports `FAILED` without an exact completion envelope,
+the manager records a fixed failure classification and does not automatically replay
+the work. A valid failure completion still supplies the existing retry decision.
+Operators should investigate uncertain external effects before requesting a retry.
+
+Supporting Job logs are limited to a 16 KiB HTTP response, with one extra byte read
+to detect overrun. Oversized responses are discarded with an explicit omission marker;
+they are not partially decoded or truncated before redaction. Only a valid UTF-8 JSON
+object containing a string `logs` field is accepted. The reader preserves the selected
+cluster's credentials and TLS verification, refuses redirects and compressed responses,
+and uses the existing five-second connection/read-inactivity timeout. This is not a
+universal wall-clock deadline for an actively streaming peer.
+
+Accepted text is redacted and normalized before either the current execution or its
+attempt history is written. Raw Job status messages and transport exceptions are not
+stored as failure details. Missing, malformed or unavailable logs produce a fixed marker.
+Logs never replace a valid completion envelope or authorize a retry. If the owner, Job,
+attempt, generation or completion changes while logs are retrieved, the existing
+authoritative persistence fence rejects that stale diagnostic.
+
 ## Distributed Utilities
 
 `parallel_map()`, `parallel_starmap()`, and `scatter_gather()` work in local, cluster,
