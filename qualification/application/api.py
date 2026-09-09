@@ -373,6 +373,7 @@ def verify_application_api(
             raise ValueError(f"task status polling returned {status}, expected 200")
         task_status = _json_body(body, endpoint="task status polling")
         last_state = validate_task_status_payload(task_status, task_id=task_id)
+        evidence.task_state = last_state
         validate_execution_protocol_visibility(
             task_status,
             surface="task status polling",

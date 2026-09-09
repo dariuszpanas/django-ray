@@ -203,6 +203,11 @@ dependency advisories without starting Ray. It is outside `CI Gate` and release 
 Linux dependency audits remain blocking. Focused resource-free checks and host-side tools remain
 available locally.
 
+Path-selected deployed evidence is reviewed under the affected-gate policy. The supplemental
+Application Qualification workflow runs the public native Chainsaw core stage on a disposable
+GitHub Actions Linux cluster. Its affected assertions must pass when required by the trigger matrix;
+it is separate from the global `CI Gate` and needs no private test service.
+
 Run `uv run make ci` only in an explicitly bounded Linux environment. If none is available, record
 that reason and use passing exact-head hosted Linux `CI Gate` as the full-suite checkpoint. This
 does not waive a required deployed-behavior KubeRay gate. Do not automatically start or repurpose

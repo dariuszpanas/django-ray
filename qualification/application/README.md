@@ -1,4 +1,4 @@
-# Shared application assertions
+# Application qualification workloads
 
 `api.py` contains the source-owned HTTP assertion layer used by
 `scripts/local_kuberay_gate.py`. A bounded assertion Job can import this module using only the
@@ -22,11 +22,10 @@ enqueued task identity after a later assertion fails. Success requires the funct
 partial flags do not establish a passing layer. Credentials and raw response bodies are not stored
 in that evidence object.
 
-This extraction does not change the supported application images, create a DRT runbook, or replace
-the required KubeRay gate. Packaging the assertion Job, proving cold Ray generations, manager and
-workflow recovery, RuntimeEnv delivery and encryption, and the remaining deployment assertions
-remain tracked in django-ray issue #455. Source/image identity and bounded run evidence must be
-established by that workload and its executor before a DRT result can serve as application proof.
+The API function proves one layer. The namespace workload below adds generic-node, manager and
+encrypted RuntimeEnv assertions. Workflow recovery and the remaining deployment stages stay
+tracked in django-ray issue #455. Source/image identity and bounded run evidence must be established
+by the workload and its executor before a test result can serve as application proof.
 
 ## Running the API layer
 
@@ -40,7 +39,7 @@ python -m qualification.application.run_api \
 ```
 
 The caller provides the admitted application service origin and a mounted application token file.
-The token must contain 32–512 ASCII token68 characters, without a trailing newline. It is read only
+The token must contain 32Ã¢â‚¬â€œ512 ASCII token68 characters, without a trailing newline. It is read only
 after the unauthenticated and schema assertions pass. HTTP(S) origins cannot include credentials,
 paths, queries or fragments. The transport ignores ambient proxies, does not follow redirects,
 verifies HTTPS with the standard system trust store, and enforces response byte limits for success
@@ -55,8 +54,8 @@ they may contain application data. Partial observations remain diagnostic even w
 fails. The receipt always reports `complete_application_gate: false`; it does not establish image
 identity, Ray generation, manager ownership, cleanup or any other gate layer.
 
-The command starts no services and has no Kubernetes or DRT client. Assertion image packaging,
-namespace manifests, source binding and the overall gate remain work for issue #455.
+The command starts no services and has no Kubernetes client. `core.yaml` wires the API layer
+into a bounded application stage; its admission, image binding and evidence requirements follow below.
 
 ## Generic Ray nodes and cold generations
 
@@ -100,5 +99,130 @@ Exit zero requires all assertions and exclusive receipt-file creation to succeed
 prints a fixed failed receipt with no partial node observations or raw dependency exception. Every
 receipt reports `complete_application_gate: false`. The executor still owns immutable source/image
 binding, Pod/image and RayCluster lifecycle evidence, resource admission, bounded receipt collection
-and cleanup. The module has no Kubernetes or DRT authority and does not replace the host gate.
+and cleanup. The module has no Kubernetes authority and does not replace the host gate.
 Its existence or resource-free unit tests do not establish a passing live generic-node layer.
+
+## Offline application core stage
+
+`core.yaml` is a native public Chainsaw Test. Its thirteen steps start disposable PostgreSQL 17,
+prepare the sample web application and locked recovery archives, and start one current core task
+manager with stock Ray 2.56.0 head/worker nodes. Two serial Jobs require authenticated API execution,
+exact durable task/attempt/current-manager ownership, authenticated encrypted RuntimeEnv snapshots
+and the remote decrypted canary. Between them Chainsaw foreground-deletes and recreates RayCluster.
+Both generic-node receipts require identical archives/runtime and disjoint node identities.
+The web and manager Deployments remain; this does not assert survival of one manager process.
+
+`settings_qualification` retains production validation and replaces the project RuntimeEnv with the
+locked recovery ZIP; `thin` inherits it. No pip download or `PYTHONPATH=src` is used in that profile.
+The task environment pins the validated Ray Client target so generic workers retain the same
+application configuration when their Pod supplies a node-local Ray address. Database and encryption
+settings remain inherited from the disposable Pod's configuration and Secret.
+Ordinary sample settings remain unchanged. The stage does not certify their dependency-download
+behavior, workflow recovery, negative encryption cases, or a complete release upgrade.
+
+### Public prerequisites and invocation
+
+Use an explicitly admitted Linux Kubernetes environment with public KubeRay 1.6.2 already installed,
+a compatible `kubectl`, [Chainsaw 0.2.15](https://github.com/kyverno/chainsaw/releases/tag/v0.2.15),
+and Python 3.12+. No private test service, schema, image registry API or executor is required.
+Never create or resize a shared cluster merely to run this test. The path-selected
+[Application Qualification workflow](../../.github/workflows/application-qualification.yml) waits
+for the current source Linux `CI Gate`, then hosts this stage on a disposable GitHub Actions Linux
+Kind cluster with a 3-CPU/12-GiB node limit. Its local image registry has a separate 0.25-CPU/128-MiB
+limit. Builds precede cluster creation on the hosted 4-CPU/16-GiB VM; normal docs-only PRs do not
+trigger this supplemental workload. It also supports manual `workflow_dispatch`. The three PVCs require same-node ReadWriteOnce storage;
+pass Kind's `standard` StorageClass or Docker Desktop's `hostpath` explicitly.
+
+Build the root Dockerfile and `qualification/application/Dockerfile` from the same clean committed
+Git archive, with Python 3.12/Linux amd64 matching the pinned stock Ray image. The derived image
+inherits the application entrypoint and adds these assertion modules. For example, after admitting
+build capacity and selecting a registry you can write to:
+
+```sh
+candidate=$(git rev-parse HEAD)
+build=$(mktemp -d)
+git archive "$candidate" | tar -x -C "$build"
+docker build --platform linux/amd64 --provenance=false -t "$REGISTRY/django-ray-base:$candidate" "$build"
+docker push "$REGISTRY/django-ray-base:$candidate"
+base=$(docker image inspect "$REGISTRY/django-ray-base:$candidate" --format '{{index .RepoDigests 0}}')
+docker build --platform linux/amd64 --provenance=false -f "$build/qualification/application/Dockerfile" \
+  --build-arg DJANGO_RAY_RUNTIME_IMAGE="$base" \
+  -t "$REGISTRY/django-ray-core:$candidate" "$build"
+docker push "$REGISTRY/django-ray-core:$candidate"
+image=$(docker image inspect "$REGISTRY/django-ray-core:$candidate" --format '{{index .RepoDigests 0}}')
+python -m qualification.application.run_chainsaw --context "$KUBE_CONTEXT" \
+  --image "$image" --storage-class standard --output "$EVIDENCE_DIRECTORY"
+```
+
+The output directory must be new and outside the clean checkout. The caller retains the Git archive,
+build identity and source/package verification with the receipts; an image label alone is not source
+proof. The wrapper never builds, pulls or pushes images, installs an operator or changes cluster-wide
+configuration. Registry access and image availability on the admitted nodes are caller prerequisites.
+Build archives may be removed after retaining their identity; no unrelated Docker images are pruned.
+
+The runner requires an explicit context and the immutable digest of a concrete Linux-amd64 image
+manifest. The single-platform builds disable provenance so an attestation-bearing image index does
+not obscure comparison with the manifest digest reported by the container runtime. It creates one fresh
+`django-ray-core-*` namespace and six random application Secret values via stdin, without storing
+them in evidence or exposing them in command arguments. The two ordered Django secret parts compose
+the production secret; the separate unpadded base64url key selects authenticated encryption under
+key ID `qualification`, with Django-secret fallback disabled.
+
+`chainsaw.yaml` pins serial execution, foreground deletion and operation timeouts. The runner uses
+[public external values](https://kyverno.github.io/chainsaw/0.2.3/configuration/options/values/)
+for the image and StorageClass. Automatic Chainsaw teardown is delayed with `skipDelete` so receipts
+can be collected; the explicit mid-test RayCluster delete still runs. The wrapper then checks the
+namespace UID, deletes only its owned namespace and requires observed absence. It returns nonzero
+if the test, receipt validation or cleanup fails. An interrupted host process may require manual
+cleanup of the exact recorded namespace; no cluster deletion or shared resource cleanup is attempted.
+
+### Resource and evidence boundaries
+
+Source inventory, conservatively counting both serial Jobs and init peaks, is **2.6 CPU, 9728 MiB
+memory, 3200 MiB ephemeral storage, seven Pods and 1408 MiB PVC requests**. Every source container has
+non-root identity, no service-account token, a read-only root filesystem and explicit limits.
+KubeRay, Kubernetes, image builds and the host-side Chainsaw process are additional reservations.
+Storage requests do not prove physical disk enforcement. The caller admits total capacity and
+network reachability/isolation; this test does not install or qualify a network-policy provider.
+
+The test has a 1800-second outer deadline, each assertion Job a 600-second deadline, and owned
+namespace deletion a 180-second allowance. These are ceilings, not expected durations.
+
+The runner retrieves at most 64 KiB from each exact setup/assertion container's log. It requires
+zero successful-container restarts, exit zero, the requested immutable image with its manifest
+digest in the observed container image ID, and every expected
+passing JSON receipt at no more than 16 KiB. It retains `setup.json`, `before-nodes.json`,
+`before-core.json`, `after-nodes.json`, `after-core.json`, producer Pod/image identities, Chainsaw's
+XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
+in the public Actions job log. Receipts are transported from the modules' existing stdout; they are
+not inferred from Job status. The cold receipt's predecessor digest must match the retained first
+node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
+a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
+Before failure cleanup, the runner also retains at most 100 RayCluster, Pod and Event records
+per resource, capped at 64 KiB per file. These include status and event messages, never resource
+specs or Secrets. It captures current and previous logs from at most six Ray, web or manager Pods,
+at most 32 KiB per log, before teardown. Failed core receipts retain request count, last HTTP status
+and validated API progress without response bodies or exception text. Hosted failures retain the
+last 200 operator log lines, capped at 64 KiB.
+
+The [affected-scenario policy](../../docs/deployment/local-kuberay-gate.md) determines which product
+assertions a change needs. This stage needs actual exact-source Linux execution after the full Linux
+CI checkpoint. Its source tests and a schema-valid native Test do not establish that live result.
+
+The stock Ray head reserves 5 GiB and the worker 1.5 GiB. A 3-GiB head exhausted its memory
+during full dashboard startup, which loads nine subprocess modules in the pinned Ray version.
+The dashboard stays enabled because its State and Job APIs are part of the qualification.
+The runner checks Pod status every 15 seconds and aborts on nonzero container termination,
+retaining diagnostics before cleanup. This avoids spending the readiness timeout retrying
+an OOM-killed or failed container.
+
+For fixture debugging, push a branch without an open PR and manually dispatch the same workflow:
+
+```sh
+gh workflow run application-qualification.yml --ref "$BRANCH" -f mode=diagnostic
+```
+
+This runs only the bounded application job, without waiting for or launching the full CI matrix.
+The job summary and artifact explicitly identify diagnostic intent. Diagnostic execution does not
+satisfy final acceptance: publish the completed candidate to its PR, where the default acceptance
+mode requires current-source Linux CI before repeating the application test.

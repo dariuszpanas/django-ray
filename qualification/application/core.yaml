@@ -1,0 +1,1130 @@
+# Public Chainsaw Test; run through run_chainsaw.py to retain receipts and clean up.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: django-ray-application-core
+spec:
+  steps:
+  - name: create-configuration-and-storage
+    try:
+    - create:
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: application-config
+          immutable: true
+          data:
+            DJANGO_SETTINGS_MODULE: testproject.settings_qualification
+            DJANGO_DEPLOYMENT_MODE: production
+            DJANGO_DEBUG: 'false'
+            DJANGO_ALLOWED_HOSTS: django-web,localhost,127.0.0.1
+            DATABASE_ENGINE: django.db.backends.postgresql
+            DATABASE_NAME: django_ray
+            DATABASE_USER: django_ray
+            DATABASE_HOST: postgres
+            DATABASE_PORT: '5432'
+            RAY_ADDRESS: ray://ray-head:10001
+            RAY_STATE_API_ADDRESS: http://ray-head:8265
+            RAY_DASHBOARD_URL: http://ray-head:8265
+            DJANGO_RAY_RECOVERY_WORKING_DIR: /runtime/recovery.zip
+            DJANGO_STATIC_ROOT: /static
+            DJANGO_RAY_CONCURRENCY: '1'
+            DJANGO_RAY_QUEUES: default
+            GUNICORN_WORKERS: '1'
+            GUNICORN_THREADS: '2'
+            GUNICORN_WORKER_TMP_DIR: /tmp
+            GUNICORN_ACCESS_LOGFILE: 'off'
+            HOME: /tmp
+            PYTHONDONTWRITEBYTECODE: '1'
+            PYTHONUNBUFFERED: '1'
+            RAY_USAGE_STATS_ENABLED: '0'
+            OPENBLAS_NUM_THREADS: '1'
+            OMP_NUM_THREADS: '1'
+            MKL_NUM_THREADS: '1'
+    - create:
+        resource:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: postgres-data
+          spec:
+            storageClassName: ($values.storageClass)
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+    - create:
+        resource:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: runtime
+          spec:
+            storageClassName: ($values.storageClass)
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 256Mi
+    - create:
+        resource:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: receipts
+          spec:
+            storageClassName: ($values.storageClass)
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 128Mi
+    - create:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgres
+          spec:
+            type: ClusterIP
+            clusterIP: None
+            selector:
+              app: postgres
+            ports:
+            - name: service
+              port: 5432
+              targetPort: 5432
+    - create:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: django-web
+          spec:
+            type: ClusterIP
+            clusterIP: None
+            selector:
+              app: django-web
+            ports:
+            - name: service
+              port: 8000
+              targetPort: 8000
+    - create:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ray-head
+          spec:
+            type: ClusterIP
+            clusterIP: None
+            selector:
+              app: ray-head
+            ports:
+            - name: service
+              port: 10001
+              targetPort: 10001
+            - name: gcs
+              port: 6379
+              targetPort: 6379
+            - name: dashboard
+              port: 8265
+              targetPort: 8265
+  - name: start-postgresql
+    try:
+    - create:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: postgres
+          spec:
+            replicas: 1
+            strategy:
+              type: Recreate
+            selector:
+              matchLabels:
+                app: postgres
+            template:
+              metadata:
+                labels:
+                  app: postgres
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Always
+                terminationGracePeriodSeconds: 30
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 999
+                  runAsGroup: 999
+                  fsGroup: 999
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                - name: postgres
+                  image: postgres@sha256:7bade6d532592ca8ce7ee32def7399dad2607c4ea5583839fc4352a095a11ea6
+                  resources:
+                    requests:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 128Mi
+                    limits:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 128Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  env:
+                  - name: POSTGRES_USER
+                    value: django_ray
+                  - name: POSTGRES_DB
+                    value: django_ray
+                  - name: PGDATA
+                    value: /var/lib/postgresql/data/pgdata
+                  - name: POSTGRES_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DATABASE_PASSWORD
+                  ports:
+                  - containerPort: 5432
+                  volumeMounts:
+                  - name: postgres-data
+                    mountPath: /var/lib/postgresql/data
+                    readOnly: false
+                  - name: postgres-run
+                    mountPath: /var/run/postgresql
+                    readOnly: false
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+                  readinessProbe:
+                    exec:
+                      command:
+                      - pg_isready
+                      - -U
+                      - django_ray
+                      - -d
+                      - django_ray
+                    periodSeconds: 3
+                    timeoutSeconds: 2
+                    failureThreshold: 20
+                volumes:
+                - name: postgres-data
+                  persistentVolumeClaim:
+                    claimName: postgres-data
+                - name: postgres-run
+                  emptyDir:
+                    sizeLimit: 16Mi
+                    medium: ''
+                - name: tmp
+                  emptyDir:
+                    sizeLimit: 32Mi
+                    medium: ''
+            progressDeadlineSeconds: 600
+  - name: require-postgresql
+    try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: postgres
+          status:
+            readyReplicas: 1
+            availableReplicas: 1
+  - name: prepare-and-start-application
+    try:
+    - create:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: django-web
+          spec:
+            replicas: 1
+            strategy:
+              type: Recreate
+            selector:
+              matchLabels:
+                app: django-web
+            template:
+              metadata:
+                labels:
+                  app: django-web
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Always
+                terminationGracePeriodSeconds: 30
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                - name: web
+                  image: ($values.applicationImage)
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                    limits:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  envFrom:
+                  - configMapRef:
+                      name: application-config
+                  - secretRef:
+                      name: application-credentials
+                  env:
+                  - name: DJANGO_SECRET_KEY_PART_ONE
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_ONE
+                  - name: DJANGO_SECRET_KEY_PART_TWO
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_TWO
+                  - name: DJANGO_SECRET_KEY
+                    value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                  args:
+                  - web
+                  ports:
+                  - containerPort: 8000
+                  volumeMounts:
+                  - name: runtime
+                    mountPath: /runtime
+                    readOnly: true
+                  - name: static
+                    mountPath: /static
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+                  readinessProbe:
+                    httpGet:
+                      path: /api/readyz
+                      port: 8000
+                      httpHeaders:
+                      - name: Host
+                        value: django-web
+                    initialDelaySeconds: 10
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 6
+                  livenessProbe:
+                    httpGet:
+                      path: /api/livez
+                      port: 8000
+                      httpHeaders:
+                      - name: Host
+                        value: django-web
+                    initialDelaySeconds: 10
+                    periodSeconds: 10
+                    timeoutSeconds: 5
+                    failureThreshold: 6
+                volumes:
+                - name: runtime
+                  persistentVolumeClaim:
+                    claimName: runtime
+                - name: static
+                  emptyDir:
+                    sizeLimit: 128Mi
+                    medium: ''
+                - name: receipts
+                  persistentVolumeClaim:
+                    claimName: receipts
+                - name: tmp
+                  emptyDir:
+                    sizeLimit: 128Mi
+                    medium: ''
+                initContainers:
+                - name: setup
+                  image: ($values.applicationImage)
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                    limits:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  envFrom:
+                  - configMapRef:
+                      name: application-config
+                  - secretRef:
+                      name: application-credentials
+                  env:
+                  - name: DJANGO_SECRET_KEY_PART_ONE
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_ONE
+                  - name: DJANGO_SECRET_KEY_PART_TWO
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_TWO
+                  - name: DJANGO_SECRET_KEY
+                    value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                  command:
+                  - python
+                  - -m
+                  - qualification.application.setup_core
+                  - --receipt
+                  - /receipts/setup.json
+                  volumeMounts:
+                  - name: runtime
+                    mountPath: /runtime
+                    readOnly: false
+                  - name: static
+                    mountPath: /static
+                    readOnly: false
+                  - name: receipts
+                    mountPath: /receipts
+                    readOnly: false
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+            progressDeadlineSeconds: 600
+  - name: require-prepared-application
+    try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: django-web
+          status:
+            readyReplicas: 1
+            availableReplicas: 1
+  - name: start-first-ray-generation
+    try:
+    - create:
+        resource:
+          apiVersion: ray.io/v1
+          kind: RayCluster
+          metadata:
+            name: ray
+          spec:
+            rayVersion: 2.56.0
+            enableInTreeAutoscaling: false
+            headGroupSpec:
+              serviceType: ClusterIP
+              rayStartParams:
+                num-cpus: '1'
+                num-gpus: '0'
+                object-store-memory: '134217728'
+                dashboard-host: 0.0.0.0
+                dashboard-port: '8265'
+                include-dashboard: 'true'
+              template:
+                metadata:
+                  labels:
+                    app: ray-head
+                spec:
+                  automountServiceAccountToken: false
+                  restartPolicy: Always
+                  terminationGracePeriodSeconds: 30
+                  securityContext:
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                  - name: ray-head
+                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    resources:
+                      requests:
+                        cpu: 750m
+                        memory: 5120Mi
+                        ephemeral-storage: 1Gi
+                      limits:
+                        cpu: 750m
+                        memory: 5120Mi
+                        ephemeral-storage: 1Gi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    envFrom:
+                    - configMapRef:
+                        name: application-config
+                    - secretRef:
+                        name: application-credentials
+                    env:
+                    - name: DJANGO_SECRET_KEY_PART_ONE
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_ONE
+                    - name: DJANGO_SECRET_KEY_PART_TWO
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_TWO
+                    - name: DJANGO_SECRET_KEY
+                      value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                    volumeMounts:
+                    - name: runtime
+                      mountPath: /runtime
+                      readOnly: true
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
+                    - name: shm
+                      mountPath: /dev/shm
+                      readOnly: false
+                    ports:
+                    - containerPort: 6379
+                    - containerPort: 8265
+                    - containerPort: 10001
+                  volumes:
+                  - name: runtime
+                    persistentVolumeClaim:
+                      claimName: runtime
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: 1Gi
+                      medium: ''
+                  - name: shm
+                    emptyDir:
+                      sizeLimit: 128Mi
+                      medium: Memory
+            workerGroupSpecs:
+            - groupName: worker
+              replicas: 1
+              minReplicas: 1
+              maxReplicas: 1
+              rayStartParams:
+                num-cpus: '1'
+                num-gpus: '0'
+                object-store-memory: '134217728'
+              template:
+                metadata:
+                  labels:
+                    app: ray-worker
+                spec:
+                  automountServiceAccountToken: false
+                  restartPolicy: Always
+                  terminationGracePeriodSeconds: 30
+                  securityContext:
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                  - name: ray-worker
+                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    resources:
+                      requests:
+                        cpu: 750m
+                        memory: 1536Mi
+                        ephemeral-storage: 1Gi
+                      limits:
+                        cpu: 750m
+                        memory: 1536Mi
+                        ephemeral-storage: 1Gi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    envFrom:
+                    - configMapRef:
+                        name: application-config
+                    - secretRef:
+                        name: application-credentials
+                    env:
+                    - name: DJANGO_SECRET_KEY_PART_ONE
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_ONE
+                    - name: DJANGO_SECRET_KEY_PART_TWO
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_TWO
+                    - name: DJANGO_SECRET_KEY
+                      value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                    volumeMounts:
+                    - name: runtime
+                      mountPath: /runtime
+                      readOnly: true
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
+                    - name: shm
+                      mountPath: /dev/shm
+                      readOnly: false
+                  volumes:
+                  - name: runtime
+                    persistentVolumeClaim:
+                      claimName: runtime
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: 1Gi
+                      medium: ''
+                  - name: shm
+                    emptyDir:
+                      sizeLimit: 128Mi
+                      medium: Memory
+  - name: require-first-ray-generation
+    try:
+    - assert:
+        resource:
+          apiVersion: ray.io/v1
+          kind: RayCluster
+          metadata:
+            name: ray
+          status:
+            state: ready
+            readyWorkerReplicas: 1
+  - name: start-current-manager
+    try:
+    - create:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: django-manager
+          spec:
+            replicas: 1
+            strategy:
+              type: Recreate
+            selector:
+              matchLabels:
+                app: django-manager
+            template:
+              metadata:
+                labels:
+                  app: django-manager
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Always
+                terminationGracePeriodSeconds: 30
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                - name: manager
+                  image: ($values.applicationImage)
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                    limits:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  envFrom:
+                  - configMapRef:
+                      name: application-config
+                  - secretRef:
+                      name: application-credentials
+                  env:
+                  - name: DJANGO_SECRET_KEY_PART_ONE
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_ONE
+                  - name: DJANGO_SECRET_KEY_PART_TWO
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_TWO
+                  - name: DJANGO_SECRET_KEY
+                    value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                  args:
+                  - worker-cluster
+                  volumeMounts:
+                  - name: runtime
+                    mountPath: /runtime
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+                  readinessProbe:
+                    exec:
+                      command:
+                      - /bin/sh
+                      - -c
+                      - test -d /proc/1 && grep -q python /proc/1/cmdline
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 6
+                volumes:
+                - name: runtime
+                  persistentVolumeClaim:
+                    claimName: runtime
+                - name: tmp
+                  emptyDir:
+                    sizeLimit: 256Mi
+                    medium: ''
+            progressDeadlineSeconds: 600
+  - name: require-current-manager
+    try:
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: django-manager
+          status:
+            readyReplicas: 1
+            availableReplicas: 1
+  - name: assert-first-generation
+    try:
+    - create:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: assert-before
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 600
+            parallelism: 1
+            completions: 1
+            template:
+              metadata:
+                labels:
+                  app: assert-before
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Never
+                terminationGracePeriodSeconds: 30
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                - name: assertions
+                  image: ($values.applicationImage)
+                  resources:
+                    requests:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 256Mi
+                    limits:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  envFrom:
+                  - configMapRef:
+                      name: application-config
+                  - secretRef:
+                      name: application-credentials
+                  env:
+                  - name: DJANGO_SECRET_KEY_PART_ONE
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_ONE
+                  - name: DJANGO_SECRET_KEY_PART_TWO
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_TWO
+                  - name: DJANGO_SECRET_KEY
+                    value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                  command:
+                  - /bin/sh
+                  - -ec
+                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/before-core.json
+                  volumeMounts:
+                  - name: runtime
+                    mountPath: /runtime
+                    readOnly: true
+                  - name: receipts
+                    mountPath: /receipts
+                    readOnly: false
+                  - name: credentials
+                    mountPath: /credentials
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+                volumes:
+                - name: runtime
+                  persistentVolumeClaim:
+                    claimName: runtime
+                - name: receipts
+                  persistentVolumeClaim:
+                    claimName: receipts
+                - name: credentials
+                  secret:
+                    secretName: application-credentials
+                    defaultMode: 288
+                    items:
+                    - key: DJANGO_API_TOKEN
+                      path: DJANGO_API_TOKEN
+                - name: tmp
+                  emptyDir:
+                    sizeLimit: 256Mi
+                    medium: ''
+    - assert:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: assert-before
+          status:
+            succeeded: 1
+  - name: replace-ray-with-cold-generation
+    try:
+    - delete:
+        ref:
+          apiVersion: ray.io/v1
+          kind: RayCluster
+          name: ray
+        deletionPropagationPolicy: Foreground
+    - create:
+        resource:
+          apiVersion: ray.io/v1
+          kind: RayCluster
+          metadata:
+            name: ray
+          spec:
+            rayVersion: 2.56.0
+            enableInTreeAutoscaling: false
+            headGroupSpec:
+              serviceType: ClusterIP
+              rayStartParams:
+                num-cpus: '1'
+                num-gpus: '0'
+                object-store-memory: '134217728'
+                dashboard-host: 0.0.0.0
+                dashboard-port: '8265'
+                include-dashboard: 'true'
+              template:
+                metadata:
+                  labels:
+                    app: ray-head
+                spec:
+                  automountServiceAccountToken: false
+                  restartPolicy: Always
+                  terminationGracePeriodSeconds: 30
+                  securityContext:
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                  - name: ray-head
+                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    resources:
+                      requests:
+                        cpu: 750m
+                        memory: 5120Mi
+                        ephemeral-storage: 1Gi
+                      limits:
+                        cpu: 750m
+                        memory: 5120Mi
+                        ephemeral-storage: 1Gi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    envFrom:
+                    - configMapRef:
+                        name: application-config
+                    - secretRef:
+                        name: application-credentials
+                    env:
+                    - name: DJANGO_SECRET_KEY_PART_ONE
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_ONE
+                    - name: DJANGO_SECRET_KEY_PART_TWO
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_TWO
+                    - name: DJANGO_SECRET_KEY
+                      value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                    volumeMounts:
+                    - name: runtime
+                      mountPath: /runtime
+                      readOnly: true
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
+                    - name: shm
+                      mountPath: /dev/shm
+                      readOnly: false
+                    ports:
+                    - containerPort: 6379
+                    - containerPort: 8265
+                    - containerPort: 10001
+                  volumes:
+                  - name: runtime
+                    persistentVolumeClaim:
+                      claimName: runtime
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: 1Gi
+                      medium: ''
+                  - name: shm
+                    emptyDir:
+                      sizeLimit: 128Mi
+                      medium: Memory
+            workerGroupSpecs:
+            - groupName: worker
+              replicas: 1
+              minReplicas: 1
+              maxReplicas: 1
+              rayStartParams:
+                num-cpus: '1'
+                num-gpus: '0'
+                object-store-memory: '134217728'
+              template:
+                metadata:
+                  labels:
+                    app: ray-worker
+                spec:
+                  automountServiceAccountToken: false
+                  restartPolicy: Always
+                  terminationGracePeriodSeconds: 30
+                  securityContext:
+                    runAsNonRoot: true
+                    runAsUser: 1000
+                    runAsGroup: 1000
+                    fsGroup: 1000
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                  - name: ray-worker
+                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    resources:
+                      requests:
+                        cpu: 750m
+                        memory: 1536Mi
+                        ephemeral-storage: 1Gi
+                      limits:
+                        cpu: 750m
+                        memory: 1536Mi
+                        ephemeral-storage: 1Gi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    envFrom:
+                    - configMapRef:
+                        name: application-config
+                    - secretRef:
+                        name: application-credentials
+                    env:
+                    - name: DJANGO_SECRET_KEY_PART_ONE
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_ONE
+                    - name: DJANGO_SECRET_KEY_PART_TWO
+                      valueFrom:
+                        secretKeyRef:
+                          name: application-credentials
+                          key: DJANGO_SECRET_KEY_PART_TWO
+                    - name: DJANGO_SECRET_KEY
+                      value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                    volumeMounts:
+                    - name: runtime
+                      mountPath: /runtime
+                      readOnly: true
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
+                    - name: shm
+                      mountPath: /dev/shm
+                      readOnly: false
+                  volumes:
+                  - name: runtime
+                    persistentVolumeClaim:
+                      claimName: runtime
+                  - name: tmp
+                    emptyDir:
+                      sizeLimit: 1Gi
+                      medium: ''
+                  - name: shm
+                    emptyDir:
+                      sizeLimit: 128Mi
+                      medium: Memory
+  - name: require-cold-ray-generation
+    try:
+    - assert:
+        resource:
+          apiVersion: ray.io/v1
+          kind: RayCluster
+          metadata:
+            name: ray
+          status:
+            state: ready
+            readyWorkerReplicas: 1
+  - name: assert-cold-generation
+    try:
+    - create:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: assert-after
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 600
+            parallelism: 1
+            completions: 1
+            template:
+              metadata:
+                labels:
+                  app: assert-after
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Never
+                terminationGracePeriodSeconds: 30
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                - name: assertions
+                  image: ($values.applicationImage)
+                  resources:
+                    requests:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 256Mi
+                    limits:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  envFrom:
+                  - configMapRef:
+                      name: application-config
+                  - secretRef:
+                      name: application-credentials
+                  env:
+                  - name: DJANGO_SECRET_KEY_PART_ONE
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_ONE
+                  - name: DJANGO_SECRET_KEY_PART_TWO
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_TWO
+                  - name: DJANGO_SECRET_KEY
+                    value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                  command:
+                  - /bin/sh
+                  - -ec
+                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/after-nodes.json --previous-receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/after-core.json
+                  volumeMounts:
+                  - name: runtime
+                    mountPath: /runtime
+                    readOnly: true
+                  - name: receipts
+                    mountPath: /receipts
+                    readOnly: false
+                  - name: credentials
+                    mountPath: /credentials
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+                volumes:
+                - name: runtime
+                  persistentVolumeClaim:
+                    claimName: runtime
+                - name: receipts
+                  persistentVolumeClaim:
+                    claimName: receipts
+                - name: credentials
+                  secret:
+                    secretName: application-credentials
+                    defaultMode: 288
+                    items:
+                    - key: DJANGO_API_TOKEN
+                      path: DJANGO_API_TOKEN
+                - name: tmp
+                  emptyDir:
+                    sizeLimit: 256Mi
+                    medium: ''
+    - assert:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: assert-after
+          status:
+            succeeded: 1

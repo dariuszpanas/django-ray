@@ -1,0 +1,172 @@
+name: Application Qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/application-qualification.yml'
+      - 'qualification/application/**'
+      - 'testproject/**'
+      - 'src/django_ray/**'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Diagnostic runs do not satisfy the final acceptance gate
+        type: choice
+        options: [acceptance, diagnostic]
+        default: acceptance
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: application-qualification-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  application-core:
+    if: github.event_name != 'pull_request_target'
+    name: Application Core (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      VALIDATION_INTENT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'diagnostic' && 'diagnostic' || 'acceptance' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require the current source Linux CI checkpoint
+        if: env.VALIDATION_INTENT == 'acceptance'
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 40); do
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/check-runs" \
+              --jq '[.check_runs[] | select(.name == "CI Gate")] | sort_by(.started_at) | last | .conclusion // "pending"')
+            case "$conclusion" in
+              success) exit 0 ;;
+              pending) sleep 25 ;;
+              *) echo "::error::Linux CI checkpoint did not pass"; exit 1 ;;
+            esac
+          done
+          echo "::error::No passing exact-source Linux CI Gate within the checkpoint deadline"
+          exit 1
+
+      - name: Install pinned public test tools
+        timeout-minutes: 5
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo 'aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind' | sha256sum -c -
+          curl -fsSL -o chainsaw.tar.gz https://github.com/kyverno/chainsaw/releases/download/v0.2.15/chainsaw_linux_amd64.tar.gz
+          echo '295d226c89f126c0a97775d364be149f47a810c8a3f9829ee410583d0c1abe3c  chainsaw.tar.gz' | sha256sum -c -
+          tar -xzf chainsaw.tar.gz chainsaw
+          curl -fsSL -o helm.tar.gz https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo 'a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  helm.tar.gz' | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          curl -fsSL -o kubectl https://dl.k8s.io/release/v1.35.8/bin/linux/amd64/kubectl
+          echo '874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf  kubectl' | sha256sum -c -
+          sudo install kind chainsaw kubectl linux-amd64/helm /usr/local/bin/
+
+      - name: Build the committed candidate with a disposable local registry
+        timeout-minutes: 15
+        run: |
+          # The hosted VM is the 4-CPU/16-GiB build boundary; no cluster exists yet.
+          docker run -d --name application-registry --cpus=0.25 --memory=128m \
+            --pids-limit=128 -p 127.0.0.1:5001:5000 \
+            registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
+          mkdir "$RUNNER_TEMP/application-source" "$RUNNER_TEMP/application-build"
+          echo "$VALIDATION_INTENT" | tee "$RUNNER_TEMP/application-build/validation-intent.txt"
+          echo "Application core run: **$VALIDATION_INTENT**" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VALIDATION_INTENT" = diagnostic ]; then
+            echo 'Diagnostic execution does not satisfy final acceptance.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          git archive --format=tar HEAD > "$RUNNER_TEMP/application-build/source.tar"
+          tar -xf "$RUNNER_TEMP/application-build/source.tar" -C "$RUNNER_TEMP/application-source"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/application-build/source.txt"
+          sha256sum "$RUNNER_TEMP/application-build/source.tar" > "$RUNNER_TEMP/application-build/source.sha256"
+          docker build --platform linux/amd64 --provenance=false -t localhost:5001/application-base:candidate "$RUNNER_TEMP/application-source"
+          docker push localhost:5001/application-base:candidate
+          base=$(docker image inspect localhost:5001/application-base:candidate --format '{{index .RepoDigests 0}}')
+          docker build --platform linux/amd64 --provenance=false \
+            -f "$RUNNER_TEMP/application-source/qualification/application/Dockerfile" \
+            --build-arg DJANGO_RAY_RUNTIME_IMAGE="$base" \
+            -t localhost:5001/application-core:candidate "$RUNNER_TEMP/application-source"
+          docker push localhost:5001/application-core:candidate
+          image=$(docker image inspect localhost:5001/application-core:candidate --format '{{index .RepoDigests 0}}')
+          echo "APPLICATION_IMAGE=$image" >> "$GITHUB_ENV"
+          docker image inspect "$base" "$image" > "$RUNNER_TEMP/application-build/images.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          base, image = json.loads((Path(os.environ['RUNNER_TEMP']) / 'application-build/images.json').read_text())
+          layers = base['RootFS']['Layers']
+          if not layers or image['RootFS']['Layers'][:len(layers)] != layers:
+              raise SystemExit('Application image does not inherit the verified source base')
+          PY
+
+      - name: Create a bounded disposable Kind cluster
+        timeout-minutes: 10
+        run: |
+          kind create cluster --name application-core --wait 180s \
+            --image kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          docker update --cpus=3 --memory=12g --memory-swap=12g application-core-control-plane
+          # Public Kind local-registry configuration; the registry stays loopback-only on the host.
+          docker network connect kind application-registry
+          docker exec application-core-control-plane mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://application-registry:5000"]\n' | \
+            docker exec -i application-core-control-plane cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+          helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+          helm install kuberay-operator kuberay/kuberay-operator --version 1.6.2 \
+            --kube-context kind-application-core -n kuberay-system --create-namespace \
+            --set image.repository=quay.io/kuberay/operator \
+            --set image.tag='v1.6.2@sha256:2602383ef61afe1b4c55bdcb24da2ff55ee31b6674cbe53b1583e5219e5e3376' \
+            --set resources.requests.cpu=100m --set resources.limits.cpu=100m \
+            --set resources.requests.memory=512Mi --set resources.limits.memory=512Mi \
+            --wait --timeout 180s
+
+      - name: Run the native application core test
+        timeout-minutes: 35
+        run: |
+          python -m qualification.application.run_chainsaw --context kind-application-core \
+            --image "$APPLICATION_IMAGE" --storage-class standard --output "$RUNNER_TEMP/application-evidence"
+
+      - name: Retain bounded operator diagnostics on failure
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          mkdir -p "$RUNNER_TEMP/application-evidence"
+          kubectl --context kind-application-core --request-timeout=30s \
+            -n kuberay-system logs deployment/kuberay-operator \
+            --tail=200 --limit-bytes=65536 > "$RUNNER_TEMP/application-evidence/operator.log" 2>&1 || true
+          cat "$RUNNER_TEMP/application-evidence/operator.log"
+
+      - name: Remove only this job's disposable infrastructure
+        if: always()
+        timeout-minutes: 5
+        run: |
+          if command -v kind >/dev/null; then kind delete cluster --name application-core; fi
+          if docker container inspect application-registry >/dev/null 2>&1; then docker rm -f application-registry; fi
+
+      - name: Upload application receipts and build identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: application-core-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/application-evidence/
+            ${{ runner.temp }}/application-build/source.txt
+            ${{ runner.temp }}/application-build/source.sha256
+            ${{ runner.temp }}/application-build/images.json
+            ${{ runner.temp }}/application-build/validation-intent.txt
+          if-no-files-found: warn
+          retention-days: 14

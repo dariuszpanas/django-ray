@@ -1,0 +1,21 @@
+apiVersion: chainsaw.kyverno.io/v1alpha2
+kind: Configuration
+metadata:
+  name: application-core
+spec:
+  discovery:
+    testFile: core
+  execution:
+    failFast: true
+    parallel: 1
+  cleanup:
+    # The public runner collects receipts before deleting its owned namespace.
+    skipDelete: true
+  deletion:
+    propagation: Foreground
+  timeouts:
+    apply: 60s
+    assert: 600s
+    cleanup: 180s
+    delete: 180s
+    exec: 30s
