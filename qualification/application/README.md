@@ -57,3 +57,48 @@ identity, Ray generation, manager ownership, cleanup or any other gate layer.
 
 The command starts no services and has no Kubernetes or DRT client. Assertion image packaging,
 namespace manifests, source binding and the overall gate remain work for issue #455.
+
+## Generic Ray nodes and cold generations
+
+`generic_nodes.py` supplies a separate assertion Job layer. It connects only to an explicit Ray
+Client address and sends a by-value function to every live node using hard node affinity, zero
+logical CPUs, no task retries and an empty RuntimeEnv. The function imports only Python's standard
+library and Ray. A generic node must have no preinstalled `django_ray`, must see the exact bounded
+source and recovery archives, and must contain the application image's `remote.py` in both archive
+layouts. Required task modules, Ray version and Python major/minor must match. Python patch-level
+differences are allowed; this inspection does not prove native-extension ABI compatibility. The
+application's remote task assertions must establish that separately.
+
+For example, with archives mounted read-only at the same paths in the assertion image and generic
+Ray nodes:
+
+```sh
+python -m qualification.application.generic_nodes \
+  --address ray://ray-head:10001 \
+  --source-archive /runtime/project.zip \
+  --recovery-archive /runtime/recovery.zip \
+  --remote-source /app/src/django_ray/runtime/remote.py \
+  --receipt /receipts/before.json
+```
+
+After the executor has deleted the first RayCluster, confirmed removal and created its replacement,
+run a second Job with the same source, image, archives and arguments, adding
+`--previous-receipt /receipts/before.json` and selecting `--receipt /receipts/after.json`. Every new
+node ID must differ from every previous ID. Membership must remain unchanged during each probe,
+and the source/archive/runtime observations must match across generations. The second receipt
+includes the SHA-256 of the exact first receipt bytes. Existing output files are never overwritten.
+Use a fresh, namespace-owned receipt volume for each run and require both Jobs to succeed.
+
+The default task-result timeout is 120 seconds, configurable up to 300; the default node count is
+two, configurable from one to three. Each archive is capped at 32 MiB, the remote source member at
+1 MiB and each receipt at 16 KiB. Enclosing Jobs must also enforce a hard deadline: Ray Client
+connection, file I/O and shutdown do not share the result timeout. The probe requests cancellation
+of its submitted tasks and disconnects its own client on failure. It refuses to adopt an existing Ray connection.
+No local Ray cluster is started.
+
+Exit zero requires all assertions and exclusive receipt-file creation to succeed. A failed command
+prints a fixed failed receipt with no partial node observations or raw dependency exception. Every
+receipt reports `complete_application_gate: false`. The executor still owns immutable source/image
+binding, Pod/image and RayCluster lifecycle evidence, resource admission, bounded receipt collection
+and cleanup. The module has no Kubernetes or DRT authority and does not replace the host gate.
+Its existence or resource-free unit tests do not establish a passing live generic-node layer.
