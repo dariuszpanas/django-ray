@@ -133,9 +133,11 @@ configuration and a worker must consume it.
 
 ### Enqueue after a database commit
 
-If a task depends on a row changed in the current transaction, enqueue it from
-`transaction.on_commit()`. Otherwise a fast worker can try to read the row before the
-transaction that produced it is visible:
+Use `transaction.on_commit()` when submission should follow a domain transaction's
+commit and the producer does not need a task ID before that commit. It is necessary
+when the selected backend publishes outside that database transaction, such as an
+external broker: otherwise a fast worker can observe work before its domain row is
+visible. django-ray also supports the same-connection receipt pattern below.
 
 ```python
 from functools import partial
@@ -151,6 +153,66 @@ def enqueue_email_after_commit(to: str, subject: str, body: str) -> None:
 
 The callback runs only after a successful commit, so it cannot provide a task result to
 code still inside the transaction. Pass stable identifiers rather than model instances.
+
+### Transactional enqueue and application receipts
+
+`RayTaskBackend.enqueue()` supports an existing `transaction.atomic(using="default")`
+on the **same synchronous Django database connection**. The task row and its external
+input registry row join that transaction. An application can store the generated task
+ID in its own receipt before commit:
+
+```python
+from django.db import transaction
+
+from myapp.models import TaskReceipt
+from myapp.tasks import send_email
+
+
+def enqueue_tracked_email(to: str, subject: str, body: str) -> TaskReceipt:
+    with transaction.atomic(using="default"):
+        enqueued = send_email.enqueue(to=to, subject=subject, body=body)
+        return TaskReceipt.objects.using("default").create(
+            backend_alias=enqueued.backend,
+            task_id=enqueued.id,
+        )
+```
+
+With this django-ray backend and configuration, PostgreSQL workers on another
+connection cannot see either row before commit. The outer commit makes both visible;
+outer rollback removes both. A failed nested savepoint removes work created inside
+that savepoint while preserving earlier outer work. Releasing an inner savepoint does
+not protect its rows from a later outer rollback. An enqueue or receipt error that
+escapes the enclosing `atomic()` block rolls back its database work. Catch errors
+outside the block whose work should be discarded.
+
+The supported configuration keeps django-ray persistence on database alias `default`.
+Enqueue rejects read or write routes for `RayTaskExecution` or `TaskInputPayload` that
+select another alias, and rejects router errors before preparing or publishing input.
+Its task insert, input registry lock/create/update, and collision savepoints are then
+bound to `default`, so a later router decision cannot move those writes outside the
+transaction. The application must also write its receipt and relevant domain changes
+on that same connection. Unrelated application databases can coexist, but there is no
+atomicity promise across aliases, connections, or independently configured worker
+databases. A `TASKS` backend alias selects task configuration; it is not a database
+alias. Existing deployments routing these persistence models elsewhere must move to
+the supported default-database configuration before using this enqueue contract.
+
+The returned `TaskResult` is still an enqueue-time snapshot. It can outlive a rollback
+even though its row no longer exists. Returning from this helper inside another outer
+transaction does not prove that commit has happened. Do not span a transaction across
+`await` points; keep the entire helper synchronous and bridge that whole helper from
+async application code when needed.
+
+External input publication is separate: `prepare_task_input()` may write an object
+before the database insertion. Rolling back task, registry and receipt rows does not
+roll back that object. An object without a committed registry row is not discoverable
+by the current registry-based input purger; retain an ownership-safe storage inventory
+and cleanup policy for this failure case. This contract does not cover object storage,
+Ray effects, Celery, external brokers or other systems. If an application transaction
+must reliably trigger an external backend, use an application outbox; an `on_commit()`
+callback alone cannot make two systems atomic.
+
+### Deferred submission
 
 For a one-off deferred submission, provide an aware timestamp through
 `.using(run_after=...)`. `run_after` is the earliest time that submission is eligible to

@@ -1,0 +1,28 @@
+# Public Docker Compose entry point; run from a clean committed source archive.
+services:
+  receipts:
+    build:
+      context: ../..
+      dockerfile: qualification/transactions/Dockerfile
+    image: django-ray-transaction-qualification:${TRANSACTION_IMAGE_TAG:-local}
+    command: [python, -m, qualification.transactions.scenario]
+    user: "10001:10001"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1.0
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 128
+    stop_grace_period: 20s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m,mode=1777
+    volumes:
+      - type: bind
+        source: ../..
+        target: /workspace
+        read_only: true
+      - type: bind
+        source: ${TRANSACTION_EVIDENCE_DIR:?Set an empty evidence directory writable by UID 10001}
+        target: /evidence

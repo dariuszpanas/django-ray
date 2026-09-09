@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only Task projections: execute new work through an explicit application Task,
   and persist a backend-alias/result-ID receipt instead of pickling a fetched Task or
   TaskResult. See [historical result reads](tasks.md#historical-result-reads).
+- `RayTaskBackend.enqueue()` now rejects task/input read or write routing outside
+  database alias `default` before publishing input, and pins its database writes to
+  that connection. The supported [transactional receipt contract](tasks.md#transactional-enqueue-and-application-receipts)
+  covers commit, rollback and savepoints; backend aliases are not database aliases.
+  External objects remain outside the database transaction and require separate
+  orphan cleanup. Deployments routing django-ray persistence elsewhere must adopt the
+  supported default-database configuration before enqueueing.
 - Private flat workflow and target implementation imports have moved without compatibility
   shims while the project remains Beta. Replace `django_ray.workflow_plans` with
   `django_ray.workflow.plans`, `django_ray.admin_workflow_graph` with

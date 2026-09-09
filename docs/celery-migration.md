@@ -531,6 +531,14 @@ def enqueue_report_index(report_id: int) -> TaskReceipt:
     )
 ```
 
+This route-neutral example does not make enqueue and receipt creation atomic. For a
+route known to use `RayTaskBackend`, place both inside one synchronous
+`transaction.atomic(using="default")` and write the receipt with `.using("default")`.
+The [transactional receipt contract](tasks.md#transactional-enqueue-and-application-receipts)
+defines rollback, savepoints, supported routers and external-input cleanup. This
+guarantee does not transfer to the Celery route or another database connection; use an
+outbox when a committed application receipt must reliably drive an external backend.
+
 Setting the flag back to `default` sends only later calls to Celery. It does not move,
 cancel, or reinterpret django-ray rows already recorded under `ray`. Likewise, setting
 it to `ray` does not consume Celery messages already published under `default`.

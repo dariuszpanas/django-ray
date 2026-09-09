@@ -324,12 +324,16 @@ def test_safe_first_production_path_is_discoverable_and_explicit() -> None:
         "will not execute when the worker restarts",
     ):
         assert required_expiration_boundary in normalized_queue_expiration
-    transaction_section = tasks.split("### Enqueue after a database commit", maxsplit=1)[1].split(
-        "## Priority", maxsplit=1
-    )[0]
-    transaction_sources = re.findall(r"```python\n(.*?)\n```", transaction_section, re.DOTALL)
-    assert len(transaction_sources) == 1
-    ast.parse(transaction_sources[0])
+    for heading in (
+        "Enqueue after a database commit",
+        "Transactional enqueue and application receipts",
+    ):
+        transaction_section = tasks.split(f"### {heading}", maxsplit=1)[1].split(
+            "### ", maxsplit=1
+        )[0]
+        transaction_sources = re.findall(r"```python\n(.*?)\n```", transaction_section, re.DOTALL)
+        assert len(transaction_sources) == 1
+        ast.parse(transaction_sources[0])
 
     normalized_retry = re.sub(r"\s+", " ", retry)
     assert "does not provide exactly-once execution" in normalized_retry

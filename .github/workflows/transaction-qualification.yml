@@ -1,0 +1,75 @@
+name: Transaction Qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/transaction-qualification.yml
+      - qualification/transactions/**
+      - qualification/docker/**
+      - tests/integration/test_transactional_enqueue.py
+      - src/django_ray/backends.py
+      - src/django_ray/input_storage.py
+      - pyproject.toml
+      - uv.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transaction-qualification-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  receipts:
+    if: github.event_name != 'pull_request_target'
+    name: Transaction Qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE_FILE: qualification/transactions/receipts.yaml
+      COMPOSE_PROJECT_NAME: transaction-qualification
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Prepare empty evidence directory and record source
+        run: |
+          export TRANSACTION_EVIDENCE_DIR="$RUNNER_TEMP/transaction-receipts"
+          mkdir -m 700 "$TRANSACTION_EVIDENCE_DIR"
+          sudo chown 10001:10001 "$TRANSACTION_EVIDENCE_DIR"
+          echo "TRANSACTION_EVIDENCE_DIR=$TRANSACTION_EVIDENCE_DIR" >> "$GITHUB_ENV"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/transaction-source.txt"
+          docker compose config --quiet
+
+      - name: Build the same-source installed-wheel fixture
+        timeout-minutes: 8
+        run: docker compose build receipts
+
+      - name: Prove all sixteen PostgreSQL transaction cases
+        run: |
+          set -o pipefail
+          timeout --signal=INT --kill-after=20s 300s \
+            docker compose run --rm receipts 2>&1 |
+            tee "$RUNNER_TEMP/transaction-execution.log"
+
+      - name: Remove owned test resources
+        if: always()
+        run: |
+          trap 'if [[ -d "$TRANSACTION_EVIDENCE_DIR" ]]; then sudo chown -R "$(id -u):$(id -g)" "$TRANSACTION_EVIDENCE_DIR"; fi' EXIT
+          docker compose down --timeout 20 --remove-orphans
+          test -z "$(docker ps -aq --filter label=com.docker.compose.project=transaction-qualification)"
+
+      - name: Retain bounded qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: transaction-qualification
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/transaction-receipts/
+            ${{ runner.temp }}/transaction-source.txt
+            ${{ runner.temp }}/transaction-execution.log

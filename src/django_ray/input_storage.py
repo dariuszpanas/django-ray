@@ -341,8 +341,14 @@ def prepare_task_input(
 def register_task_input(
     prepared: PreparedTaskInput,
     config: dict[str, Any] | None = None,
+    *,
+    using: str | None = None,
 ) -> TaskInputPayload | None:
-    """Register or reactivate an external input while the caller holds a transaction."""
+    """Register input in the caller's transaction, optionally binding its database.
+
+    Explicit ``using`` pins the lock, insertion and reactivation update to that
+    connection. Omitting it preserves the helper's existing router behavior.
+    """
     if not prepared.is_external:
         return None
     if (
@@ -369,17 +375,21 @@ def register_task_input(
         raise InputPayloadValidationError("Prepared task input metadata is inconsistent")
 
     now = timezone.now()
-    payload, created = TaskInputPayload.objects.select_for_update().get_or_create(
-        reference=prepared.input_reference,
-        defaults={
-            "payload_kind": InputPayloadKind.TASK_INPUT,
-            "backend": prepared.backend,
-            "digest": prepared.digest,
-            "size_bytes": prepared.size_bytes,
-            "envelope_version": prepared.envelope_version,
-            "state": InputPayloadState.ACTIVE,
-            "last_used_at": now,
-        },
+    payload, created = (
+        TaskInputPayload.objects.using(using)
+        .select_for_update()
+        .get_or_create(
+            reference=prepared.input_reference,
+            defaults={
+                "payload_kind": InputPayloadKind.TASK_INPUT,
+                "backend": prepared.backend,
+                "digest": prepared.digest,
+                "size_bytes": prepared.size_bytes,
+                "envelope_version": prepared.envelope_version,
+                "state": InputPayloadState.ACTIVE,
+                "last_used_at": now,
+            },
+        )
     )
     if not created:
         persisted_metadata = (
@@ -419,7 +429,7 @@ def register_task_input(
             payload.purged_at = None
             payload.cleanup_error = ""
             update_fields.extend(["state", "purged_at", "cleanup_error"])
-        payload.save(update_fields=update_fields)
+        payload.save(using=using, update_fields=update_fields)
     return payload
 
 

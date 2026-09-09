@@ -111,6 +111,7 @@ test-postgres:
 	python scripts/require_linux.py
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
+		tests/integration/test_transactional_enqueue.py \
 		tests/integration/test_postgresql_workflow_progress_storage.py \
 		tests/integration/test_postgresql_workflow_progress_reads.py \
 		tests/integration/test_postgresql_polling.py \
