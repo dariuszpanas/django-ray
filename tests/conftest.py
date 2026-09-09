@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 
 import django
@@ -12,6 +12,7 @@ import pytest
 from django.conf import settings
 
 from scripts.require_linux import require_linux
+from tests.local_ray import init_local_ray
 from tests.real_ray_ownership import (
     RealRayOwnershipLock,
     RealRayOwnershipPathError,
@@ -91,6 +92,28 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     except BaseException:
         ownership.release()
         raise
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """A skipped required local-Ray case cannot become passing runtime evidence."""
+    del call
+    report = yield
+    if (
+        report.skipped
+        and item.get_closest_marker("real_ray") is not None
+        and item.get_closest_marker("compiled_graph_opt_in") is None
+    ):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"Required local-Ray test must execute; skip/xfail is forbidden. "
+            f"Original outcome: {report.longrepr}"
+        )
+        if hasattr(report, "wasxfail"):
+            del report.wasxfail
+    return report
 
 
 def _release_real_ray_ownership(config: pytest.Config) -> None:
@@ -199,7 +222,7 @@ def ray_cluster() -> Iterator[object]:
     import ray
 
     assert not ray.is_initialized()
-    ray.init(address="local", include_dashboard=False, num_cpus=2)
+    init_local_ray(num_cpus=2)
     try:
         yield ray
     finally:

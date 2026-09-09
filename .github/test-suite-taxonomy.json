@@ -176,6 +176,7 @@
           "tests/unit/test_coverage_debt.py",
           "tests/unit/test_docs_theme.py",
           "tests/unit/test_makefile_test_targets.py",
+          "tests/unit/test_local_ray.py",
           "tests/unit/test_require_linux.py",
           "tests/unit/test_package_metadata.py",
           "tests/unit/test_release.py",

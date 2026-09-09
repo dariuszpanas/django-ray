@@ -13,7 +13,7 @@ import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from tests import conftest
+from tests import conftest, local_ray
 from tests.integration import test_live_failure_injection, test_task_execution
 
 
@@ -71,6 +71,12 @@ class _FakeRay:
         return self.node_inventory
 
 
+@pytest.fixture(autouse=True)
+def _resource_free_local_ray_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests replace Ray startup and inspect fixture ownership without Ray.
+    monkeypatch.setattr(local_ray, "require_linux", lambda: None)
+
+
 def test_required_local_ray_startup_error_fails_the_fixture(monkeypatch) -> None:
     startup_error = OSError("dashboard port is unavailable")
     shutdown_calls: list[bool] = []
@@ -119,8 +125,11 @@ def test_required_local_ray_uses_explicit_local_runtime_and_tears_down(
     assert init_calls == [
         {
             "address": "local",
+            "num_cpus": 2,
+            "num_gpus": 0,
+            "object_store_memory": local_ray.OBJECT_STORE_BYTES,
             "include_dashboard": True,
-            "dashboard_port": 8265,
+            "resources": None,
         }
     ]
     assert shutdown_calls == [True]

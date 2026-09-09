@@ -14,6 +14,8 @@ from typing import Any
 import pytest
 import ray
 
+from tests.local_ray import init_local_ray
+
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -36,9 +38,8 @@ def ray_cluster():
     if ray.is_initialized():
         raise RuntimeError("Required local Ray fixture found an initialized runtime")
     try:
-        ray.init(address="local", include_dashboard=True, dashboard_port=8265)
+        init_local_ray(include_dashboard=True)
     except Exception as exc:
-        ray.shutdown()
         raise RuntimeError("Required local Ray startup failed") from exc
     try:
         yield

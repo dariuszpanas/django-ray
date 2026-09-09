@@ -20,6 +20,7 @@ from django_ray.runtime import distributed, entrypoint
 from django_ray.runtime.context import durable_task_execution, get_current_task_context
 from django_ray.runtime.runtime_env import normalize_runtime_env
 from django_ray.workflow.plans import runtime_env_plan_identity
+from tests.local_ray import init_local_ray
 
 
 # Module-level functions for Ray tests (must be picklable)
@@ -231,10 +232,10 @@ class TestDistributedWithRay:
         """Initialize Ray for these tests."""
         import ray
 
-        if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
-        yield
-        if ray.is_initialized():
+        init_local_ray()
+        try:
+            yield
+        finally:
             ray.shutdown()
 
     def test_parallel_map_with_ray(self) -> None:

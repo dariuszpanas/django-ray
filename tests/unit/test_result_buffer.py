@@ -26,6 +26,7 @@ from django_ray.runtime.result_buffer import (
 )
 from django_ray.workflow.plans import WorkflowPlanValidationError
 from django_ray.workflows import _Executor, _RayExecutor, chain, map_step, step
+from tests.local_ray import init_local_ray
 
 SIDE_EFFECTS: list[int] = []
 
@@ -888,10 +889,7 @@ def test_buffered_map_cancellation_cleans_dependencies_and_actor(
 def test_real_ray_production_payload_stays_out_of_coordinator_until_reducer() -> None:
     import ray
 
-    ray.init(
-        ignore_reinit_error=True,
-        num_cpus=4,
-    )
+    init_local_ray(num_cpus=4)
     try:
         payload_bytes = 64 * 1024
         workflow = chain(
@@ -930,7 +928,7 @@ def test_real_ray_overflow_stops_admission_and_preserves_actor_error() -> None:
     import ray
     from ray.exceptions import RayTaskError
 
-    ray.init(ignore_reinit_error=True, num_cpus=3)
+    init_local_ray(num_cpus=3)
     try:
         tracker = ray.remote(num_cpus=0)(_RealEventTracker).remote()
         workflow = chain(
@@ -957,13 +955,7 @@ def test_real_ray_actor_resources_direct_returns_and_success_cleanup() -> None:
     from ray.exceptions import RayActorError
     from ray.util.state import get_actor
 
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(
-        address="local",
-        num_cpus=2,
-        resources={"result_buffer": 1},
-    )
+    init_local_ray(num_cpus=2, include_dashboard=True, resources={"result_buffer": 1})
     try:
         options = normalize_result_buffer_actor_options(
             {
@@ -1029,7 +1021,7 @@ def test_real_ray_non_detached_buffer_dies_with_owner() -> None:
     import ray
     from ray.exceptions import RayActorError, RayTaskError
 
-    ray.init(ignore_reinit_error=True, num_cpus=2)
+    init_local_ray(num_cpus=2)
     try:
         owner = ray.remote(num_cpus=0.1)(_ResultBufferOwner).remote()
         child = ray.get(owner.spawn.remote())

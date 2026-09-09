@@ -119,6 +119,30 @@ Collection also enforces that `compiled_graph_opt_in` implies `real_ray`. This k
 capability probe out of in-process lanes while allowing required local-Ray evidence to remain
 fail-closed.
 
+### Local Ray allocation and limits
+
+All test-owned local Ray initializers use `tests/local_ray.py`: an explicit new local runtime,
+two logical CPUs by default, zero GPUs, and a 128 MiB object store. Scheduling scenarios may request
+up to four logical CPUs and their existing custom resources. The dashboard is disabled unless a
+test requires the Jobs or State API. A pre-existing runtime fails initialization instead of being
+reused or stopped; failed startup cleans up the runtime being created, and the owning test or
+fixture shuts it down after execution. The separate live-cluster fixture connects only to its
+explicitly configured external address.
+
+Every required `real_ray` case must execute. A skip or xfail fails ordinary pytest as well as
+manifest-backed observations, including setup-time skips and every supported Python lane. The
+explicit `compiled_graph_opt_in` exception retains its capability skip. The supported-Python
+Actions jobs have a 20-minute ceiling, including setup, tests, evidence and coverage checks.
+
+Ray logical CPU allocation and object-store size are not an OS CPU or total-memory limit; see
+[Ray's initialization parameters](https://docs.ray.io/en/latest/ray-core/api/doc/ray.init.html).
+They do not bound worker heaps, process count, spill files or the entire local command's wall time.
+An admitted Linux workload still needs enforced CPU, RAM, PID, shared-memory, scratch and timeout
+limits plus observable owned cleanup. That remaining work is tracked in
+[#469](https://github.com/dariuszpanas/django-ray/issues/469). Do not run a broad suite on a workstation
+merely because these Ray settings are present. Keep owner-death, cold-start and teardown scenarios
+isolated; measure compatible fixture reuse before changing their lifetime.
+
 A boundary such as `bundled-testproject` intentionally overlaps an execution contract: it answers
 which product surface is being proven, while the execution contract answers what resources the case
 consumes. `portable-local` is a measurement profile, not a product boundary or CI topology promise.

@@ -147,6 +147,7 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
