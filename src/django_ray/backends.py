@@ -41,6 +41,11 @@ from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.exceptions import TaskResultDoesNotExist
 
 from django_ray import __version__ as django_ray_version
+from django_ray._result_tasks import (
+    _project_result_task,
+    _register_validated_task,
+    _require_executable_task,
+)
 from django_ray.conf.defaults import QUEUE_TIMEOUT_SECONDS_MAX
 from django_ray.conf.settings import get_settings
 from django_ray.execution_protocol import (
@@ -210,6 +215,12 @@ class RayTaskBackend(BaseTaskBackend):
                 "django-ray: TASKS backend OPTIONS['RAY_JOB_ONLY'] must be a boolean"
             )
 
+    def validate_task(self, task: Task) -> None:
+        """Validate an application declaration before trusting its identity."""
+        _require_executable_task(task)
+        super().validate_task(task)
+        _register_validated_task(self.alias, task)
+
     def enqueue(
         self,
         task: Task,
@@ -230,6 +241,7 @@ class RayTaskBackend(BaseTaskBackend):
         Returns:
             TaskResult object with task status and metadata
         """
+        _require_executable_task(task)
         # The database is the authority for uniqueness. UUIDv4 keeps collisions
         # vanishingly rare, while the bounded retry below makes a collision a
         # recoverable allocation event instead of an ambiguous durable identity.
@@ -345,7 +357,7 @@ class RayTaskBackend(BaseTaskBackend):
         except RayTaskExecution.DoesNotExist:
             raise TaskResultDoesNotExist(f"Task result {result_id} does not exist") from None
 
-        # Reconstruct the Task object from the execution record
+        # Project identity without importing application code selected by a row.
         task = self._reconstruct_task(execution)
 
         return self._execution_to_result(execution, task)
@@ -462,25 +474,11 @@ class RayTaskBackend(BaseTaskBackend):
         return result
 
     def _reconstruct_task(self, execution: RayTaskExecution) -> Task:
-        """Reconstruct a Django Task object from an execution record.
-
-        Args:
-            execution: The database execution record
-
-        Returns:
-            Task object
-        """
-        from django.tasks.base import Task
-
-        # Import the function from the callable path
-        from django_ray.runtime.import_utils import import_callable
-
-        func = import_callable(execution.callable_path)
-
-        return Task(
+        """Build a read-only Task while preserving trusted function identity."""
+        return _project_result_task(
+            alias=self.alias,
+            callable_path=execution.callable_path,
             priority=execution.priority,
-            func=func,
-            backend=self.alias,
             queue_name=execution.queue_name,
             run_after=execution.run_after,
         )

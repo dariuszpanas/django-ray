@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade from 0.4.0
 
+- Durable backend result reads no longer import stored callable paths. They remain
+  readable after a callable or queue is removed and preserve matching-task checks
+  using successfully validated application declarations. Fetched results now contain
+  read-only Task projections: execute new work through an explicit application Task,
+  and persist a backend-alias/result-ID receipt instead of pickling a fetched Task or
+  TaskResult. See [historical result reads](tasks.md#historical-result-reads).
 - Private flat workflow and target implementation imports have moved without compatibility
   shims while the project remains Beta. Replace `django_ray.workflow_plans` with
   `django_ray.workflow.plans`, `django_ray.admin_workflow_graph` with
