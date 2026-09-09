@@ -588,6 +588,12 @@ def get_tracked_result(receipt_id: int):
     return backend.get_result(receipt.task_id)
 ```
 
+This backend read remains usable after a callable is removed or renamed. It does not
+import the stored callable path. Its attached Task is a read-only projection; retain
+the receipt rather than pickling the result, and use an explicit current Task
+declaration to enqueue new work. See [historical result reads](tasks.md#historical-result-reads)
+for matching-task identity and the migration from executable fetched Task objects.
+
 Calling `add_numbers.get_result(task_id)` instead would use the task definition's
 current backend, which may differ from a per-submission override. Result retrieval also
 depends on the selected backend's capabilities. The Celery route needs the configured

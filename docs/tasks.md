@@ -344,6 +344,57 @@ matching snapshot from the task definition:
 current = send_email.get_result(enqueued.id)
 ```
 
+### Historical result reads
+
+`get_result()`, `aget_result()`, `refresh()`, and `arefresh()` treat a stored callable
+path as identity metadata. They do not import that application module, discover task
+modules, or look up an attribute on a row-selected module. A terminal result remains
+readable after its callable or queue is removed. Read-only inspection still loads
+application arguments and results through the existing validated storage loaders;
+it is not a storage-free monitoring API.
+
+Matching `send_email.get_result(id)` calls preserve Django's function identity check.
+django-ray remembers functions from successful application Task validation, including
+ordinary `@task` declarations, and shares those identities across the async backend
+bridge. An already retained Task can read its result after its module attribute is
+removed. A different task still raises `TaskResultMismatch`. If application code
+validates a new function at the same backend alias and dotted path, that latest
+validation owns the identity; an older function will mismatch until explicitly
+validated again. Treat reloads and task renames as application deployment changes.
+
+When no current declaration exists, use the original backend alias to inspect the
+historical result without importing the old task:
+
+```python
+from django.tasks import task_backends
+
+current = task_backends[receipt.backend_alias].get_result(receipt.task_id)
+print(current.status, current.task.module_path)
+```
+
+The `task` attached to a fetched result is a **read-only Task projection**, including
+when its function is known. Its stored path, name, backend, priority, queue, and
+schedule remain inspectable. Unknown functions are inert identities; they cannot
+execute application code. Reads do not register unknown paths, and the identity
+registry holds weak references to trusted functions rather than retaining a history
+of results or keeping application functions alive. A projection may retain a known
+function for as long as that result object is held by the caller.
+
+**Migration from 0.4:** do not call `current.task.enqueue()`, `aenqueue()`, `call()`,
+`acall()`, or `using()`. These operations raise `TypeError`. Copying the fetched Task,
+deep-copying its TaskResult, or pickling either object is also refused; reconstruction
+must not turn stored metadata into an import.
+Keep a receipt containing the backend alias and result ID, then fetch it again. To
+execute new work, explicitly use your current application Task declaration and
+validated inputs. The object returned directly by `enqueue()` still contains that
+original application Task, and refreshing its status does not replace it.
+
+Worker-time callable loading and execution remain unchanged. Import-free result reads
+are not an application-code sandbox: a known projection's `func` is the already
+trusted function, and Python callers retain their usual ability to execute their own
+code. No historical execution configuration, including `takes_context`, should be
+inferred from a read projection for re-enqueue.
+
 Successful `TaskResult.return_value`, arguments, and keyword arguments are application
 data returned to the Python caller. Failed results expose one ordinary operational
 projection through `TaskResult.errors`: terminal controls are made inert and configured
