@@ -924,6 +924,81 @@ class TestWorkerCommandRuntime:
         assert polls == pytest.approx([0.0, 0.1, 0.2, 0.3])
         assert claims == [0.0]
 
+    def test_ray_job_completion_frees_capacity_before_the_recovery_clock(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd.execution_mode = "ray"
+        clock = FakeClock()
+        cmd.polling_policy = AdaptivePollingPolicy(
+            base_interval_seconds=0.5,
+            max_interval_seconds=10.0,
+            random_value=lambda: 0.0,
+        )
+        admitted: list[float] = []
+        polls: list[float] = []
+        recoveries: list[float] = []
+
+        def claim(_queues, _concurrency):
+            if cmd.active_tasks:
+                return 0
+            admitted.append(clock.now)
+            cmd.active_tasks[1] = "raysubmit_pending"
+            if len(admitted) == 2:
+                cmd.shutdown_requested = True
+            return 1
+
+        def poll():
+            polls.append(clock.now)
+            # Fake I/O: the remote completion was durable after 50 ms.
+            if clock.now >= 0.05:
+                cmd.active_tasks.clear()
+                return 1
+            return 0
+
+        def recover(_queues):
+            recoveries.append(clock.now)
+            if clock.now >= 30:
+                cmd.active_tasks.clear()
+            return 0
+
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: None)
+        monkeypatch.setattr(cmd, "claim_and_process_tasks", claim)
+        monkeypatch.setattr(cmd, "poll_ray_job_completions", poll, raising=False)
+        monkeypatch.setattr(cmd, "reconcile_tasks", recover)
+        monkeypatch.setattr(cmd, "detect_stuck_tasks", lambda _queues: 0)
+        monkeypatch.setattr(cmd, "process_cancellations", lambda _queues: 0)
+        monkeypatch.setattr(cmd, "cleanup_expired_leases", lambda: 0)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.monotonic", clock.monotonic
+        )
+        monkeypatch.setattr(cmd, "_wait_for_poll_deadline", clock.sleep)
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
+
+        assert admitted == pytest.approx([0.0, 0.25])
+        assert polls == pytest.approx([0.0, 0.25])
+        assert recoveries == [0.0]
+
+    def test_shutdown_during_job_receipt_poll_prevents_the_advanced_claim(
+        self, monkeypatch
+    ) -> None:
+        cmd = _make_command()
+        cmd.execution_mode = "ray"
+        cmd.active_tasks = {1: "raysubmit_pending"}
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: None)
+
+        def poll():
+            cmd.shutdown_requested = True
+            return 1
+
+        monkeypatch.setattr(cmd, "poll_ray_job_completions", poll)
+        monkeypatch.setattr(
+            cmd,
+            "claim_and_process_tasks",
+            lambda *_args: pytest.fail("shutdown must precede a newly freed claim"),
+        )
+
+        cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
+
     def test_reconciliation_timeout_and_cleanup_have_independent_deadlines(
         self, monkeypatch
     ) -> None:

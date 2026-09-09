@@ -10,6 +10,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from heapq import nsmallest
 from threading import Event
 from types import FrameType
 from typing import Any
@@ -170,6 +171,9 @@ class Command(BaseCommand):
         self.task_monitor_heartbeat_interval = 15.0
         self.last_task_monitor_heartbeat = 0.0
         self.completion_poll_interval = 0.1
+        self.ray_job_completion_poll_interval = 0.25
+        self._ray_job_completion_cursor = 0
+        self._ray_job_completion_cycle_end = 0
         self.poll_base_interval = 0.1
         self.poll_max_interval = 0.1
         self.polling_policy = self._new_polling_policy()
@@ -910,6 +914,7 @@ class Command(BaseCommand):
         now = time.monotonic()
         next_heartbeat = now
         next_completion_poll = now
+        next_ray_job_completion_poll = now
         next_claim = now
         next_reconciliation = now
         next_timeout_check = now
@@ -940,6 +945,22 @@ class Command(BaseCommand):
 
             # A signal may arrive while heartbeat/polling is in progress.  Do
             # not claim another task once shutdown has begun.
+            if self.shutdown_requested:
+                break
+
+            if (
+                current_time >= next_ray_job_completion_poll
+                and self.active_tasks
+                and not self.sync_mode
+            ):
+                completed = self.poll_ray_job_completions()
+                activity = bool(completed) or activity
+                # An exact durable completion frees a slot now, even when an
+                # earlier saturated claim backed off past this poll deadline.
+                claim_due = bool(completed) or claim_due
+                next_ray_job_completion_poll = (
+                    time.monotonic() + self.ray_job_completion_poll_interval
+                )
             if self.shutdown_requested:
                 break
 
@@ -997,6 +1018,8 @@ class Command(BaseCommand):
                 and getattr(self.ray_core_runner, "pending_count", 0) > 0
             ):
                 deadlines.append(next_completion_poll)
+            if self.active_tasks and not self.sync_mode:
+                deadlines.append(next_ray_job_completion_poll)
 
             sleep_seconds = max(0.0, min(deadlines) - time.monotonic())
             self._wait_for_poll_deadline(sleep_seconds)
@@ -3521,6 +3544,7 @@ class Command(BaseCommand):
         completed_tasks: list[int],
         orphaned: bool,
         tracked_identity: tuple[int, int] | None = None,
+        completion_only: bool = False,
     ) -> None:
         """Reconcile a single Ray Job task from either active or orphaned tracking."""
         from django_ray.runner.base import JobStatus
@@ -3550,6 +3574,8 @@ class Command(BaseCommand):
         # Older or deliberately handed-off rows may be ownerless while this
         # process still has their exact durable Ray Job capability in memory.
         # Claim that row before the first reconciliation effect.
+        if completion_only and task.claimed_by_worker is None:
+            return
         if task.claimed_by_worker is None and not self._adopt_orphaned_ray_job_task(
             task,
             now=datetime.now(UTC),
@@ -3670,9 +3696,10 @@ class Command(BaseCommand):
         # before contacting Ray so a control-plane outage cannot strand a task
         # whose terminal result is already safely persisted.
         completion_consumed, completion_inspection = consume_valid_completion(task.completion_data)
-        if completion_consumed:
+        if completion_consumed or completion_only:
             return
 
+        assert runner is not None
         job_info = runner.get_status(handle)
         now = datetime.now(UTC)
 
@@ -4161,6 +4188,90 @@ class Command(BaseCommand):
     def _request_timeout_cancellation(self, task: RayTaskExecution) -> CancellationOutcome:
         """Stop a timed-out execution by its exact recorded backend identity."""
         return self._request_cancellation_for_task(task)
+
+    def poll_ray_job_completions(self) -> int:
+        """Consume at most 32 active durable receipts without a Ray control RPC.
+
+        Advance by primary key so a pending prefix cannot starve later active
+        tasks. The selection walks in-memory tracking but retains only one
+        bounded batch and sends at most 32 primary keys to the database.
+        Orphan adoption and absent/malformed receipts stay on the recovery clock.
+        """
+        if self.sync_mode or self.shutdown_requested or not self.active_tasks:
+            return 0
+
+        task_ids = nsmallest(
+            32,
+            (
+                task_pk
+                for task_pk in self.active_tasks
+                if self._ray_job_completion_cursor < task_pk <= self._ray_job_completion_cycle_end
+            ),
+        )
+        if not task_ids:
+            # Freeze each cycle's upper bound. A continuous stream of newly
+            # claimed rows cannot postpone revisiting the older pending rows.
+            self._ray_job_completion_cycle_end = max(self.active_tasks)
+            task_ids = nsmallest(32, self.active_tasks)
+        self._ray_job_completion_cursor = task_ids[-1]
+        tracking = {
+            task_pk: (self.active_tasks[task_pk], self.active_task_identities[task_pk])
+            for task_pk in task_ids
+            if task_pk in self.active_task_identities
+        }
+        if not tracking:
+            return 0
+
+        completed_tasks: list[int] = []
+        try:
+            # This is only a bounded candidate read. Receipt consumption below
+            # still locks the exact live lease and rechecks its protocol range
+            # before decoding or mutating the task. Pending work costs one read
+            # without repeatedly locking leases or rewriting heartbeats.
+            tasks = RayTaskExecution.objects.filter(
+                pk__in=tracking,
+                completion_data__isnull=False,
+            ).only(
+                "pk",
+                "task_id",
+                "state",
+                "claimed_by_worker",
+                "attempt_number",
+                "execution_generation",
+                "execution_protocol_version",
+                "ray_job_id",
+                "ray_address",
+                "started_at",
+                "last_heartbeat_at",
+                "completion_data",
+            )
+            for task in tasks:
+                if self.shutdown_requested:
+                    break
+                ray_job_id, tracked_identity = tracking[task.pk]
+                try:
+                    self._reconcile_ray_job_task(
+                        task,
+                        None,
+                        ray_job_id=ray_job_id,
+                        completed_tasks=completed_tasks,
+                        orphaned=False,
+                        tracked_identity=tracked_identity,
+                        completion_only=True,
+                    )
+                except Exception as error:
+                    diagnostic = render_console_diagnostic(error)
+                    self.stdout.write(
+                        self.style.ERROR(
+                            f"\nError consuming task {task.pk} completion: {diagnostic}"
+                        )
+                    )
+        except Exception as error:
+            diagnostic = render_console_diagnostic(error)
+            self.stdout.write(
+                self.style.ERROR(f"\nError polling Ray Job completions: {diagnostic}")
+            )
+        return len(completed_tasks)
 
     def reconcile_tasks(self, queues: Sequence[str] | None = None) -> int:
         """Reconcile Ray Jobs, optionally fencing orphan adoption by queue.

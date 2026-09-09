@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Cancellation does not prove quiescence, undo effects, or authorize
   automatic replay; the helpers add no blocking result drain.
 
+### Ray Job completion polling
+
+- Active Ray Jobs check durable completion receipts on a separate 250 ms schedule in fair
+  batches of up to 32 tracked identities. Valid receipts release capacity before the slower
+  recovery scan, without Jobs API polling or idle database queries. Existing lease, protocol,
+  attempt, generation and cancellation fences still govern persistence and retry. Blocking
+  database/storage work or recovery RPCs can still delay the single worker loop.
+
 ### Platform validation
 
 - Linux is the supported execution target. Broad Make test commands and direct pytest selections

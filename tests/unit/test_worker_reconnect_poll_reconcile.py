@@ -5723,7 +5723,10 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk not in cmd.active_tasks
         assert "automatic retry was suppressed" in cmd.stdout.getvalue()
 
-    def test_reconcile_consumes_valid_completion_before_status_rpc(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("poll_method", ["reconcile_tasks", "poll_ray_job_completions"])
+    def test_reconcile_consumes_valid_completion_before_status_rpc(
+        self, monkeypatch, poll_method
+    ) -> None:
         task = RayTaskExecution.objects.create(
             task_id="reconcile-unknown-valid-completion-001",
             callable_path="testproject.tasks.add_numbers",
@@ -5752,12 +5755,330 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
         monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
-        cmd.reconcile_tasks()
+        getattr(cmd, poll_method)()
 
         task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
         assert task.result_data == "3"
         assert task.pk not in cmd.active_tasks
+
+    @pytest.mark.parametrize("job_id", [_strict_ray_job_id(), _rq2_ray_job_id()])
+    @pytest.mark.parametrize("success", [True, False])
+    def test_fast_job_receipt_uses_exact_completion_without_constructing_a_runner(
+        self, monkeypatch, job_id, success
+    ) -> None:
+        cmd = _make_command()
+        task = RayTaskExecution.objects.create(
+            task_id="fast-exact-receipt",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            ray_job_id=job_id,
+            attempt_number=2,
+            execution_generation=7,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        task.completion_data = _versioned_completion_json(
+            task, success=success, error="expected failure", retryable=False
+        )
+        task.save(update_fields=["completion_data"])
+        cmd.active_tasks = {task.pk: job_id}
+        cmd.active_task_identities = {task.pk: (2, 7)}
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.RayJobRunner",
+            lambda: pytest.fail("fast receipt polling must not construct a Ray control client"),
+        )
+        monkeypatch.setattr(
+            "django_ray.runner.leasing.get_active_workers",
+            lambda: pytest.fail("fast receipt polling must not scan for orphans"),
+        )
+
+        assert cmd.poll_ray_job_completions() == 1
+
+        task.refresh_from_db()
+        assert task.state == (TaskState.SUCCEEDED if success else TaskState.FAILED)
+        assert task.result_data == ("3" if success else None)
+        assert task.pk not in cmd.active_tasks
+        assert task.pk not in cmd.active_task_identities
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"attempt_number": 3},
+            {"execution_generation": 8},
+            {"claimed_by_worker": "replacement"},
+            {"claimed_by_worker": None},
+            {"ray_job_id": _rq2_ray_job_id("b")},
+            {"state": TaskState.CANCELLING},
+            pytest.param(
+                {"execution_protocol_version": 2}, marks=pytest.mark.django_db(transaction=True)
+            ),
+            {"completion_data": "{malformed"},
+            {"completion_data": None},
+        ],
+    )
+    def test_fast_job_receipt_does_not_rewrite_replaced_or_untrusted_work(
+        self, monkeypatch, change
+    ) -> None:
+        if "execution_protocol_version" in change:
+            close_legacy_worker_admission(expected_revision=1, legacy_producers_retired=True)
+        cmd = _make_command()
+        task = RayTaskExecution.objects.create(
+            task_id="fast-replaced-receipt",
+            execution_protocol_version=change.get("execution_protocol_version", 1),
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            ray_job_id=_rq2_ray_job_id(),
+            attempt_number=2,
+            execution_generation=7,
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        task.completion_data = (
+            "unsupported receipt"
+            if "execution_protocol_version" in change
+            else _versioned_completion_json(task)
+        )
+        task.save(update_fields=["completion_data"])
+        cmd.active_tasks = {task.pk: str(task.ray_job_id)}
+        cmd.active_task_identities = {task.pk: (2, 7)}
+        mutable_change = {
+            key: value for key, value in change.items() if key != "execution_protocol_version"
+        }
+        if mutable_change:
+            RayTaskExecution.objects.filter(pk=task.pk).update(**mutable_change)
+        monkeypatch.setattr(
+            cmd,
+            "_adopt_orphaned_ray_job_task",
+            lambda *_args, **_kwargs: pytest.fail("fast polling must not adopt an ownerless row"),
+        )
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.RayJobRunner",
+            lambda: pytest.fail("missing or untrusted receipts must not contact Ray"),
+        )
+
+        assert cmd.poll_ray_job_completions() == 0
+
+        task.refresh_from_db()
+        assert task.state == change.get("state", TaskState.RUNNING)
+        assert task.result_data is None
+        assert task.finished_at is None
+        assert "Error consuming" not in cmd.stdout.getvalue()
+        for field, expected in change.items():
+            assert getattr(task, field) == expected
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"execution_generation": 8},
+            {"claimed_by_worker": "replacement"},
+            {"completion_data": None},
+            {"state": TaskState.CANCELLING},
+        ],
+    )
+    def test_fast_receipt_rechecks_mutation_fences_after_candidate_read(
+        self, monkeypatch, change
+    ) -> None:
+        cmd = _make_command()
+        task = RayTaskExecution.objects.create(
+            task_id="fast-receipt-late-race",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            ray_job_id=_rq2_ray_job_id(),
+            attempt_number=2,
+            execution_generation=7,
+        )
+        task.completion_data = _versioned_completion_json(task)
+        task.save(update_fields=["completion_data"])
+        cmd.active_tasks = {task.pk: str(task.ray_job_id)}
+        cmd.active_task_identities = {task.pk: (2, 7)}
+        reconcile = cmd._reconcile_ray_job_task
+
+        def race(snapshot, runner, **options):
+            RayTaskExecution.objects.filter(pk=task.pk).update(**change)
+            return reconcile(snapshot, runner, **options)
+
+        monkeypatch.setattr(cmd, "_reconcile_ray_job_task", race)
+
+        assert cmd.poll_ray_job_completions() == 0
+
+        task.refresh_from_db()
+        assert task.state == change.get("state", TaskState.RUNNING)
+        assert task.result_data is None
+        assert task.finished_at is None
+        assert "Error consuming" not in cmd.stdout.getvalue()
+
+    def test_fast_receipt_losing_lease_after_read_cannot_terminalize(self, monkeypatch) -> None:
+        cmd = _make_command()
+        task = RayTaskExecution.objects.create(
+            task_id="fast-receipt-late-lease-loss",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            ray_job_id=_rq2_ray_job_id(),
+            attempt_number=2,
+            execution_generation=7,
+        )
+        task.completion_data = _versioned_completion_json(task)
+        task.save(update_fields=["completion_data"])
+        cmd.active_tasks = {task.pk: str(task.ray_job_id)}
+        cmd.active_task_identities = {task.pk: (2, 7)}
+        reconcile = cmd._reconcile_ray_job_task
+
+        def lose_lease(snapshot, runner, **options):
+            TaskWorkerLease.objects.filter(worker_id=cmd.worker_id).update(is_active=False)
+            return reconcile(snapshot, runner, **options)
+
+        monkeypatch.setattr(cmd, "_reconcile_ray_job_task", lose_lease)
+
+        assert cmd.poll_ray_job_completions() == 0
+
+        task.refresh_from_db()
+        assert cmd.shutdown_requested is True
+        assert task.state == TaskState.RUNNING
+        assert task.result_data is None
+        assert task.finished_at is None
+
+    def test_fast_receipt_database_error_keeps_tracking_for_recovery(self, monkeypatch) -> None:
+        cmd = _make_command()
+        cmd.active_tasks = {999: "raysubmit_pending"}
+        cmd.active_task_identities = {999: (2, 7)}
+
+        def unavailable(**_filters):
+            raise OSError("candidate read unavailable")
+
+        monkeypatch.setattr(RayTaskExecution.objects, "filter", unavailable)
+
+        assert cmd.poll_ray_job_completions() == 0
+        assert cmd.active_tasks == {999: "raysubmit_pending"}
+        assert cmd.active_task_identities == {999: (2, 7)}
+        assert "Error polling Ray Job completions" in cmd.stdout.getvalue()
+
+    @pytest.mark.parametrize("interrupt", ["candidate-error", "shutdown"])
+    def test_fast_receipt_batch_contains_candidate_error_and_obeys_shutdown(
+        self, monkeypatch, interrupt
+    ) -> None:
+        cmd = _make_command()
+        tasks = []
+        for index in range(2):
+            task = RayTaskExecution.objects.create(
+                task_id=f"fast-receipt-interrupt-{index}",
+                callable_path="testproject.tasks.add_numbers",
+                state=TaskState.RUNNING,
+                claimed_by_worker=cmd.worker_id,
+                ray_job_id=_rq2_ray_job_id(str(index)),
+                attempt_number=2,
+                execution_generation=7,
+            )
+            task.completion_data = _versioned_completion_json(task)
+            task.save(update_fields=["completion_data"])
+            tasks.append(task)
+        cmd.active_tasks = {task.pk: str(task.ray_job_id) for task in tasks}
+        cmd.active_task_identities = {task.pk: (2, 7) for task in tasks}
+        reconcile = cmd._reconcile_ray_job_task
+        observed: list[int] = []
+
+        def consume(snapshot, runner, **options):
+            observed.append(snapshot.pk)
+            if len(observed) == 1:
+                if interrupt == "candidate-error":
+                    raise ValueError("one candidate could not be consumed")
+                cmd.shutdown_requested = True
+                return
+            return reconcile(snapshot, runner, **options)
+
+        monkeypatch.setattr(cmd, "_reconcile_ray_job_task", consume)
+
+        assert cmd.poll_ray_job_completions() == (1 if interrupt == "candidate-error" else 0)
+        assert len(observed) == (2 if interrupt == "candidate-error" else 1)
+        assert observed[0] in cmd.active_tasks
+        if interrupt == "candidate-error":
+            assert observed[1] not in cmd.active_tasks
+            assert "Error consuming" in cmd.stdout.getvalue()
+
+    @pytest.mark.parametrize("mode", ["idle", "sync", "shutdown", "missing-identity"])
+    def test_fast_job_receipt_has_no_idle_or_shutdown_database_cost(
+        self, mode, django_assert_num_queries
+    ) -> None:
+        cmd = _make_command()
+        if mode != "idle":
+            cmd.active_tasks = {999: "raysubmit_unconfirmed"}
+        cmd.sync_mode = mode == "sync"
+        cmd.shutdown_requested = mode == "shutdown"
+
+        with django_assert_num_queries(0):
+            assert cmd.poll_ray_job_completions() == 0
+
+    def test_fast_job_receipt_fair_batches_bound_queries_and_skip_pending_prefix(
+        self, monkeypatch, django_assert_num_queries
+    ) -> None:
+        cmd = _make_command()
+        tasks = RayTaskExecution.objects.bulk_create(
+            [
+                RayTaskExecution(
+                    task_id=f"fast-batch-{index}",
+                    callable_path="testproject.tasks.add_numbers",
+                    state=TaskState.RUNNING,
+                    claimed_by_worker=cmd.worker_id,
+                    ray_job_id=f"raysubmit_batch_{index}",
+                    attempt_number=2,
+                    execution_generation=7,
+                    completion_data=None if index < 32 else "receipt",
+                )
+                for index in range(66)
+            ]
+        )
+        cmd.active_tasks = {task.pk: str(task.ray_job_id) for task in reversed(tasks)}
+        cmd.active_task_identities = {task.pk: (2, 7) for task in tasks}
+        # Candidate discovery has one query; authoritative consumption owns its
+        # separate lease and task locks and is exercised by the receipt tests.
+        observed: list[int] = []
+
+        def consume(task, runner, **options):
+            assert runner is None
+            assert {"args_json", "kwargs_json", "runtime_env_json", "result_data"}.issubset(
+                task.get_deferred_fields()
+            )
+            assert options["completion_only"] is True
+            assert options["orphaned"] is False
+            assert options["tracked_identity"] == (2, 7)
+            observed.append(task.pk)
+
+        monkeypatch.setattr(cmd, "_reconcile_ray_job_task", consume)
+        per_pass: list[int] = []
+        for pass_index in range(4):
+            if pass_index == 1:
+                new_tasks = RayTaskExecution.objects.bulk_create(
+                    [
+                        RayTaskExecution(
+                            task_id=f"fast-new-arrival-{index}",
+                            callable_path="testproject.tasks.add_numbers",
+                            state=TaskState.RUNNING,
+                            claimed_by_worker=cmd.worker_id,
+                            ray_job_id=f"raysubmit_new_arrival_{index}",
+                            attempt_number=2,
+                            execution_generation=7,
+                            completion_data="receipt",
+                        )
+                        for index in range(32)
+                    ]
+                )
+                cmd.active_tasks.update({task.pk: str(task.ray_job_id) for task in new_tasks})
+                cmd.active_task_identities.update({task.pk: (2, 7) for task in new_tasks})
+            if pass_index == 3:
+                RayTaskExecution.objects.filter(pk__in=[task.pk for task in tasks[:32]]).update(
+                    completion_data="receipt"
+                )
+            before = len(observed)
+            with django_assert_num_queries(1):
+                assert cmd.poll_ray_job_completions() == 0
+            per_pass.append(len(observed) - before)
+
+        assert per_pass == [0, 32, 2, 32]
+        assert set(observed) == {task.pk for task in tasks}
 
     def test_reconcile_stale_unknown_orphan_with_malformed_completion_stops_exact_id(
         self, monkeypatch
