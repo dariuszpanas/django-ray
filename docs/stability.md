@@ -5,6 +5,45 @@ provide migrations, but they do not yet make the complete source-compatibility p
 described on this page. This page defines the **candidate contract for 1.0** so it can
 be reviewed and tested before the Beta classifier is removed.
 
+## Coordinated beta upgrades
+
+The supported upgrade model for the remaining Beta releases is a coordinated,
+stopped-writer upgrade. Mixed-version task managers, rolling execution handoff and
+continued execution of old payload formats are outside that product commitment.
+Ray Jobs remains a supported current execution mode.
+
+For each Beta release, document and rehearse this order:
+
+1. Stop submissions, schedules and other producers. Drain queued and running work
+   using the old version. Resolve uncertain outcomes explicitly; do not silently
+   delete or replay work to make the upgrade proceed.
+2. Back up the database and referenced input, result, workflow and RuntimeEnv
+   artifacts. Verify an independent restore before applying migrations.
+3. Stop old writers, task managers and cleanup processes. Apply the documented
+   migrations and update the package, managers and compatible Ray/Python cluster
+   tuple together.
+4. Verify historical task/result readability and run a bounded current-version
+   execution smoke test before reopening submissions.
+
+Preserved data and execution compatibility are separate obligations. Terminal
+history and supported durable formats remain readable. Unsupported execution
+formats must remain visible and reject before application invocation; they must
+not be relabeled, automatically replayed or silently deleted. Current-version
+ownership, attempt/generation fencing, cancellation and crash reconciliation
+remain required. Recovery never implies exactly-once external side effects.
+
+Each release must state its rollback boundary. A code-only rollback is supported
+only when rehearsed for those migrations and stored formats. Restoring the
+pre-upgrade backup after accepting new writes loses those writes; it is not an
+automatic or lossless rollback.
+
+Existing drain-window readers are transitional implementation, not a renewed
+mixed-version support promise. Retire their execution acceptance in a focused
+change at the announced Beta release boundary, after inventorying old writers,
+readers and purgers and proving preserved-data migration/readability. This policy
+does not itself remove code or migrate an adopter database. Future rolling or
+two-cluster upgrades require a separate product decision and qualification.
+
 ## Contract classes
 
 Every adopter-facing surface belongs to one of these classes:
