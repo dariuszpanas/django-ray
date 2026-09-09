@@ -87,23 +87,28 @@ audit-dependencies:
 
 # Run all tests
 test:
+	python scripts/require_linux.py
 	pytest
 
 # Run the default-resource local subset with ordinary pytest-xdist.
 test-xdist:
+	python scripts/require_linux.py
 	pytest -n $(TEST_XDIST_WORKERS) --max-worker-restart=0 \
 		-m "not real_ray and not live_cluster and not postgresql"
 
 # Run unit tests only
 test-unit:
+	python scripts/require_linux.py
 	pytest tests/unit/ -v
 
 # Run integration tests only
 test-integration:
+	python scripts/require_linux.py
 	pytest tests/integration/ -v
 
 # Exercise database coordination against a real PostgreSQL server.
 test-postgres:
+	python scripts/require_linux.py
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
 		tests/integration/test_postgresql_workflow_progress_storage.py \
@@ -130,6 +135,7 @@ test-postgres:
 
 # Validate the bundled sample project's user-facing boundary
 test-testproject:
+	python scripts/require_linux.py
 	python testproject/manage.py check
 	pytest tests/integration/test_api.py \
 		tests/integration/test_testproject_admin_theme.py \
@@ -146,6 +152,7 @@ test-testproject:
 
 # Run tests with coverage
 test-cov:
+	python scripts/require_linux.py
 	pytest -m "not live_cluster" --cov=src --cov-report=html --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
@@ -158,6 +165,7 @@ test-suite-inventory:
 
 # Produce deterministic line-coverage debt evidence from isolated resource phases.
 coverage-debt:
+	python scripts/require_linux.py
 	python scripts/coverage_debt.py prepare-output --output-dir "$(COVERAGE_DEBT_OUTPUT_DIR)"
 	python scripts/coverage_debt.py run-phases \
 		--output-dir "$(COVERAGE_DEBT_OUTPUT_DIR)" \
@@ -185,6 +193,7 @@ check:
 # CI check - current-interpreter equivalents of required CI jobs, without modifications.
 # Invoke as `uv run make ci` so Ray inherits one uv-managed environment.
 ci:
+	python scripts/require_linux.py
 	$(MAKE) commit-policy-test
 	ruff format --check .
 	ruff check .
@@ -318,7 +327,7 @@ help:
 	@echo "  commit-check   - Validate commits from COMMIT_BASE through COMMIT_HEAD"
 	@echo "  commit-title-check - Validate the PR_TITLE environment variable"
 	@echo "  all            - Run non-mutating checks and tests"
-	@echo "  ci             - Run current-interpreter CI checks, coverage, docs, and build"
+	@echo "  ci             - Run Linux current-interpreter CI, coverage, docs, and build"
 	@echo "  build          - Build the package"
 	@echo "  clean          - Clean cache and build files"
 	@echo ""

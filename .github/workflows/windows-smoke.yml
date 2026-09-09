@@ -1,0 +1,47 @@
+name: Windows Compatibility (Advisory)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-smoke-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows-smoke:
+    name: Windows Packaging and Import (Advisory)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Install locked Python 3.12 dependencies
+        run: uv sync --frozen --python 3.12
+
+      - name: Check package and backend imports without starting Ray
+        run: >-
+          uv run --no-sync --python 3.12 python -c
+          "from django.conf import settings;
+          settings.configure(INSTALLED_APPS=['django_ray'], DJANGO_RAY={'RAY_ADDRESS': 'local'});
+          import django; django.setup(); import django_ray;
+          from django_ray.backends import RayTaskBackend; import ray; assert not ray.is_initialized()"
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Audit Windows runtime dependencies
+        run: uv run --no-sync --python 3.12 python scripts/audit_runtime_dependencies.py

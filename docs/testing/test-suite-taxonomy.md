@@ -59,12 +59,13 @@ worker fields. This internal test-tooling schema is unrelated to django-ray's wo
 schema versions. The selector is an importable pytest plugin loaded by the serial pytest process. It
 remains inert during an ordinary pytest run and activates only when the manifest runner supplies an
 explicit lane. Each observation and variant label is stable for grouping; a generated sample UUID
-distinguishes repeated measurements:
+distinguishes repeated measurements. Run broad execution measurements only inside an explicitly
+bounded Linux environment; collection-only inventory does not execute workloads:
 
 ```bash
 uv run python scripts/test_suite_inventory.py run \
   --lane portable-local \
-  --observation windows-local-py312 \
+  --observation linux-bounded-py312 \
   --variant locked-dependencies \
   --timing-output artifacts/test-suite-inventory/local-timing.json \
   --external-note "uv environment was already synchronized; dependency setup excluded" \

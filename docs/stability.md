@@ -51,7 +51,8 @@ The following remains experimental unless a later capability-specific promotion 
 otherwise:
 
 - Ray Compiled Graph and every compiled execution strategy;
-- native Windows Ray execution beyond best-effort local development;
+- native Windows Ray execution and other non-Linux execution, with compatibility observed only
+  through advisory hosted checks;
 - GPU and zero-copy transport;
 - Ray Data, Train, Tune, RLlib, Serve, and Serve LLM integration beyond the documented
   application-owned boundary;

@@ -34,7 +34,7 @@ Beta users that imported those private modules must move to the canonical packag
 | Python | 3.12, 3.13, 3.14 |
 | Django | 6.0.8 or newer compatible release |
 | Ray | 2.56.0 or newer compatible release |
-| Production operating system | Linux recommended |
+| Production operating system | Linux |
 
 Python 3.12 is the floor because Django 6.0 requires Python 3.12+, not because Ray does.
 Current [Ray releases support a wider Python range](https://pypi.org/project/ray/).
@@ -236,17 +236,16 @@ the declared lower bound controls what a downstream fresh install may resolve.
 Ray publishes platform-specific wheels. A pure-Python django-ray wheel does not imply
 that Ray is available on every Python/platform combination.
 
-- Linux is the production target for clusters and Kubernetes.
-- Ray's
-  [native Windows support remains beta](https://docs.ray.io/en/latest/ray-overview/installation.html#windows-support),
-  and multi-node Windows clusters are untested upstream. django-ray retains Windows for
-  best-effort local development and
-  test visibility, not as a production or release-certification target. Repeated native
-  local-Ray lifecycles have intermittently aborted during startup before any job, worker,
-  object, or application task registered; the upstream investigation is
-  [ray-project/ray#65181](https://github.com/ray-project/ray/issues/65181). No Ray release
-  is currently identified as the fix. Use Linux, WSL2, or the documented Docker path for
-  repeatable evaluation, and keep one native local-Ray owner on a Windows host at a time.
+- Linux is the supported execution target, including local Ray, clusters, and Kubernetes.
+- Windows compatibility is best effort, observed only through a small advisory GitHub Actions
+  Windows packaging/import lane. Native Windows/macOS execution is outside production and release
+  certification. Full CI, broad test suites, and native-Ray validation must not run on non-Linux
+  workstations. Focused resource-free checks and host-side tools remain usable there; use an explicitly
+  bounded Linux environment for execution tests. No container or cluster is started automatically.
+- Historical native Windows startup-abort investigation is retained in
+  [ray-project/ray#65181](https://github.com/ray-project/ray/issues/65181). Keeping existing platform
+  accommodations does not expand the supported execution promise; removal is sequenced after Linux
+  replacement qualification in [#456](https://github.com/dariuszpanas/django-ray/issues/456).
 - Ray publishes Linux aarch64 wheels for supported Python versions, but users must
   confirm their OS, architecture, and Python ABI match an available Ray wheel.
 

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Platform validation
+
+- Linux is the supported execution target. Broad Make test commands and direct pytest selections
+  containing native-Ray cases reject non-Linux execution before launching work. Windows compatibility
+  is observed through a small advisory GitHub Actions packaging/import lane. Focused resource-free
+  checks and host tools remain available on other developer platforms; full-suite evidence comes
+  from explicitly bounded Linux execution or required exact-head hosted Linux CI.
+
 ### Upgrade from 0.4.0
 
 - Private flat workflow and target implementation imports have moved without compatibility
