@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import io
 import json
 import math
 import os
 import platform
-import re
 import shlex
 import subprocess
 import sys
@@ -31,6 +29,11 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from scripts import pytest_taxonomy  # noqa: E402
+from scripts.test_suite_source import (  # noqa: E402
+    GENERATED_BASELINE_RE,
+    bound_source,
+    source_digest,
+)
 from scripts.test_suite_taxonomy import (  # noqa: E402
     CollectedTest,
     Group,
@@ -50,12 +53,6 @@ __all__ = ("CollectedTest", "InventoryError", "Selection", "load_manifest")
 REPORT_SCHEMA_VERSION = 4
 TIMING_SCHEMA_VERSION = 4
 DEFAULT_MANIFEST = Path(".github/test-suite-taxonomy.json")
-GENERATED_BASELINE_RE = re.compile(
-    r"^docs/investigations/test-suite-baseline-\d{4}-\d{2}-\d{2}\.(?:json|md)$"
-)
-BINARY_SUFFIXES = frozenset(
-    {".gif", ".gz", ".ico", ".jpeg", ".jpg", ".pdf", ".png", ".whl", ".zip"}
-)
 ENVIRONMENT_PACKAGES = (
     "coverage",
     "django",
@@ -217,65 +214,10 @@ def _validate_pytest_passthrough(arguments: list[str]) -> None:
         )
 
 
-def _source_digest(root: Path, manifest_path: Path) -> dict[str, object]:
-    root = root.resolve()
-    try:
-        manifest_relative = manifest_path.resolve().relative_to(root).as_posix()
-    except ValueError as error:
-        raise InventoryError("taxonomy manifest must stay inside the repository") from error
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-            cwd=root,
-            check=True,
-            capture_output=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise InventoryError("cannot enumerate Git-visible taxonomy source inputs") from error
-    relative_paths = sorted(
-        {
-            os.fsdecode(raw_path).replace("\\", "/")
-            for raw_path in result.stdout.split(b"\0")
-            if raw_path
-        }
-        | {manifest_relative}
-    )
-    relative_paths = [path for path in relative_paths if not GENERATED_BASELINE_RE.fullmatch(path)]
-    digest = hashlib.sha256()
-    for relative in relative_paths:
-        path = root / relative
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        if not path.exists():
-            digest.update(b"missing\0")
-            continue
-        if not path.is_file():
-            digest.update(b"non-file\0")
-            continue
-        try:
-            content = path.read_bytes()
-        except OSError as error:
-            raise InventoryError(f"cannot hash taxonomy source input {path}") from error
-        if path.suffix.lower() not in BINARY_SUFFIXES and b"\0" not in content:
-            content = content.replace(b"\r\n", b"\n")
-        digest.update(b"file\0")
-        digest.update(hashlib.sha256(content).digest())
-    return {
-        "algorithm": "sha256",
-        "digest": digest.hexdigest(),
-        "file_count": len(relative_paths),
-        "roots": [
-            "git ls-files --cached --others --exclude-standard",
-            "excluding generated test-suite baseline JSON and Markdown",
-        ],
-    }
+def _source_digest(
+    root: Path, manifest_path: Path, source_manifest: Path | None = None
+) -> dict[str, object]:
+    return source_digest(root, manifest_path, source_manifest)
 
 
 def _validate_output_path(
@@ -285,12 +227,15 @@ def _validate_output_path(
     *,
     allow_generated_baseline: bool = False,
     generated_baseline_suffix: str | None = None,
+    source_manifest: Path | None = None,
 ) -> None:
     resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
     try:
         relative = resolved.relative_to(root.resolve()).as_posix()
     except ValueError:
         return
+    if source_manifest is not None:
+        raise InventoryError(f"{label} for sealed source must stay outside the source tree")
     if allow_generated_baseline and GENERATED_BASELINE_RE.fullmatch(relative):
         if generated_baseline_suffix is not None and resolved.suffix != generated_baseline_suffix:
             raise InventoryError(f"{label} generated baseline must use {generated_baseline_suffix}")
@@ -728,6 +673,8 @@ def build_inventory(
     manifest: Manifest,
     items: list[CollectedTest],
     timing_records: list[dict[str, Any]] | None = None,
+    *,
+    source_manifest: Path | None = None,
 ) -> dict[str, Any]:
     """Build deterministic classification and overlap evidence."""
     require_unique_nodeids([item.nodeid for item in items], "inventory collection")
@@ -785,7 +732,7 @@ def build_inventory(
         )
 
     timings = timing_records or []
-    source = _source_digest(root, manifest_path)
+    source = _source_digest(root, manifest_path, source_manifest)
     timing_identities: set[str] = set()
     for timing in timings:
         identity = _validate_timing_record(timing, source, manifest, items)
@@ -1152,6 +1099,7 @@ def run_lane(
     runner_queue_seconds: float | None,
     environment_setup_seconds: float | None,
     external_note: str,
+    source_manifest: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one named selection and retain phase-level timing evidence."""
     group = manifest.group(lane_id)
@@ -1161,7 +1109,7 @@ def run_lane(
         manifest_relative = manifest_path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError as error:
         raise InventoryError("taxonomy manifest must stay inside the repository") from error
-    source_before = _source_digest(root, manifest_path)
+    source_before = _source_digest(root, manifest_path, source_manifest)
     plugin = _RuntimePlugin(root, group)
     pytest_taxonomy.consume_last_run_report()
     arguments = [
@@ -1170,10 +1118,11 @@ def run_lane(
         str(root / "tests"),
         *pytest_arguments,
     ]
-    exit_code = pytest.main(arguments, plugins=[plugin])
+    with bound_source(root, source_manifest):
+        exit_code = pytest.main(arguments, plugins=[plugin])
     collection_report = pytest_taxonomy.consume_last_run_report()
     finished = time.perf_counter()
-    source_after = _source_digest(root, manifest_path)
+    source_after = _source_digest(root, manifest_path, source_manifest)
     per_test = [
         {
             "nodeid": nodeid,
@@ -1359,6 +1308,7 @@ def _write_text(path: Path, value: str) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--source-manifest", type=Path)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     collect = subparsers.add_parser("collect", help="write collection and classification evidence")
@@ -1422,7 +1372,12 @@ def main(argv: list[str] | None = None) -> int:
                 print("pytest " + shlex.join(group.selection.pytest_arguments()))
             return 0
         if arguments.command == "run":
-            _validate_output_path(root, arguments.timing_output, "timing output")
+            _validate_output_path(
+                root,
+                arguments.timing_output,
+                "timing output",
+                source_manifest=arguments.source_manifest,
+            )
             pytest_arguments = list(arguments.pytest_arguments)
             if pytest_arguments[:1] == ["--"]:
                 pytest_arguments = pytest_arguments[1:]
@@ -1448,6 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
                 runner_queue_seconds=arguments.runner_queue_seconds,
                 environment_setup_seconds=arguments.environment_setup_seconds,
                 external_note=external_note,
+                source_manifest=arguments.source_manifest,
             )
             _write_json(arguments.timing_output, timing)
             print(f"Wrote {arguments.timing_output} for taxonomy lane {arguments.lane}.")
@@ -1465,6 +1421,7 @@ def main(argv: list[str] | None = None) -> int:
             "JSON output",
             allow_generated_baseline=True,
             generated_baseline_suffix=".json",
+            source_manifest=arguments.source_manifest,
         )
         _validate_output_path(
             root,
@@ -1472,6 +1429,7 @@ def main(argv: list[str] | None = None) -> int:
             "Markdown output",
             allow_generated_baseline=True,
             generated_baseline_suffix=".md",
+            source_manifest=arguments.source_manifest,
         )
         timings = [_load_timing(path) for path in arguments.timing]
         report = build_inventory(
@@ -1480,6 +1438,7 @@ def main(argv: list[str] | None = None) -> int:
             manifest,
             collect_tests(root),
             timings,
+            source_manifest=arguments.source_manifest,
         )
         rendered_json = _render_json(arguments.json_output, report)
         rendered_markdown = render_markdown(report)

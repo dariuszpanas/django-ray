@@ -59,6 +59,7 @@ nav = [
   { "Development" = [
     { "Contributing" = "contributing.md" },
     { "Test Suite Taxonomy" = "testing/test-suite-taxonomy.md" },
+    { "Finite Linux Test Stages" = "testing/linux-test-plan.md" },
     { "Test Suite Baseline" = "investigations/test-suite-baseline-2026-07-22.md" },
     { "Architecture" = "architecture.md" },
     { "Workflow Plan Contract" = "workflow-plans.md" },

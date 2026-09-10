@@ -166,6 +166,9 @@ def _mini_inventory_repository(tmp_path: Path) -> Path:
     script.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / "scripts" / "test_suite_inventory.py", script)
     shutil.copyfile(
+        ROOT / "scripts" / "test_suite_source.py", script.with_name("test_suite_source.py")
+    )
+    shutil.copyfile(
         ROOT / "scripts" / "test_suite_taxonomy.py", script.with_name("test_suite_taxonomy.py")
     )
     shutil.copyfile(ROOT / "scripts" / "pytest_taxonomy.py", script.with_name("pytest_taxonomy.py"))
