@@ -74,6 +74,7 @@ def _identity(python, selected_wheel, target, source):
 def _postgres(root):
     """Same private socket, process ownership and resource limits as receipt qualification."""
     psycopg = importlib.import_module("psycopg")
+    sql = importlib.import_module("psycopg.sql")
 
     data, socket = root / "postgres", root / "socket"
     socket.mkdir(mode=0o700)
@@ -140,11 +141,12 @@ def _postgres(root):
                     autocommit=True,
                 ) as connection:
                     assert connection.info.server_version // 10000 == 17
-                    assert connection.execute("SHOW listen_addresses").fetchone()[0] == ""
+                    listen_addresses = connection.execute("SHOW listen_addresses").fetchone()
+                    assert listen_addresses is not None and listen_addresses[0] == ""
                     for name in ("baseline", "restored", "rollback"):
                         connection.execute(
-                            psycopg.sql.SQL("CREATE DATABASE {}").format(
-                                psycopg.sql.Identifier(name),
+                            sql.SQL("CREATE DATABASE {}").format(
+                                sql.Identifier(name),
                             )
                         )
                 break

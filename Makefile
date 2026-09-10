@@ -9,6 +9,7 @@
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve
+.PHONY: linux-test-catalogue linux-test-stage linux-test-aggregate
 
 # Include optional modules (comment out if not needed)
 -include mk/docker.mk
@@ -26,6 +27,10 @@ COVERAGE_DEBT_DEFAULT_TIMEOUT_SECONDS ?= 1200
 COVERAGE_DEBT_LOCAL_RAY_TIMEOUT_SECONDS ?= 900
 TEST_SUITE_INVENTORY_OUTPUT_DIR ?= artifacts/test-suite-inventory
 TEST_XDIST_WORKERS ?= 4
+LINUX_TEST_STAGE ?=
+LINUX_TEST_OUTPUT ?=
+LINUX_TEST_EVIDENCE ?=
+LINUX_TEST_SOURCE_MANIFEST ?=
 
 # =============================================================================
 # Development
@@ -33,6 +38,21 @@ TEST_XDIST_WORKERS ?= 4
 
 # Default target - run non-mutating checks and tests
 all: check test
+
+# Source-owned assertions only; the caller admits resources and runs each stage.
+linux-test-catalogue:
+	python scripts/linux_test_plan.py catalogue \
+		$(if $(LINUX_TEST_SOURCE_MANIFEST),--source-manifest "$(LINUX_TEST_SOURCE_MANIFEST)")
+
+linux-test-stage:
+	python scripts/linux_test_plan.py run --stage "$(LINUX_TEST_STAGE)" \
+		--output-dir "$(LINUX_TEST_OUTPUT)" \
+		$(if $(LINUX_TEST_SOURCE_MANIFEST),--source-manifest "$(LINUX_TEST_SOURCE_MANIFEST)")
+
+linux-test-aggregate:
+	python scripts/linux_test_plan.py aggregate --evidence-dir "$(LINUX_TEST_EVIDENCE)" \
+		--output-dir "$(LINUX_TEST_OUTPUT)" \
+		$(if $(LINUX_TEST_SOURCE_MANIFEST),--source-manifest "$(LINUX_TEST_SOURCE_MANIFEST)")
 
 # Install dependencies
 install:
@@ -149,6 +169,7 @@ test-testproject:
 		tests/unit/test_ray_data_golden_path.py \
 		tests/unit/test_testproject_workflows.py \
 		tests/unit/test_workflow_reporting_benchmark_command.py \
+		-m "not postgresql" \
 		--cov=testproject.api \
 		--cov=testproject.views \
 		--cov=testproject.urls \

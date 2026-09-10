@@ -453,7 +453,7 @@
     {
       "id": "testproject-contract",
       "owner": "Required bundled-application gate",
-      "contract": "Runs the bundled-testproject boundary again with its own coverage floor.",
+      "contract": "Runs the SQLite bundled-testproject boundary again with its own coverage floor; PostgreSQL admission variants run in the dedicated PostgreSQL lane.",
       "variants": 1,
       "skip_policy": {
         "mode": "forbid",
@@ -470,7 +470,8 @@
           "tests/unit/test_ray_data_golden_path.py",
           "tests/unit/test_testproject_workflows.py",
           "tests/unit/test_workflow_reporting_benchmark_command.py"
-        ]
+        ],
+        "exclude_markers": ["postgresql"]
       }
     },
     {

@@ -247,6 +247,9 @@ def test_representative_sparse_write_records_postgresql_round_trip_row_and_wal_e
     ).node_key
     with transaction.atomic():
         with connection.cursor() as cursor:
+            cursor.execute(
+                f"ANALYZE {connection.ops.quote_name(WorkflowProgressNodeDetail._meta.db_table)}"
+            )
             cursor.execute("SET LOCAL enable_seqscan = off")
             cursor.execute(
                 "EXPLAIN (FORMAT JSON) "

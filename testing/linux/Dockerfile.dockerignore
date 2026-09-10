@@ -1,0 +1,6 @@
+# Build from a new external bundle, never a workstation checkout.
+**
+!source.tar
+!source-manifest.json
+!build-constraints.txt
+!kubectl

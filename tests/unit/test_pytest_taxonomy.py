@@ -124,7 +124,12 @@ def _mini_repository(tmp_path: Path) -> Path:
         path.write_text(content, encoding="utf-8")
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("pytest_taxonomy.py", "test_suite_inventory.py", "test_suite_taxonomy.py"):
+    for name in (
+        "pytest_taxonomy.py",
+        "test_suite_inventory.py",
+        "test_suite_source.py",
+        "test_suite_taxonomy.py",
+    ):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     return tmp_path
 
