@@ -207,7 +207,7 @@ def test_dormant_target_attestation_has_an_explicit_gate_boundary() -> None:
     assert "unreachable from settings, enqueue, worker, runner, transport, persistence" in row
     assert "narrow exception" in row
     assert "Once a production path consumes the proof" in row
-    assert "two-cluster handoff extension" in row
+    assert "two-cluster handoff requires a separate product decision" in row
 
     assert "remote bootstrap/import behavior other than the narrow dormant-attestation" in guide
     assert (
@@ -232,7 +232,9 @@ def test_dormant_target_persistence_has_a_database_only_gate_boundary() -> None:
         "status, operator, or deployment path consumes those records"
     ) in row
     assert "creates no target capacity, work placement, cluster mutation" in row
-    assert "final target routing requires the two-cluster handoff extension" in row
+    assert "production activation requires every affected scenario gate" in row
+    assert "Coordinated Beta upgrades use #381" in row
+    assert "two-cluster handoff requires a separate product decision" in row
 
     assert (
         "For the dormant target-persistence exception, retain the exact SQLite and PostgreSQL "
@@ -262,8 +264,11 @@ def test_dormant_task_target_binding_has_a_database_only_gate_boundary() -> None
     assert "binding deletion requires explicit audit and retention ordering" in row
     assert "`created_at` is not enqueue provenance" in row
     assert "historical policy state is not capacity or claim authorization" in row
-    assert "Legacy adoption remains forbidden until #381 supplies exact mapping lineage" in row
-    assert "final target routing requires the two-cluster handoff extension" in row
+    assert "Legacy active-work adoption is outside coordinated Beta upgrades" in row
+    assert "historical bindings do not authorize execution" in row
+    assert "production activation requires every affected scenario gate" in row
+    assert "Coordinated Beta upgrades use #381" in row
+    assert "two-cluster handoff requires a separate product decision" in row
 
     assert (
         "For the dormant task-target-binding exception, retain the exact SQLite and PostgreSQL "
@@ -303,10 +308,13 @@ def test_dormant_target_routing_has_a_database_only_gate_boundary() -> None:
     assert "claim/adoption predicate, lifecycle path, lease, or runtime consumer" in row
     assert "Route intent is not a live attestation, target capacity" in row
     assert "An absent selection is unproved provenance" in row
-    assert "Legacy mapping is distinct and deferred to #381" in row
+    assert "Historical mapping is not active-work adoption" in row
+    assert "#381's drained upgrade proof" in row
     assert "Cleanup must delete a selection before either its binding or route revision" in row
     assert "every revision before its route" in row
-    assert "final target routing requires the two-cluster handoff extension" in row
+    assert "production activation requires every affected scenario gate" in row
+    assert "Coordinated Beta upgrades use #381" in row
+    assert "two-cluster handoff requires a separate product decision" in row
 
     assert (
         "For the dormant target-routing exception, retain the exact SQLite and PostgreSQL "
@@ -356,7 +364,9 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "Ray Job capability APIs remain unsupported" in row
     assert "supported Admin inactive-lease cleanup" in row
     assert "KubeRay remains not applicable because no production producer can create" in row
-    assert "final target routing requires the two-cluster handoff extension" in row
+    assert "production activation requires every affected scenario gate" in row
+    assert "Coordinated Beta upgrades use #381" in row
+    assert "two-cluster handoff requires a separate product decision" in row
 
     assert (
         "For the dormant worker-target-capability exception, retain the exact SQLite and "
