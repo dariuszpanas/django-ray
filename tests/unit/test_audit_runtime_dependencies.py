@@ -116,7 +116,7 @@ def test_audit_exports_only_the_locked_runtime_graph(
     assert sbom_options == {"cwd": tmp_path, "check": True}
 
     scanner, scanner_options = commands[2]
-    assert scanner[:3] == [sys.executable, "-m", "pip_audit"]
+    assert scanner[:3] == [sys.executable, "-m", "scripts.retry_pypi_audit"]
     assert {
         "--strict",
         "--require-hashes",

@@ -395,6 +395,7 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     assert '"ray[default]==2.56.0"' in minimum_install["run"]
     assert '"django==6.0.8"' in minimum_install["run"]
     assert '"sqlparse==0.6.0"' in minimum_install["run"]
+    assert '"pip-audit==2.10.1"' in minimum_install["run"]
     assert audit_job["name"] == (
         "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
     )
