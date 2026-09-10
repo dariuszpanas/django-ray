@@ -664,6 +664,7 @@ jobs:
             "pytest-django==4.7" \
             "pytest-cov==4.0" \
             "pytest-xdist==3.8.0" \
+            "pip-audit==2.10.1" \
             "locust==2.43.0"
 
       - name: Resolve and install latest dependencies

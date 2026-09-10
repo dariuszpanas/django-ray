@@ -196,7 +196,11 @@ silently. Blocking CI and release workflows repeat it under every supported Pyth
 The advisory Windows workflow separately checks that platform's dependency graph.
 Each scan also cross-checks its hashed requirements
 against a second locked CycloneDX export so an omitted transitive cannot silently escape
-the advisory input.
+the advisory input. A read timeout raised by the pinned scanner's PyPI advisory query
+retains its traceback and retries the complete scan once after two seconds, using the
+same validated input and per-run cache. The second failure remains fatal; export/hash
+errors, vulnerability findings and other failures are not retried. The 30-second
+request timeout and hosted job deadlines remain unchanged.
 
 `test-xdist` is a fast local iteration target, not the full test or release gate. It invokes pytest
 once with `-n 4` by default and selects tests without the resource-owning `real_ray`, `postgresql`,

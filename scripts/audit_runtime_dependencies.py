@@ -205,7 +205,7 @@ def audit_runtime_dependencies(
             [
                 sys.executable,
                 "-m",
-                "pip_audit",
+                "scripts.retry_pypi_audit",
                 "--strict",
                 "--require-hashes",
                 "--disable-pip",
