@@ -6,8 +6,9 @@ presence alone never authorizes a claim.  A future consumer must still
 revalidate the lease, current target policy, and attestation at its own
 decision boundary.
 
-Every mutation owns an outermost durable transaction and takes locks in the
-fixed order ``exact lease -> target -> capability``.  SQLite uses exact no-op
+Standalone mutations own an outermost durable transaction. Private publisher
+helpers require an existing transaction. Both take locks in the fixed order
+``exact lease -> target -> capability``. SQLite uses exact no-op
 updates as writer fences; PostgreSQL uses row locks.  No operation probes Ray,
 renews a worker heartbeat, selects a task, or performs a remote effect.
 """
@@ -24,6 +25,7 @@ from django.db.utils import ConnectionDoesNotExist
 
 from django_ray.execution_protocol import explicit_worker_protocol_range
 from django_ray.models import (
+    RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT,
     RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION,
     RayTarget,
     RayTargetAttestationRevision,
@@ -222,6 +224,13 @@ def _require_outermost_transaction(*, using: str) -> None:
         raise NestedRayWorkerTargetCapabilityTransactionError
 
 
+def _require_locked_transaction(*, using: str) -> None:
+    if not connections[using].in_atomic_block:
+        raise RayWorkerTargetCapabilityError(
+            "Ray worker target locked coordination requires a caller-owned transaction"
+        )
+
+
 def _target_key(value: object) -> str:
     if type(value) is not str or _TARGET_KEY.fullmatch(value) is None:
         raise InvalidRayWorkerTargetCapabilityArgumentError
@@ -280,10 +289,12 @@ def _identity(value: object) -> WorkerLeaseIdentity:
     )
 
 
-def _runner_family(value: object) -> RayRunnerFamily:
+def _runner_family(value: object, *, allow_ray_job: bool = False) -> RayRunnerFamily:
     if type(value) is not RayRunnerFamily:
         raise InvalidRayWorkerTargetCapabilityArgumentError
     if value is RayRunnerFamily.RAY_JOB:
+        if allow_ray_job:
+            return value
         raise RayJobWorkerTargetCapabilityUnsupportedError
     if value is not RayRunnerFamily.RAY_CORE:  # pragma: no cover - enum is closed above
         raise InvalidRayWorkerTargetCapabilityArgumentError
@@ -371,6 +382,7 @@ def _latest_usable_policy(
     *,
     expected_revision: int,
     using: str,
+    allow_ray_job: bool = False,
 ) -> tuple[RayTargetPolicyRevision, RayTargetExpectation]:
     try:
         policy, expectation, desired_state = _latest_policy(target, using=using)
@@ -382,9 +394,12 @@ def _latest_usable_policy(
             expected_revision=expected_revision,
             actual_revision=actual_revision,
         )
-    if expectation.runner_family is RayRunnerFamily.RAY_JOB:
+    if expectation.runner_family is RayRunnerFamily.RAY_JOB and not allow_ray_job:
         raise RayJobWorkerTargetCapabilityUnsupportedError
-    if expectation.runner_family is not RayRunnerFamily.RAY_CORE or desired_state not in {
+    if expectation.runner_family not in {
+        RayRunnerFamily.RAY_CORE,
+        RayRunnerFamily.RAY_JOB,
+    } or desired_state not in {
         RayTargetDesiredState.ACTIVE,
         RayTargetDesiredState.DRAINING,
     }:
@@ -487,6 +502,7 @@ def _validate_current_capability(
     lease: TaskWorkerLease,
     target: RayTarget,
     using: str,
+    allow_ray_job: bool = False,
 ) -> tuple[int, RayRuntimeVersion]:
     revision = int(capability.revision)
     runtime = _capability_runtime(capability)
@@ -500,7 +516,9 @@ def _validate_current_capability(
         or capability.lease_started_at != lease.started_at
         or capability.target_id != target.pk
         or capability.runner_family != target.runner_family
-        or capability.runner_family != RayRunnerFamily.RAY_CORE.value
+        or capability.runner_family
+        not in {RayRunnerFamily.RAY_CORE.value, RayRunnerFamily.RAY_JOB.value}
+        or (capability.runner_family == RayRunnerFamily.RAY_JOB.value and not allow_ray_job)
         or runtime
         != RayRuntimeVersion(
             ray_major=int(target.ray_major),
@@ -547,6 +565,232 @@ def _change(
     )
 
 
+def _require_family_capacity(
+    lease: TaskWorkerLease,
+    runner_family: RayRunnerFamily,
+    *,
+    current: RayWorkerTargetCapability | None,
+    using: str,
+) -> None:
+    capabilities = RayWorkerTargetCapability.objects.using(using).filter(lease_id=lease.pk)
+    if current is not None:
+        capabilities = capabilities.exclude(pk=current.pk)
+    if runner_family is RayRunnerFamily.RAY_CORE:
+        if capabilities.exists():
+            raise RayWorkerTargetCapabilityLimitError
+    elif (
+        capabilities.exclude(runner_family=RayRunnerFamily.RAY_JOB.value).exists()
+        or capabilities.count() >= RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT
+    ):
+        raise RayWorkerTargetCapabilityLimitError
+
+
+def _advertise_canonical_ray_worker_target_capability_locked(
+    identity: WorkerLeaseIdentity,
+    target_key: str,
+    actual_runtime: RayRuntimeVersion,
+    *,
+    manager_runner_family: RayRunnerFamily,
+    expected_policy_revision: int,
+    expected_attestation_revision: int,
+    expected_capability_revision: int,
+    now: datetime,
+    using: str,
+    vendor: str,
+    allow_ray_job: bool,
+) -> RayWorkerTargetCapabilityChange:
+    _require_locked_transaction(using=using)
+    lease = _require_advertising_lease(
+        _locked_exact_lease(identity, using=using, vendor=vendor),
+        now=now,
+    )
+    target = _locked_capability_target(
+        target_key=target_key,
+        using=using,
+        vendor=vendor,
+    )
+    policy, expectation = _latest_usable_policy(
+        target,
+        expected_revision=expected_policy_revision,
+        using=using,
+        allow_ray_job=allow_ray_job,
+    )
+    attestation = _latest_valid_attestation(
+        policy,
+        expectation,
+        expected_revision=expected_attestation_revision,
+        now=now,
+        using=using,
+    )
+    if (
+        manager_runner_family is not expectation.runner_family
+        or actual_runtime != expectation.runtime
+    ):
+        raise RayWorkerTargetCapabilityRuntimeMismatchError
+
+    current = _locked_current_capability(
+        lease,
+        target,
+        using=using,
+        vendor=vendor,
+    )
+    if current is None:
+        if expected_capability_revision != 0:
+            raise RayWorkerTargetCapabilityRevisionConflictError(
+                expected_revision=expected_capability_revision,
+                actual_revision=0,
+            )
+        _require_family_capacity(
+            lease,
+            manager_runner_family,
+            current=None,
+            using=using,
+        )
+        runtime = actual_runtime
+        RayWorkerTargetCapability.objects.using(using).create(
+            lease=lease,
+            lease_hostname=lease.hostname,
+            lease_pid=lease.pid,
+            lease_started_at=lease.started_at,
+            target=target,
+            target_policy=policy,
+            attestation=attestation,
+            runner_family=manager_runner_family.value,
+            manager_ray_major=runtime.ray_major,
+            manager_ray_minor=runtime.ray_minor,
+            manager_ray_patch=runtime.ray_patch,
+            manager_python_implementation=runtime.python_implementation,
+            manager_python_major=runtime.python_major,
+            manager_python_minor=runtime.python_minor,
+            manager_python_patch=runtime.python_patch,
+            schema_version=RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION,
+            revision=1,
+            created_at=now,
+            advertised_at=now,
+        )
+        return _change(
+            expectation=expectation,
+            attestation=attestation,
+            manager_runner_family=manager_runner_family,
+            manager_runtime=actual_runtime,
+            changed=True,
+            previous_revision=0,
+            revision=1,
+            advertised_at=now,
+        )
+
+    actual_capability_revision, retained_runtime = _validate_current_capability(
+        current,
+        lease=lease,
+        target=target,
+        using=using,
+        allow_ray_job=allow_ray_job,
+    )
+    _require_family_capacity(lease, manager_runner_family, current=current, using=using)
+    exact_replay = (
+        current.target_policy_id == policy.pk
+        and current.attestation_id == attestation.pk
+        and current.runner_family == manager_runner_family.value
+        and retained_runtime == actual_runtime
+        and current.advertised_at == now
+    )
+    if exact_replay and expected_capability_revision in {
+        actual_capability_revision,
+        actual_capability_revision - 1,
+    }:
+        return _change(
+            expectation=expectation,
+            attestation=attestation,
+            manager_runner_family=manager_runner_family,
+            manager_runtime=actual_runtime,
+            changed=False,
+            previous_revision=actual_capability_revision,
+            revision=actual_capability_revision,
+            advertised_at=current.advertised_at,
+        )
+    if expected_capability_revision != actual_capability_revision:
+        raise RayWorkerTargetCapabilityRevisionConflictError(
+            expected_revision=expected_capability_revision,
+            actual_revision=actual_capability_revision,
+        )
+    if now <= current.advertised_at:
+        raise RayWorkerTargetCapabilityAdvertisementRegressionError
+    if actual_capability_revision >= _MAX_REVISION:
+        raise RayWorkerTargetCapabilityRevisionExhaustedError
+
+    next_revision = actual_capability_revision + 1
+    updated = (
+        RayWorkerTargetCapability.objects.using(using)
+        .filter(pk=current.pk, revision=actual_capability_revision)
+        .update(
+            target_policy=policy,
+            attestation=attestation,
+            revision=next_revision,
+            advertised_at=now,
+        )
+    )
+    if updated != 1:
+        raise RayWorkerTargetCapabilityStateError
+    return _change(
+        expectation=expectation,
+        attestation=attestation,
+        manager_runner_family=manager_runner_family,
+        manager_runtime=actual_runtime,
+        changed=True,
+        previous_revision=actual_capability_revision,
+        revision=next_revision,
+        advertised_at=now,
+    )
+
+
+def _advertise_ray_worker_target_capability_locked(
+    identity: WorkerLeaseIdentity,
+    target_key: str,
+    actual_runtime: RayRuntimeVersion,
+    *,
+    manager_runner_family: RayRunnerFamily,
+    expected_policy_revision: int,
+    expected_attestation_revision: int,
+    expected_capability_revision: int,
+    now: datetime,
+    using: str = DEFAULT_DB_ALIAS,
+) -> RayWorkerTargetCapabilityChange:
+    """CAS-publish verified Core/Jobs capacity within an existing transaction.
+
+    The publisher must bind the exact lease, challenge and authenticated proof
+    before calling. This helper reacquires the lease before target/capability
+    locks, preserves their validation, and never consumes a probe challenge.
+    An advertisement alone still cannot authorize task admission.
+    """
+
+    identity = _identity(identity)
+    target_key = _target_key(target_key)
+    actual_runtime = _runtime(actual_runtime)
+    manager_runner_family = _runner_family(manager_runner_family, allow_ray_job=True)
+    expected_policy_revision = _revision(expected_policy_revision, allow_zero=False)
+    expected_attestation_revision = _revision(expected_attestation_revision, allow_zero=False)
+    expected_capability_revision = _revision(expected_capability_revision, allow_zero=True)
+    now = _now(now)
+    vendor = _database_vendor(using=using)
+    _require_locked_transaction(using=using)
+    try:
+        return _advertise_canonical_ray_worker_target_capability_locked(
+            identity,
+            target_key,
+            actual_runtime,
+            manager_runner_family=manager_runner_family,
+            expected_policy_revision=expected_policy_revision,
+            expected_attestation_revision=expected_attestation_revision,
+            expected_capability_revision=expected_capability_revision,
+            now=now,
+            using=using,
+            vendor=vendor,
+            allow_ray_job=True,
+        )
+    except DatabaseError:
+        raise RayWorkerTargetCapabilityPersistenceRaceError from None
+
+
 def advertise_ray_worker_target_capability(
     identity: WorkerLeaseIdentity,
     target_key: str,
@@ -579,143 +823,18 @@ def advertise_ray_worker_target_capability(
         vendor = _database_vendor(using=using)
         _require_outermost_transaction(using=using)
         with transaction.atomic(using=using, durable=True):
-            lease = _require_advertising_lease(
-                _locked_exact_lease(identity, using=using, vendor=vendor),
-                now=now,
-            )
-            target = _locked_capability_target(
-                target_key=target_key,
-                using=using,
-                vendor=vendor,
-            )
-            policy, expectation = _latest_usable_policy(
-                target,
-                expected_revision=expected_policy_revision,
-                using=using,
-            )
-            attestation = _latest_valid_attestation(
-                policy,
-                expectation,
-                expected_revision=expected_attestation_revision,
-                now=now,
-                using=using,
-            )
-            if (
-                manager_runner_family is not expectation.runner_family
-                or actual_runtime != expectation.runtime
-            ):
-                raise RayWorkerTargetCapabilityRuntimeMismatchError
-
-            current = _locked_current_capability(
-                lease,
-                target,
-                using=using,
-                vendor=vendor,
-            )
-            if current is None:
-                if expected_capability_revision != 0:
-                    raise RayWorkerTargetCapabilityRevisionConflictError(
-                        expected_revision=expected_capability_revision,
-                        actual_revision=0,
-                    )
-                if (
-                    RayWorkerTargetCapability.objects.using(using)
-                    .filter(lease_id=lease.pk)
-                    .exists()
-                ):
-                    raise RayWorkerTargetCapabilityLimitError
-                runtime = actual_runtime
-                RayWorkerTargetCapability.objects.using(using).create(
-                    lease=lease,
-                    lease_hostname=lease.hostname,
-                    lease_pid=lease.pid,
-                    lease_started_at=lease.started_at,
-                    target=target,
-                    target_policy=policy,
-                    attestation=attestation,
-                    runner_family=manager_runner_family.value,
-                    manager_ray_major=runtime.ray_major,
-                    manager_ray_minor=runtime.ray_minor,
-                    manager_ray_patch=runtime.ray_patch,
-                    manager_python_implementation=runtime.python_implementation,
-                    manager_python_major=runtime.python_major,
-                    manager_python_minor=runtime.python_minor,
-                    manager_python_patch=runtime.python_patch,
-                    schema_version=RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION,
-                    revision=1,
-                    created_at=now,
-                    advertised_at=now,
-                )
-                return _change(
-                    expectation=expectation,
-                    attestation=attestation,
-                    manager_runner_family=manager_runner_family,
-                    manager_runtime=actual_runtime,
-                    changed=True,
-                    previous_revision=0,
-                    revision=1,
-                    advertised_at=now,
-                )
-
-            actual_capability_revision, retained_runtime = _validate_current_capability(
-                current,
-                lease=lease,
-                target=target,
-                using=using,
-            )
-            exact_replay = (
-                current.target_policy_id == policy.pk
-                and current.attestation_id == attestation.pk
-                and current.runner_family == manager_runner_family.value
-                and retained_runtime == actual_runtime
-                and current.advertised_at == now
-            )
-            if exact_replay and expected_capability_revision in {
-                actual_capability_revision,
-                actual_capability_revision - 1,
-            }:
-                return _change(
-                    expectation=expectation,
-                    attestation=attestation,
-                    manager_runner_family=manager_runner_family,
-                    manager_runtime=actual_runtime,
-                    changed=False,
-                    previous_revision=actual_capability_revision,
-                    revision=actual_capability_revision,
-                    advertised_at=current.advertised_at,
-                )
-            if expected_capability_revision != actual_capability_revision:
-                raise RayWorkerTargetCapabilityRevisionConflictError(
-                    expected_revision=expected_capability_revision,
-                    actual_revision=actual_capability_revision,
-                )
-            if now <= current.advertised_at:
-                raise RayWorkerTargetCapabilityAdvertisementRegressionError
-            if actual_capability_revision >= _MAX_REVISION:
-                raise RayWorkerTargetCapabilityRevisionExhaustedError
-
-            next_revision = actual_capability_revision + 1
-            updated = (
-                RayWorkerTargetCapability.objects.using(using)
-                .filter(pk=current.pk, revision=actual_capability_revision)
-                .update(
-                    target_policy=policy,
-                    attestation=attestation,
-                    revision=next_revision,
-                    advertised_at=now,
-                )
-            )
-            if updated != 1:
-                raise RayWorkerTargetCapabilityStateError
-            return _change(
-                expectation=expectation,
-                attestation=attestation,
+            return _advertise_canonical_ray_worker_target_capability_locked(
+                identity,
+                target_key,
+                actual_runtime,
                 manager_runner_family=manager_runner_family,
-                manager_runtime=actual_runtime,
-                changed=True,
-                previous_revision=actual_capability_revision,
-                revision=next_revision,
-                advertised_at=now,
+                expected_policy_revision=expected_policy_revision,
+                expected_attestation_revision=expected_attestation_revision,
+                expected_capability_revision=expected_capability_revision,
+                now=now,
+                using=using,
+                vendor=vendor,
+                allow_ray_job=False,
             )
     except RayWorkerTargetCapabilityError:
         raise

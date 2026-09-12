@@ -42,6 +42,7 @@ from django_ray.workflow.progress.storage import (
     prepare_workflow_progress_detail,
     stage_workflow_progress_topology,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_storage_helpers import (
     workflow_detail,
     workflow_node,
@@ -860,7 +861,8 @@ def test_graph_response_byte_ceiling_degrades_atomically(
     _assert_empty_graph(_json(response), "LIMIT_EXCEEDED")
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_graph_endpoint_reads_real_terminal_schema_v3_storage(settings) -> None:
     terminal_time = timezone.now()
     started_at = (terminal_time - timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
@@ -868,6 +870,8 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage(settings) -> None:
     finished_at = terminal_time.isoformat().replace("+00:00", "Z")
     execution = _execution(
         task_id="graph-real-schema-v3",
+        # Retained storage/fence behavior for a released protocol 1 execution.
+        execution_protocol_version=1,
         state=TaskState.RUNNING,
         result_data=json.dumps({"real-result-sentinel": True}),
         runtime_env_json=json.dumps({"real-runtime-sentinel": True}),

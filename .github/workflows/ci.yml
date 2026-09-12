@@ -147,7 +147,8 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The expanded cohort suite reached 60% on Python 3.12 at the old 20m limit.
+    timeout-minutes: 40
     env:
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
@@ -335,14 +336,14 @@ jobs:
             --network django-ray-live-cluster \
             --shm-size=1g \
             --publish 127.0.0.1:10001:10001 \
-            rayproject/ray:2.56.0-py312 \
+            rayproject/ray:2.58.0-py312 \
             bash -lc 'ray start --head --port=6379 \
               --ray-client-server-port=10001 --num-cpus=0 \
               --disable-usage-stats --block'
           docker run --detach --name ray-worker \
             --network django-ray-live-cluster \
             --shm-size=1g \
-            rayproject/ray:2.56.0-py312 \
+            rayproject/ray:2.58.0-py312 \
             bash -lc 'ray start --address=ray-head:6379 --num-cpus=1 \
               --disable-usage-stats --block'
 
@@ -625,7 +626,8 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Dependencies (${{ matrix.resolution }}, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The minimum lane reached 39% at 10m while tests continued making progress.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -655,7 +657,7 @@ jobs:
             "cryptography==42.0.8" \
             "django==6.0.8" \
             "pyasn1==0.6.4" \
-            "ray[default]==2.56.0" \
+            "ray[default]==2.58.0" \
             "sqlparse==0.6.0" \
             "django-ninja==1.5.1" \
             "gunicorn==23.0" \
@@ -689,10 +691,10 @@ jobs:
         include:
           - profile: supported-min-python
             python-version: "3.12"
-            ray-version: "2.56.0"
+            ray-version: "2.58.0"
           - profile: newest-python
             python-version: "3.14"
-            ray-version: "2.56.0"
+            ray-version: "2.58.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

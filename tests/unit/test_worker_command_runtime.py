@@ -21,6 +21,7 @@ from django_ray.execution_protocol import (
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     WORKER_CAPABILITY_SCHEMA_VERSION,
+    ExecutionProtocolRange,
 )
 from django_ray.input_storage import EXTERNAL_INPUT_PLACEHOLDER
 from django_ray.management.commands.django_ray_worker import Command
@@ -30,6 +31,127 @@ from django_ray.runner.cancellation import CancellationOutcome, CancellationOutc
 from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.polling import AdaptivePollingPolicy
 from django_ray.runner.ray_core import RayCoreHandle
+from tests.integration import test_cohort_claim_storage as _cohort_claim_tests
+from tests.integration import test_cohort_worker as _cohort_worker_tests
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+from tests.unit import test_cohort_worker_controller as _cohort_controller_tests
+from tests.unit.test_worker_mode_selection import _assert_current_startup_lease
+
+cohort_controller_case = _cohort_controller_tests.case
+current_claim_case = _cohort_claim_tests.case
+
+
+@pytest.fixture
+def current_claim_cleanup():
+    yield from _cohort_claim_tests.isolated_sqlite_ledger_maintenance.__wrapped__()
+
+
+@pytest.fixture
+def current_worker_case(current_claim_cleanup, current_claim_case, monkeypatch):
+    from django_ray.management.commands import django_ray_worker as worker
+    from django_ray.runner import (
+        cohort_completion,
+        cohort_core_submission,
+        cohort_dispatch,
+        cohort_preparation,
+    )
+
+    case = current_claim_case
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return case.now
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
+    monkeypatch.setattr(worker, "datetime", Clock)
+    monkeypatch.setattr(cohort_dispatch, "datetime", Clock)
+    monkeypatch.setattr(cohort_completion, "_clock", lambda: case.now)
+    monkeypatch.setattr(cohort_preparation, "_clock", lambda: (case.now, 100.0))
+    monkeypatch.setattr(cohort_core_submission, "_clock", lambda: (case.now, 100.0))
+    return case
+
+
+@pytest.fixture
+def historical_worker(preactivation_protocol_schema, monkeypatch):
+    """Named protocol-1 factories on the actual stopped preactivation schema."""
+    from django_ray.lifecycle import cancel_task
+
+    def task(**fields):
+        return RayTaskExecution.objects.create(execution_protocol_version=1, **fields)
+
+    def lease(**fields):
+        return TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            min_supported_execution_protocol_version=1,
+            max_supported_execution_protocol_version=1,
+            legacy_admission_token=None,
+            **fields,
+        )
+
+    def lease_for(cmd):
+        row = lease(worker_id=cmd.worker_id, hostname="historical-host", pid=12345)
+        cmd.lease = row
+        cmd.lease_identity = WorkerLeaseIdentity(
+            row.worker_id, row.hostname, row.pid, row.started_at
+        )
+        return row
+
+    def finalize(task, **fences):
+        return cancel_task(task, supported_protocols=ExecutionProtocolRange(1, 1), **fences)
+
+    monkeypatch.setattr(
+        "django_ray.management.commands.django_ray_worker.finalize_cancellation", finalize
+    )
+    return SimpleNamespace(task=task, lease=lease, lease_for=lease_for)
+
+
+@pytest.mark.parametrize("disconnected", [True, False])
+def test_current_shutdown_waits_for_owned_ray_processes_before_accepting_disconnect(
+    monkeypatch, disconnected
+):
+    import ray
+    import ray.util.client as client
+
+    from django_ray.runner.cohort_connection import CoreConnectionPhase
+
+    command = Command()
+    command.execution_mode = "local"
+    state = SimpleNamespace(cleanup=None, calls=[])
+    ticket = object()
+
+    def cleanup(actual_ticket, *, cleanup, timeout_seconds):
+        assert actual_ticket is ticket and timeout_seconds == 5.0
+        state.cleanup = cleanup()
+
+    def poll(actual_ticket):
+        assert actual_ticket is ticket
+        return SimpleNamespace(
+            phase=(
+                CoreConnectionPhase.CONNECTED
+                if state.cleanup is None
+                else CoreConnectionPhase.CLEANED
+                if state.cleanup
+                else CoreConnectionPhase.BLOCKED
+            ),
+            callback_running=False,
+        )
+
+    monkeypatch.setattr(ray, "shutdown", lambda **kwargs: state.calls.append(kwargs))
+    monkeypatch.setattr(ray, "is_initialized", lambda: not disconnected)
+    monkeypatch.setattr(client, "num_connected_contexts", lambda: 0 if disconnected else 1)
+    command._cohort_controller = SimpleNamespace(
+        connection=SimpleNamespace(poll=poll, begin_cleanup=cleanup),
+        connection_ticket=ticket,
+        lifecycle=SimpleNamespace(outstanding=None),
+        adapter=None,
+        invalidate=lambda: None,
+        poll_stopped_cleanup=lambda: None,
+    )
+    command._shutdown_cohort()
+    assert state.calls == [{"wait_for_processes": True}]
+    assert state.cleanup is disconnected
+    assert command.shutdown_exit_code is None if disconnected else command.shutdown_exit_code == 1
 
 
 class CustomRayTaskBackend(RayTaskBackend):
@@ -72,6 +194,62 @@ def _set_lease_identity(cmd: Command) -> WorkerLeaseIdentity:
     )
     cmd.lease_identity = identity
     return identity
+
+
+def _prepare_cohort_startup(cmd, monkeypatch, case, *, error=None):
+    """Run the actual controller with an owned fake callback and no Ray process."""
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
+    monkeypatch.setattr(
+        django_settings,
+        "TASKS",
+        {
+            "default": {"BACKEND": "django_ray.backends.RayTaskBackend", "QUEUES": ["default"]},
+        },
+    )
+    case.ray_initializations = []
+    ray = sys.modules["ray"]
+
+    def initialize(**arguments):
+        # The parent wait hook verifies the real lease before releasing this
+        # callback. The retained connection thread must not open an ORM writer.
+        case.ray_initializations.append(arguments)
+        if error is not None:
+            raise RuntimeError(error)
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: False, raising=False)
+    monkeypatch.setattr(ray, "init", initialize, raising=False)
+    monkeypatch.setattr(cmd, "_initialize_ray_execution", lambda: pytest.fail("Legacy startup"))
+    monkeypatch.setattr(cmd, "setup_signal_handlers", lambda: None)
+    monkeypatch.setattr(cmd, "shutdown", lambda: None)
+
+
+def _run_cohort_startup_cycle(cmd, monkeypatch, case):
+    """Drive pending/finished owned connect in two bounded production-loop ticks."""
+    waits = []
+    for method in (
+        "_poll_cohort_completions",
+        "_expire_cohort_tasks",
+        "_recover_cohort_jobs",
+        "_poll_cohort_timeouts",
+        "_poll_cohort_cancellations",
+        "_claim_and_process_cohort_tasks",
+    ):
+        monkeypatch.setattr(cmd, method, lambda *args: 0)
+
+    def wait(_delay):
+        _assert_current_startup_lease(cmd)
+        waits.append(True)
+        if len(waits) == 1:
+            assert cmd.ray_core_runner is None
+            assert len(case.threads) == 1 and not case.ray_initializations
+            case.threads[0].run()
+        else:
+            assert len(waits) == 2
+            cmd.shutdown_requested = True
+
+    monkeypatch.setattr(cmd, "_wait_for_poll_deadline", wait)
+    monkeypatch.setattr(cmd, "run_loop", lambda **arguments: Command.run_loop(cmd, **arguments))
+    return waits
 
 
 class FakeClock:
@@ -668,14 +846,17 @@ class TestWorkerCommandRuntime:
 
         assert calls == ["heartbeat", "poll"]
 
-    def test_cli_signal_shutdown_uses_documented_exit_code(self, monkeypatch) -> None:
+    @pytest.mark.django_db
+    def test_cli_signal_shutdown_uses_documented_exit_code(
+        self, monkeypatch, cohort_controller_case
+    ) -> None:
         cmd = _make_command()
+        _prepare_cohort_startup(cmd, monkeypatch, cohort_controller_case)
         cmd._called_from_command_line = True
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.get_settings",
             lambda: {"DEFAULT_CONCURRENCY": 1},
         )
-        monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
         monkeypatch.setattr(
             cmd,
             "run_loop",
@@ -697,6 +878,10 @@ class TestWorkerCommandRuntime:
             )
 
         assert exc_info.value.code == 130
+
+        _assert_current_startup_lease(cmd)
+        assert cmd._cohort_controller is not None
+        assert not cohort_controller_case.threads
 
     def test_run_loop_executes_reconciliation_cycle_once(self, monkeypatch) -> None:
         cmd = _make_command()
@@ -1168,19 +1353,19 @@ class TestWorkerCommandRuntime:
 
         assert len(attempts) == 5
 
-    def test_handle_local_mode_init_failure_continues_startup(self, monkeypatch) -> None:
+    @pytest.mark.django_db
+    def test_handle_local_mode_init_failure_continues_startup(
+        self, monkeypatch, cohort_controller_case
+    ) -> None:
         cmd = _make_command()
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.get_settings",
             lambda: {"DEFAULT_CONCURRENCY": 2},
         )
-        monkeypatch.setattr(
-            cmd,
-            "_init_local_ray",
-            lambda: (_ for _ in ()).throw(RuntimeError("local init failed")),
+        _prepare_cohort_startup(
+            cmd, monkeypatch, cohort_controller_case, error="private init failure"
         )
-        monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
-        monkeypatch.setattr(cmd, "run_loop", lambda **_kwargs: None)
+        waits = _run_cohort_startup_cycle(cmd, monkeypatch, cohort_controller_case)
         monkeypatch.setattr(cmd, "shutdown", lambda: None)
         monkeypatch.setattr(cmd, "setup_signal_handlers", lambda: None)
 
@@ -1196,8 +1381,19 @@ class TestWorkerCommandRuntime:
 
         assert cmd.execution_mode == "local"
 
-    def test_handle_configures_adaptive_polling_from_settings(self, monkeypatch) -> None:
+        assert waits == [True, True]
+        assert len(cohort_controller_case.ray_initializations) == 1
+        assert cmd.ray_core_runner is None
+        assert cmd._cohort_controller.reason == "connection_unavailable"
+        assert any("connection_unavailable" in message for message in cmd.stdout.messages)
+        assert all("private init failure" not in message for message in cmd.stdout.messages)
+
+    @pytest.mark.django_db
+    def test_handle_configures_adaptive_polling_from_settings(
+        self, monkeypatch, cohort_controller_case
+    ) -> None:
         cmd = _make_command()
+        _prepare_cohort_startup(cmd, monkeypatch, cohort_controller_case)
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.get_settings",
             lambda: {
@@ -1207,7 +1403,6 @@ class TestWorkerCommandRuntime:
                 "WORKER_POLL_MAX_INTERVAL_SECONDS": 2.0,
             },
         )
-        monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
         monkeypatch.setattr(cmd, "run_loop", lambda **_kwargs: None)
         monkeypatch.setattr(cmd, "shutdown", lambda: None)
         monkeypatch.setattr(cmd, "setup_signal_handlers", lambda: None)
@@ -1233,19 +1428,23 @@ class TestWorkerCommandRuntime:
         assert cmd.polling_policy.max_interval_seconds == 2.0
         assert any("0.25s base, 2s maximum" in message for message in cmd.stdout.messages)
 
-    def test_handle_cluster_mode_init_failure_continues_startup(self, monkeypatch) -> None:
+        _assert_current_startup_lease(cmd)
+        assert cmd._cohort_controller is not None
+        assert not cohort_controller_case.threads
+
+    @pytest.mark.django_db
+    def test_handle_cluster_mode_init_failure_continues_startup(
+        self, monkeypatch, cohort_controller_case
+    ) -> None:
         cmd = _make_command()
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.get_settings",
             lambda: {"DEFAULT_CONCURRENCY": 2},
         )
-        monkeypatch.setattr(
-            cmd,
-            "_init_cluster_ray",
-            lambda _addr: (_ for _ in ()).throw(RuntimeError("cluster init failed")),
+        _prepare_cohort_startup(
+            cmd, monkeypatch, cohort_controller_case, error="private init failure"
         )
-        monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
-        monkeypatch.setattr(cmd, "run_loop", lambda **_kwargs: None)
+        waits = _run_cohort_startup_cycle(cmd, monkeypatch, cohort_controller_case)
         monkeypatch.setattr(cmd, "shutdown", lambda: None)
         monkeypatch.setattr(cmd, "setup_signal_handlers", lambda: None)
 
@@ -1261,13 +1460,21 @@ class TestWorkerCommandRuntime:
 
         assert cmd.execution_mode == "cluster"
 
-    def test_handle_keyboard_interrupt_path(self, monkeypatch) -> None:
+        assert waits == [True, True]
+        assert len(cohort_controller_case.ray_initializations) == 1
+        assert cmd.ray_core_runner is None
+        assert cmd._cohort_controller.reason == "connection_unavailable"
+        assert any("connection_unavailable" in message for message in cmd.stdout.messages)
+        assert all("private init failure" not in message for message in cmd.stdout.messages)
+
+    @pytest.mark.django_db
+    def test_handle_keyboard_interrupt_path(self, monkeypatch, cohort_controller_case) -> None:
         cmd = _make_command()
+        _prepare_cohort_startup(cmd, monkeypatch, cohort_controller_case)
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.get_settings",
             lambda: {"DEFAULT_CONCURRENCY": 2},
         )
-        monkeypatch.setattr(cmd, "_create_lease", lambda _queue: None)
         monkeypatch.setattr(
             cmd,
             "run_loop",
@@ -1287,6 +1494,10 @@ class TestWorkerCommandRuntime:
         )
 
         assert any("Shutdown requested via keyboard interrupt" in m for m in cmd.stdout.messages)
+
+        _assert_current_startup_lease(cmd)
+        assert cmd._cohort_controller is not None
+        assert not cohort_controller_case.threads
 
     @pytest.mark.parametrize("concurrency", [0, -1, True, 1001])
     def test_handle_rejects_invalid_cli_concurrency_before_ray_init(
@@ -1384,86 +1595,83 @@ class TestWorkerCommandRuntimeDb:
             ),
         ],
     )
+    @pytest.mark.django_db(transaction=True)
     def test_ray_core_claim_submits_durable_input_without_manager_hydration(
         self,
         monkeypatch,
+        current_worker_case,
         args_json: str,
         kwargs_json: str,
         input_reference: str | None,
     ) -> None:
-        cmd = _make_command(worker_id="request-transport-worker")
-        cmd.execution_mode = "local"
-        cmd._create_lease("default")
-        task = RayTaskExecution.objects.create(
-            task_id=f"request-transport-{input_reference is not None}",
+        from django_ray.models import RayTaskCohortClaim
+        from tests.integration.test_cohort_dispatch import _claimed
+
+        case = current_worker_case
+        RayTaskExecution.objects.filter(pk=case.task.pk).update(
             callable_path="testproject.tasks.add_numbers",
-            queue_name="default",
-            state=TaskState.QUEUED,
             args_json=args_json,
             kwargs_json=kwargs_json,
             input_reference=input_reference,
         )
-        submissions: list[dict[str, Any]] = []
+        case.task.refresh_from_db()
+        claimed = _claimed(case, "ray_core")
+        cmd = _make_command(worker_id=case.owner.worker_id)
+        cmd.execution_mode = "local"
+        cmd.lease, cmd.lease_identity = case.lease, case.owner
+        sdk = _cohort_worker_tests.core_sdk.__wrapped__(monkeypatch, cmd)
+        cmd.ray_core_runner = sdk.runner
 
-        class FakeRunner:
-            pending_count = 0
+        def reject_manager_hydration(*_args, **_kwargs):
+            pytest.fail("the manager must not hydrate Ray Core task input")
 
-            def submit_durable(
-                self,
-                *,
-                task_execution: RayTaskExecution,
-            ) -> SubmissionHandle:
-                submissions.append(
-                    {
-                        "task_pk": task_execution.pk,
-                        "callable_path": task_execution.callable_path,
-                        "args_json": task_execution.args_json,
-                        "kwargs_json": task_execution.kwargs_json,
-                        "input_reference": task_execution.input_reference,
-                    }
-                )
-                return SubmissionHandle(
-                    ray_job_id=f"ray_core:{task_execution.pk}",
-                    ray_address="local",
-                    submitted_at=datetime.now(UTC),
-                )
-
-        def reject_manager_hydration(*_args: Any, **_kwargs: Any) -> None:
-            raise AssertionError("the manager must not hydrate Ray Core task input")
-
-        cmd.ray_core_runner = cast(Any, FakeRunner())
-        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
         monkeypatch.setattr(
-            "django_ray.runtime.serialization.deserialize_args",
-            reject_manager_hydration,
+            "django_ray.runtime.serialization.deserialize_args", reject_manager_hydration
         )
-        monkeypatch.setattr(
-            "django_ray.input_storage.load_task_input",
-            reject_manager_hydration,
+        monkeypatch.setattr("django_ray.input_storage.load_task_input", reject_manager_hydration)
+        cmd._dispatch_cohort_task(claimed)
+        assert not sdk.calls
+        assert cmd._cohort_preparation_tickets
+        _cohort_worker_tests._advance_core(cmd)
+
+        from django_ray.execution_codec import decode_execution_request
+
+        ((serialized, _bindings),) = sdk.calls
+        request = decode_execution_request(serialized)
+        assert request.execution_protocol_version == 3
+        assert request.identity == claimed.claim.facts.identity
+        assert (request.serialized_args, request.serialized_kwargs, request.input_reference) == (
+            args_json,
+            kwargs_json,
+            input_reference,
         )
+        case.task.refresh_from_db()
+        assert case.task.state == TaskState.RUNNING
+        handle = cmd._cohort_core_handles[case.task.pk]
+        assert (
+            sdk.runner.get_pending_handle(
+                case.task.pk,
+                attempt_number=claimed.claim.facts.identity.attempt_number,
+                execution_generation=claimed.claim.facts.identity.execution_generation,
+            )
+            is handle
+        )
+        assert RayTaskCohortClaim.objects.get().dispatched_at is not None
 
-        claimed = cmd.claim_and_process_tasks(["default"], concurrency=1)
-
-        task.refresh_from_db()
-        assert claimed == 1
-        assert submissions == [
-            {
-                "task_pk": task.pk,
-                "callable_path": task.callable_path,
-                "args_json": args_json,
-                "kwargs_json": kwargs_json,
-                "input_reference": input_reference,
-            }
-        ]
-        assert task.state == TaskState.RUNNING
-        assert task.ray_job_id == f"ray_core:{task.pk}"
-        assert task.ray_address == "local"
-
+    @pytest.mark.django_db(transaction=True)
     def test_ray_core_request_encode_failure_is_permanent_before_execution(
-        self, monkeypatch
+        self, monkeypatch, historical_worker
     ) -> None:
+        from functools import partial
+
         cmd = _make_command(worker_id="request-encode-worker")
-        task = RayTaskExecution.objects.create(
+        historical_worker.lease_for(cmd)
+        monkeypatch.setattr(
+            cmd,
+            "_handle_task_failure",
+            partial(cmd._handle_task_failure, supported_protocols=ExecutionProtocolRange(1, 1)),
+        )
+        task = historical_worker.task(
             task_id="request-encode-failure",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1497,10 +1705,13 @@ class TestWorkerCommandRuntimeDb:
         assert task.ray_job_id is None
         assert task.error_message == "Failed to submit to Ray Core: execution request is invalid"
 
-    def test_sync_execution_still_accepts_legacy_completion(self, monkeypatch) -> None:
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_sync_execution_still_accepts_legacy_completion(
+        self, monkeypatch, historical_worker
+    ) -> None:
         cmd = _make_command(worker_id="legacy-sync-worker")
-        cmd._create_lease("default")
-        task = RayTaskExecution.objects.create(
+        historical_worker.lease_for(cmd)
+        task = historical_worker.task(
             task_id="legacy-sync-completion",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1529,10 +1740,13 @@ class TestWorkerCommandRuntimeDb:
         assert task.state == TaskState.SUCCEEDED
         assert task.result_data == "3"
 
-    def test_mark_stale_ray_core_tasks_routes_rows_through_retry_handling(self) -> None:
+    @pytest.mark.django_db(transaction=True)
+    def test_mark_stale_ray_core_tasks_routes_rows_through_retry_handling(
+        self, historical_worker
+    ) -> None:
         cmd = _make_command(worker_id="stale-worker")
-        cmd._create_lease("default")
-        task = RayTaskExecution.objects.create(
+        historical_worker.lease_for(cmd)
+        task = historical_worker.task(
             task_id="stale-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1666,10 +1880,13 @@ class TestWorkerCommandRuntimeDb:
         assert cmd.lease is None
         assert cmd.lease_identity is None
 
-    def test_process_cancellations_clears_tracking_and_finalizes(self, monkeypatch) -> None:
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_process_cancellations_clears_tracking_and_finalizes(
+        self, monkeypatch, historical_worker
+    ) -> None:
         cmd = _make_command(worker_id="cancel-worker")
-        cmd._create_lease("default")
-        task = RayTaskExecution.objects.create(
+        historical_worker.lease_for(cmd)
+        task = historical_worker.task(
             task_id="cancel-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -1725,14 +1942,17 @@ class TestWorkerCommandRuntimeDb:
         assert cancel_calls == ["ray-cancel"]
         assert task.pk not in cmd.active_tasks
 
-    def test_process_cancellations_adopts_inactive_owner(self) -> None:
-        TaskWorkerLease.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_process_cancellations_adopts_inactive_owner(
+        self, historical_worker
+    ) -> None:
+        historical_worker.lease(
             worker_id="dead-cancel-worker",
             hostname="host",
             pid=123,
             is_active=False,
         )
-        task = RayTaskExecution.objects.create(
+        task = historical_worker.task(
             task_id="cancel-orphan-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.CANCELLING,
@@ -1741,7 +1961,7 @@ class TestWorkerCommandRuntimeDb:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="recovery-worker")
-        cmd._create_lease("default")
+        historical_worker.lease_for(cmd)
 
         cmd.process_cancellations()
 
@@ -1750,8 +1970,9 @@ class TestWorkerCommandRuntimeDb:
         assert task.claimed_by_worker == "recovery-worker"
         assert task.cancellation_status == "NOT_APPLICABLE"
 
-    def test_process_cancellations_adopts_missing_owner(self) -> None:
-        task = RayTaskExecution.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_process_cancellations_adopts_missing_owner(self, historical_worker) -> None:
+        task = historical_worker.task(
             task_id="cancel-orphan-002",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.CANCELLING,
@@ -1760,7 +1981,7 @@ class TestWorkerCommandRuntimeDb:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="recovery-worker")
-        cmd._create_lease("default")
+        historical_worker.lease_for(cmd)
 
         cmd.process_cancellations()
 
@@ -1768,15 +1989,18 @@ class TestWorkerCommandRuntimeDb:
         assert task.state == TaskState.CANCELLED
         assert task.claimed_by_worker == "recovery-worker"
 
-    def test_process_cancellations_adopts_expired_lease_owner(self) -> None:
-        TaskWorkerLease.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_process_cancellations_adopts_expired_lease_owner(
+        self, historical_worker
+    ) -> None:
+        historical_worker.lease(
             worker_id="expired-cancel-worker",
             hostname="host",
             pid=123,
             is_active=True,
             last_heartbeat_at=datetime.now(UTC) - timedelta(hours=1),
         )
-        task = RayTaskExecution.objects.create(
+        task = historical_worker.task(
             task_id="cancel-orphan-003",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.CANCELLING,
@@ -1785,7 +2009,7 @@ class TestWorkerCommandRuntimeDb:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="recovery-worker")
-        cmd._create_lease("default")
+        historical_worker.lease_for(cmd)
 
         cmd.process_cancellations()
 
@@ -1793,14 +2017,15 @@ class TestWorkerCommandRuntimeDb:
         assert task.state == TaskState.CANCELLED
         assert task.claimed_by_worker == "recovery-worker"
 
-    def test_process_cancellations_skips_active_owner(self) -> None:
-        TaskWorkerLease.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_process_cancellations_skips_active_owner(self, historical_worker) -> None:
+        historical_worker.lease(
             worker_id="active-cancel-worker",
             hostname="host",
             pid=123,
             is_active=True,
         )
-        task = RayTaskExecution.objects.create(
+        task = historical_worker.task(
             task_id="cancel-active-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.CANCELLING,
@@ -1809,7 +2034,7 @@ class TestWorkerCommandRuntimeDb:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="recovery-worker")
-        cmd._create_lease("default")
+        historical_worker.lease_for(cmd)
 
         cmd.process_cancellations()
 
@@ -1817,8 +2042,11 @@ class TestWorkerCommandRuntimeDb:
         assert task.state == TaskState.CANCELLING
         assert task.claimed_by_worker == "active-cancel-worker"
 
-    def test_process_cancellations_uses_ray_job_cancellation(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_process_cancellations_uses_ray_job_cancellation(
+        self, monkeypatch, historical_worker
+    ) -> None:
+        task = historical_worker.task(
             task_id="cancel-ray-job-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.CANCELLING,
@@ -1841,7 +2069,7 @@ class TestWorkerCommandRuntimeDb:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
         cmd = _make_command(worker_id="recovery-worker")
-        cmd._create_lease("default")
+        historical_worker.lease_for(cmd)
 
         cmd.process_cancellations()
 
@@ -1850,8 +2078,11 @@ class TestWorkerCommandRuntimeDb:
         assert task.state == TaskState.CANCELLED
         assert task.cancellation_status == "REQUESTED"
 
-    def test_process_cancellations_records_indeterminate_without_ray_core_runner(self) -> None:
-        task = RayTaskExecution.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_process_cancellations_records_indeterminate_without_ray_core_runner(
+        self, historical_worker
+    ) -> None:
+        task = historical_worker.task(
             task_id="cancel-ray-core-unavailable-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.CANCELLING,
@@ -1860,7 +2091,7 @@ class TestWorkerCommandRuntimeDb:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="recovery-worker")
-        cmd._create_lease("default")
+        historical_worker.lease_for(cmd)
 
         cmd.process_cancellations()
 
@@ -1993,47 +2224,48 @@ class TestWorkerCommandRuntimeDb:
 
         assert finished == [task.pk]
 
-    def test_sync_batch_stops_starting_new_tasks_after_signal(self) -> None:
-        cmd = _make_command(worker_id="sync-batch-shutdown-worker")
+    @pytest.mark.django_db(transaction=True)
+    def test_sync_batch_stops_starting_new_tasks_after_signal(
+        self, monkeypatch, current_worker_case
+    ) -> None:
+        from django_ray.models import RayTaskCohortClaim
+        from django_ray.target.cohort_claim import CohortRunnerFamily
+        from tests.integration.test_cohort_selection import _clone
+        from tests.integration.test_cohort_worker import _claim_task
+
+        case = current_worker_case
+        first = case.task
+        second = _clone(case, name="sync-batch-second")
+        cmd = _make_command(worker_id=case.owner.worker_id)
         cmd.execution_mode = "sync"
-        cmd._create_lease("default")
-        first = RayTaskExecution.objects.create(
-            task_id="sync-batch-shutdown-001",
-            callable_path="testproject.tasks.add_numbers",
-            queue_name="default",
-            state=TaskState.QUEUED,
-            args_json="[1, 2]",
-            kwargs_json="{}",
-        )
-        second = RayTaskExecution.objects.create(
-            task_id="sync-batch-shutdown-002",
-            callable_path="testproject.tasks.add_numbers",
-            queue_name="default",
-            state=TaskState.QUEUED,
-            args_json="[3, 4]",
-            kwargs_json="{}",
-        )
-        processed: list[int] = []
+        cmd.lease, cmd.lease_identity = case.lease, case.owner
+        limits = []
 
-        def finish_first_then_signal(active: RayTaskExecution) -> None:
-            processed.append(active.pk)
-            RayTaskExecution.objects.filter(pk=active.pk).update(
-                state=TaskState.SUCCEEDED,
-                finished_at=datetime.now(UTC),
-            )
+        def claim(*, limit):
+            limits.append(limit)
+            assert limit == 1 and not cmd.shutdown_requested
+            return (_claim_task(case),)
+
+        cmd._cohort_controller = SimpleNamespace(family=CohortRunnerFamily.SYNC, claim=claim)
+        apply_result = cmd._apply_cohort_result
+
+        def finish_first_then_signal(*args, **kwargs):
+            outcome = apply_result(*args, **kwargs)
+            assert outcome == 1
             cmd.handle_shutdown_signal(signal.SIGTERM, None)
+            return outcome
 
-        cmd.process_task = finish_first_then_signal  # type: ignore[method-assign]
-
-        cmd.claim_and_process_tasks(["default"], concurrency=2)
+        monkeypatch.setattr(cmd, "_apply_cohort_result", finish_first_then_signal)
+        assert cmd._claim_and_process_cohort_tasks(concurrency=2) == 1
 
         first.refresh_from_db()
         second.refresh_from_db()
-        assert processed == [first.pk]
+        assert limits == [1] and cmd.shutdown_requested
         assert first.state == TaskState.SUCCEEDED
-        assert second.state == TaskState.QUEUED
-        assert second.claimed_by_worker is None
-        assert second.started_at is None
+        assert first.result_data == "3"
+        assert RayTaskCohortClaim.objects.get(binding_id=first.pk).disposition == "RESOLVED"
+        assert second.state == TaskState.QUEUED and second.execution_generation == 0
+        assert second.claimed_by_worker is None and second.started_at is None
         assert second.last_heartbeat_at is None
 
     def test_shutdown_cancels_and_persists_active_ray_core(self) -> None:

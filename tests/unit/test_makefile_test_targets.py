@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -49,6 +50,37 @@ def test_postgres_target_includes_target_execution_evidence_migration() -> None:
     assert target.index("test_ray_worker_target_capability_migration.py") < target.index(
         migration_test
     )
+    assert "-m postgresql" in target
+
+
+def test_production_cohort_and_maintenance_guards_are_selected_by_both_postgres_lanes() -> None:
+    target = _target_body(MAKEFILE.read_text(encoding="utf-8"), "test-postgres")
+    manifest = json.loads((ROOT / ".github/test-suite-taxonomy.json").read_text(encoding="utf-8"))
+    lane = next(item for item in manifest["ci_lanes"] if item["id"] == "postgresql-evidence")
+    paths = {
+        "tests/integration/test_cohort_selection.py",
+        "tests/integration/test_cohort_selection_postgres.py",
+        "tests/integration/test_cohort_dispatch.py",
+        "tests/integration/test_cohort_completion.py",
+        "tests/integration/test_cohort_recovery.py",
+        "tests/integration/test_cohort_cleanup_recovery.py",
+        "tests/integration/test_cohort_job_cleanup.py",
+        "tests/integration/test_cohort_timeout.py",
+        "tests/integration/test_cohort_expiration.py",
+        "tests/integration/test_cohort_cancellation.py",
+        "tests/integration/test_cohort_cancel_request.py",
+        "tests/integration/test_cohort_worker.py",
+        "tests/integration/test_cohort_worker_jobs_dispatch.py",
+        "tests/integration/test_cohort_worker_control.py",
+        "tests/integration/test_cohort_worker_jobs_control.py",
+        "tests/integration/test_maintenance_admission.py",
+        "tests/integration/test_maintenance_controls.py",
+    }
+    for path in paths:
+        assert (ROOT / path).is_file()
+        assert target.count(path) == 1
+        assert lane["selection"]["paths"].count(path) == 1
+    assert lane["selection"]["include_markers"] == ["postgresql"]
     assert "-m postgresql" in target
 
 

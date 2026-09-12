@@ -55,6 +55,13 @@ run in full; its implementation is unchanged. The instructions below describe th
 explicit full run. They do not make every historical scenario a per-PR requirement
 or claim that a partial DRT workload completed the full script.
 
+That historical handoff expects a protocol-1 current manager and is incompatible
+with the protocol-3 activation in migration `0035`. It cannot qualify the 0.5
+candidate as written. The replacement coordinated-upgrade workload must prove
+released-runtime drain, writer retirement, backup and independent restore, then
+current Core/Jobs execution and cleanup. Preserve this missing evidence explicitly
+until that workload passes; changing the old receipt's protocol label is insufficient.
+
 This is a maintainer integration-validation gate for the checked-in local profile. A passing run
 is not deployment certification, a threat-model review, or evidence that the sample manifests form
 a production-ready topology.
@@ -92,7 +99,7 @@ scenario and a cold Ray restart, or by explicitly admitting a bounded full run.
 | Additive Ray-target persistence tables, coordinator-enforced append history, database immutable-update/insert-bound guards, or a private coordination service that records only target intent and verified attestations while no production task/attempt, worker-lease, enqueue, claim, adoption, lifecycle, routing, status, operator, or deployment path consumes those records | KubeRay not applicable; mandatory SQLite and PostgreSQL migration/coordination evidence | N/A | This narrow dormant-database exception proves revision, immutability, verified-only history, derived expiry, maintenance-delete rollback, and schema-reversal refusal with retained history at the owning database boundary. It creates no target capacity, work placement, cluster mutation, or blue/green activation; `retired` remains reserved for #368. Any production consumer uses the affected rows below, and production activation requires every affected scenario gate. Coordinated Beta upgrades use #381; two-cluster handoff requires a separate product decision. |
 | An additive, unseeded, create-once execution-to-immutable-target-policy binding table with no binding writer, reader, Admin surface, enqueue hook, claim/adoption predicate, lifecycle or routing path, backfill, worker capability, or lease consumer | KubeRay not applicable; mandatory SQLite and PostgreSQL binding-migration evidence | N/A | This narrow dormant-binding exception proves one protected relationship per execution, bounded inserts, material-update rejection, deliberate maintenance deletion, and schema-reversal refusal while bindings remain. Both parents are deletion-protected; activation must first adapt and test every execution and policy retention or cleanup path, and binding deletion requires explicit audit and retention ordering. Current workers are target-unaware; a future target-aware consumer must treat absence as unbound and fail closed. `created_at` is not enqueue provenance; historical policy state is not capacity or claim authorization. Legacy active-work adoption is outside coordinated Beta upgrades; historical bindings do not authorize execution. Any production consumer uses the affected rows below, and production activation requires every affected scenario gate. Coordinated Beta upgrades use #381; two-cluster handoff requires a separate product decision. |
 | Bounded backend-alias route history plus a separate, unseeded, create-once binding-to-route-revision selection table while no task or binding writer, reader, Admin surface, enqueue hook, worker, claim/adoption predicate, lifecycle path, lease, or runtime consumer creates or reads route-selection provenance | KubeRay not applicable; mandatory SQLite and PostgreSQL routing migration/coordination evidence | N/A | This narrow dormant-routing exception proves append-only backend-alias route history, revision-checked coordination, exact binding/route-revision target-policy equality, protected parents, maintenance deletion, and schema-reversal refusal. Route intent is not a live attestation, target capacity, claim authorization, or work placement. An absent selection is unproved provenance and cannot imply a default route. Historical mapping is not active-work adoption and remains separate from #381's drained upgrade proof. Cleanup must delete a selection before either its binding or route revision and every revision before its route. Any production consumer uses the affected rows below, and production activation requires every affected scenario gate. Coordinated Beta upgrades use #381; two-cluster handoff requires a separate product decision. |
-| An additive, unseeded, lease-cascading worker/target current-capability table plus a private compare-and-set coordinator while no production path creates, renews, reads, or treats capability rows as capacity; existing exact-lease deletion may only fail-closed cascade-withdraw an otherwise unreachable row | KubeRay not applicable; mandatory SQLite and PostgreSQL capability migration/coordination evidence | N/A | This narrow dormant-capability exception proves exact lease-incarnation snapshots, bounded per-target cardinality, CAS renewal, lease-cascade withdrawal, exact target-policy/attestation equality, and fixed fail-closed refusals. A current row may reference a fresh latest `active` or `draining` Ray Core policy so later pinned-work handling can distinguish drain capacity from new placement; draining never authorizes a new route or enqueue. Row presence alone is never claim authority: a future consumer must revalidate the heartbeat-live exact lease, current policy, same latest unexpired proof, and authenticated execution evidence under its locks. Policy and attestation revisions remain the audit history, and future generations or attempts must archive their own observed tuple. Ray Job capability APIs remain unsupported pending an authenticated pre-Django proof channel. Existing exact-lease deletion, including supported Admin inactive-lease cleanup, can only withdraw current state through the current Django ORM cascade; raw parent deletion remains foreign-key restricted. It does not produce or consume capacity. KubeRay remains not applicable because no production producer can create a capability row. Any production consumer uses the affected rows below, and production activation requires every affected scenario gate. Coordinated Beta upgrades use #381; two-cluster handoff requires a separate product decision. |
+| An additive, unseeded, lease-cascading worker/target current-capability table plus a private compare-and-set coordinator while no production path creates, renews, or treats capability rows as capacity; read-only diagnostics may aggregate scalar metadata; existing exact-lease deletion may only fail-closed cascade-withdraw an otherwise unreachable row | KubeRay not applicable; mandatory SQLite and PostgreSQL capability migration/coordination evidence | N/A | This narrow dormant-capability exception proves exact lease-incarnation snapshots, bounded per-target cardinality, CAS renewal, lease-cascade withdrawal, exact target-policy/attestation equality, and fixed fail-closed refusals. A current row may reference a fresh latest `active` or `draining` Ray Core policy so later pinned-work handling can distinguish drain capacity from new placement; draining never authorizes a new route or enqueue. Row presence alone is never claim authority: a future consumer must revalidate the heartbeat-live exact lease, current policy, same latest unexpired proof, and authenticated execution evidence under its locks. Policy and attestation revisions remain the audit history, and future generations or attempts must archive their own observed tuple. Standalone Ray Job capability APIs remain unsupported; the private current-cohort publisher uses its own authenticated pre-Django proof channel and must be qualified under the affected runtime rows below. Existing exact-lease deletion, including supported Admin inactive-lease cleanup, can only withdraw current state through the current Django ORM cascade; raw parent deletion remains foreign-key restricted. It does not produce or consume capacity. KubeRay remains not applicable because no production producer can create a capability row. Any production consumer uses the affected rows below, and production activation requires every affected scenario gate. Coordinated Beta upgrades use #381; two-cluster handoff requires a separate product decision. |
 | Testproject dashboard, templates, JavaScript, static collection, web image, entrypoint, or web dependencies | Required | `skip`, unless the RuntimeEnv or Ray boundary also changed | Proves the exact asset and image reached the live web pod and protected actions still work. |
 | `Dockerfile.ray`, package or RuntimeEnv contents, source archive construction, dependency delivery, or remote bootstrap/import behavior other than the narrow dormant-attestation exception above | Required | `required` | Proves a newly built archive reaches newly created generic Ray interpreters without preinstalling `django_ray`. |
 | RuntimeEnv snapshot storage, encryption settings or dependencies, storage/retry validation, the fixed deployment canary, or KubeRay encryption selectors | Required | `required` | Proves a cold generic Ray generation receives the decrypted marker while the database retains only the authenticated envelope, and proves corrupt or unknown-key rows fail before Ray. |
@@ -154,6 +161,16 @@ and remote-bootstrap rows require the cold gate even though production remains o
 `1..1`. Retain the SQLite and PostgreSQL `0026` migration evidence as well; the cluster proof does
 not replace database immutability and reversal evidence.
 
+The private current-cohort preparation likewise includes remote bootstrap and Jobs
+request changes, so it requires the affected cold runtime rows even while production
+stays on protocol `1`. Its schema-2 first-runner bindings and per-generation claim
+services require SQLite and PostgreSQL lineage, ownership, held-disposition and
+reversal evidence. They are not production claim capacity. Preserve schema-1 binding
+behavior and historical data, and verify that no producer or worker calls the new
+services. Activating protocol `3` requires new evidence for every affected claim,
+completion, retry, cancellation, recovery and operator path; passing a dormant
+database test or an ordinary protocol-1 task does not supply that proof.
+
 ## Guarded local capacity
 
 The gate renders the direct `kuberay-kind` exploratory profile: one default
@@ -190,8 +207,8 @@ Ray workers for its heavier backlog/capacity role.
   generic Ray head and workers mount it read-only.
 - The KubeRay CRD and operator already installed. The gate deliberately does not install or mutate
   cluster-wide operators.
-- The local access path already exposed, either through the direct NodePorts or the documented Kong
-  local routes.
+- Time-bounded loopback forwards to Django and Prometheus already running. See
+  [local access and credentials](local-credentials.md); the overlay exposes no NodePort or Ingress.
 - A `django-ray-secret` in `django-ray`. During preflight, the gate reads `DJANGO_API_TOKEN` through a
   sensitive-output-suppressed command path and accepts only 32-512 characters from the Bearer
   `token68` alphabet (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`, `+`, and `/`) with at most two
@@ -200,8 +217,11 @@ Ray workers for its heavier backlog/capacity role.
   padding are rejected. The gate immediately registers the token,
   Kubernetes base64 value, and their JSON-, repr-, and URL-escaped forms with the output redactor. It
   treats percent-escape hex case as equivalent, never prints the token, and never places it in a
-  subprocess argument. The rendered placeholder Secret is intentionally excluded from apply so an
-  existing conforming local token is preserved.
+  subprocess argument. All eight component Secrets must already exist; no Secret is rendered or
+  applied. The gate captures and later compares every complete Secret data mapping, including Ray,
+  database, signing, bootstrap, Grafana, demo, and metrics credentials. It submits the bounded
+  complex-workflow demo using `DJANGO_DEMO_TOKEN`; reads and lifecycle calls retain the operator
+  token. The local KubeRay web profile explicitly enables demos; production remains disabled.
 - Static bearer/basic-auth, auth-provider, private-key, and sensitive exec argument/environment
   values embedded in the private kubeconfig snapshot are registered with the same redactor before
   the first snapshot-backed Kubernetes command. The snapshot command itself suppresses captured
@@ -233,12 +253,12 @@ uv run make k8s-final-gate-preflight `
   K8S_RAY_RESTART=required
 ```
 
-The gate renders and owns the `kuberay-kind` overlay, so its HTTP acceptance boundary is the
-direct NodePort pair: Django at `http://localhost:30080` and Prometheus at
-`http://localhost:30090`. Keep those defaults unless the same services are already exposed through
-equivalent reviewed local routes. In particular, `http://prometheus.localhost:30080` belongs to the
-optional, independently deployed `kong-local` overlay. Without that Prometheus ingress, port `30080`
-routes to Django and the Prometheus `/api/v1/targets` request returns HTTP 404.
+The gate renders and owns the `kuberay-kind` overlay. Its HTTP acceptance boundary is the
+loopback-forward pair: Django at `http://127.0.0.1:30080` and Prometheus at
+`http://127.0.0.1:30090`. Run `make k8s-forward-web` and `make k8s-forward-prometheus` with the
+explicit context in separate terminals. Allow enough time using `K8S_FORWARD_SECONDS` (at most
+3600); a forward that expires or loses its backing pod must be restarted explicitly before rerunning
+the affected gate. Forwarding grants no resource admission and bypasses no API authentication.
 
 For a plain Kind cluster, the context encodes the cluster name. The optional override must match it:
 
@@ -338,7 +358,16 @@ The gate performs these bounded layers:
    unexpected-container resources remain immediate failures rather than retryable rollout state.
 7. Strictly rechecks that converged application topology without polling and verifies the full named
     init/regular container image and runtime image-ID set. This prevents a terminating or old-image
-    pod from being omitted from final evidence. Before any probe, authenticated task, or rq2
+    pod from being omitted from final evidence. The `authentication` layer runs fresh, read-only
+    processes in the existing authorized default manager and the verified Ray head's Grafana
+    importer. Ray Dashboard/Jobs must return their exact missing-token `401` and invalid-token `403`
+    responses, and accept the configured token. Raw Ray Client/GCS RPCs require token-specific
+    `UNAUTHENTICATED` responses and successful authorized reads; explicit metadata avoids cached
+    credentials and GCS wrong-cluster errors cannot count as token denial. Grafana search must
+    reject anonymous access and a bad password, while its user endpoint must identify the configured
+    administrator. No connection error, timeout, redirect, or incomplete receipt passes. Only complete
+    receipts set `ray_auth_boundary_verified` and `grafana_auth_boundary_verified`.
+    Before authenticated task or rq2
     submission, a separate `protocol-handoff-recovery` layer removes only an exact interrupted
     released-manager Deployment/lease or reserved protocol fixture, restores the current Ray Job
     manager replica, and rejects missing ownership, foreign residue, an orphan live lease, or
@@ -577,7 +606,7 @@ The runtime block records:
   plan, null legacy progress and detail revisions, zero retained detail rows, and no advertised
   admin action;
 - probe path/Host, web restart count, and Prometheus pool counts;
-- the preservation statement. The full base64 `django-ray-secret.data` mapping is digested privately
+- the preservation statement. The full base64 data mapping of every component Secret is digested privately
   during preflight and compared again immediately before evidence; neither digest nor Secret value is
   emitted.
 
@@ -649,7 +678,7 @@ final-gate evidence.
 ## Failure diagnostics and recovery
 
 Failures are labeled by layer: `preflight`, `images`, `apply`, `setup`, `workloads`, `ray`, `rollouts`,
-`app-convergence`, `image-identity`, `protocol-handoff-recovery`, `runtime-env`, `probes`,
+`app-convergence`, `image-identity`, `authentication`, `protocol-handoff-recovery`, `runtime-env`, `probes`,
 `api-smoke`, `ray-job-request-reference`, `protocol-handoff`, `runtime-env-encryption`,
 `workflow-progress`, `workflow-admin`, `prometheus`, or
 `final-identity`. After a Kubernetes mutation,
@@ -669,7 +698,7 @@ use `k8s-reset`, delete the namespace, delete PostgreSQL, delete a PVC, prune Do
 local images. The gate itself never performs those actions. It only:
 
 - applies namespace-confined prerequisites first and defers application/Ray workloads until setup;
-- preserves the existing `Secret/django-ray-secret` rather than applying its checked-in placeholder;
+- preserves all eight existing component Secrets without rendering or applying credentials;
 - rolls the namespaced Prometheus Deployment so target checks use the applied configuration;
 - deletes/recreates `Job/django-setup` with bounded waits;
 - optionally deletes individually verified `RayCluster/ray` head/worker pod names with a bounded

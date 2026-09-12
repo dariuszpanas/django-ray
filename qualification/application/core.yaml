@@ -432,7 +432,7 @@ spec:
           metadata:
             name: ray
           spec:
-            rayVersion: 2.56.0
+            rayVersion: 2.58.0
             enableInTreeAutoscaling: false
             headGroupSpec:
               serviceType: ClusterIP
@@ -460,7 +460,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-head
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m
@@ -546,7 +546,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-worker
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m
@@ -617,24 +617,22 @@ spec:
     try:
     - create:
         resource:
-          apiVersion: apps/v1
-          kind: Deployment
+          apiVersion: batch/v1
+          kind: Job
           metadata:
             name: django-manager
           spec:
-            replicas: 1
-            strategy:
-              type: Recreate
-            selector:
-              matchLabels:
-                app: django-manager
+            backoffLimit: 0
+            activeDeadlineSeconds: 1800
+            parallelism: 1
+            completions: 1
             template:
               metadata:
                 labels:
                   app: django-manager
               spec:
                 automountServiceAccountToken: false
-                restartPolicy: Always
+                restartPolicy: Never
                 terminationGracePeriodSeconds: 30
                 securityContext:
                   runAsNonRoot: true
@@ -706,18 +704,16 @@ spec:
                   emptyDir:
                     sizeLimit: 256Mi
                     medium: ''
-            progressDeadlineSeconds: 600
   - name: require-current-manager
     try:
     - assert:
         resource:
-          apiVersion: apps/v1
-          kind: Deployment
+          apiVersion: batch/v1
+          kind: Job
           metadata:
             name: django-manager
           status:
-            readyReplicas: 1
-            availableReplicas: 1
+            active: 1
   - name: assert-first-generation
     try:
     - create:
@@ -785,7 +781,7 @@ spec:
                   command:
                   - /bin/sh
                   - -ec
-                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/before-core.json
+                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/before-core.json && python -m qualification.application.retire_manager --before-core /receipts/before-core.json --receipt /receipts/before-retirement.json
                   volumeMounts:
                   - name: runtime
                     mountPath: /runtime
@@ -825,6 +821,22 @@ spec:
             name: assert-before
           status:
             succeeded: 1
+  - name: reap-retired-manager-before-ray
+    try:
+    - assert:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: django-manager
+          status:
+            succeeded: 1
+    - delete:
+        ref:
+          apiVersion: batch/v1
+          kind: Job
+          name: django-manager
+        deletionPropagationPolicy: Foreground
   - name: replace-ray-with-cold-generation
     try:
     - delete:
@@ -840,7 +852,7 @@ spec:
           metadata:
             name: ray
           spec:
-            rayVersion: 2.56.0
+            rayVersion: 2.58.0
             enableInTreeAutoscaling: false
             headGroupSpec:
               serviceType: ClusterIP
@@ -868,7 +880,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-head
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m
@@ -954,7 +966,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-worker
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m
@@ -1021,6 +1033,107 @@ spec:
           status:
             state: ready
             readyWorkerReplicas: 1
+  - name: start-new-manager-incarnation
+    try:
+    - create:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: django-manager
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 1800
+            parallelism: 1
+            completions: 1
+            template:
+              metadata:
+                labels:
+                  app: django-manager
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Never
+                terminationGracePeriodSeconds: 30
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                - name: manager
+                  image: ($values.applicationImage)
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                    limits:
+                      cpu: 250m
+                      memory: 768Mi
+                      ephemeral-storage: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  envFrom:
+                  - configMapRef:
+                      name: application-config
+                  - secretRef:
+                      name: application-credentials
+                  env:
+                  - name: DJANGO_SECRET_KEY_PART_ONE
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_ONE
+                  - name: DJANGO_SECRET_KEY_PART_TWO
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_TWO
+                  - name: DJANGO_SECRET_KEY
+                    value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                  args:
+                  - worker-cluster
+                  volumeMounts:
+                  - name: runtime
+                    mountPath: /runtime
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+                  readinessProbe:
+                    exec:
+                      command:
+                      - /bin/sh
+                      - -c
+                      - test -d /proc/1 && grep -q python /proc/1/cmdline
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 6
+                volumes:
+                - name: runtime
+                  persistentVolumeClaim:
+                    claimName: runtime
+                - name: tmp
+                  emptyDir:
+                    sizeLimit: 256Mi
+                    medium: ''
+  - name: require-new-manager-incarnation
+    try:
+    - assert:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: django-manager
+          status:
+            active: 1
   - name: assert-cold-generation
     try:
     - create:
@@ -1088,7 +1201,7 @@ spec:
                   command:
                   - /bin/sh
                   - -ec
-                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/after-nodes.json --previous-receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/after-core.json
+                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/after-nodes.json --previous-receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/after-core.json --previous-retirement /receipts/before-retirement.json
                   volumeMounts:
                   - name: runtime
                     mountPath: /runtime

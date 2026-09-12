@@ -1,5 +1,9 @@
 # Contributing
 
+Path-selected runtime image proof is reviewed before the native upgrade gate. The
+`Upgrade Runtime Images` job checks both installed upgrade images; it is supplemental
+to `CI Gate` and does not establish native execution or preservation acceptance.
+
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
 changes. Its passing current-source result is required when the enqueue-only gate row applies,

@@ -23,6 +23,7 @@ from django.db import (
     transaction,
 )
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.recorder import MigrationRecorder
 from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
@@ -38,10 +39,13 @@ from django_ray.target.attestation import (
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
 
 MIGRATE_FROM = [("django_ray", "0022_ray_target_persistence")]
 MIGRATE_TO = [("django_ray", "0023_ray_task_target_binding")]
-LATEST = [("django_ray", "0026_ray_task_target_execution_evidence")]
+HISTORICAL_LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGER = "ray_tbinding_guard_0023"
@@ -115,6 +119,7 @@ def _create_target_and_policy(
 
 def _create_execution(*, task_id: str = "task-target-binding") -> RayTaskExecution:
     return RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id=task_id,
         callable_path="testproject.tasks.add_numbers",
     )
@@ -129,6 +134,14 @@ def _database_trigger_names() -> set[str]:
         else:
             raise AssertionError(f"unsupported database vendor: {connection.vendor}")
         return {str(row[0]) for row in cursor.fetchall()}
+
+
+def _expected_binding_trigger_names() -> set[str]:
+    # Reversal may have removed later empty schemas before the original 0023
+    # history guard refuses. Assert the fences for the actually applied state.
+    if ("django_ray", "0030_cohort_claims") in MigrationRecorder(connection).applied_migrations():
+        return {"ray_cbinding_insert_0030", "ray_cbinding_update_0030"}
+    return _SQLITE_TRIGGERS if connection.vendor == "sqlite" else {_POSTGRESQL_TRIGGER}
 
 
 def _clear_binding_tables() -> None:
@@ -181,12 +194,18 @@ def _close_owned_thread_connection() -> None:
         thread_connection.connection = None
 
 
-def test_model_exposes_only_the_dormant_task_target_binding_contract() -> None:
+def test_model_preserves_schema_one_defaults_with_explicit_cohort_fields() -> None:
     assert [field.name for field in RayTaskTargetBinding._meta.fields] == [
         "execution",
         "target_policy",
         "schema_version",
         "created_at",
+        "runner_family",
+        "package_version",
+        "sync_python_implementation",
+        "sync_python_major",
+        "sync_python_minor",
+        "sync_python_patch",
     ]
     execution = RayTaskTargetBinding._meta.get_field("execution")
     target_policy = RayTaskTargetBinding._meta.get_field("target_policy")
@@ -275,7 +294,7 @@ def test_migration_fence_sql_is_reversible_typed_and_fail_closed() -> None:
 
 
 def _assert_database_constraints_and_fences() -> None:
-    expected_triggers = _SQLITE_TRIGGERS if connection.vendor == "sqlite" else {_POSTGRESQL_TRIGGER}
+    expected_triggers = _expected_binding_trigger_names()
     assert expected_triggers <= _database_trigger_names()
 
     with connection.cursor() as cursor:
@@ -541,7 +560,7 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
         reverted_execution = reverted_apps.get_model("django_ray", "RayTaskExecution")
         assert reverted_execution.objects.filter(pk__in=(existing.pk, rolling.pk)).count() == 2
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         table_names = set(connection.introspection.table_names())
         if RayTaskTargetBinding._meta.db_table in table_names:
             RayTaskTargetBinding.objects.all().delete()
@@ -626,10 +645,10 @@ def test_sqlite_active_binding_writer_cannot_partially_reverse_schema() -> None:
         execution = RayTaskExecution.objects.get(task_id="binding-concurrent-writer")
         assert RayTaskTargetBinding.objects.filter(pk=execution.pk).exists()
         assert RayTaskTargetBinding._meta.db_table in connection.introspection.table_names()
-        assert _SQLITE_TRIGGERS <= _database_trigger_names()
+        assert _expected_binding_trigger_names() <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_binding_tables()
 
 
@@ -706,8 +725,8 @@ def test_postgresql_binding_writer_serializes_before_reverse_guard() -> None:
         execution = RayTaskExecution.objects.get(task_id="binding-concurrent-writer")
         assert RayTaskTargetBinding.objects.filter(pk=execution.pk).exists()
         assert RayTaskTargetBinding._meta.db_table in connection.introspection.table_names()
-        assert {_POSTGRESQL_TRIGGER} <= _database_trigger_names()
+        assert _expected_binding_trigger_names() <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_binding_tables()

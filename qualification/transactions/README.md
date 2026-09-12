@@ -51,7 +51,14 @@ The existing tests prove commit/rollback, nested savepoints, input and receipt
 failures, backend-alias interpretation, route refusal, pinned registry writes,
 and the external filesystem object that survives database rollback. Two cases
 retain independent writer/observer process IDs and the actual before/after row
-counts. Missing cases, skips, failed teardown or incomplete observations fail.
+counts for the execution, application receipt and immutable cohort intent, in
+that order. The current protocol-3 producer must expose none before the outer
+transaction finishes, all three after commit, and none after rollback. The
+installed package selects its exact execution epoch; the manifest retains that
+epoch. Missing cases, skips, failed teardown, incomplete counts or a missing
+committed intent fail. The same validator retains historical protocol-1 receipt
+semantics, which require a zero intent count, without selecting that epoch for
+the current installed package.
 
 The server uses a fresh `initdb` directory and private mode-0700 Unix socket
 under the target's `/tmp`; it never addresses a shared database. Limits are ten
@@ -69,8 +76,9 @@ manifest containing source/wheel/dependency identities and observations. No
 database passwords or Kubernetes API tokens enter the fixture.
 
 This is the affected gate for default-database enqueue binding. Cold Ray is
-explicitly `skip`: no cluster submission, worker, remote bootstrap or execution
-protocol changes are involved. No Ray runtime starts. This gate does not claim
+explicitly `skip`: the workload observes enqueue persistence without cluster
+submission, a worker or remote bootstrap. No Ray runtime starts, and this gate
+does not qualify the broader execution-protocol activation. It does not claim
 remote execution, rollback of external objects, cross-database atomicity, or a
 complete application qualification. Passing exact-head hosted Linux CI is the
 full-suite checkpoint. The focused container workflow proves this database-only

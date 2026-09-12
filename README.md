@@ -65,7 +65,7 @@ task stats, project links, and smoke-task trigger:
 
 - Python 3.12, 3.13, or 3.14
 - Django 6.0.8+
-- Ray 2.56.0+
+- Ray 2.58.0+
 
 ## Installation
 

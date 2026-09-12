@@ -226,7 +226,9 @@ def ray_cluster() -> Iterator[object]:
     try:
         yield ray
     finally:
-        ray.shutdown()
+        # Wait for this fixture's subprocesses before the next test starts.
+        # The admitting test runner supplies the enclosing execution deadline.
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.fixture(autouse=True)
@@ -247,20 +249,44 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
     request.getfixturevalue("django_db_setup")
     django_db_blocker = request.getfixturevalue("django_db_blocker")
 
-    from django_ray.models import LegacyWorkerAdmissionToken, TaskExecutionProtocolPolicy
+    from django.apps import apps
+    from django.utils import timezone
+
+    from django_ray.models import TaskExecutionProtocolPolicy
 
     with django_db_blocker.unblock():
-        policy, _ = TaskExecutionProtocolPolicy.objects.get_or_create(
+        # Installed-wheel qualification intentionally omits the sample app.
+        # Restore its migration seed only when that app owns a table here.
+        if apps.is_installed("testproject"):
+            SampleAdmissionBudget = apps.get_model("testproject", "SampleAdmissionBudget")
+            SampleAdmissionBudget.objects.get_or_create(
+                pk=1, defaults={"window_started_at": timezone.now()}
+            )
+        TaskExecutionProtocolPolicy.objects.get_or_create(
             singleton_key=1,
             defaults={
                 "schema_version": 1,
-                "active_write_protocol_version": 1,
-                "legacy_worker_admission_enabled": True,
+                "active_write_protocol_version": 3,
+                "legacy_worker_admission_enabled": False,
                 "revision": 1,
             },
         )
-        if policy.legacy_worker_admission_enabled:
-            LegacyWorkerAdmissionToken.objects.get_or_create(singleton_key=1)
+        # Transactional flush removes migration data. Reuse the exact seed
+        # function for isolated tests; production never repairs a missing or
+        # incoherent maintenance policy automatically.
+        from importlib import import_module
+        from types import SimpleNamespace
+
+        from django.db import connections, transaction
+
+        from django_ray.models import RayMaintenanceAudit, RayMaintenancePolicy
+
+        if not RayMaintenancePolicy.objects.exists():
+            if RayMaintenanceAudit.objects.exists():
+                raise RuntimeError("Test maintenance seed has retained audit without policy")
+            seed = import_module("django_ray.migrations.0031_maintenance_admission")._seed
+            with transaction.atomic():
+                seed(apps, SimpleNamespace(connection=connections["default"]))
 
 
 @pytest.fixture(autouse=True)

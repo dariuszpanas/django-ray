@@ -1,4 +1,8 @@
-"""Execution-protocol policy transition and cross-version race coverage."""
+"""Historical protocol1/2 transition races at the actual preactivation schema.
+
+Current protocol3 activation/refusal is qualified in test_cohort_activation_migration.
+These retained rollout-service tests do not reopen admission on a current database.
+"""
 
 from __future__ import annotations
 
@@ -56,10 +60,41 @@ from django_ray.protocol_coordination import (
 )
 from django_ray.runner.base import JobInfo, JobStatus, SubmissionHandle
 from django_ray.runner.leasing import WorkerLeaseIdentity
+from tests.migration_cleanup import clear_historical_admission_fixtures
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
-pytestmark = pytest.mark.django_db(transaction=True)
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("historical_rollout_schema"),
+]
 
 MIGRATE_FROM = [("django_ray", "0018_workflow_run_allocation")]
+
+
+@pytest.fixture
+def historical_rollout_schema(preactivation_protocol_schema):
+    """Restore this suite's deliberate corruption before its migration teardown."""
+    original = TaskExecutionProtocolPolicy.objects.values().get(singleton_key=1)
+    try:
+        yield
+    finally:
+        # These are stopped, isolated test fixtures after their assertions. No
+        # current fence is disabled and no production policy is repaired here.
+        clear_historical_admission_fixtures()
+        apps = (
+            MigrationExecutor(connection)._create_project_state(with_applied_migrations=True).apps
+        )
+        lease_model = apps.get_model("django_ray", "TaskWorkerLease")
+        policy_model = apps.get_model("django_ray", "TaskExecutionProtocolPolicy")
+        token_model = apps.get_model("django_ray", "LegacyWorkerAdmissionToken")
+        lease_model.objects.filter(legacy_admission_token__isnull=False).update(
+            legacy_admission_token=None
+        )
+        policy_model.objects.update_or_create(
+            singleton_key=1,
+            defaults={key: value for key, value in original.items() if key != "singleton_key"},
+        )
+        token_model.objects.get_or_create(singleton_key=1)
 
 
 def _historical_models():
@@ -114,11 +149,7 @@ def _reopen(expected_revision: int = 2):
 
 
 def _explicit_v1_worker(worker_id: str) -> Command:
-    worker = Command()
-    worker.stdout = StringIO()
-    worker._set_worker_id(worker_id)
-    worker._create_lease("default")
-    return worker
+    return _explicit_range_worker(worker_id, minimum=1, maximum=1)
 
 
 def _explicit_range_worker(
@@ -1251,10 +1282,10 @@ def test_postgresql_coordination_helpers_emit_exact_bounded_sql(
             statements.append((sql, params))
 
     database_connection = connections["default"]
-    monkeypatch.setattr(database_connection, "cursor", lambda: RecordingCursor())
-
-    protocol_coordination._postgresql_lock_transition(using="default")
-    protocol_coordination._postgresql_lock_execution_writers(using="default")
+    with monkeypatch.context() as cursor_patch:
+        cursor_patch.setattr(database_connection, "cursor", lambda: RecordingCursor())
+        protocol_coordination._postgresql_lock_transition(using="default")
+        protocol_coordination._postgresql_lock_execution_writers(using="default")
 
     assert statements == [
         (

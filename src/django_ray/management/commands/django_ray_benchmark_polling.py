@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import platform
 import random
+import sys
 import threading
 import time
 import uuid
 from collections import Counter, deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from io import StringIO
 from typing import Any
@@ -19,7 +21,7 @@ import django
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import close_old_connections, connection, transaction
 from django.db.migrations.recorder import MigrationRecorder
-from django.db.models import Q, QuerySet
+from django.db.models import QuerySet
 
 from django_ray import __version__ as django_ray_version
 from django_ray.execution_protocol import (
@@ -27,20 +29,39 @@ from django_ray.execution_protocol import (
     EXECUTION_PROTOCOL_VERSION,
     SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 )
+from django_ray.maintenance import maintenance_admission_barrier, read_maintenance_policy
 from django_ray.management.commands.django_ray_worker import Command as WorkerCommand
 from django_ray.management.diagnostics import render_console_diagnostic
-from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
+from django_ray.models import (
+    RayTaskCohortClaim,
+    RayTaskCohortIntent,
+    RayTaskExecution,
+    RayTaskTargetBinding,
+    TaskState,
+    TaskWorkerLease,
+)
+from django_ray.runner import cohort_claims
+from django_ray.runner.cohort_claims import ClaimedCohortTask, CohortClaimAlias
 from django_ray.runner.leasing import WorkerLeaseIdentity, get_heartbeat_interval
 from django_ray.runner.polling import AdaptivePollingPolicy
+from django_ray.target import cohort_claim_storage
+from django_ray.target.cohort_claim import (
+    CohortClaimDisposition,
+    CohortManagerRuntime,
+    CohortPythonVersion,
+    CohortResolutionKind,
+    CohortRunnerFamily,
+)
+from django_ray.target.cohort_intent import CohortExecutionDeclaration, build_cohort_intent
+from django_ray.target.cohort_intent_storage import persist_cohort_intent
 
-_PROTOCOL_PREDICATE_EVIDENCE_SCHEMA_VERSION = 1
-_PROTOCOL_PREDICATE_METHOD = "paired_counterbalanced_production_claim"
-_PROTOCOL_PREDICATE_MAX_ROWS = 256
+_PROTOCOL_PREDICATE_EVIDENCE_SCHEMA_VERSION = 2
+_PROTOCOL_PREDICATE_METHOD = "paired_counterbalanced_current_cohort_selection"
+_PROTOCOL_PREDICATE_MAX_ROWS = 100
 _PROTOCOL_PREDICATE_TIMED_PAIRS = 12
 _PRODUCTION_VARIANT = "production_protocol_predicate"
 _CONTROL_VARIANT = "control_without_protocol_predicate"
 _MAX_PLAN_NODES = 32
-_CAPTURE_EMPTY_SELECT = "SELECT 1 WHERE FALSE"
 
 _PLAN_NODE_CATEGORIES = {
     "Append": "append",
@@ -134,38 +155,22 @@ def _cross_worker_overlap_metrics(
 
 
 def _is_claim_query(sql: str) -> bool:
-    """Identify the production task claim SELECT from executed SQL text."""
+    """Count the actual pre-LIMIT candidate SELECT, not each later row lock."""
     normalized = " ".join(sql.upper().split())
     table_name = RayTaskExecution._meta.db_table.upper()
+    order_clause = normalized.rsplit("ORDER BY", 1)[-1] if "ORDER BY" in normalized else ""
     return (
-        normalized.startswith("SELECT") and table_name in normalized and "FOR UPDATE" in normalized
+        normalized.startswith("SELECT")
+        and table_name in normalized
+        and '"PRIORITY" DESC' in order_clause
+        and '"CREATED_AT" ASC' in order_clause
+        and "LIMIT" in order_clause
     )
 
 
 def _is_production_claim_query(sql: str) -> bool:
-    """Distinguish the priority claim SELECT from the preceding expiry sweep."""
-    normalized = " ".join(sql.upper().split())
-    order_clause = normalized.rsplit("ORDER BY", 1)[-1] if "ORDER BY" in normalized else ""
-    return (
-        _is_claim_query(sql)
-        and '"PRIORITY" DESC' in order_clause
-        and '"CREATED_AT" ASC' in order_clause
-    )
-
-
-def _is_expiry_sweep_query(sql: str) -> bool:
-    """Recognize the bounded expiry SELECT that precedes production claiming."""
-    normalized = " ".join(sql.upper().split())
-    if " WHERE " not in normalized or " ORDER BY " not in normalized:
-        return False
-    where_clause = normalized.split(" WHERE ", 1)[1].rsplit(" ORDER BY ", 1)[0]
-    order_clause = normalized.rsplit(" ORDER BY ", 1)[1]
-    return (
-        _is_claim_query(sql)
-        and '"QUEUE_DEADLINE_AT" IS NOT NULL' in where_clause
-        and '"QUEUE_DEADLINE_AT" <=' in where_clause
-        and '"QUEUE_DEADLINE_AT" ASC' in order_clause
-    )
+    """Require current intent qualification on the observed candidate SELECT."""
+    return _is_claim_query(sql) and "COHORTINTENT" in sql.upper()
 
 
 def _normalized_sql_shape(sql: str) -> str:
@@ -173,11 +178,11 @@ def _normalized_sql_shape(sql: str) -> str:
     return " ".join(sql.upper().split())
 
 
-def _has_inclusive_protocol_predicates(sql: str) -> bool:
-    """Return whether a SQL shape includes both protocol-range bounds."""
+def _has_current_protocol_predicate(sql: str) -> bool:
+    """Require the current exact task epoch, distinct from lease predicates."""
     normalized = _normalized_sql_shape(sql)
     column = '"EXECUTION_PROTOCOL_VERSION"'
-    return f"{column} >=" in normalized and f"{column} <=" in normalized
+    return f"{column} =" in normalized
 
 
 @dataclass(frozen=True)
@@ -206,7 +211,7 @@ class ProtocolPredicateVariantResult:
 
 @dataclass(frozen=True)
 class ProtocolPredicateEvidence:
-    """Counterbalanced evidence for the production protocol-range predicate."""
+    """Counterbalanced evidence for the current candidate epoch predicate."""
 
     schema_version: int
     method: str
@@ -318,6 +323,49 @@ class _ThreadMetrics:
     lock: threading.Lock
 
 
+def _benchmark_intent():
+    return build_cohort_intent(
+        CohortExecutionDeclaration("polling-benchmark", "auto", False),
+        package_version=django_ray_version,
+        runtime_env_identity_digest="sha256:" + hashlib.sha256(b"{}").hexdigest(),
+    )
+
+
+@dataclass(frozen=True)
+class _BenchmarkCohort:
+    identity: WorkerLeaseIdentity
+    alias: CohortClaimAlias
+    runtime: CohortManagerRuntime
+
+    @classmethod
+    def current(cls, queue_name, identity):
+        intent = _benchmark_intent()
+        return cls(
+            identity,
+            CohortClaimAlias(
+                intent.backend_alias,
+                intent.configuration_digest,
+                intent.selection_policy,
+                (queue_name,),
+            ),
+            CohortManagerRuntime(
+                django_ray_version,
+                CohortPythonVersion(sys.implementation.name, *sys.version_info[:3]),
+            ),
+        )
+
+    def claim(self, limit):
+        return cohort_claims.claim_cohort_tasks(
+            self.identity,
+            aliases=(self.alias,),
+            qualifications=(),
+            runner_family=CohortRunnerFamily.SYNC,
+            manager_runtime=self.runtime,
+            limit=limit,
+            now=datetime.now(UTC),
+        )
+
+
 @dataclass
 class _WorkerGroup:
     stop: threading.Event
@@ -325,6 +373,7 @@ class _WorkerGroup:
     threads: list[threading.Thread]
     metrics: _ThreadMetrics
     lease_identities: list[WorkerLeaseIdentity | None]
+    claims: list[ClaimedCohortTask] = field(default_factory=list)
 
 
 class Command(BaseCommand):
@@ -509,6 +558,13 @@ class Command(BaseCommand):
         task_prefix = f"poll-protocol-{run_id}-"
         row_count = min(task_count, _PROTOCOL_PREDICATE_MAX_ROWS)
         created_pks: list[int] = []
+        command = WorkerCommand()
+        command.stdout = StringIO()
+        command._set_worker_id(f"benchmark-{queue_name}-capture")
+        command._create_lease(queue_name)
+        if command.lease_identity is None:
+            raise CommandError("protocol predicate benchmark could not acquire a capture lease")
+        cohort = _BenchmarkCohort.current(queue_name, command.lease_identity)
         try:
             for index in range(row_count):
                 task_id = f"{task_prefix}{index}"
@@ -528,23 +584,27 @@ class Command(BaseCommand):
             captured_sql = self._capture_production_claim_sql(
                 queue_name=queue_name,
                 query_limit=row_count,
+                cohort=cohort,
             )
             self._verify_production_claim_sql_shape(
                 captured_sql=captured_sql,
                 queue_name=queue_name,
                 claim_now=claim_now,
+                cohort=cohort,
                 query_limit=row_count,
             )
 
             production_plan = self._explain_claim_query(
                 queue_name=queue_name,
                 claim_now=claim_now,
+                cohort=cohort,
                 query_limit=row_count,
                 protocol_predicate=True,
             )
             control_plan = self._explain_claim_query(
                 queue_name=queue_name,
                 claim_now=claim_now,
+                cohort=cohort,
                 query_limit=row_count,
                 protocol_predicate=False,
             )
@@ -560,6 +620,7 @@ class Command(BaseCommand):
                 _, selected_pks = self._time_claim_query(
                     queue_name=queue_name,
                     claim_now=claim_now,
+                    cohort=cohort,
                     query_limit=row_count,
                     protocol_predicate=protocol_predicate,
                 )
@@ -581,6 +642,7 @@ class Command(BaseCommand):
                     duration_ms, selected_pks = self._time_claim_query(
                         queue_name=queue_name,
                         claim_now=claim_now,
+                        cohort=cohort,
                         query_limit=row_count,
                         protocol_predicate=protocol_predicate,
                     )
@@ -632,11 +694,25 @@ class Command(BaseCommand):
                 variants=variants,
             )
         finally:
-            if created_pks:
+            with transaction.atomic():
                 owned_rows = RayTaskExecution.objects.filter(pk__in=created_pks)
+                locked = list(owned_rows.select_for_update())
+                original_ids = {pk: f"{task_prefix}{index}" for index, pk in enumerate(created_pks)}
+                if len(locked) != len(created_pks) or any(
+                    row.state != TaskState.QUEUED
+                    or row.attempt_number != 1
+                    or row.execution_generation != 0
+                    or row.claimed_by_worker is not None
+                    or row.queue_name != queue_name
+                    or row.task_id != original_ids[row.pk]
+                    for row in locked
+                ):
+                    raise CommandError("protocol predicate benchmark row ownership changed")
+                RayTaskCohortIntent.objects.filter(execution_id__in=created_pks).delete()
                 owned_rows.delete()
                 if RayTaskExecution.objects.filter(pk__in=created_pks).exists():
                     raise CommandError("protocol predicate benchmark row cleanup was incomplete")
+                self._delete_exact_leases([cohort.identity])
 
     @staticmethod
     def _claim_queryset(
@@ -645,74 +721,77 @@ class Command(BaseCommand):
         claim_now: datetime,
         query_limit: int,
         protocol_predicate: bool,
+        cohort: _BenchmarkCohort,
     ) -> QuerySet:
-        claim_filters: dict[str, object] = {
-            "state": TaskState.QUEUED,
-            "queue_name__in": [queue_name],
-        }
-        if protocol_predicate:
-            claim_filters.update(
-                execution_protocol_version__gte=SUPPORTED_EXECUTION_PROTOCOL_RANGE.minimum,
-                execution_protocol_version__lte=SUPPORTED_EXECUTION_PROTOCOL_RANGE.maximum,
+        if cohort.alias.queues != (queue_name,):
+            raise CommandError("protocol predicate benchmark context changed")
+        with maintenance_admission_barrier(using="default"):
+            tasks = cohort_claims._candidates(
+                {cohort.alias.alias: cohort.alias},
+                {},
+                CohortRunnerFamily.SYNC,
+                cohort.runtime,
+                cohort.identity,
+                claim_now,
+                read_maintenance_policy(using="default"),
+                using="default",
             )
-        tasks = RayTaskExecution.objects.select_for_update(skip_locked=True).filter(**claim_filters)
-        return (
-            tasks.filter(Q(run_after__isnull=True) | Q(run_after__lte=claim_now))
-            .filter(Q(queue_deadline_at__isnull=True) | Q(queue_deadline_at__gt=claim_now))
-            .order_by("-priority", "created_at", "pk")[:query_limit]
-        )
+        if not protocol_predicate:
+            # Only this root-table equality is removed. Every qualification
+            # subquery remains intact; this SELECT never authorizes a claim.
+            children = tasks.query.where.children
+            matches = [
+                lookup
+                for lookup in children
+                if getattr(getattr(getattr(lookup, "lhs", None), "target", None), "name", None)
+                == "execution_protocol_version"
+            ]
+            if len(matches) != 1 or getattr(matches[0], "lookup_name", None) != "exact":
+                raise CommandError("current protocol predicate shape changed")
+            children.remove(matches[0])
+        return tasks.order_by("-priority", "created_at", "pk").values_list("pk", flat=True)[
+            :query_limit
+        ]
 
     @staticmethod
-    def _capture_production_claim_sql(*, queue_name: str, query_limit: int) -> str:
-        command = WorkerCommand()
-        command.stdout = StringIO()
-        command._set_worker_id(f"benchmark-{queue_name}-capture")
-        command.execution_mode = "local"
-        command.shutdown_requested = False
-        command.active_tasks = {}
-        command.ray_core_runner = None
-        captured_sql: str | None = None
-
-        def reject_process_task(_task: RayTaskExecution) -> None:
-            raise _CaptureProcessInvocationError
-
-        command.process_task = reject_process_task  # type: ignore[method-assign]
+    def _capture_production_claim_sql(
+        *,
+        queue_name: str,
+        query_limit: int,
+        cohort: _BenchmarkCohort,
+    ) -> str:
+        if cohort.alias.queues != (queue_name,):
+            raise CommandError("protocol predicate benchmark context changed")
+        captured_sql = None
+        protected_tables = tuple(
+            model._meta.db_table.upper()
+            for model in (RayTaskExecution, RayTaskCohortClaim, RayTaskTargetBinding)
+        )
 
         def observe(execute, sql, params, many, context):
             nonlocal captured_sql
+            normalized = _normalized_sql_shape(sql)
             if _is_claim_query(sql):
-                if _is_production_claim_query(sql):
-                    captured_sql = str(sql)
-                    raise _ProductionClaimSqlCapturedError
-                if _is_expiry_sweep_query(sql):
-                    return execute(_CAPTURE_EMPTY_SELECT, (), False, context)
-                raise CommandError("capture encountered an unrecognized task-row locking SELECT")
+                if not _is_production_claim_query(sql):
+                    raise CommandError("capture encountered an unrecognized candidate SELECT")
+                captured_sql = str(sql)
+                raise _ProductionClaimSqlCapturedError
+            if normalized.startswith(("UPDATE ", "INSERT ", "DELETE ")) and any(
+                table in normalized for table in protected_tables
+            ):
+                raise _CaptureProcessInvocationError
             return execute(sql, params, many, context)
 
         try:
-            command._create_lease(queue_name)
-            if command.lease_identity is None:
-                raise CommandError("protocol predicate benchmark could not acquire a capture lease")
-            try:
-                with transaction.atomic():
-                    try:
-                        with connection.execute_wrapper(observe):
-                            command.claim_and_process_tasks([queue_name], concurrency=query_limit)
-                    finally:
-                        transaction.set_rollback(True)
-            except _ProductionClaimSqlCapturedError:
-                pass
-            except _CaptureProcessInvocationError:
-                raise CommandError(
-                    "capture reached the protected application processing boundary"
-                ) from None
-            if captured_sql is None:
-                raise CommandError(
-                    "protocol predicate benchmark did not observe the production claim"
-                )
-            return captured_sql
-        finally:
-            Command._delete_exact_leases([command.lease_identity])
+            with connection.execute_wrapper(observe):
+                cohort.claim(query_limit)
+        except _ProductionClaimSqlCapturedError:
+            pass
+        except _CaptureProcessInvocationError:
+            raise CommandError("capture reached the protected claim mutation boundary") from None
+        if captured_sql is None:
+            raise CommandError("protocol predicate benchmark did not observe the production claim")
+        return captured_sql
 
     @staticmethod
     def _verify_production_claim_sql_shape(
@@ -721,18 +800,20 @@ class Command(BaseCommand):
         queue_name: str,
         claim_now: datetime,
         query_limit: int,
+        cohort: _BenchmarkCohort,
     ) -> None:
         with transaction.atomic():
             queryset = Command._claim_queryset(
                 queue_name=queue_name,
                 claim_now=claim_now,
+                cohort=cohort,
                 query_limit=query_limit,
                 protocol_predicate=True,
             )
             candidate_sql, _ = queryset.query.sql_with_params()
-        if not _has_inclusive_protocol_predicates(captured_sql):
+        if not _has_current_protocol_predicate(captured_sql):
             raise CommandError(
-                "production claim SELECT is missing the inclusive protocol-range predicates"
+                "production claim SELECT is missing the exact current protocol predicate"
             )
         if _normalized_sql_shape(captured_sql) != _normalized_sql_shape(candidate_sql):
             raise CommandError(
@@ -746,11 +827,13 @@ class Command(BaseCommand):
         claim_now: datetime,
         query_limit: int,
         protocol_predicate: bool,
+        cohort: _BenchmarkCohort,
     ) -> ProtocolPredicatePlanSummary:
         with transaction.atomic():
             queryset = Command._claim_queryset(
                 queue_name=queue_name,
                 claim_now=claim_now,
+                cohort=cohort,
                 query_limit=query_limit,
                 protocol_predicate=protocol_predicate,
             )
@@ -769,16 +852,18 @@ class Command(BaseCommand):
         claim_now: datetime,
         query_limit: int,
         protocol_predicate: bool,
+        cohort: _BenchmarkCohort,
     ) -> tuple[float, list[int]]:
         with transaction.atomic():
             queryset = Command._claim_queryset(
                 queue_name=queue_name,
                 claim_now=claim_now,
+                cohort=cohort,
                 query_limit=query_limit,
                 protocol_predicate=protocol_predicate,
             )
             started_ns = time.perf_counter_ns()
-            selected_pks = [int(execution.pk) for execution in queryset]
+            selected_pks = [int(pk) for pk in queryset]
             elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
         if not math.isfinite(elapsed_ms) or elapsed_ms < 0:
             raise CommandError("protocol predicate benchmark produced an invalid duration")
@@ -867,6 +952,7 @@ class Command(BaseCommand):
         enqueue_times: dict[str, float] = {}
         claim_latencies: list[float] = []
         claimed_task_ids: list[str] = []
+        created_pks: list[int] = []
         done = threading.Event()
         lock = threading.Lock()
 
@@ -924,7 +1010,8 @@ class Command(BaseCommand):
                 task_id = f"{task_prefix}{index}"
                 with lock:
                     enqueue_times[task_id] = time.monotonic()
-                self._create_execution(task_id=task_id, queue_name=queue_name)
+                execution = self._create_execution(task_id=task_id, queue_name=queue_name)
+                created_pks.append(execution.pk)
                 if index + 1 < task_count:
                     time.sleep(enqueue_interval)
 
@@ -952,7 +1039,11 @@ class Command(BaseCommand):
             self._stop_workers(group, max_interval=max_interval)
             self._cleanup_phase_rows(
                 task_prefix=task_prefix,
+                queue_name=queue_name,
                 lease_identities=group.lease_identities,
+                claims=group.claims,
+                created_pks=created_pks,
+                threads=group.threads,
             )
 
     def _run_throughput_phase(
@@ -972,10 +1063,14 @@ class Command(BaseCommand):
         task_prefix = f"poll-throughput-{run_id}-"
         claimed_at: list[float] = []
         claimed_task_ids: list[str] = []
+        created_pks: list[int] = []
         done = threading.Event()
         lock = threading.Lock()
         for index in range(task_count):
-            self._create_execution(task_id=f"{task_prefix}{index}", queue_name=queue_name)
+            execution = self._create_execution(
+                task_id=f"{task_prefix}{index}", queue_name=queue_name
+            )
+            created_pks.append(execution.pk)
 
         def on_claim(_task: RayTaskExecution) -> None:
             with lock:
@@ -1023,7 +1118,11 @@ class Command(BaseCommand):
             self._stop_workers(group, max_interval=max_interval)
             self._cleanup_phase_rows(
                 task_prefix=task_prefix,
+                queue_name=queue_name,
                 lease_identities=group.lease_identities,
+                claims=group.claims,
+                created_pks=created_pks,
+                threads=group.threads,
             )
 
     def _start_workers(
@@ -1050,6 +1149,7 @@ class Command(BaseCommand):
         )
         worker_id_prefix = f"benchmark-{queue_name}-"
         lease_identities: list[WorkerLeaseIdentity | None] = [None] * workers
+        claims: list[ClaimedCohortTask] = []
 
         def poll(worker_index: int) -> None:
             close_old_connections()
@@ -1061,11 +1161,11 @@ class Command(BaseCommand):
                 command.shutdown_requested = False
                 command.active_tasks = {}
                 command.ray_core_runner = None
-                command.process_task = on_claim  # type: ignore[method-assign]
                 command._create_lease(queue_name)
                 if command.lease_identity is None:
                     raise RuntimeError("benchmark worker did not acquire a lease identity")
                 lease_identities[worker_index] = command.lease_identity
+                cohort = _BenchmarkCohort.current(queue_name, command.lease_identity)
                 policy = AdaptivePollingPolicy(
                     base_interval_seconds=base_interval,
                     max_interval_seconds=max_interval,
@@ -1094,9 +1194,12 @@ class Command(BaseCommand):
                                 raise RuntimeError("benchmark worker lease ownership was lost")
                             next_lease_heartbeat_at = now + get_heartbeat_interval().total_seconds()
                         if now >= next_claim_at:
-                            activity = bool(
-                                command.claim_and_process_tasks([queue_name], concurrency=1)
-                            )
+                            batch = cohort.claim(1)
+                            with metrics.lock:
+                                claims.extend(batch)
+                            for claimed in batch:
+                                on_claim(claimed.execution)
+                            activity = bool(batch)
                             if command.shutdown_requested:
                                 raise RuntimeError("benchmark worker lease ownership was lost")
                             next_claim_at = now + policy.next_delay(activity=activity)
@@ -1144,6 +1247,8 @@ class Command(BaseCommand):
             deadline = time.monotonic() + barrier_timeout
             for thread in started_threads:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if any(thread.is_alive() for thread in started_threads):
+                raise CommandError("benchmark startup cleanup remains unconfirmed") from None
             self._delete_exact_leases(lease_identities)
             diagnostic = render_console_diagnostic(exc)
             raise CommandError(f"could not start benchmark workers: {diagnostic}") from None
@@ -1153,6 +1258,7 @@ class Command(BaseCommand):
             threads=threads,
             metrics=metrics,
             lease_identities=lease_identities,
+            claims=claims,
         )
 
     @staticmethod
@@ -1190,11 +1296,102 @@ class Command(BaseCommand):
     def _cleanup_phase_rows(
         *,
         task_prefix: str,
+        queue_name: str,
         lease_identities: list[WorkerLeaseIdentity | None],
+        claims: list[ClaimedCohortTask],
+        created_pks: list[int],
+        threads: list[threading.Thread],
     ) -> None:
-        """Delete only this completed benchmark phase's tasks and leases."""
-        RayTaskExecution.objects.filter(task_id__startswith=task_prefix).delete()
-        Command._delete_exact_leases(lease_identities)
+        """Resolve only owned, never-dispatched work after all threads exited.
+
+        The benchmark has no preparation or execution path. Its retained return
+        and a fresh locked reread establish non-invocation; database state alone
+        cannot supply that authority. Any drift rolls back the entire cleanup.
+        """
+        expected = {item.claim.facts.identity.task_execution_pk: item for item in claims}
+        if (
+            len(expected) != len(claims)
+            or not set(expected).issubset(created_pks)
+            or any(thread.is_alive() for thread in threads)
+        ):
+            raise CommandError("benchmark cleanup claim ownership changed")
+        with transaction.atomic():
+            for item in claims:
+                record = item.claim
+                if record.owner not in lease_identities:
+                    raise CommandError("benchmark cleanup claim ownership changed")
+                row, now = cohort_claim_storage._locked_claim(
+                    record.owner,
+                    record.claim_id,
+                    record.facts.identity,
+                    record.revision,
+                    datetime.now(UTC),
+                    using="default",
+                )
+                task = RayTaskExecution.objects.get(pk=record.facts.identity.task_execution_pk)
+                if (
+                    cohort_claim_storage._record(row) != record
+                    or record.disposition is not CohortClaimDisposition.OPEN
+                    or row.prepared_at is not None
+                    or row.dispatched_at is not None
+                    or row.prepared_request_digest is not None
+                    or not task.task_id.startswith(task_prefix)
+                    or task.queue_name != queue_name
+                    or task.state != TaskState.RUNNING
+                    or any(
+                        value is not None
+                        for value in (
+                            task.ray_job_id,
+                            task.ray_address,
+                            task.ray_job_request_reference,
+                            task.completion_data,
+                        )
+                    )
+                ):
+                    raise CommandError("benchmark cleanup claim ownership changed")
+                evidence = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        ("django-ray-polling-never-dispatched-v1:" + record.facts_digest).encode()
+                    ).hexdigest()
+                )
+                cohort_claim_storage.resolve_cohort_claim(
+                    record.owner,
+                    record.claim_id,
+                    expected_identity=record.facts.identity,
+                    expected_revision=record.revision,
+                    kind=CohortResolutionKind.VERIFIED_NOT_INVOKED,
+                    evidence_digest=evidence,
+                    now=now,
+                )
+                task.state = TaskState.CANCELLED
+                task.finished_at = now
+                task.save(update_fields=("state", "finished_at"))
+            rows = RayTaskExecution.objects.filter(pk__in=created_pks)
+            locked = list(rows.select_for_update().order_by("pk"))
+            original_ids = {pk: f"{task_prefix}{index}" for index, pk in enumerate(created_pks)}
+            if len(locked) != len(created_pks) or any(
+                task.queue_name != queue_name
+                or (
+                    task.pk not in expected
+                    and (
+                        task.task_id != original_ids[task.pk]
+                        or task.state != TaskState.QUEUED
+                        or task.attempt_number != 1
+                        or task.execution_generation != 0
+                        or task.claimed_by_worker is not None
+                    )
+                )
+                for task in locked
+            ):
+                raise CommandError("benchmark cleanup task ownership changed")
+            RayTaskCohortClaim.objects.filter(
+                pk__in=[item.claim.claim_id for item in claims]
+            ).delete()
+            RayTaskTargetBinding.objects.filter(execution_id__in=expected).delete()
+            RayTaskCohortIntent.objects.filter(execution_id__in=created_pks).delete()
+            rows.delete()
+            Command._delete_exact_leases(lease_identities)
 
     @staticmethod
     def _delete_exact_leases(
@@ -1207,17 +1404,20 @@ class Command(BaseCommand):
 
     @staticmethod
     def _create_execution(*, task_id: str, queue_name: str) -> RayTaskExecution:
-        return RayTaskExecution.objects.create(
-            task_id=task_id,
-            callable_path="django_ray.benchmarks.polling_probe",
-            metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
-            execution_protocol_version=EXECUTION_PROTOCOL_VERSION,
-            created_with_django_ray_version=django_ray_version,
-            queue_name=queue_name,
-            state=TaskState.QUEUED,
-            args_json="[]",
-            kwargs_json="{}",
-        )
+        with transaction.atomic():
+            execution = RayTaskExecution.objects.create(
+                task_id=task_id,
+                callable_path="django_ray.benchmarks.polling_probe",
+                metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
+                execution_protocol_version=EXECUTION_PROTOCOL_VERSION,
+                created_with_django_ray_version=django_ray_version,
+                queue_name=queue_name,
+                state=TaskState.QUEUED,
+                args_json="[]",
+                kwargs_json="{}",
+            )
+            persist_cohort_intent(execution.pk, _benchmark_intent(), now=datetime.now(UTC))
+            return execution
 
     @staticmethod
     def _assert_claim_integrity(

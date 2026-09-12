@@ -12,6 +12,7 @@ from django.core.management.base import CommandError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.lifecycle import succeed_task
 from django_ray.models import WorkflowProgressNodeDetail, WorkflowProgressRunStorage
 from django_ray.workflow.progress.storage import (
@@ -25,6 +26,7 @@ from django_ray.workflow.progress.summary import (
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_storage_helpers import (
     PublishedWorkflow,
     publish_initial_workflow,
@@ -175,12 +177,14 @@ def test_audit_rejects_retained_state_count_above_truncated_active_summary() -> 
         audit_workflow_progress_detail_storage(published.identity)
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_audit_accepts_last_observed_detail_after_lifecycle_success() -> None:
-    published = publish_initial_workflow(2, case_id=2181)
+    published = publish_initial_workflow(2, execution_protocol_version=1, case_id=2181)
 
     assert succeed_task(
         published.execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
         result_data="{}",
         result_reference=None,
     )
@@ -217,9 +221,10 @@ def test_audit_binds_active_summary_retention_to_run_storage(
         audit_workflow_progress_detail_storage(published.identity)
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_historical_audit_uses_exact_run_local_evidence_after_task_reuse() -> None:
-    published = publish_initial_workflow(1, case_id=216)
+    published = publish_initial_workflow(1, execution_protocol_version=1, case_id=216)
     published.execution.attempt_number = 2
     published.execution.execution_generation = 2
     published.execution.workflow_run_id = None

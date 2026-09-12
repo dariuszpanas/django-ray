@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from qualification.docker import scenario as wheel
-from qualification.transactions.contract import MAX_PROBE_BYTES, TEST_PATH
+from qualification.transactions.contract import MAX_PROBE_BYTES, case_nodeids
 
 POSTGRES_BIN = Path("/usr/lib/postgresql/17/bin")
 
@@ -118,13 +118,15 @@ def execute(root, expected_module, receipt_path):
         )
         import pytest
 
+        from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
+
         code = pytest.main(
             [
                 "-p",
                 "django",
                 "-p",
                 "qualification.transactions.plugin",
-                TEST_PATH,
+                *case_nodeids(EXECUTION_PROTOCOL_VERSION),
                 "-m",
                 "postgresql",
                 "-q",

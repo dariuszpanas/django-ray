@@ -29,6 +29,9 @@ from django_ray.protocol_coordination import (
     close_legacy_worker_admission,
     reopen_legacy_worker_admission,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
 
 MIGRATE_FROM = [("django_ray", "0018_workflow_run_allocation")]
 MIGRATE_TO = [("django_ray", "0019_execution_protocol_schema")]
@@ -698,9 +701,8 @@ def _cleanup_rollback_fence_test_state(latest: list[tuple[str, str]]) -> None:
     executor.migrate(ROLLBACK_FENCE_FROM)
     apps = executor.loader.project_state(ROLLBACK_FENCE_FROM).apps
     execution_model = apps.get_model("django_ray", "RayTaskExecution")
-    execution_model.objects.filter(state__in=("QUEUED", "RUNNING", "CANCELLING")).exclude(
-        execution_protocol_version=1
-    ).delete()
+    execution_model.objects.filter(state__in=("QUEUED", "RUNNING", "CANCELLING")).delete()
+    apps.get_model("django_ray", "TaskWorkerLease").objects.filter(is_active=True).delete()
     _normalize_open_v1_policy(apps)
     MigrationExecutor(connection).migrate(latest)
 

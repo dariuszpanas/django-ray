@@ -13,7 +13,29 @@ from django.tasks import TaskResultStatus, task
 from django.tasks.exceptions import TaskResultDoesNotExist
 
 from django_ray.input_storage import InputPayloadError
-from django_ray.models import RayTaskExecution, TaskInputPayload
+from django_ray.models import RayTaskCohortIntent, RayTaskExecution, TaskInputPayload
+
+pytestmark = pytest.mark.django_db(transaction=True)
+
+
+@pytest.fixture(params=[3], autouse=True)
+def enqueue_protocol(request, _restore_execution_protocol_rollout_seed):
+    """Exercise the active producer against the real closed0035 admission policy."""
+    from django_ray.backends import EXECUTION_PROTOCOL_VERSION
+    from django_ray.models import TaskExecutionProtocolPolicy
+
+    policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+    assert request.param == EXECUTION_PROTOCOL_VERSION == 3
+    assert policy.active_write_protocol_version == 3
+    assert not policy.legacy_worker_admission_enabled
+    return request.param
+
+
+def _assert_intents_match_executions(protocol):
+    expected = (
+        set(RayTaskExecution.objects.values_list("pk", flat=True)) if protocol == 3 else set()
+    )
+    assert set(RayTaskCohortIntent.objects.values_list("execution_id", flat=True)) == expected
 
 
 def _application_task(value):
@@ -66,7 +88,9 @@ class ReceiptFailureError(Exception):
     pass
 
 
-def test_commit_persists_generated_id_and_receipt_on_one_connection(receipt_model):
+def test_commit_persists_generated_id_and_receipt_on_one_connection(
+    receipt_model, enqueue_protocol
+):
     committed = []
     with transaction.atomic(using="default"):
         result, receipt = _enqueue_receipt(receipt_model, "commit")
@@ -79,6 +103,7 @@ def test_commit_persists_generated_id_and_receipt_on_one_connection(receipt_mode
         assert RayTaskExecution.objects.using("default").filter(task_id=result.id).exists()
     assert committed == [result.id]
     assert receipt_model.objects.using("default").get(application_key="commit").task_id == result.id
+    _assert_intents_match_executions(enqueue_protocol)
 
 
 def test_outer_rollback_removes_task_receipt_and_commit_callback(receipt_model):
@@ -89,6 +114,7 @@ def test_outer_rollback_removes_task_receipt_and_commit_callback(receipt_model):
         raise ReceiptFailureError
     assert not committed
     assert not RayTaskExecution.objects.using("default").exists()
+    assert not RayTaskCohortIntent.objects.exists()
     assert not receipt_model.objects.using("default").exists()
     # The earlier enqueue-time snapshot is still present, but its row is gone.
     assert result.status == TaskResultStatus.READY
@@ -96,7 +122,7 @@ def test_outer_rollback_removes_task_receipt_and_commit_callback(receipt_model):
         result.refresh()
 
 
-def test_nested_savepoint_failure_preserves_outer_receipts(receipt_model):
+def test_nested_savepoint_failure_preserves_outer_receipts(receipt_model, enqueue_protocol):
     with transaction.atomic(using="default"):
         first, _ = _enqueue_receipt(receipt_model, "before")
         with pytest.raises(ReceiptFailureError), transaction.atomic(using="default"):
@@ -106,6 +132,7 @@ def test_nested_savepoint_failure_preserves_outer_receipts(receipt_model):
     assert set(receipt_model.objects.values_list("task_id", flat=True)) == {first.id, last.id}
     assert set(RayTaskExecution.objects.values_list("task_id", flat=True)) == {first.id, last.id}
     assert not RayTaskExecution.objects.filter(task_id=lost.id).exists()
+    _assert_intents_match_executions(enqueue_protocol)
 
 
 def test_released_inner_savepoint_does_not_survive_outer_rollback(receipt_model):
@@ -162,6 +189,7 @@ def test_external_input_object_survives_database_rollback(receipt_model, setting
     assert not RayTaskExecution.objects.exists()
     assert not receipt_model.objects.exists()
     assert not TaskInputPayload.objects.exists()
+    assert not RayTaskCohortIntent.objects.exists()
     # The filesystem is not a transaction participant. This remains orphan evidence.
     assert len(list(tmp_path.rglob("*.json"))) == 1
 
@@ -201,6 +229,28 @@ def test_router_errors_are_contained_before_enqueue(receipt_model, monkeypatch):
     assert not RayTaskExecution.objects.using("default").exists()
 
 
+@pytest.mark.parametrize("enqueue_protocol", [3], indirect=True)
+@pytest.mark.parametrize("operation", ["db_for_read", "db_for_write"])
+def test_cohort_intent_routes_fail_before_payload_publication(
+    receipt_model, monkeypatch, operation
+):
+    monkeypatch.setattr(
+        router,
+        operation,
+        lambda model, **hints: "private-other" if model is RayTaskCohortIntent else "default",
+    )
+    monkeypatch.setattr(
+        "django_ray.backends.prepare_task_input",
+        lambda *a, **k: pytest.fail("intent routing must precede external input"),
+    )
+    with pytest.raises(ImproperlyConfigured, match="default database"):
+        task(_application_task).enqueue(42)
+    assert (
+        not RayTaskExecution.objects.using("default").exists()
+        and not RayTaskCohortIntent.objects.using("default").exists()
+    )
+
+
 def test_validated_connection_pins_registry_updates_and_task_inserts(
     receipt_model,
     settings,
@@ -233,6 +283,7 @@ def test_postgresql_observer_sees_task_and_receipt_only_after_outer_commit(
     transactional_db,
     commit,
     record_property,
+    enqueue_protocol,
 ):
     if connection.vendor != "postgresql":
         pytest.skip("requires postgresql")
@@ -266,11 +317,14 @@ def test_postgresql_observer_sees_task_and_receipt_only_after_outer_commit(
     def observe():
         task_table = connection.ops.quote_name(RayTaskExecution._meta.db_table)
         receipt_table = connection.ops.quote_name(ApplicationReceipt._meta.db_table)
+        intent_table = connection.ops.quote_name(RayTaskCohortIntent._meta.db_table)
         with connection.cursor() as cursor:
             cursor.execute(
                 f"SELECT (SELECT COUNT(*) FROM {task_table} WHERE task_id = %s), "
-                f"(SELECT COUNT(*) FROM {receipt_table} WHERE task_id = %s), pg_backend_pid()",
-                [identity["task_id"], identity["task_id"]],
+                f"(SELECT COUNT(*) FROM {receipt_table} WHERE task_id = %s), "
+                f"(SELECT COUNT(*) FROM {intent_table} i JOIN {task_table} t "
+                "ON i.execution_id = t.id WHERE t.task_id = %s), pg_backend_pid()",
+                [identity["task_id"], identity["task_id"], identity["task_id"]],
             )
             return cursor.fetchone()
 
@@ -279,18 +333,19 @@ def test_postgresql_observer_sees_task_and_receipt_only_after_outer_commit(
             future = executor.submit(writer)
             try:
                 assert published.wait(timeout=10), "writer did not publish its uncommitted identity"
-                before_task, before_receipt, observer_pid = observe()
+                before_task, before_receipt, before_intent, observer_pid = observe()
                 assert observer_pid != identity["writer_pid"]
-                assert (before_task, before_receipt) == (0, 0)
+                assert (before_task, before_receipt, before_intent) == (0, 0, 0)
             finally:
                 release.set()
             future.result(timeout=15)
-        after_task, after_receipt, _ = observe()
+        after_task, after_receipt, after_intent, _ = observe()
         assert (after_task, after_receipt) == ((1, 1) if commit else (0, 0))
+        assert after_intent == int(commit and enqueue_protocol == 3)
         record_property("writer_pid", identity["writer_pid"])
         record_property("observer_pid", observer_pid)
-        record_property("before", [before_task, before_receipt])
-        record_property("after", [after_task, after_receipt])
+        record_property("before", [before_task, before_receipt, before_intent])
+        record_property("after", [after_task, after_receipt, after_intent])
     finally:
         release.set()
         with connection.schema_editor() as editor:

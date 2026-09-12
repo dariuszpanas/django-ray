@@ -769,27 +769,37 @@ python manage.py django_ray_benchmark_polling \
   --json
 ```
 
-The command runs fixed-100-ms and adaptive policies sequentially through the production
-worker claim loop. Both execute its real `SELECT ... FOR UPDATE SKIP LOCKED` query on
-isolated queues. Independent phases report idle claim and total SQL queries per
-worker-second, peak distinct-worker overlap and a sliding-window overlap ratio, spaced
-enqueue-to-claim p50/p95, and preloaded-burst claim throughput. The enqueue timestamp is
-captured before the task row is inserted, so latency includes enqueue database time.
-Generated rows are validated for exact, unique ownership before deletion. The command
-refuses non-PostgreSQL databases because SQLite cannot represent the multi-worker locking
-behavior being measured.
+The command runs fixed-100-ms and adaptive policies sequentially through the current
+production Sync claim service. Each generated task has real protocol-3 intent and each
+manager uses its actual package/Python identity. Qualification, maintenance admission,
+and unresolved ownership checks precede priority and `LIMIT`; successful claims then use
+the unchanged ledger transactions and `FOR UPDATE SKIP LOCKED` task locking. No task
+callable or Ray runtime is invoked. Independent phases report idle candidate and total
+SQL queries per worker-second, peak distinct-worker overlap and a sliding-window overlap
+ratio, spaced enqueue-to-claim p50/p95, and preloaded-burst claim throughput. The enqueue
+timestamp precedes the atomic task-and-intent insert, so latency includes that database
+time. These current-cohort measurements are not directly comparable to historical
+single-query claim measurements below.
 
-The additive `protocol_predicate_evidence` block measures the execution-protocol filter
-separately from those polling-policy phases. It creates at most 256 exact owned rows
-at the package's active write protocol (currently protocol `1`) on a private queue,
-intercepts the real production priority claim
-`SELECT` before execution, and verifies that the measured production variant has the
-same normalized SQL shape. A control removes only the inclusive protocol-range
-predicates. Both variants must return the same rows in the same order. One warm-up pair
-is followed by 12 deterministic AB/BA timing pairs; the report retains each bounded
-sample, p50/p95, and signed production-minus-control deltas, plus fixed-vocabulary
-bounded `EXPLAIN ANALYZE` plan summaries. Raw SQL, parameters, queue/task/row identities,
-and arbitrary index names are not retained.
+After all owned threads exit, generated rows are validated for exact, unique ownership.
+Cleanup rechecks each retained claim under its original lease and task locks; only an
+unchanged, unprepared, undispatched claim can be resolved as verified not invoked and
+terminalized before its benchmark history is deleted. This cleanup runs outside measured
+claim timing. Any changed or uncertain ownership preserves evidence and fails the command.
+The command refuses non-PostgreSQL databases because SQLite cannot represent the
+multi-worker locking behavior being measured.
+
+The schema-v2 `protocol_predicate_evidence` block measures the current exact epoch filter
+separately from those polling-policy phases. It creates at most 100 exact owned rows at
+protocol `3` on a private queue, intercepts the real pre-LIMIT priority candidate `SELECT`
+before execution, and verifies the measured production variant has the same normalized
+SQL shape. A SELECT-only control removes just the root task `protocol=3` equality; all
+intent, package, lease, maintenance, binding and unresolved-work predicates remain. The
+candidate query itself takes no row locks and never grants claim authority. Both variants
+must return the same rows in the same order. One warm-up pair is followed by 12
+deterministic AB/BA timing pairs; the report retains each bounded sample, p50/p95, signed
+production-minus-control deltas, and fixed-vocabulary bounded `EXPLAIN ANALYZE` summaries.
+Raw SQL, parameters, queue/task/row identities and arbitrary index names are not retained.
 
 Do not turn one shared-runner delta into a latency threshold. Compare repeated artifacts
 from the same PostgreSQL version and task shape, confirm

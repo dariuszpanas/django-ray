@@ -7,9 +7,11 @@ from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 MIGRATE_FROM = [("django_ray", "0020_legacy_open_rollback_fence")]
 MIGRATE_TO = [("django_ray", "0021_ray_job_request_reference")]
-LATEST = [("django_ray", "0026_ray_task_target_execution_evidence")]
+LATEST = [("django_ray", "0035_activate_current_cohort")]
 
 
 def _insert_legacy_payload_row(payload_model, *, reference: str) -> None:
@@ -144,6 +146,7 @@ def _assert_request_reference_schema_migration_round_trip() -> None:
         assert "payload_kind" not in {field.name for field in reverted_payload._meta.get_fields()}
         assert reverted_payload.objects.filter(pk=raw_reference).exists()
     finally:
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
 
 

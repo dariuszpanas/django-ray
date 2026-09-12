@@ -43,10 +43,13 @@ from django_ray.target.attestation import (
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
 
 MIGRATE_FROM = [("django_ray", "0024_ray_target_routes")]
 MIGRATE_TO = [("django_ray", "0025_ray_worker_target_capabilities")]
-LATEST = [("django_ray", "0026_ray_task_target_execution_evidence")]
+HISTORICAL_LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGERS = {
@@ -1039,7 +1042,7 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
             == 3
         )
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_capability_tables()
 
 
@@ -1222,5 +1225,5 @@ def test_postgresql_capability_writer_serializes_before_reverse_guard() -> None:
         assert _POSTGRESQL_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_capability_tables()

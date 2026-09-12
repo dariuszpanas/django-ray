@@ -7,6 +7,10 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
+import textwrap
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,10 +19,289 @@ import pytest
 
 from django_ray.runtime.context import DurableTaskContext
 from testproject.apps.cluster_tasks import ray_data_job, tasks
+from tests.integration.test_cohort_activation_migration import LATEST, _migrate
+from tests.integration.test_cohort_activation_migration import historical as historical
 
 PROJECT_ROOT = Path(__file__).parents[2]
 DEPLOYMENT_KEY = "test-deployment"
 TASK_ID = "00000000-0000-4000-8000-000000000041"
+
+
+@pytest.fixture
+def timeout_diagnostic(monkeypatch):
+    from ray.dashboard.modules.job.common import JobStatus
+    from ray.dashboard.modules.job.pydantic_models import JobDetails, JobType
+
+    from django_ray.runtime import cohort_job as job
+    from django_ray.runtime import cohort_job_entrypoint as entry
+    from django_ray.target import cohort_job_http
+    from scripts import ray_data_golden_path_probe as probe
+    from tests.unit.test_cohort_job import request
+
+    value = request()
+    profile = {"env_vars": {"DJANGO_SETTINGS_MODULE": "testproject.settings"}}
+    launch = entry.CohortProbeJobLaunch(
+        value,
+        job.probe_job_request_digest(value),
+        "http://127.0.0.1:8265",
+        entry.cohort_probe_submitted_runtime_env_digest(profile),
+        "testproject.settings",
+    )
+    row = {
+        "challenge_id": value.challenge_id,
+        "challenge_revision": value.challenge_revision,
+        "request_json": job.encode_probe_job_request(value),
+        "request_digest": launch.request_digest,
+        "submission_id": job.probe_job_submission_id(value),
+        "ray_address": launch.jobs_endpoint,
+        "entrypoint_digest": entry.cohort_probe_entrypoint_digest(
+            entry.probe_job_launch_entrypoint(launch)
+        ),
+        "submitted_runtime_env_digest": launch.submitted_runtime_env_digest,
+        "received_at": None,
+    }
+    assert JobDetails is not None
+    state = SimpleNamespace(
+        probe=probe,
+        request=value,
+        row=row,
+        calls=[],
+        expected={
+            "lease": value.lease,
+            "configuration_digest": value.configuration_digest,
+            "jobs_endpoint": launch.jobs_endpoint,
+        },
+        details=JobDetails(
+            type=JobType.SUBMISSION,
+            submission_id=row["submission_id"],
+            status=JobStatus.FAILED,
+            job_id="01000000",
+            metadata=job.probe_job_metadata(value),
+            entrypoint=entry.probe_job_launch_entrypoint(launch),
+            runtime_env=profile,
+            message="private-token /private/path\nCohort probe driver refused: bootstrap_failed\n",
+        ),
+    )
+
+    def fetch(endpoint, submission_id, *, timeout_seconds):
+        state.calls.append((endpoint, submission_id, timeout_seconds))
+        return state.details
+
+    monkeypatch.setattr(cohort_job_http, "fetch_reserved_cohort_job_details", fetch)
+    return state
+
+
+def test_timeout_diagnostic_reads_missing_receipt_without_promoting_job_status(timeout_diagnostic):
+    state = timeout_diagnostic
+    result = state.probe._reserved_probe_diagnostics(state.row, **state.expected)
+    assert result == {
+        "reservation_binding": True,
+        "receipt_present": False,
+        "job_binding": True,
+        "job_status": "FAILED",
+        "native_id_present": True,
+        "driver_refusal": "bootstrap_failed",
+    }
+    assert state.calls == [("http://127.0.0.1:8265", state.row["submission_id"], 5.0)]
+    serialized = json.dumps(result)
+    for private in (
+        "private-token",
+        "/private/path",
+        state.row["request_json"],
+        state.row["submission_id"],
+        state.row["ray_address"],
+    ):
+        assert private not in serialized
+
+
+@pytest.mark.parametrize("field", ["lease", "configuration_digest", "jobs_endpoint"])
+def test_timeout_diagnostic_rejects_other_owned_scope_before_http(timeout_diagnostic, field):
+    state = timeout_diagnostic
+    expected = dict(state.expected)
+    expected[field] = (
+        replace(state.request.lease, pid=999)
+        if field == "lease"
+        else "sha256:" + "e" * 64
+        if field == "configuration_digest"
+        else "http://127.0.0.1:9999"
+    )
+    assert state.probe._reserved_probe_diagnostics(state.row, **expected) == {
+        "reservation_binding": False,
+    }
+    assert state.calls == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["challenge_id", "challenge_revision", "request_digest", "submission_id", "entrypoint_digest"],
+)
+def test_timeout_diagnostic_rejects_crossed_reservation(timeout_diagnostic, field):
+    state = timeout_diagnostic
+    state.row[field] = 999 if field.startswith("challenge_") else "crossed"
+    assert state.probe._reserved_probe_diagnostics(state.row, **state.expected) == {
+        "reservation_binding": False,
+    }
+    assert state.calls == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"submission_id": "another-job"},
+        {"type": "DRIVER"},
+        {"metadata": {"private-token": "wrong"}},
+        {"entrypoint": "echo private-token"},
+        {"runtime_env": {"env_vars": {"PRIVATE_TOKEN": "secret"}}},
+    ],
+)
+def test_timeout_diagnostic_never_attributes_wrong_physical_job(timeout_diagnostic, changes):
+    state = timeout_diagnostic
+    state.details = state.details.model_copy(update=changes)
+    result = state.probe._reserved_probe_diagnostics(state.row, **state.expected)
+    assert result == {
+        "reservation_binding": True,
+        "receipt_present": False,
+        "job_binding": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cohort probe driver refused: private_token",
+        "Cohort probe driver refused: bootstrap_failed private-token",
+        "prefix Cohort probe driver refused: bootstrap_failed",
+        "Cohort probe driver refused: bootstrap_failed\nCohort probe driver refused: probe_failed",
+    ],
+)
+def test_timeout_diagnostic_only_emits_one_exact_allowlisted_refusal(timeout_diagnostic, message):
+    state = timeout_diagnostic
+    state.details = state.details.model_copy(update={"message": message})
+    result = state.probe._reserved_probe_diagnostics(state.row, **state.expected)
+    assert result["driver_refusal"] is None
+    assert "private" not in json.dumps(result)
+
+
+def test_timeout_diagnostic_failed_http_is_redacted(timeout_diagnostic, monkeypatch):
+    from django_ray.target import cohort_job_http
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("private-token /private/path")
+
+    monkeypatch.setattr(cohort_job_http, "fetch_reserved_cohort_job_details", fail)
+    state = timeout_diagnostic
+    assert state.probe._reserved_probe_diagnostics(state.row, **state.expected) == {
+        "reservation_binding": True,
+        "receipt_present": False,
+        "job_read": "unavailable",
+    }
+
+
+@pytest.mark.parametrize("lease_count", [0, 1, 2])
+def test_timeout_diagnostic_queries_only_owned_process_and_current_config(
+    timeout_diagnostic,
+    monkeypatch,
+    lease_count,
+):
+    from dataclasses import asdict
+
+    from django_ray.models import RayTargetProbeJobReceipt, TaskWorkerLease
+    from django_ray.target import cohort_intent_storage
+
+    state = timeout_diagnostic
+    queries = []
+
+    class Rows:
+        def __init__(self, values):
+            self.rows = values
+
+        def values(self, *fields):
+            queries.append(fields)
+            return self.rows
+
+    def leases(**filters):
+        queries.append(filters)
+        return Rows([asdict(state.request.lease)] * lease_count)
+
+    def reservations(**filters):
+        queries.append(filters)
+        return Rows([])
+
+    monkeypatch.setattr(TaskWorkerLease.objects, "filter", leases)
+    monkeypatch.setattr(RayTargetProbeJobReceipt.objects, "filter", reservations)
+    monkeypatch.setattr(state.probe.socket, "gethostname", lambda: state.request.lease.hostname)
+    monkeypatch.setattr(
+        cohort_intent_storage,
+        "read_cohort_intent",
+        lambda pk: SimpleNamespace(
+            configuration_digest=state.request.configuration_digest,
+        ),
+    )
+    output = state.probe._probe_timeout_diagnostics(
+        41,
+        SimpleNamespace(pid=state.request.lease.pid, poll=lambda: None),
+        started_after=state.request.lease.started_at,
+        jobs_endpoint=state.expected["jobs_endpoint"],
+    )
+    assert queries[0] == {
+        "hostname": state.request.lease.hostname,
+        "pid": state.request.lease.pid,
+        "started_at__gte": state.request.lease.started_at,
+        "started_at__lte": queries[0]["started_at__lte"],
+        "queue_name": "ray-data",
+    }
+    if lease_count == 1:
+        assert queries[2] == {
+            "challenge__lease_id": state.request.lease.worker_id,
+            "challenge__lease_hostname": state.request.lease.hostname,
+            "challenge__lease_pid": state.request.lease.pid,
+            "challenge__lease_started_at": state.request.lease.started_at,
+            "challenge__configuration_digest": state.request.configuration_digest,
+            "challenge__runner_family": "ray_job",
+        }
+        assert json.loads(output) == {"worker_binding": True, "reservation_present": False}
+    else:
+        assert len(queries) == 2
+        assert json.loads(output) == {"worker_binding": False}
+    assert state.calls == []
+
+
+def test_timeout_diagnostic_failure_preserves_original_timeout_and_worker_cleanup(
+    timeout_diagnostic,
+    monkeypatch,
+    tmp_path,
+):
+    from django_ray.models import TaskWorkerLease
+
+    state = timeout_diagnostic
+
+    def fail(**kwargs):
+        raise RuntimeError("private-token /private/path")
+
+    monkeypatch.setattr(TaskWorkerLease.objects, "filter", fail)
+    clock = iter([0, 301])
+    monkeypatch.setattr(state.probe.time, "monotonic", lambda: next(clock))
+    events = []
+    worker = SimpleNamespace(
+        pid=456,
+        poll=lambda: None,
+        terminate=lambda: events.append("terminate"),
+        wait=lambda **kwargs: events.append("wait"),
+    )
+    with pytest.raises(AssertionError, match="Ray Data recovery task timed out") as caught:
+        try:
+            state.probe._wait_for_recovered_execution(
+                41,
+                worker,
+                tmp_path / "missing.log",
+                started_after=state.request.lease.started_at,
+                jobs_endpoint=state.expected["jobs_endpoint"],
+            )
+        finally:
+            state.probe._stop_worker(worker)
+    assert '"diagnostics":"unavailable"' in str(caught.value)
+    assert "private-token" not in str(caught.value)
+    assert events == ["terminate", "wait"]
 
 
 class _Vector:
@@ -243,7 +526,8 @@ def test_real_probe_forces_one_disposable_local_ray_runtime() -> None:
     assert "_build_probe_working_dir_archive(working_dir_archive)" in source
     assert '"ray-data-probe-working-dir.zip"' in source
     assert "_use_preinstalled_probe_dependencies(django_settings)" in source
-    assert '"django_ray_worker"' in source
+    # Fresh-process startup tests verify actual Command dispatch, including the
+    # diagnostic subclass, without depending on a command-name string literal.
     assert '"ray-data"' in source
     assert '"--cluster"' not in source
     assert '"management_worker_routed": True' in source
@@ -270,8 +554,347 @@ def test_real_probe_forces_one_disposable_local_ray_runtime() -> None:
     path_env = 'os.environ["DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH"]'
     assert backend_env in source
     assert path_env in source
-    assert source.index(backend_env) < source.index("django.setup()")
-    assert source.index(path_env) < source.index("django.setup()")
+    producer_setup = source.index("django.setup()", source.index("def main("))
+    assert source.index(backend_env) < producer_setup
+    assert source.index(path_env) < producer_setup
+
+
+def test_real_probe_worker_uses_same_preinstalled_profile_before_command(
+    monkeypatch: pytest.MonkeyPatch, settings
+) -> None:
+    import copy
+
+    import django
+    from django.core import management
+
+    from scripts import ray_data_golden_path_probe as probe
+    from testproject import settings as sample_settings
+
+    settings.DJANGO_RAY = copy.deepcopy(sample_settings.DJANGO_RAY)
+    producer = SimpleNamespace(DJANGO_RAY=copy.deepcopy(settings.DJANGO_RAY))
+    probe._use_preinstalled_probe_dependencies(producer)
+    events = []
+    monkeypatch.setattr(django, "setup", lambda: events.append("setup"))
+
+    def command(name, **options):
+        from django_ray.management.commands.django_ray_worker import Command
+
+        assert events == ["setup"]
+        assert settings.DJANGO_RAY == producer.DJANGO_RAY
+        assert isinstance(name, Command)
+        assert options == {"queue": "ray-data", "concurrency": 1}
+        events.append("command")
+
+    monkeypatch.setattr(management, "call_command", command)
+    assert probe.main(["--worker"]) == 0
+    assert events == ["setup", "command"]
+
+
+def test_probe_worker_initializes_django_before_real_command_import():
+    """A fresh child catches app-registry ordering hidden by pytest-django setup."""
+    script = textwrap.dedent("""\
+        import os
+        import sys
+        sys.path[:0] = [sys.argv[1], sys.argv[2]]
+        os.environ.update(
+            DJANGO_SETTINGS_MODULE="testproject.settings",
+            DJANGO_DEPLOYMENT_MODE="demo",
+            DATABASE_ENGINE="django.db.backends.sqlite3",
+            DATABASE_NAME=":memory:",
+        )
+        import ray
+        from django.apps import apps
+        from django.core import management
+        from django.db.backends.base.base import BaseDatabaseWrapper
+        def forbidden(*args, **kwargs):
+            raise AssertionError("startup attempted database or native execution")
+        ray.init = forbidden
+        BaseDatabaseWrapper.ensure_connection = forbidden
+        assert not apps.ready
+        assert "django_ray.management.commands.django_ray_worker" not in sys.modules
+        calls = []
+        def command(value, **options):
+            from django_ray.management.commands.django_ray_worker import Command
+            from django.conf import settings
+            assert apps.ready and isinstance(value, Command)
+            assert options == {"queue": "ray-data", "concurrency": 1}
+            profiles = settings.DJANGO_RAY["RUNTIME_ENV_PROFILES"]
+            assert profiles["project"]["pip"] == []
+            assert profiles["ray-data"]["runtime_env"]["pip"] == []
+            calls.append(True)
+        management.call_command = command
+        from scripts import ray_data_golden_path_probe as probe
+        assert probe.main(["--worker"]) == 0
+        assert calls == [True] and not ray.is_initialized()
+        print("standalone-worker-ready")
+    """)
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(PROJECT_ROOT / "src"), str(PROJECT_ROOT)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "standalone-worker-ready"
+
+
+def test_qualification_progress_reports_retained_helper_without_polling(monkeypatch):
+    from django_ray.runner.cohort_jobs import JobsCohortPhase
+    from django_ray.runner.cohort_process import CohortProcessPhase, CohortProcessReason
+    from scripts import ray_data_golden_path_probe as probe
+
+    command = SimpleNamespace(
+        _cohort_controller=SimpleNamespace(
+            adapter=SimpleNamespace(
+                _operation=SimpleNamespace(phase=JobsCohortPhase.INSPECTING, blocked=None),
+                _supervisor=SimpleNamespace(
+                    _running=SimpleNamespace(
+                        phase=CohortProcessPhase.QUARANTINED,
+                        reason=CohortProcessReason.OWNERSHIP_UNCERTAIN,
+                        reap_attempted=True,
+                        reaped=False,
+                    )
+                ),
+            )
+        )
+    )
+    result = json.loads(probe._worker_qualification_diagnostic(command))
+    assert result == {
+        "controller_present": True,
+        "adapter_phase": "inspecting",
+        "adapter_reason": None,
+        "helper_phase": "quarantined",
+        "helper_reason": "ownership_uncertain",
+        "helper_reap_attempted": True,
+        "helper_reaped": False,
+    }
+    command._cohort_controller.adapter._operation.blocked = "private-token"
+    command._cohort_controller.adapter._supervisor._running.reason = "private-path"
+    assert "private" not in probe._worker_qualification_diagnostic(command)
+    assert json.loads(probe._worker_qualification_diagnostic(SimpleNamespace())) == {
+        "progress_diagnostic": "unavailable",
+    }
+
+
+def test_qualification_progress_changes_are_bounded_and_preserve_heartbeat(monkeypatch):
+    import django
+    from django.core import management
+
+    from django_ray.management.commands.django_ray_worker import Command
+    from scripts import ray_data_golden_path_probe as probe
+
+    calls, output = [], []
+    monkeypatch.setattr(django, "setup", lambda: None)
+    monkeypatch.setattr(probe, "_use_preinstalled_probe_dependencies", lambda value: None)
+    monkeypatch.setattr(Command, "send_heartbeat", lambda self: calls.append("heartbeat"))
+    monkeypatch.setattr(
+        probe, "_worker_qualification_diagnostic", lambda value: str(len(calls) // 2)
+    )
+
+    def run(command, **options):
+        command.stdout = SimpleNamespace(write=output.append, flush=lambda: None)
+        for _ in range(40):
+            command.send_heartbeat()
+
+    monkeypatch.setattr(management, "call_command", run)
+    assert probe._run_probe_worker() == 0
+    assert len(calls) == 40 and len(output) == 16
+    assert len(set(output)) == 16
+
+
+@pytest.mark.parametrize(
+    "consumed,elapsed,latest",
+    [
+        (False, 0, None),
+        (True, 0, 2),
+        (True, 120, 1),
+    ],
+)
+def test_receipt_publication_diagnostic_distinguishes_policy_and_expiry(
+    monkeypatch,
+    consumed,
+    elapsed,
+    latest,
+):
+    from datetime import datetime, timedelta
+
+    from django_ray.models import RayTargetPolicyRevision
+    from django_ray.runtime.cohort_job import encode_probe_job_request
+    from django_ray.target.cohort_job_receipt import (
+        cohort_job_receipt_digest,
+        encode_cohort_job_receipt,
+    )
+    from scripts import ray_data_golden_path_probe as probe
+    from tests.unit.test_cohort_job_receipt import receipt
+
+    value = receipt()
+    now = value.collected_at + timedelta(seconds=elapsed)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    queried = []
+
+    def policies(**filters):
+        queried.append(filters)
+        return SimpleNamespace(
+            order_by=lambda field: SimpleNamespace(
+                values=lambda *fields: SimpleNamespace(
+                    first=lambda: (
+                        None
+                        if latest is None
+                        else {
+                            "revision": latest,
+                            "desired_state": "active",
+                        }
+                    )
+                )
+            )
+        )
+
+    monkeypatch.setattr(probe, "datetime", Clock)
+    monkeypatch.setattr(RayTargetPolicyRevision.objects, "filter", policies)
+    row = {
+        "request_json": encode_probe_job_request(value.request),
+        "request_digest": value.request_digest,
+        "submission_id": value.submission_id,
+        "receipt_json": encode_cohort_job_receipt(value),
+        "receipt_digest": cohort_job_receipt_digest(value),
+        "challenge__consumed_at": now if consumed else None,
+    }
+    result = probe._receipt_publication_diagnostic(row)
+    assert result["challenge_consumed"] is consumed
+    assert result["request_fresh"] is (elapsed == 0)
+    assert result["receipt_fresh"] is (elapsed == 0)
+    assert result["refresh_policy_requested"] is False
+    assert result["target_policy_present"] is (latest is not None)
+    if latest is not None:
+        assert result["receipt_matches_latest_policy"] is (latest == 1)
+        assert result["latest_policy_active"] is True
+    assert queried == [{"target_id": value.attestation.expectation.target_key}]
+    assert value.attestation.expectation.target_key not in json.dumps(result)
+
+
+@pytest.fixture
+def current_probe_completion(monkeypatch):
+    """Synthetic protected row and real codecs, without a Ray process or DB I/O."""
+    from datetime import timedelta
+
+    from django_ray.models import RayTaskCohortClaim
+    from django_ray.runner import cohort_dispatch
+    from django_ray.runner.cohort_completion import _digest
+    from django_ray.target.cohort_claim import (
+        CohortRunnerFamily,
+        cohort_claim_facts_digest,
+        encode_cohort_claim_facts,
+    )
+    from django_ray.target.cohort_transport import (
+        CohortExecutionResult,
+        encode_cohort_execution_result,
+    )
+    from tests.unit.test_cohort_claim import facts
+    from tests.unit.test_cohort_execution import completed, prepared
+
+    value = prepared()
+    claim_facts = facts(family=CohortRunnerFamily.RAY_JOB)
+    claim_facts = replace(claim_facts, identity=value.identity)
+    claim_facts = replace(claim_facts, binding_id=value.identity.task_execution_pk)
+    raw = encode_cohort_execution_result(
+        CohortExecutionResult(
+            value.identity, value.request_digest, value.contract_digest, completed(value)
+        )
+    )
+    claim = SimpleNamespace(
+        pk=1,
+        facts_json=encode_cohort_claim_facts(claim_facts),
+        facts_digest=cohort_claim_facts_digest(claim_facts),
+        revision=4,
+        disposition="RESOLVED",
+        owner_lease_id=claim_facts.worker_lease_id,
+        owner_lease_hostname=claim_facts.worker_lease_hostname,
+        owner_lease_pid=claim_facts.worker_lease_pid,
+        owner_lease_started_at=claim_facts.worker_lease_started_at,
+        prepared_request_digest=value.request_digest,
+        dispatched_at=claim_facts.claimed_at + timedelta(seconds=1),
+        resolved_at=claim_facts.claimed_at + timedelta(seconds=2),
+        resolution_kind="application_completed",
+        resolution_digest=_digest(raw),
+    )
+    execution = SimpleNamespace(
+        pk=value.identity.task_execution_pk,
+        task_id=value.identity.task_id,
+        attempt_number=value.identity.attempt_number,
+        execution_generation=value.identity.execution_generation,
+        execution_protocol_version=3,
+        ray_address=claim_facts.job_qualification.jobs_endpoint,
+        finished_at=claim.resolved_at,
+        completion_data=raw,
+        executor_django_ray_version="0.5.0",
+    )
+
+    def get_claim(**filters):
+        assert filters == {
+            "binding_id": value.identity.task_execution_pk,
+            "attempt_number": value.identity.attempt_number,
+            "execution_generation": value.identity.execution_generation,
+        }
+        return claim
+
+    from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+    _, contract = validate_prepared_cohort_execution(value)
+    monkeypatch.setattr(RayTaskCohortClaim.objects, "get", get_claim)
+    monkeypatch.setattr(cohort_dispatch, "_contract", lambda _record: contract)
+    return execution, claim
+
+
+def test_real_probe_reads_guarded_current_completion(current_probe_completion):
+    from scripts import ray_data_golden_path_probe as probe
+
+    execution, _claim = current_probe_completion
+    probe._verify_current_completion(execution)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "request_digest",
+        "contract_digest",
+        "completion_identity",
+        "legacy",
+        "unresolved",
+        "endpoint",
+    ],
+)
+def test_real_probe_refuses_crossed_or_unresolved_current_completion(
+    current_probe_completion, change
+):
+    from django_ray.target.cohort_contract import CohortContractError
+    from scripts import ray_data_golden_path_probe as probe
+
+    execution, claim = current_probe_completion
+    if change == "request_digest":
+        claim.prepared_request_digest = "sha256:" + "f" * 64
+    elif change == "contract_digest":
+        body = json.loads(execution.completion_data)
+        body["contract_digest"] = "sha256:" + "f" * 64
+        execution.completion_data = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    elif change == "completion_identity":
+        body = json.loads(execution.completion_data)
+        body["identity"]["execution_generation"] += 1
+        execution.completion_data = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    elif change == "legacy":
+        execution.completion_data = json.dumps({"execution_protocol_version": 1, "success": True})
+    elif change == "unresolved":
+        claim.disposition = "HELD"
+    else:
+        execution.ray_address = "http://another-head:8265"
+    with pytest.raises((AssertionError, CohortContractError)):
+        probe._verify_current_completion(execution)
 
 
 def _strict_job_metadata(*, execution_pk: int, attempt: int, generation: int) -> dict[str, str]:
@@ -323,13 +946,25 @@ def _rq2_job_binding(
     )
     from django_ray.ray_job_protocol import (
         STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
-        build_ray_job_request_reference_metadata,
+        _build_cohort_job_metadata,
         coordination_sha256,
     )
     from django_ray.ray_job_request_storage import (
         RayJobRequestLocator,
         encode_ray_job_request_locator,
     )
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+    from django_ray.target.attestation import RayRunnerFamily
+    from django_ray.target.cohort_contract import (
+        cohort_execution_contract_digest,
+        encode_cohort_execution_contract,
+    )
+    from django_ray.target.cohort_transport import (
+        PreparedCohortExecution,
+        cohort_execution_request_digest,
+    )
+    from django_ray.workflow.plans import runtime_env_plan_identity
+    from tests.unit.test_cohort_contract import contract
 
     identity = ExecutionIdentity(
         task_execution_pk=execution_pk,
@@ -337,18 +972,22 @@ def _rq2_job_binding(
         attempt_number=attempt,
         execution_generation=generation,
     )
+    # This is a canonical synthetic current claim, not native qualification.
+    claim = replace(contract(family=RayRunnerFamily.RAY_JOB), identity=identity)
+    environment = normalize_runtime_env({})
     request = ExecutionRequest(
         identity=identity,
-        execution_protocol_version=1,
+        execution_protocol_version=3,
         callable_path=callable_path,
         transport_version=1,
         serialized_args="[]",
         serialized_kwargs="{}",
         input_reference=None,
         runtime_env_profile=None,
-        runtime_env_hash="0" * 64,
-        runtime_env_plan_identity={},
+        runtime_env_hash=environment.digest,
+        runtime_env_plan_identity=runtime_env_plan_identity(environment).as_transport_dict(),
         compiled_graph_submission_transport="ray-job",
+        cohort_contract_json=encode_cohort_execution_contract(claim),
     )
     serialized_request = encode_execution_request(request)
     reference = _content_addressed_request_reference(serialized_request)
@@ -361,9 +1000,13 @@ def _rq2_job_binding(
         size_bytes=len(payload),
         filesystem_path="/var/lib/django-ray/requests",
     )
-    metadata = build_ray_job_request_reference_metadata(
-        request,
-        serialized_request,
+    metadata = _build_cohort_job_metadata(
+        PreparedCohortExecution(
+            identity,
+            serialized_request,
+            cohort_execution_request_digest(request),
+            cohort_execution_contract_digest(claim),
+        ),
         reference,
         encode_ray_job_request_locator(locator),
     )
@@ -373,7 +1016,9 @@ def _rq2_job_binding(
     return metadata, submission_id, reference
 
 
-def _create_probe_execution(*, current_reference: str) -> None:
+def _create_probe_execution(
+    *, current_reference: str | None, execution_protocol_version: int = 3
+) -> None:
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 
     execution = RayTaskExecution.objects.create(
@@ -381,6 +1026,7 @@ def _create_probe_execution(*, current_reference: str) -> None:
         task_id="probe-task-41",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.SUCCEEDED,
+        execution_protocol_version=execution_protocol_version,
         attempt_number=2,
         execution_generation=8,
         ray_job_request_reference=current_reference,
@@ -388,13 +1034,13 @@ def _create_probe_execution(*, current_reference: str) -> None:
     TaskAttempt.objects.create(
         execution=execution,
         attempt_number=1,
-        execution_protocol_version=1,
+        execution_protocol_version=execution_protocol_version,
         state=TaskState.FAILED,
     )
     TaskAttempt.objects.create(
         execution=execution,
         attempt_number=2,
-        execution_protocol_version=1,
+        execution_protocol_version=execution_protocol_version,
         state=TaskState.SUCCEEDED,
     )
 
@@ -586,22 +1232,31 @@ def test_real_probe_rejects_wrong_current_rq2_request_binding(
         )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_real_probe_retains_rq1_jobinfo_compatibility(
     monkeypatch: pytest.MonkeyPatch,
+    historical,
 ) -> None:
     monkeypatch.setenv("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "test-sentinel")
+    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.ray_job_protocol import (
+        STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
+        coordination_sha256,
+    )
     from scripts import ray_data_golden_path_probe as probe
 
-    _, first_rq2_id, _ = _rq2_job_binding(execution_pk=41, attempt=1, generation=7)
-    _, second_rq2_id, current_reference = _rq2_job_binding(
-        execution_pk=41,
-        attempt=2,
-        generation=8,
+    first_id, second_id = (
+        STRICT_RAY_JOB_SUBMISSION_ID_PREFIX
+        + coordination_sha256(ExecutionIdentity(41, "probe-task-41", attempt, generation))
+        for attempt, generation in ((1, 7), (2, 8))
     )
-    first_id = first_rq2_id.replace("_rq2_", "_rq1_")
-    second_id = second_rq2_id.replace("_rq2_", "_rq1_")
-    _create_probe_execution(current_reference=current_reference)
+    # Terminal released history remains readable after activation; it cannot
+    # create new work and does not require a fabricated current rq2 request.
+    _create_probe_execution(
+        current_reference=None,
+        execution_protocol_version=1,
+    )
+    _migrate(LATEST)
 
     class _Client:
         def list_jobs(self) -> list[SimpleNamespace]:

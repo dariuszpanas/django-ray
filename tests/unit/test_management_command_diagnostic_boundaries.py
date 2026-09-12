@@ -14,15 +14,18 @@ from django.core.management.base import CommandError, OutputWrapper
 import django_ray.management.commands.django_ray_audit_workflow_progress as audit_command
 import django_ray.management.commands.django_ray_benchmark_polling as polling_benchmark
 import django_ray.management.commands.django_ray_worker as worker_command
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.management.commands.django_ray_purge_inputs import Command as PurgeInputsCommand
 from django_ray.management.commands.django_ray_worker import Command as WorkerCommand
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import TaskState
 from django_ray.redaction import REDACTED
 from django_ray.result_storage import ResultStorageError
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.retry import RetryDecision
 from django_ray.workflow.progress.storage import WorkflowProgressStorageError
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+from tests.unit.test_worker_command_runtime import historical_worker as historical_worker
 
 
 def _output_command() -> tuple[WorkerCommand, StringIO]:
@@ -122,13 +125,14 @@ def test_worker_redacts_callable_path_before_display(
     assert "\x1b" not in output
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_worker_success_status_does_not_project_application_result(
     monkeypatch: pytest.MonkeyPatch,
+    historical_worker,
 ) -> None:
     command, stream = _output_command()
-    command._create_lease("default")
-    task = RayTaskExecution.objects.create(
+    historical_worker.lease_for(command)
+    task = historical_worker.task(
         task_id="fixed-success-output",
         callable_path="tests.fake",
         state=TaskState.RUNNING,
@@ -164,12 +168,13 @@ def test_worker_success_status_does_not_project_application_result(
     assert marker not in stream.getvalue()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_worker_result_storage_fallback_survives_broken_exception_rendering(
     monkeypatch: pytest.MonkeyPatch,
+    historical_worker,
 ) -> None:
     command, stream = _output_command()
-    task = RayTaskExecution.objects.create(
+    task = historical_worker.task(
         task_id="diagnostic-result-storage-fallback",
         callable_path="tests.fake",
         state=TaskState.RUNNING,
@@ -199,7 +204,12 @@ def test_worker_result_storage_fallback_survives_broken_exception_rendering(
         lambda _settings: FailingStorage(),
     )
 
-    assert command._store_and_succeed_task(task, {"large": "value"}) is True
+    assert (
+        command._store_and_succeed_task(
+            task, {"large": "value"}, supported_protocols=ExecutionProtocolRange(1, 1)
+        )
+        is True
+    )
 
     task.refresh_from_db()
     output = stream.getvalue()

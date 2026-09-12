@@ -34,7 +34,7 @@ def fake_ray(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         SimpleNamespace(
             is_initialized=lambda: state.initialized,
             init=init,
-            shutdown=lambda: state.shutdowns.append(True),
+            shutdown=lambda **options: state.shutdowns.append(options),
         ),
     )
     return state
@@ -87,7 +87,27 @@ def test_partial_startup_failure_cleans_owned_runtime_and_preserves_error(fake_r
     with pytest.raises(OSError) as raised:
         local_ray.init_local_ray()
     assert raised.value is fake_ray.init_error
-    assert fake_ray.shutdowns == [True]
+    assert fake_ray.shutdowns == [{"wait_for_processes": True}]
+
+
+@pytest.mark.parametrize("test_failed", [False, True])
+def test_shared_fixture_waits_for_owned_processes_after_test(fake_ray, test_failed) -> None:
+    from tests.conftest import ray_cluster
+
+    fixture = ray_cluster.__wrapped__()
+    assert next(fixture) is sys.modules["ray"]
+    assert fake_ray.shutdowns == []
+
+    if test_failed:
+        failure = RuntimeError("test failed")
+        with pytest.raises(RuntimeError) as raised:
+            fixture.throw(failure)
+        assert raised.value is failure
+    else:
+        with pytest.raises(StopIteration):
+            next(fixture)
+
+    assert fake_ray.shutdowns == [{"wait_for_processes": True}]
 
 
 def test_non_linux_is_rejected_before_startup_or_cleanup(fake_ray, monkeypatch) -> None:

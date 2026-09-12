@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 import textwrap
 import tomllib
 from pathlib import Path
@@ -33,6 +35,9 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ("upgrade-qualification.yml", "data"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
+    ("upgrade-qualification.yml", "runtime-images"): (
+        "Path-selected runtime image proof is reviewed before the native upgrade gate"
+    ),
     (
         "application-qualification.yml",
         "application-core",
@@ -42,6 +47,38 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
 
 def _workflow_paths() -> list[Path]:
     return sorted(path for path in WORKFLOWS.iterdir() if path.suffix in {".yml", ".yaml"})
+
+
+@pytest.mark.parametrize(
+    "limit,accepted",
+    [(1024, True), (-1, False), (0, False), (2048, False), (True, False), ("1024", False)],
+)
+def test_hosted_kind_pid_ceiling_is_configured_and_effectively_verified(limit, accepted):
+    configuration = yaml.safe_load(
+        (PROJECT_ROOT / "qualification/application/kind.yaml").read_text()
+    )
+    (node,) = configuration["nodes"]
+    (patch,) = node["kubeadmConfigPatches"]
+    assert yaml.safe_load(patch)["podPidsLimit"] == 1024
+    workflow = _workflow(WORKFLOWS / "application-qualification.yml")
+    step = next(
+        step
+        for step in workflow["jobs"]["application-core"]["steps"]
+        if step.get("name") == "Create a bounded disposable Kind cluster"
+    )
+    command = step["run"]
+    assert "--config qualification/application/kind.yaml" in command
+    assert command.index("proxy/configz") < command.index("helm install")
+    program = re.search(r"python -c '([^']+)'", command).group(1)
+    result = subprocess.run(
+        [sys.executable, "-I", "-O", "-c", program],
+        input=json.dumps({"kubeletconfig": {"podPidsLimit": limit}}),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert (result.returncode == 0) is accepted
 
 
 def _workflow(path: Path = CI_WORKFLOW) -> dict[str, Any]:
@@ -402,7 +439,7 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     )
 
     assert '"pyasn1==0.6.4"' in minimum_install["run"]
-    assert '"ray[default]==2.56.0"' in minimum_install["run"]
+    assert '"ray[default]==2.58.0"' in minimum_install["run"]
     assert '"django==6.0.8"' in minimum_install["run"]
     assert '"sqlparse==0.6.0"' in minimum_install["run"]
     assert '"pip-audit==2.10.1"' in minimum_install["run"]
@@ -557,7 +594,7 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     }
 
     assert test_job["name"] == "Test (Python ${{ matrix.python-version }})"
-    assert test_job["timeout-minutes"] == "20"
+    assert test_job["timeout-minutes"] == "40"
     assert strategy["fail-fast"] == "false"
     assert matrix == {"python-version": ["3.12", "3.13", "3.14"]}
     assert "--lane supported-python" in steps["Run tests with suite timing"]["run"]
@@ -584,12 +621,12 @@ def test_ray_data_golden_path_runs_real_optional_dependency_endpoints() -> None:
                 {
                     "profile": "supported-min-python",
                     "python-version": "3.12",
-                    "ray-version": "2.56.0",
+                    "ray-version": "2.58.0",
                 },
                 {
                     "profile": "newest-python",
                     "python-version": "3.14",
-                    "ray-version": "2.56.0",
+                    "ray-version": "2.58.0",
                 },
             ]
         },

@@ -12,6 +12,7 @@ import pytest
 from django.db import IntegrityError
 
 import django_ray.workflow.progress.runs as workflow_progress_module
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.lifecycle import record_failure, retry_task
 from django_ray.models import (
     RayTaskExecution,
@@ -38,6 +39,7 @@ from django_ray.workflow.progress.runs import (
     reclaim_workflow_run,
     refresh_workflow_run_activity,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 
 def _identity(
@@ -253,13 +255,15 @@ def test_fresh_allocation_skips_a_migrated_current_candidate_collision(
     assert str(execution.workflow_run_id) == fresh_identity.run_id
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_one_namespace_stays_distinct_across_attempts_and_generations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     namespace = 0x3317A23B01FD4215
     monkeypatch.setattr(workflow_progress_module, "randbits", lambda _bits: namespace)
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-run-forced-cross-fence-collision",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
@@ -414,7 +418,8 @@ def test_namespace_allocator_does_not_retry_unrelated_integrity_error(
     assert execution.workflow_run_sequence == 0
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize(
     ("updates", "expected_attempt", "expected_generation"),
     [
@@ -429,6 +434,7 @@ def test_exact_reclaim_scopes_a_reused_legacy_uuid_by_outer_fences(
 ) -> None:
     run_id = "00000000-0000-4000-8000-000000000012"
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id=f"workflow-run-legacy-outer-fence-{expected_attempt}-{expected_generation}",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
@@ -708,9 +714,11 @@ def test_replacement_claim_rolls_back_storage_deletion_when_task_update_fails(
     assert WorkflowProgressRunStorage.objects.filter(pk=old_storage.pk).exists()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_automatic_retry_clears_identity_and_rejects_late_writer() -> None:
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-run-auto-retry",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
@@ -720,7 +728,15 @@ def test_automatic_retry_clears_identity_and_rejects_late_writer() -> None:
     stale = _allocate(execution)
     assert persist_workflow_progress(stale, _snapshot(stale)) is True
 
-    assert record_failure(execution, error_message="retry", retry=True) is True
+    assert (
+        record_failure(
+            execution,
+            supported_protocols=ExecutionProtocolRange(1, 1),
+            error_message="retry",
+            retry=True,
+        )
+        is True
+    )
     assert persist_workflow_progress(stale, _snapshot(stale, revision=2)) is False
 
     execution.refresh_from_db()

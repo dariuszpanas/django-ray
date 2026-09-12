@@ -2,14 +2,14 @@
 
 The probe observes one bounded interval.  It does not activate a target, grant
 worker capability, or make a claim about cluster membership after the second
-snapshot.  Ray 2.56.0 resource-state counters advance during ordinary
-heartbeats, so they are retained as non-regressing before/after diagnostics;
+snapshot.  Ray 2.58.0 resource-state counters advance when resource state is
+read, so they are retained as non-regressing before/after diagnostics;
 they are not membership epochs.
 
 Remote code is produced by a local factory and serialized by value.  Generic
 Ray nodes therefore need Ray itself, but do not need ``django_ray`` installed.
 All private Ray access is confined to that remote bootstrap and occurs only
-after an exact Ray 2.56.0 version check.
+after an exact Ray 2.58.0 version check.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
         TargetExecutionResult,
     )
 
-RAY_TARGET_PROBE_RAY_VERSION = "2.56.0"
+RAY_TARGET_PROBE_RAY_VERSION = "2.58.0"
 RAY_TARGET_PROBE_DEFAULT_TIMEOUT_SECONDS = 30.0
 RAY_TARGET_PROBE_MAX_TIMEOUT_SECONDS = 120.0
 RAY_TARGET_PROBE_DEFAULT_MAX_NODES = 64
@@ -401,6 +401,38 @@ def _cancel_refs_bounded(
             pass
 
 
+def _cancel_refs_owned(
+    ray_module: Any,
+    refs: Sequence[object],
+    *,
+    deadline: float,
+) -> None:
+    """Keep every cleanup call inside the caller's externally supervised slot.
+
+    This path deliberately creates no cancellation thread. The caller must not
+    reuse or reconnect the Ray connection while this call is outstanding, even
+    after its eligibility deadline. Returning means local calls have finished;
+    best-effort cancellation is not proof of remote termination or drain.
+    """
+    owned_refs = tuple(refs)
+    for ref in owned_refs:
+        try:
+            ray_module.cancel(ref, force=True, recursive=True)
+        except Exception:
+            pass
+    remaining = deadline - time.monotonic()
+    if owned_refs and remaining > 0:
+        try:
+            ray_module.wait(
+                list(owned_refs),
+                num_returns=len(owned_refs),
+                timeout=remaining,
+                fetch_local=False,
+            )
+        except Exception:
+            pass
+
+
 def _current_caller_observation(ray_module: Any) -> _RuntimeObservation:
     try:
         context = ray_module.get_runtime_context()
@@ -426,7 +458,7 @@ def _current_resource_state_snapshot(
     timeout_seconds: float,
     max_nodes: int,
 ) -> _ResourceStateSnapshot:
-    """Read one bounded schedulable-node set through the pinned Ray 2.56 API."""
+    """Read one bounded schedulable-node set through the pinned Ray 2.58 API."""
     timeout_seconds, max_nodes = _validate_probe_limits(
         timeout_seconds=timeout_seconds,
         max_nodes=max_nodes,
@@ -515,7 +547,7 @@ def _current_resource_state_snapshot(
 
 def _make_cluster_probe_coordinator() -> Callable[[float, int, int], dict[str, object]]:
     """Return stdlib-plus-Ray remote code serialized by value, not module name."""
-    supported_ray_version = "2.56.0"
+    supported_ray_version = "2.58.0"
     max_timeout_seconds = 120.0
     max_nodes_bound = 256
     expected_max_bytes = 4 * 1024 * 1024
@@ -791,7 +823,9 @@ def _run_cluster_coordinator(
     *,
     deadline: float,
     max_nodes: int,
+    owned_cleanup: bool = False,
 ) -> _ClusterIntervalObservation:
+    cancel_refs = _cancel_refs_owned if owned_cleanup else _cancel_refs_bounded
     owned_refs: list[object] = []
     try:
         coordinator = ray_module.remote(num_cpus=0, max_retries=0)(
@@ -809,30 +843,40 @@ def _run_cluster_coordinator(
             timeout=_remaining_seconds(deadline),
         )
     except RayTargetProbeError:
-        _cancel_refs_bounded(ray_module, owned_refs, deadline=deadline)
+        cancel_refs(ray_module, owned_refs, deadline=deadline)
         raise
     except Exception:
-        _cancel_refs_bounded(ray_module, owned_refs, deadline=deadline)
+        cancel_refs(ray_module, owned_refs, deadline=deadline)
         _reject(RayTargetProbeFailure.NODE_PROBE_UNAVAILABLE)
     if unfinished:
-        _cancel_refs_bounded(ray_module, owned_refs, deadline=deadline)
+        cancel_refs(ray_module, owned_refs, deadline=deadline)
         _reject(RayTargetProbeFailure.NODE_PROBE_TIMEOUT)
     try:
         raw_interval = ray_module.get(ready[0], timeout=_remaining_seconds(deadline))
     except RayTargetProbeError:
-        _cancel_refs_bounded(ray_module, owned_refs, deadline=deadline)
+        cancel_refs(ray_module, owned_refs, deadline=deadline)
         raise
     except Exception:
+        if owned_cleanup:
+            cancel_refs(ray_module, owned_refs, deadline=deadline)
         _reject(RayTargetProbeFailure.NODE_PROBE_UNAVAILABLE)
-    return _decode_remote_interval(raw_interval, max_nodes=max_nodes)
+    try:
+        return _decode_remote_interval(raw_interval, max_nodes=max_nodes)
+    except RayTargetProbeError:
+        if owned_cleanup:
+            cancel_refs(ray_module, owned_refs, deadline=deadline)
+        raise
 
 
 def _collect_raw_cluster_observation(
     *,
     timeout_seconds: float = RAY_TARGET_PROBE_DEFAULT_TIMEOUT_SECONDS,
     max_nodes: int = RAY_TARGET_PROBE_DEFAULT_MAX_NODES,
+    owned_cleanup: bool = False,
 ) -> _RawClusterObservation:
     """Collect one exact bounded interval without constructing target policy."""
+    if type(owned_cleanup) is not bool:
+        _reject(RayTargetProbeFailure.INVALID_CONFIGURATION)
     timeout_seconds, max_nodes = _validate_probe_limits(
         timeout_seconds=timeout_seconds,
         max_nodes=max_nodes,
@@ -851,7 +895,8 @@ def _collect_raw_cluster_observation(
     if initialized is not True:
         _reject(RayTargetProbeFailure.RAY_NOT_INITIALIZED)
     caller = _current_caller_observation(ray)
-    interval = _run_cluster_coordinator(ray, deadline=deadline, max_nodes=max_nodes)
+    options = {"owned_cleanup": True} if owned_cleanup else {}
+    interval = _run_cluster_coordinator(ray, deadline=deadline, max_nodes=max_nodes, **options)
     if caller.node_id not in interval.before.node_ids:
         _reject(RayTargetProbeFailure.NODE_ID_MISMATCH)
     if caller.session_name != interval.coordinator.session_name:
@@ -1093,7 +1138,7 @@ def verify_ray_target_execution(
         _reject(RayTargetProbeFailure.SESSION_MISMATCH)
     observed_runtime = RayRuntimeVersion(
         ray_major=2,
-        ray_minor=56,
+        ray_minor=58,
         ray_patch=0,
         python_implementation=caller.python_implementation,
         python_major=caller.python_version[0],
@@ -1192,7 +1237,7 @@ def probe_ray_target(
     )
     observed_runtime = RayRuntimeVersion(
         ray_major=2,
-        ray_minor=56,
+        ray_minor=58,
         ray_patch=0,
         python_implementation=raw.caller.python_implementation,
         python_major=raw.caller.python_version[0],

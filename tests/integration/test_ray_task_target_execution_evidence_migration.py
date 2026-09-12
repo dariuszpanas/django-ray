@@ -42,10 +42,13 @@ from django_ray.target.execution_evidence import (
     RayTaskTargetExecutionEvidenceClaim,
     ray_task_target_execution_evidence_digest,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
 
 MIGRATE_FROM = [("django_ray", "0025_ray_worker_target_capabilities")]
 MIGRATE_TO = [("django_ray", "0026_ray_task_target_execution_evidence")]
-LATEST = MIGRATE_TO
+HISTORICAL_LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST_A = f"sha256:{'a' * 64}"
 _DIGEST_B = f"sha256:{'b' * 64}"
@@ -75,6 +78,7 @@ def _create_lineage(
     execution_protocol_version: int = 2,
     capability_precedes_lease: bool = False,
     identity_text: str | None = None,
+    binding_model: type[RayTaskTargetBinding] = RayTaskTargetBinding,
 ) -> _Lineage:
     now = timezone.now().astimezone(UTC).replace(microsecond=123456)
     observed_at = now - timedelta(seconds=20)
@@ -158,13 +162,13 @@ def _create_lineage(
         target_policy=policy,
         created_at=observed_at,
     )
-    binding = RayTaskTargetBinding.objects.create(
-        execution=execution,
-        target_policy=policy,
+    binding = binding_model.objects.create(
+        execution_id=execution.pk,
+        target_policy_id=policy.pk,
         created_at=observed_at,
     )
     selection = RayTaskTargetRouteSelection.objects.create(
-        binding=binding,
+        binding_id=binding.pk,
         route_revision=route_revision,
         created_at=observed_at,
     )
@@ -792,7 +796,10 @@ def test_migration_is_additive_and_reverse_refuses_retained_evidence() -> None:
         ).objects.exists()
         assert old_execution.objects.filter(pk=legacy.pk).exists()
 
-        lineage = _create_lineage(suffix="reverse")
+        lineage = _create_lineage(
+            suffix="reverse",
+            binding_model=new_apps.get_model("django_ray", "RayTaskTargetBinding"),
+        )
         evidence = _create_evidence(lineage)
         with pytest.raises(RuntimeError, match="both tables to be empty"):
             MigrationExecutor(connection).migrate(MIGRATE_FROM)
@@ -806,7 +813,7 @@ def test_migration_is_additive_and_reverse_refuses_retained_evidence() -> None:
                 "django_ray", "RayTaskTargetExecutionEvidence"
             )
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
 
 
 def _hold_evidence_writer(
@@ -870,7 +877,7 @@ def test_sqlite_evidence_writer_cannot_race_partial_schema_reverse() -> None:
         assert RayTaskTargetExecutionEvidence.objects.filter(pk=2001).exists()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         RayTaskTargetExecutionOutcome.objects.all().delete()
         RayTaskTargetExecutionEvidence.objects.filter(pk=2001).delete()
 
@@ -948,6 +955,6 @@ def test_postgresql_evidence_writer_serializes_before_reverse_guard() -> None:
         assert RayTaskTargetExecutionEvidence.objects.filter(pk=2001).exists()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         RayTaskTargetExecutionOutcome.objects.all().delete()
         RayTaskTargetExecutionEvidence.objects.filter(pk=2001).delete()

@@ -22,7 +22,7 @@ from django_ray.execution_protocol import (
     EXECUTION_PROTOCOL_VERSION,
 )
 from django_ray.input_storage import prepare_task_input
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskCohortIntent, RayTaskExecution, TaskState
 from django_ray.result_storage import FilesystemResultStorage, ResultStorageError
 from django_ray.runtime.runtime_env import (
     RuntimeEnvSnapshotError,
@@ -212,11 +212,13 @@ class TestRayTaskBackend:
         observed = []
 
         observed_task_ids = []
+        observed_configs = []
 
-        def record_storage(runtime_env, *, task_id):
+        def record_storage(runtime_env, *, task_id, config):
             observed.append(runtime_env)
             observed_task_ids.append(task_id)
-            return runtime_env_for_storage(runtime_env, task_id=task_id)
+            observed_configs.append(config)
+            return runtime_env_for_storage(runtime_env, task_id=task_id, config=config)
 
         monkeypatch.setattr("django_ray.backends.runtime_env_for_storage", record_storage)
 
@@ -229,6 +231,7 @@ class TestRayTaskBackend:
         execution = RayTaskExecution.objects.get(task_id=result.id)
         assert len(observed) == 1
         assert observed_task_ids == [result.id]
+        assert len(observed_configs) == 1 and observed_configs[0] is not None
         assert execution.runtime_env_json == observed[0].serialized
         assert execution.runtime_env_hash == observed[0].digest
 
@@ -271,10 +274,12 @@ class TestRayTaskBackend:
         )
 
         observed_task_ids: list[str] = []
+        observed_configs = []
 
-        def record_storage(runtime_env, *, task_id):
+        def record_storage(runtime_env, *, task_id, config):
             observed_task_ids.append(task_id)
-            return runtime_env_for_storage(runtime_env, task_id=task_id)
+            observed_configs.append(config)
+            return runtime_env_for_storage(runtime_env, task_id=task_id, config=config)
 
         prepared_inputs = 0
         original_prepare = prepare_task_input
@@ -298,6 +303,8 @@ class TestRayTaskBackend:
         assert result.id == replacement_id
         assert RayTaskExecution.objects.filter(task_id=collided_id).count() == 1
         assert observed_task_ids == [collided_id, replacement_id]
+        assert len(observed_configs) == 2 and observed_configs[0] is observed_configs[1]
+        assert observed_configs[0]["RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY"] == "backend-key"
         assert prepared_inputs == 1
         assert execution.queue_timeout_seconds == 90
         assert execution.queue_deadline_at == run_after + timedelta(seconds=90)
@@ -427,8 +434,8 @@ class TestRayTaskBackend:
     def test_runtime_env_storage_failure_creates_no_execution(self, monkeypatch) -> None:
         from testproject.tasks import add_numbers
 
-        def reject_storage(_runtime_env, *, task_id):
-            assert task_id
+        def reject_storage(_runtime_env, *, task_id, config):
+            assert task_id and config is not None
             raise RuntimeEnvSnapshotError(
                 "django-ray: Resolved RuntimeEnv storage snapshot is invalid"
             )
@@ -937,3 +944,309 @@ class TestRayTaskBackend:
         monkeypatch.setitem(sys.modules, "ray", type("Ray", (), {"is_initialized": lambda: False}))
 
         assert backend.check() == []
+
+
+@pytest.mark.django_db(transaction=True)
+class TestCohortEnqueue:
+    @pytest.fixture(autouse=True)
+    def cohort_protocol(self, _restore_execution_protocol_rollout_seed):
+        from django_ray.models import TaskExecutionProtocolPolicy
+
+        policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+        assert policy.active_write_protocol_version == EXECUTION_PROTOCOL_VERSION == 3
+        assert not policy.legacy_worker_admission_enabled
+
+    @staticmethod
+    def enqueue(backend):
+        from testproject.tasks import add_numbers
+
+        result = backend.enqueue(add_numbers.using(queue_name="default"), args=(1, 2), kwargs={})
+        return RayTaskExecution.objects.get(task_id=result.id)
+
+    @staticmethod
+    def pause(*, scopes=(), pause_enqueues=False, pause_claims=False):
+        from django_ray.maintenance import read_maintenance_policy, replace_maintenance_policy
+
+        return replace_maintenance_policy(
+            scopes,
+            pause_enqueues=pause_enqueues,
+            pause_claims=pause_claims,
+            expected_revision=read_maintenance_policy().revision,
+            actor="test-operator",
+            reason="enqueue-regression",
+            authorized=True,
+        )
+
+    @pytest.mark.parametrize("scope", ["global", "queue", "protocol"])
+    def test_paused_enqueue_refuses_before_input_even_in_application_transaction(
+        self, monkeypatch, scope
+    ):
+        from django_ray.maintenance import MaintenanceAdmissionError, MaintenanceScope
+
+        scopes = (
+            ()
+            if scope == "global"
+            else (
+                MaintenanceScope(
+                    scope,
+                    queue_name="default" if scope == "queue" else None,
+                    protocol_version=3 if scope == "protocol" else None,
+                    pause_enqueues=True,
+                ),
+            )
+        )
+        self.pause(scopes=scopes, pause_enqueues=scope == "global")
+        monkeypatch.setattr(
+            "django_ray.backends.prepare_task_input",
+            lambda *a, **k: pytest.fail("paused admission cannot prepare external inputs"),
+        )
+        with transaction.atomic(), pytest.raises(MaintenanceAdmissionError, match="paused"):
+            self.enqueue(_make_backend())
+        assert not RayTaskExecution.objects.exists() and not RayTaskCohortIntent.objects.exists()
+
+    def test_pause_after_preparation_is_rechecked_before_any_registry_or_execution_lock(
+        self, settings, tmp_path, monkeypatch
+    ):
+        from django_ray.maintenance import MaintenanceAdmissionError
+        from django_ray.models import TaskInputPayload
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        }
+        original = prepare_task_input
+
+        def prepare(*args, **kwargs):
+            prepared = original(*args, **kwargs)
+            self.pause(pause_enqueues=True)
+            return prepared
+
+        monkeypatch.setattr("django_ray.backends.prepare_task_input", prepare)
+        monkeypatch.setattr(
+            "django_ray.backends.register_task_input",
+            lambda *a, **k: pytest.fail("pause barrier must precede registry locks"),
+        )
+        with pytest.raises(MaintenanceAdmissionError, match="paused"):
+            self.enqueue(_make_backend())
+        assert not RayTaskExecution.objects.exists() and not RayTaskCohortIntent.objects.exists()
+        assert not TaskInputPayload.objects.exists()
+        assert len(list(tmp_path.rglob("*.json"))) == 1
+
+    def test_claim_pause_does_not_imply_enqueue_pause(self):
+        self.pause(pause_claims=True)
+        execution = self.enqueue(_make_backend())
+        assert execution.cohort_intent.execution_id == execution.pk
+
+    @pytest.mark.parametrize("jobs_only", [False, True])
+    def test_intent_matches_manager_declaration_and_plaintext_snapshot(self, settings, jobs_only):
+        from django_ray.conf.settings import get_settings
+        from django_ray.runner.cohort_configuration import prepare_cohort_worker_configuration
+        from django_ray.target.attestation import RayRunnerFamily
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "WORKFLOW_PLAN_TRUST_IDENTITY": {"trust_domain": "cafe\u0301"},
+        }
+        params = {
+            "QUEUES": ["default"],
+            "OPTIONS": {
+                "RAY_ADDRESS": "https://EXACT:8265/",
+                "RAY_JOB_ONLY": jobs_only,
+                "RAY_RUNTIME_ENV": {
+                    "pip": ["dynamic-package"],
+                    "application_plugin": {"dynamic": True},
+                },
+            },
+        }
+        plan = prepare_cohort_worker_configuration(
+            tasks={"current": params},
+            validated_aliases=["current"],
+            selected_queues=["default"],
+            manager_settings=get_settings(),
+            django_settings_module="testproject.settings",
+            runner_family=RayRunnerFamily.RAY_JOB,
+            execution_mode="ray",
+        )
+        execution = self.enqueue(RayTaskBackend("current", params))
+        intent = execution.cohort_intent
+        assert execution.execution_protocol_version == 3 and intent.schema_version == 2
+        assert intent.package_version == django_ray_version
+        assert intent.configuration_digest == plan.aliases[0].declaration_digest
+        assert intent.selection_policy == ("jobs_only" if jobs_only else "worker_selected")
+        assert intent.runtime_env_identity_digest == f"sha256:{execution.runtime_env_hash}"
+        assert (
+            execution.ray_target_address == "https://EXACT:8265/" and execution.ray_address is None
+        )
+
+    def test_global_fallback_and_trust_are_captured_once_before_input(self, settings, monkeypatch):
+        from django_ray.conf.settings import get_settings
+        from django_ray.target.cohort_intent import (
+            cohort_declaration_digest,
+            prepare_cohort_declaration,
+        )
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "RAY_ADDRESS": "old:6379",
+            "WORKFLOW_PLAN_TRUST_IDENTITY": {"trust_domain": "original"},
+        }
+        backend = RayTaskBackend("current", {"QUEUES": ["default"]})
+        settings.DJANGO_RAY["RAY_ADDRESS"] = "http://current:8265"
+        expected = cohort_declaration_digest(
+            prepare_cohort_declaration("current", options={}, current_settings=get_settings())
+        )
+        original = prepare_task_input
+
+        def mutate(*args, **kwargs):
+            settings.DJANGO_RAY["RAY_ADDRESS"] = "http://later:8265"
+            settings.DJANGO_RAY["WORKFLOW_PLAN_TRUST_IDENTITY"]["trust_domain"] = "later"
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr("django_ray.backends.prepare_task_input", mutate)
+        execution = self.enqueue(backend)
+        assert execution.ray_target_address == "http://current:8265"
+        assert execution.cohort_intent.configuration_digest == expected
+        assert backend.ray_target_address == "old:6379"  # Retained legacy attribute.
+
+    @pytest.mark.parametrize("invalid", ["address", "alias", "trust"])
+    def test_invalid_finite_intent_precedes_input_side_effects(
+        self, settings, monkeypatch, invalid
+    ):
+        from django_ray.target.cohort_intent import CohortIntentError
+
+        options = {"RAY_ADDRESS": "http://user:secret@host:8265"} if invalid == "address" else {}
+        alias = "invalid alias" if invalid == "alias" else "default"
+        if invalid == "trust":
+            settings.DJANGO_RAY = {
+                **settings.DJANGO_RAY,
+                "WORKFLOW_PLAN_TRUST_IDENTITY": {"unexpected": "secret"},
+            }
+        backend = RayTaskBackend(alias, {"QUEUES": ["default"], "OPTIONS": options})
+        monkeypatch.setattr(
+            "django_ray.backends.prepare_task_input",
+            lambda *a, **k: pytest.fail("intent must precede input publication"),
+        )
+        with pytest.raises(CohortIntentError) as caught:
+            self.enqueue(backend)
+        assert "secret" not in str(caught.value)
+        assert not RayTaskExecution.objects.exists() and not RayTaskCohortIntent.objects.exists()
+
+    def test_large_mapping_and_unreadable_code_path_do_not_trigger_planning(
+        self, monkeypatch, tmp_path
+    ):
+        from pathlib import Path
+
+        location = tmp_path / "unreadable-code"
+        location.mkdir()
+        original_stat = Path.stat
+
+        def no_read(path, *args, **kwargs):
+            if path == location:
+                raise PermissionError("producer cannot inspect this tree")
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", no_read)
+        monkeypatch.setattr(
+            "django_ray.workflow.plans.runtime_env_plan_identity",
+            lambda *a, **k: pytest.fail("enqueue must not plan local content"),
+        )
+        spec = {
+            "working_dir": str(location),
+            "env_vars": {f"KEY_{index}": "value" for index in range(300)},
+            "worker_process_setup_hook": "application.worker_hook",
+            "application_plugin": {"new_field": True},
+        }
+        execution = self.enqueue(
+            RayTaskBackend("default", {"QUEUES": ["default"], "OPTIONS": {"RAY_RUNTIME_ENV": spec}})
+        )
+        assert json.loads(execution.runtime_env_json) == spec
+        assert (
+            execution.cohort_intent.runtime_env_identity_digest
+            == f"sha256:{execution.runtime_env_hash}"
+        )
+
+    def test_different_task_environments_do_not_split_admission(self):
+        rows = [
+            self.enqueue(
+                RayTaskBackend(
+                    "default",
+                    {"QUEUES": ["default"], "OPTIONS": {"RAY_RUNTIME_ENV": {"pip": [package]}}},
+                )
+            )
+            for package in ("first", "second")
+        ]
+        assert (
+            rows[0].cohort_intent.configuration_digest == rows[1].cohort_intent.configuration_digest
+        )
+        assert (
+            rows[0].cohort_intent.runtime_env_identity_digest
+            != rows[1].cohort_intent.runtime_env_identity_digest
+        )
+
+    def test_intent_failure_rolls_back_execution_and_input_registry(
+        self, settings, tmp_path, monkeypatch
+    ):
+        from django_ray.models import TaskInputPayload
+        from django_ray.target.cohort_intent_storage import (
+            CohortIntentStorageError,
+            CohortIntentStorageRejection,
+        )
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        }
+        calls = []
+
+        def refuse(*args, **kwargs):
+            calls.append(args[0])
+            raise CohortIntentStorageError(CohortIntentStorageRejection.PERSISTENCE_REFUSED)
+
+        monkeypatch.setattr("django_ray.backends.persist_cohort_intent", refuse)
+        with pytest.raises(CohortIntentStorageError):
+            self.enqueue(_make_backend())
+        assert len(calls) == 1
+        assert not RayTaskExecution.objects.exists() and not RayTaskCohortIntent.objects.exists()
+        assert not TaskInputPayload.objects.exists()
+        assert len(list(tmp_path.rglob("*.json"))) == 1  # External object is not transactional.
+
+    def test_uuid_collision_rebinds_encryption_without_duplicate_intent_or_input(
+        self, settings, monkeypatch
+    ):
+        collision, replacement = UUID(int=1), UUID(int=2)
+        RayTaskExecution.objects.create(
+            task_id=str(collision), callable_path="application.historical"
+        )
+        candidates = iter((collision, replacement))
+        monkeypatch.setattr("django_ray.backends.uuid.uuid4", lambda: next(candidates))
+        key = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"current": key},
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "current",
+        }
+        spec = {"env_vars": {"API_TOKEN": "cohort-private-token"}}
+        prepared = []
+        original = prepare_task_input
+
+        def prepare(*args, **kwargs):
+            prepared.append(True)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr("django_ray.backends.prepare_task_input", prepare)
+        execution = self.enqueue(
+            RayTaskBackend("default", {"QUEUES": ["default"], "OPTIONS": {"RAY_RUNTIME_ENV": spec}})
+        )
+        assert execution.task_id == str(replacement) and prepared == [True]
+        assert RayTaskCohortIntent.objects.count() == 1
+        assert (
+            execution.cohort_intent.runtime_env_identity_digest
+            == f"sha256:{execution.runtime_env_hash}"
+        )
+        assert runtime_env_for_execution(execution).spec == spec
+        assert "cohort-private-token" not in execution.runtime_env_json

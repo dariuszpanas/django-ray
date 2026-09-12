@@ -31,6 +31,7 @@ from django_ray.models import (
     InputPayloadState,
     RayTaskExecution,
     TaskAttempt,
+    TaskExecutionProtocolPolicy,
     TaskInputPayload,
     TaskState,
 )
@@ -45,6 +46,12 @@ from django_ray.workflow.progress.summary import (
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
 )
+from tests.integration.test_cohort_claim_storage import case as case
+from tests.integration.test_cohort_claim_storage import (
+    isolated_sqlite_ledger_maintenance as isolated_sqlite_ledger_maintenance,
+)
+from tests.integration.test_cohort_completion import _apply, _result, _started
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 _SYNTHETIC_V1_V2_PROTOCOLS = ExecutionProtocolRange(minimum=1, maximum=2)
@@ -69,8 +76,16 @@ _ATTEMPT_ARCHIVE_READ_PROJECTION = {
     "workflow_run_id",
 }
 _RETRY_LOCK_PROJECTION = _LOCK_PROJECTION | {
+    "task_id",
+    "queue_name",
     "workflow_plan_fingerprint",
     "workflow_run_id",
+}
+_RETRY_PREVIEW_PROJECTION = {
+    "execution_protocol_version",
+    "state",
+    "attempt_number",
+    "execution_generation",
 }
 _RETRY_ACCEPTED_READ_PROJECTION = (_ATTEMPT_ARCHIVE_READ_PROJECTION - {"workflow_run_id"}) | {
     "task_id",
@@ -121,6 +136,38 @@ def _execution_select_projections(
     return selected
 
 
+def _owned_running_task(case, **changes):
+    """Create real protocol3 claim provenance before testing lifecycle callbacks."""
+    assert changes.pop("state") == TaskState.RUNNING
+    # A first actual claim supplies its own generation and start timestamp.
+    changes.pop("execution_generation", None)
+    before = {
+        name: changes.pop(name)
+        for name in ("task_id", "callable_path", "attempt_number")
+        if name in changes
+    }
+    RayTaskExecution.objects.filter(pk=case.task.pk).update(**before)
+    case.task.refresh_from_db()
+    value = _started(case)
+    RayTaskExecution.objects.filter(pk=case.task.pk).update(**changes)
+    task = value.execution
+    task.refresh_from_db()
+    task._lifecycle_test_dispatch = value
+    return task
+
+
+def _completed_lifecycle_operation(case, task, operation, **kwargs):
+    value = task._lifecycle_test_dispatch
+
+    def apply(current, _decoded, *, retry_admitted):
+        if kwargs.get("retry"):
+            assert retry_admitted
+        return operation(current, **kwargs)
+
+    result = _apply(value, case, _result(value, success=operation is succeed_task), callback=apply)
+    return result.applied
+
+
 @pytest.mark.django_db
 def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     task = RayTaskExecution.objects.create(
@@ -129,8 +176,8 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
         state=TaskState.FAILED,
         attempt_number=2,
         execution_generation=4,
-        metadata_schema_version=0,
-        execution_protocol_version=1,
+        metadata_schema_version=1,
+        execution_protocol_version=3,
         created_with_django_ray_version=None,
         managed_with_django_ray_version="0.4.0-manager",
         executor_django_ray_version="0.4.0-executor",
@@ -151,8 +198,8 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     assert task.state == TaskState.QUEUED
     assert task.attempt_number == 3
     assert task.execution_generation == 5
-    assert task.metadata_schema_version == 0
-    assert task.execution_protocol_version == 1
+    assert task.metadata_schema_version == 1
+    assert task.execution_protocol_version == 3
     assert task.created_with_django_ray_version is None
     assert task.managed_with_django_ray_version is None
     assert task.executor_django_ray_version is None
@@ -166,7 +213,7 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     history = TaskAttempt.objects.get(execution=task, attempt_number=2)
     assert history.state == TaskState.FAILED
     assert history.error_message == "boom"
-    assert history.execution_protocol_version == 1
+    assert history.execution_protocol_version == 3
     assert history.managed_with_django_ray_version == "0.4.0-manager"
     assert history.executor_django_ray_version == "0.4.0-executor"
 
@@ -190,12 +237,13 @@ def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     [None, "0.5.0-executor"],
     ids=["executor-unknown", "executor-reported"],
 )
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_attempt_archival_copies_exact_protocol_and_provenance(
     transition: str,
     executor_version: str | None,
 ) -> None:
     close_legacy_worker_admission(
-        expected_revision=1,
+        expected_revision=TaskExecutionProtocolPolicy.objects.get().revision,
         legacy_producers_retired=True,
     )
     now = datetime.now(UTC)
@@ -315,12 +363,14 @@ def test_attempt_archival_copies_exact_protocol_and_provenance(
         assert task.executor_django_ray_version == executor_version
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("transition", ["success", "final_failure"])
 def test_enriched_completion_stamps_executor_provenance_on_terminal_outcome(
+    case,
     transition: str,
 ) -> None:
-    task = RayTaskExecution.objects.create(
+    task = _owned_running_task(
+        case,
         task_id=f"lifecycle-enriched-completion-{transition}",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -329,16 +379,20 @@ def test_enriched_completion_stamps_executor_provenance_on_terminal_outcome(
     )
 
     if transition == "success":
-        accepted = succeed_task(
+        accepted = _completed_lifecycle_operation(
+            case,
             task,
+            succeed_task,
             result_data="3",
             result_reference=None,
             _executor_django_ray_version="0.5.0-executor",
         )
         expected_state = TaskState.SUCCEEDED
     else:
-        accepted = record_failure(
+        accepted = _completed_lifecycle_operation(
+            case,
             task,
+            record_failure,
             error_message="terminal failure",
             retry=False,
             _executor_django_ray_version="0.5.0-executor",
@@ -354,9 +408,10 @@ def test_enriched_completion_stamps_executor_provenance_on_terminal_outcome(
     assert archived.executor_django_ray_version == "0.5.0-executor"
 
 
-@pytest.mark.django_db
-def test_enriched_completion_archives_then_clears_executor_provenance_on_retry() -> None:
-    task = RayTaskExecution.objects.create(
+@pytest.mark.django_db(transaction=True)
+def test_enriched_completion_archives_then_clears_executor_provenance_on_retry(case) -> None:
+    task = _owned_running_task(
+        case,
         task_id="lifecycle-enriched-completion-retry",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -364,8 +419,10 @@ def test_enriched_completion_archives_then_clears_executor_provenance_on_retry()
         executor_django_ray_version="0.4.0-previous",
     )
 
-    assert record_failure(
+    assert _completed_lifecycle_operation(
+        case,
         task,
+        record_failure,
         error_message="retryable failure",
         retry=True,
         _executor_django_ray_version="0.5.0-executor",
@@ -380,12 +437,14 @@ def test_enriched_completion_archives_then_clears_executor_provenance_on_retry()
     assert archived.executor_django_ray_version == "0.5.0-executor"
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("transition", ["success", "final_failure"])
 def test_legacy_completion_omission_preserves_existing_executor_provenance(
+    case,
     transition: str,
 ) -> None:
-    task = RayTaskExecution.objects.create(
+    task = _owned_running_task(
+        case,
         task_id=f"lifecycle-legacy-completion-{transition}",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -394,11 +453,15 @@ def test_legacy_completion_omission_preserves_existing_executor_provenance(
     )
 
     if transition == "success":
-        accepted = succeed_task(task, result_data="3", result_reference=None)
+        accepted = _completed_lifecycle_operation(
+            case, task, succeed_task, result_data="3", result_reference=None
+        )
         expected_state = TaskState.SUCCEEDED
     else:
-        accepted = record_failure(
+        accepted = _completed_lifecycle_operation(
+            case,
             task,
+            record_failure,
             error_message="terminal failure",
             retry=False,
         )
@@ -464,13 +527,14 @@ def test_rejected_completion_does_not_mutate_executor_provenance(transition: str
         ("finalized_cancel", TaskState.CANCELLING),
     ],
 )
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_package_lifecycle_rejects_unsupported_protocol_before_effects(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
     initial_state: str,
 ) -> None:
     close_legacy_worker_admission(
-        expected_revision=1,
+        expected_revision=TaskExecutionProtocolPolicy.objects.get().revision,
         legacy_producers_retired=True,
     )
     now = datetime.now(UTC)
@@ -532,9 +596,10 @@ def test_package_lifecycle_rejects_unsupported_protocol_before_effects(
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_stale_identity_precedes_unsupported_protocol_and_protocol_precedes_state() -> None:
     close_legacy_worker_admission(
-        expected_revision=1,
+        expected_revision=TaskExecutionProtocolPolicy.objects.get().revision,
         legacy_producers_retired=True,
     )
     task = RayTaskExecution.objects.create(
@@ -596,9 +661,10 @@ def test_stale_identity_precedes_unsupported_protocol_and_protocol_precedes_stat
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_explicit_supported_protocol_override_allows_v2_retry() -> None:
     close_legacy_worker_admission(
-        expected_revision=1,
+        expected_revision=TaskExecutionProtocolPolicy.objects.get().revision,
         legacy_producers_retired=True,
     )
     task = RayTaskExecution.objects.create(
@@ -651,11 +717,12 @@ def test_explicit_retry_of_expired_task_gets_fresh_deadline() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("storage_mode", ["inline", "external"])
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
     storage_mode: str,
 ) -> None:
     close_legacy_worker_admission(
-        expected_revision=1,
+        expected_revision=TaskExecutionProtocolPolicy.objects.get().revision,
         legacy_producers_retired=True,
     )
     unrelated_marker = f"unrelated-{storage_mode}-" + ("x" * 65_536)
@@ -717,6 +784,7 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
     assert retried is not None
     projections = _execution_select_projections(queries)
     assert [fields for fields, _sql in projections] == [
+        _RETRY_PREVIEW_PROJECTION,
         _RETRY_LOCK_PROJECTION,
         _RETRY_ACCEPTED_READ_PROJECTION,
     ]
@@ -779,7 +847,7 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
         ),
     ],
 )
-def test_retry_noop_and_stale_paths_use_one_bounded_lock(
+def test_retry_noop_and_stale_paths_use_bounded_preview_and_lock(
     state: str,
     expected_attempt: int,
     expected_generation: int,
@@ -820,15 +888,19 @@ def test_retry_noop_and_stale_paths_use_one_bounded_lock(
 
     assert result.status is expected_status
     projections = _execution_select_projections(queries)
-    assert [fields for fields, _sql in projections] == [_RETRY_LOCK_PROJECTION]
-    assert projections[0][0].isdisjoint(_REJECTED_PATH_PAYLOAD_COLUMNS)
+    assert [fields for fields, _sql in projections] == [
+        _RETRY_PREVIEW_PROJECTION,
+        _RETRY_LOCK_PROJECTION,
+    ]
+    assert all(fields.isdisjoint(_REJECTED_PATH_PAYLOAD_COLUMNS) for fields, _sql in projections)
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_cancellation_uses_state_specific_projections_without_payload_reload() -> None:
     close_legacy_worker_admission(
-        expected_revision=1,
+        expected_revision=TaskExecutionProtocolPolicy.objects.get().revision,
         legacy_producers_retired=True,
     )
     unrelated_marker = "unrelated-cancel-" + ("x" * 65_536)
@@ -1067,11 +1139,12 @@ def test_attempt_storage_failure_rolls_back_projected_lifecycle_transition(
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_automatic_retry_attempt_archive_failure_rolls_back_provenance_clear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     close_legacy_worker_admission(
-        expected_revision=1,
+        expected_revision=TaskExecutionProtocolPolicy.objects.get().revision,
         legacy_producers_retired=True,
     )
     task = RayTaskExecution.objects.create(
@@ -1107,9 +1180,10 @@ def test_automatic_retry_attempt_archive_failure_rolls_back_provenance_clear(
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
-@pytest.mark.django_db
-def test_failure_preserves_raw_redaction_evidence_for_current_and_archived_attempts() -> None:
-    task = RayTaskExecution.objects.create(
+@pytest.mark.django_db(transaction=True)
+def test_failure_preserves_raw_redaction_evidence_for_current_and_archived_attempts(case) -> None:
+    task = _owned_running_task(
+        case,
         task_id="lifecycle-terminal-diagnostic-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1122,8 +1196,10 @@ def test_failure_preserves_raw_redaction_evidence_for_current_and_archived_attem
     )
     raw_cancellation = "\x1b[33mstop not confirmed\x1b[39m\rretry blocked"
 
-    accepted = record_failure(
+    accepted = _completed_lifecycle_operation(
+        case,
         task,
+        record_failure,
         error_message=raw_error,
         error_traceback=raw_traceback,
         cancellation_status="INDETERMINATE",
@@ -1147,17 +1223,20 @@ def test_failure_preserves_raw_redaction_evidence_for_current_and_archived_attem
     assert attempt.error_traceback == task.error_traceback
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_cancellation_preserves_raw_diagnostic_for_bounded_readers() -> None:
     task = RayTaskExecution.objects.create(
         task_id="lifecycle-terminal-cancellation-001",
         callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=1,
         state=TaskState.CANCELLING,
     )
 
     raw_cancellation = "\x1b[33mRay stop uncertain\x1b[39m\rmanual review"
     accepted = cancel_task(
         task,
+        supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS,
         cancellation_status="INDETERMINATE",
         cancellation_error=raw_cancellation,
     )
@@ -1169,16 +1248,18 @@ def test_cancellation_preserves_raw_diagnostic_for_bounded_readers() -> None:
     assert normalize_terminal_text(task.cancellation_error) == "Ray stop uncertain\nmanual review"
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_retry_task_promotes_legacy_submission_address_to_target() -> None:
     task = RayTaskExecution.objects.create(
         task_id="lifecycle-legacy-routing-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
+        execution_protocol_version=1,
         ray_address="ray://legacy:10001",
     )
 
-    retried = retry_task(task)
+    _outcome, retried = _request_task_retry(task, supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS)
 
     assert retried is not None
     task.refresh_from_db()
@@ -1481,6 +1562,7 @@ def test_retry_task_missing_encryption_key_preserves_the_complete_execution(
     assert stored.serialized not in str(exc_info.value)
     assert "arbitrary-encrypted-retry-marker-8b2a" not in str(exc_info.value)
     assert [fields for fields, _sql in _execution_select_projections(queries)] == [
+        _RETRY_PREVIEW_PROJECTION,
         _RETRY_LOCK_PROJECTION,
         _RETRY_ACCEPTED_READ_PROJECTION,
     ]
@@ -1655,9 +1737,10 @@ def test_automatic_retry_rejects_missing_hash_on_encrypted_no_profile_snapshot(
     assert marker not in str(exc_info.value)
 
 
-@pytest.mark.django_db
-def test_terminal_failure_can_record_a_corrupt_snapshot_without_retrying() -> None:
-    task = RayTaskExecution.objects.create(
+@pytest.mark.django_db(transaction=True)
+def test_terminal_failure_can_record_a_corrupt_snapshot_without_retrying(case) -> None:
+    task = _owned_running_task(
+        case,
         task_id="lifecycle-terminal-runtime-env-integrity-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1667,8 +1750,10 @@ def test_terminal_failure_can_record_a_corrupt_snapshot_without_retrying() -> No
         runtime_env_hash="0" * 64,
     )
 
-    assert record_failure(
+    assert _completed_lifecycle_operation(
+        case,
         task,
+        record_failure,
         error_message="Persisted RuntimeEnv snapshot failed validation",
         retry=False,
     )
@@ -1833,9 +1918,10 @@ def test_cancellation_request_distinguishes_missing_invalid_and_stale_rows() -> 
     assert stale.state == TaskState.RUNNING
 
 
-@pytest.mark.django_db
-def test_cancellation_attempt_fence_rejects_automatic_retry_replacement() -> None:
-    task = RayTaskExecution.objects.create(
+@pytest.mark.django_db(transaction=True)
+def test_cancellation_attempt_fence_rejects_automatic_retry_replacement(case) -> None:
+    task = _owned_running_task(
+        case,
         task_id="lifecycle-cancel-auto-retry-race-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1846,8 +1932,10 @@ def test_cancellation_attempt_fence_rejects_automatic_retry_replacement() -> Non
     stale_attempt = task.attempt_number
     stale_generation = task.execution_generation
     next_attempt_at = datetime.now(UTC) + timedelta(hours=1)
-    assert record_failure(
+    assert _completed_lifecycle_operation(
+        case,
         task,
+        record_failure,
         error_message="automatic retry",
         retry=True,
         next_attempt_at=next_attempt_at,
@@ -2028,7 +2116,8 @@ def test_terminal_transitions_reject_replaced_attempt(transition: str) -> None:
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
@@ -2045,6 +2134,7 @@ def test_record_lost_rejects_refreshed_activity_snapshot(
     task = RayTaskExecution.objects.create(
         task_id=f"lifecycle-lost-activity-fence-{field}-001",
         callable_path="testproject.tasks.add_numbers",
+        execution_protocol_version=1,
         state=TaskState.RUNNING,
         claimed_by_worker="stale-worker",
         ray_job_id="raysubmit_observed",
@@ -2057,6 +2147,7 @@ def test_record_lost_rejects_refreshed_activity_snapshot(
     assert (
         record_lost(
             task,
+            supported_protocols=_SYNTHETIC_V1_V2_PROTOCOLS,
             error_message="stale owner",
             expected_attempt_number=2,
             expected_execution_generation=7,
@@ -2102,25 +2193,29 @@ def test_record_lost_rejects_durable_completion_envelope() -> None:
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
-@pytest.mark.django_db
-def test_record_failure_clears_attempt_selection_when_retrying() -> None:
-    task = RayTaskExecution.objects.create(
+@pytest.mark.django_db(transaction=True)
+def test_record_failure_clears_attempt_selection_when_retrying(case) -> None:
+    task = _owned_running_task(
+        case,
         task_id="lifecycle-retry-selection-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
         workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
     )
 
-    assert record_failure(task, error_message="retry", retry=True)
+    assert _completed_lifecycle_operation(
+        case, task, record_failure, error_message="retry", retry=True
+    )
 
     task.refresh_from_db()
     assert task.state == TaskState.QUEUED
     assert task.workflow_plan_selection is None
 
 
-@pytest.mark.django_db
-def test_succeed_task_records_success_attempt_and_clears_errors() -> None:
-    task = RayTaskExecution.objects.create(
+@pytest.mark.django_db(transaction=True)
+def test_succeed_task_records_success_attempt_and_clears_errors(case) -> None:
+    task = _owned_running_task(
+        case,
         task_id="lifecycle-success-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -2128,7 +2223,9 @@ def test_succeed_task_records_success_attempt_and_clears_errors() -> None:
         error_message="previous failure",
     )
 
-    assert succeed_task(task, result_data="3", result_reference=None)
+    assert _completed_lifecycle_operation(
+        case, task, succeed_task, result_data="3", result_reference=None
+    )
 
     task.refresh_from_db()
     assert task.state == TaskState.SUCCEEDED

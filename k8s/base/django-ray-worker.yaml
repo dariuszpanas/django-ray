@@ -1,6 +1,3 @@
-# Django-Ray Worker Deployment
-# Processes tasks from the queue and submits to Ray cluster
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,17 +19,25 @@ spec:
         component: worker
     spec:
       initContainers:
-        # Wait for PostgreSQL
         - name: wait-for-postgres
           image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;']
-        # Wait for Ray head
+          command:
+            - sh
+            - -c
+            - until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;
         - name: wait-for-ray
           image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z ray-head-svc 10001; do echo waiting for ray-head; sleep 2; done;']
+          command:
+            - sh
+            - -c
+            - until nc -z ray-head-svc 10001; do echo waiting for ray-head; sleep 2; done;
         - name: wait-for-runtime-env
           image: busybox:1.36
-          command: ['sh', '-c', 'until test -f /runtime-env/django-ray-source.zip && test -f /runtime-env/django-ray-recovery.zip; do echo waiting for runtime env bundles; sleep 2; done;']
+          command:
+            - sh
+            - -c
+            - until test -f /runtime-env/django-ray-source.zip && test -f /runtime-env/django-ray-recovery.zip;
+              do echo waiting for runtime env bundles; sleep 2; done;
           volumeMounts:
             - name: runtime-env
               mountPath: /runtime-env
@@ -41,26 +46,49 @@ spec:
         - name: django-ray-worker
           image: django-ray:latest
           imagePullPolicy: IfNotPresent
-          args: ['worker-cluster']  # Connect to Ray cluster
+          args:
+            - worker-cluster
           envFrom:
             - configMapRef:
                 name: django-ray-config
-            - secretRef:
-                name: django-ray-secret
           env:
             - name: RAY_ADDRESS
-              value: "ray://ray-head-svc:10001"
+              value: ray://ray-head-svc:10001
             - name: DJANGO_RAY_QUEUE
-              value: "default"
+              value: default
             - name: DJANGO_RAY_CONCURRENCY
-              value: "40"
+              value: '40'
+            - name: DJANGO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-runtime
+                  key: DJANGO_SECRET_KEY
+            - name: DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-runtime
+                  key: DATABASE_USER
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-runtime
+                  key: DATABASE_PASSWORD
+            - name: RAY_AUTH_MODE
+              value: token
+            - name: RAY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-auth
+                  key: RAY_AUTH_TOKEN
+            - name: DJANGO_API_ENABLED
+              value: 'false'
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: 256Mi
+              cpu: 100m
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: 512Mi
+              cpu: 500m
           volumeMounts:
             - name: runtime-env
               mountPath: /runtime-env
@@ -72,7 +100,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+                - test -d /proc/1 && grep -q python /proc/1/cmdline
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
@@ -82,7 +110,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+                - test -d /proc/1 && grep -q python /proc/1/cmdline
             initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 5
@@ -94,4 +122,3 @@ spec:
         - name: payload-storage
           persistentVolumeClaim:
             claimName: payload-storage-pvc
-

@@ -255,7 +255,7 @@ def test_co_resident_profile_manages_config_without_rendering_credentials(
     assert _resource_names(resources, kind="Secret") == set()
     config = _resource(resources, kind="ConfigMap", name="django-ray-config")
     assert config["data"]["DJANGO_DEPLOYMENT_MODE"] == "demo"
-    assert config["data"]["RAY_DASHBOARD_URL"] == "http://ray-head-svc:8265"
+    assert config["data"]["RAY_DASHBOARD_URL"] == "http://127.0.0.1:30265"
 
 
 def test_co_resident_profile_pins_single_unit_execution_capacity(
@@ -288,7 +288,6 @@ def test_co_resident_profile_pins_single_unit_execution_capacity(
         assert [container["name"] for container in containers] == [container_name]
         assert containers[0]["envFrom"] == [
             {"configMapRef": {"name": "django-ray-config"}},
-            {"secretRef": {"name": "django-ray-secret"}},
         ]
         mounts = containers[0]["volumeMounts"]
         assert {mount["mountPath"] for mount in mounts if mount["name"] == "shared-memory"} == {
@@ -483,10 +482,10 @@ def test_local_profiles_pin_distinct_routing_contracts(
         "ray-dashboard-ingress",
     }
 
-    assert _ray_head_group(direct)["serviceType"] == "NodePort"
+    assert _ray_head_group(direct)["serviceType"] == "ClusterIP"
     assert _ray_head_group(kong)["serviceType"] == "ClusterIP"
     assert _resource_names(direct, kind="Ingress").isdisjoint(dashboard_ingresses)
-    assert dashboard_ingresses <= _resource_names(kong, kind="Ingress")
+    assert not _resource_names(kong, kind="Ingress")
 
 
 @pytest.mark.parametrize("profile", ("direct", "kong"))
@@ -679,8 +678,8 @@ def test_local_url_targets_use_posix_safe_echo_syntax() -> None:
     kong_recipe = _make_target_block(makefile, "k8s-urls-kong")
 
     assert 'echo "=== Project URLs ==="' in direct_recipe
-    assert 'echo "=== Project URLs (Kong) ==="' in kong_recipe
-    for recipe in (direct_recipe, kong_recipe):
+    assert "k8s-urls" in kong_recipe
+    for recipe in (direct_recipe,):
         assert "echo." not in recipe
         assert 'echo ""' in recipe
 

@@ -6,7 +6,7 @@ import json
 import pickle
 import sys
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,6 +16,7 @@ from django_ray.execution_codec import (
     NestedExecutionRequestRejected,
     NestedExecutionRequestRejection,
 )
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.lifecycle import record_failure
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.observability import get_task_summary, get_workflow_plan
@@ -64,6 +65,8 @@ from django_ray.workflow.progress.protocol import (
 from django_ray.workflow.progress.runs import allocate_workflow_run, pin_workflow_plan
 from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
 from django_ray.workflows import chain, group, map_step, step
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+from tests.protocol_epochs import cohort_sender_task_context
 
 
 def increment(value: int) -> int:
@@ -242,15 +245,7 @@ def _materialize(signature, *args, context=BASE_CONTEXT, **kwargs):
 
 
 def test_nested_execution_identity_requires_an_explicit_strict_marker() -> None:
-    runtime_identity = runtime_env_plan_identity(normalize_runtime_env({})).as_transport_dict()
-    unmarked = DurableTaskContext(
-        task_pk=41,
-        task_id="task-41",
-        attempt_number=2,
-        execution_generation=3,
-        execution_protocol_version=1,
-        runtime_env_plan_identity=runtime_identity,
-    )
+    unmarked = replace(cohort_sender_task_context(), strict_execution_request=False)
 
     with pytest.raises(NestedExecutionRequestRejected) as caught:
         nested_execution_identity(unmarked)
@@ -260,46 +255,31 @@ def test_nested_execution_identity_requires_an_explicit_strict_marker() -> None:
 
 
 def test_nested_execution_identity_returns_the_exact_outer_fence_and_protocol() -> None:
-    runtime_identity = runtime_env_plan_identity(normalize_runtime_env({})).as_transport_dict()
-    context = DurableTaskContext(
-        task_pk=41,
-        task_id="task-41",
-        attempt_number=2,
-        execution_generation=3,
-        execution_protocol_version=1,
-        runtime_env_plan_identity=runtime_identity,
-        strict_execution_request=True,
-    )
+    context = cohort_sender_task_context(ExecutionIdentity(41, "task-41", 2, 3))
 
     assert require_strict_task_execution_context(context) is context
     assert nested_execution_identity(context) == (
         ExecutionIdentity(41, "task-41", 2, 3),
-        1,
+        3,
     )
 
 
 def test_durable_task_execution_never_infers_the_strict_marker() -> None:
-    runtime_identity = runtime_env_plan_identity(normalize_runtime_env({})).as_transport_dict()
-    kwargs = {
-        "task_id": "task-41",
-        "attempt_number": 2,
-        "execution_generation": 3,
-        "execution_protocol_version": 1,
-        "runtime_env_plan_identity": runtime_identity,
-    }
+    kwargs = asdict(cohort_sender_task_context(ExecutionIdentity(41, "task-41", 2, 3)))
+    kwargs.pop("strict_execution_request")
 
-    with durable_task_execution(41, **kwargs):
+    with durable_task_execution(**kwargs):
         context = get_current_task_context()
         assert context is not None
         assert context.strict_execution_request is False
         with pytest.raises(NestedExecutionRequestRejected):
             nested_execution_identity()
 
-    with durable_task_execution(41, strict_execution_request=True, **kwargs):
+    with durable_task_execution(strict_execution_request=True, **kwargs):
         context = get_current_task_context()
         assert context is not None
         assert context.strict_execution_request is True
-        assert nested_execution_identity() == (ExecutionIdentity(41, "task-41", 2, 3), 1)
+        assert nested_execution_identity() == (ExecutionIdentity(41, "task-41", 2, 3), 3)
 
 
 @pytest.mark.parametrize(
@@ -309,7 +289,11 @@ def test_durable_task_execution_never_infers_the_strict_marker() -> None:
         {"attempt_number": None},
         {"execution_generation": None},
         {"execution_protocol_version": None},
+        {"execution_protocol_version": 1},
         {"execution_protocol_version": 2},
+        {"cohort_contract_json": None},
+        {"cohort_contract_digest": None},
+        {"cohort_contract_digest": "sha256:" + "f" * 64},
         {"runtime_env_plan_identity": None},
         {
             "runtime_env_plan_identity": {
@@ -323,17 +307,7 @@ def test_strict_context_rejects_every_incomplete_outer_contract(
     changes: dict[str, object],
 ) -> None:
     context = replace(
-        DurableTaskContext(
-            task_pk=41,
-            task_id="task-41",
-            attempt_number=2,
-            execution_generation=3,
-            execution_protocol_version=1,
-            runtime_env_plan_identity=runtime_env_plan_identity(
-                normalize_runtime_env({})
-            ).as_transport_dict(),
-            strict_execution_request=True,
-        ),
+        cohort_sender_task_context(),
         **changes,
     )
 
@@ -2194,11 +2168,13 @@ def test_stale_ray_fence_aborts_before_preparation_or_submission(monkeypatch) ->
     assert not hasattr(executor, "workflow_run_identity")
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_ray_run_rechecks_fence_after_preparation_before_actor_or_leaf(monkeypatch) -> None:
     from django_ray.workflows import _RayExecutor
 
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-plan-stale-during-preparation",
         callable_path=f"{__name__}.increment",
         state=TaskState.RUNNING,
@@ -2238,13 +2214,15 @@ def test_ray_run_rechecks_fence_after_preparation_before_actor_or_leaf(monkeypat
     assert not hasattr(executor, "workflow_run_identity")
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_terminal_only_preparation_failure_keeps_a_plan_for_durable_failure_summary(
     monkeypatch,
 ) -> None:
     from django_ray.workflows import _RayExecutor
 
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-terminal-only-preparation-failure",
         callable_path=f"{__name__}.increment",
         state=TaskState.RUNNING,
@@ -2282,6 +2260,7 @@ def test_terminal_only_preparation_failure_keeps_a_plan_for_durable_failure_summ
 
     assert record_failure(
         execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
         error_message="RuntimeEnv preparation failed",
         retry=False,
     )
@@ -2297,13 +2276,15 @@ def test_terminal_only_preparation_failure_keeps_a_plan_for_durable_failure_summ
     assert execution.progress_data is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_terminal_only_result_serialization_failure_publishes_only_failed_summary(
     monkeypatch,
 ) -> None:
     from django_ray.runtime import entrypoint
 
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-terminal-only-result-serialization-failure",
         callable_path="tests.return_unserializable_workflow_result",
         state=TaskState.RUNNING,
@@ -2353,6 +2334,7 @@ def test_terminal_only_result_serialization_failure_publishes_only_failed_summar
 
     assert record_failure(
         execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
         error_message=result["error"],
         error_traceback=result["traceback"],
         retry=False,
@@ -2552,9 +2534,11 @@ def test_retry_unsafe_plan_message_reports_truncated_path_count() -> None:
         )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-plan-retry",
         callable_path="tests.unit.test_workflow_plans.increment",
         state=TaskState.RUNNING,
@@ -2563,7 +2547,12 @@ def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
     first_plan = _materialize(step(increment), 1).plan
     first_selection = first_plan.eligibility.select("dynamic_tasks", requested_policy="auto")
     _allocate(execution, first_plan, first_selection)
-    assert record_failure(execution, error_message="retry", retry=True)
+    assert record_failure(
+        execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
+        error_message="retry",
+        retry=True,
+    )
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
 
@@ -2582,9 +2571,11 @@ def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
     assert execution.workflow_run_id is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-result-buffer-plan-retry",
         callable_path=f"{__name__}.record_side_effect",
         state=TaskState.RUNNING,
@@ -2610,7 +2601,12 @@ def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
         requested_policy="auto",
     )
     _allocate(execution, first_plan, first_selection)
-    assert record_failure(execution, error_message="retry", retry=True)
+    assert record_failure(
+        execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
+        error_message="retry",
+        retry=True,
+    )
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
 
@@ -2631,9 +2627,11 @@ def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
     assert SIDE_EFFECTS == []
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_retry_rejects_opaque_runtime_env_even_when_secret_free_plan_matches() -> None:
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-plan-opaque-runtime-retry",
         callable_path=f"{__name__}.increment",
         state=TaskState.RUNNING,
@@ -2656,7 +2654,12 @@ def test_retry_rejects_opaque_runtime_env_even_when_secret_free_plan_matches() -
     # Repeated binding in the same fenced attempt is allowed. A later durable
     # attempt is not, because the redacted URI cannot be compared to the pin.
     _allocate(execution, rotated_plan, selection)
-    assert record_failure(execution, error_message="retry", retry=True)
+    assert record_failure(
+        execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
+        error_message="retry",
+        retry=True,
+    )
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
     with pytest.raises(
@@ -2676,7 +2679,8 @@ def test_retry_rejects_opaque_runtime_env_even_when_secret_free_plan_matches() -
     assert execution.workflow_run_id is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_retry_allows_content_hashed_local_runtime_env(tmp_path) -> None:
     source = tmp_path / "retry-safe-code"
     source.mkdir()
@@ -2699,13 +2703,19 @@ def test_retry_allows_content_hashed_local_runtime_env(tmp_path) -> None:
     )
     selection = plan.eligibility.select("dynamic_tasks", requested_policy="auto")
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-plan-local-runtime-retry",
         callable_path=f"{__name__}.increment",
         state=TaskState.RUNNING,
         execution_generation=5,
     )
     _allocate(execution, plan, selection)
-    assert record_failure(execution, error_message="retry", retry=True)
+    assert record_failure(
+        execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
+        error_message="retry",
+        retry=True,
+    )
     RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
     execution.refresh_from_db()
     _allocate(execution, plan, selection)

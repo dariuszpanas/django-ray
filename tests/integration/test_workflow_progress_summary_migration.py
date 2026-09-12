@@ -9,6 +9,8 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 
 @pytest.mark.django_db(transaction=True)
 def test_summary_fields_are_additive_nullable_and_reversible() -> None:
@@ -91,6 +93,5 @@ def test_summary_fields_are_additive_nullable_and_reversible() -> None:
             == legacy_progress
         )
     finally:
-        MigrationExecutor(connection).migrate(
-            [("django_ray", "0026_ray_task_target_execution_evidence")]
-        )
+        clear_historical_admission_fixtures()
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])

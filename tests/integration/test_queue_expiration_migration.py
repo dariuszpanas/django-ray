@@ -8,9 +8,11 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 MIGRATE_FROM = [("django_ray", "0015_raytaskexecution_task_id_unique")]
 MIGRATE_TO = [("django_ray", "0016_raytaskexecution_queue_expiration")]
-LATEST = [("django_ray", "0026_ray_task_target_execution_evidence")]
+LATEST = [("django_ray", "0035_activate_current_cohort")]
 
 
 def _assert_existing_queued_rows_get_deadline_from_latest_eligibility(
@@ -61,6 +63,7 @@ def _assert_existing_queued_rows_get_deadline_from_latest_eligibility(
             constraint.name for constraint in new_execution._meta.constraints
         }
     finally:
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
 
 
@@ -102,6 +105,7 @@ def _assert_existing_queued_rows_support_explicit_unlimited_adoption(
         assert migrated_failed.queue_timeout_seconds == 86400
         assert migrated_failed.queue_deadline_at is None
     finally:
+        clear_historical_admission_fixtures()
         monkeypatch.delenv("DJANGO_RAY_EXISTING_QUEUED_UNLIMITED", raising=False)
         MigrationExecutor(connection).migrate(LATEST)
 
@@ -143,6 +147,7 @@ def _assert_reverse_migration_keeps_expired_executions_terminal() -> None:
             constraint.name for constraint in old_execution._meta.constraints
         }
     finally:
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
 
 

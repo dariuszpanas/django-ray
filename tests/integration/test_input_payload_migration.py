@@ -8,6 +8,8 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 
 @pytest.mark.django_db(transaction=True)
 def test_existing_inline_execution_round_trips_through_input_payload_migration() -> None:
@@ -69,6 +71,5 @@ def test_existing_inline_execution_round_trips_through_input_payload_migration()
         assert reverted.args_json == "[1, 2]"
         assert reverted.kwargs_json == '{"scale": 3}'
     finally:
-        MigrationExecutor(connection).migrate(
-            [("django_ray", "0026_ray_task_target_execution_evidence")]
-        )
+        clear_historical_admission_fixtures()
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])

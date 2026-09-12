@@ -43,11 +43,7 @@ from django_ray.execution_codec import (
     decode_execution_completion,
     decode_execution_request,
     decode_legacy_v1_completion,
-    decode_nested_execution_request,
-    encode_execution_completion,
-    encode_execution_request,
     encode_execution_request_rejection,
-    encode_nested_execution_request,
     find_nested_execution_request_rejection,
     nested_callable_digest,
     nested_runtime_env_digests,
@@ -55,6 +51,25 @@ from django_ray.execution_codec import (
 from django_ray.execution_protocol import ExecutionProtocolRange
 
 _PROTOCOL_V1 = ExecutionProtocolRange(1, 1)
+
+
+# Retained byte-format tests name their historical range at the call boundary.
+# Public codec defaults remain current-only, with separate tests below.
+def _encode_legacy_request(request):
+    return codec_module._encode_execution_request_for_protocols(request, _PROTOCOL_V1)
+
+
+def _encode_legacy_completion(completion):
+    return codec_module._encode_execution_completion_for_protocols(completion, _PROTOCOL_V1)
+
+
+def _encode_legacy_nested_request(request):
+    return codec_module._encode_nested_request_for_protocols(request, _PROTOCOL_V1)
+
+
+def _decode_legacy_nested_request(serialized, **bindings):
+    bindings.setdefault("supported_protocols", _PROTOCOL_V1)
+    return codec_module.decode_nested_execution_request(serialized, **bindings)
 
 
 @pytest.fixture
@@ -224,7 +239,7 @@ def test_execution_request_round_trips_as_exact_canonical_flat_schema(
 ) -> None:
     request = _inline_request(identity)
 
-    serialized = encode_execution_request(request)
+    serialized = _encode_legacy_request(request)
     value = json.loads(serialized)
     decoded = _decode_request(
         serialized,
@@ -261,7 +276,7 @@ def test_referenced_request_round_trips_without_hydrating_opaque_input(
 ) -> None:
     request = _referenced_request(identity)
 
-    serialized = encode_execution_request(request)
+    serialized = _encode_legacy_request(request)
     decoded = _decode_request(serialized)
     value = json.loads(serialized)
 
@@ -281,7 +296,7 @@ def test_request_encoder_normalizes_numeric_mapping_keys(
         runtime_env_plan_identity={10: "ten", 2: "two"},
     )
 
-    decoded = _decode_request(encode_execution_request(request))
+    decoded = _decode_request(_encode_legacy_request(request))
 
     assert decoded.runtime_env_plan_identity == {"10": "ten", "2": "two"}
 
@@ -295,7 +310,7 @@ def test_request_encoder_rejects_post_stringification_key_collision(
     )
 
     with pytest.raises(ExecutionRequestEncodeError) as caught:
-        encode_execution_request(request)
+        _encode_legacy_request(request)
 
     assert str(caught.value) == "execution request is invalid"
     assert caught.value.classification is ExecutionRequestRejection.INVALID_VERSIONED
@@ -330,7 +345,7 @@ def test_request_encoder_has_fixed_failure_for_invalid_fields(
     request = replace(_inline_request(identity), **changes)
 
     with pytest.raises(ExecutionRequestEncodeError) as caught:
-        encode_execution_request(request)
+        _encode_legacy_request(request)
 
     assert str(caught.value) == "execution request is invalid"
     assert caught.value.classification is ExecutionRequestRejection.INVALID_VERSIONED
@@ -353,7 +368,7 @@ def test_referenced_request_requires_reference_and_safety_placeholders(
     request = replace(_referenced_request(identity), **changes)
 
     with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid") as caught:
-        encode_execution_request(request)
+        _encode_legacy_request(request)
     assert caught.value.classification is ExecutionRequestRejection.INVALID_VERSIONED
 
 
@@ -366,7 +381,7 @@ def test_request_encoder_rejects_nonfinite_and_invalid_unicode_metadata(
             runtime_env_plan_identity={"value": value},
         )
         with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid"):
-            encode_execution_request(request)
+            _encode_legacy_request(request)
 
 
 def test_inline_serialized_payload_remains_an_opaque_subordinate_format(
@@ -378,14 +393,14 @@ def test_inline_serialized_payload_remains_an_opaque_subordinate_format(
         serialized_kwargs='{"duplicate":1,"duplicate":2}',
     )
 
-    decoded = _decode_request(encode_execution_request(request))
+    decoded = _decode_request(_encode_legacy_request(request))
 
     assert decoded.serialized_args == "[NaN]"
     assert decoded.serialized_kwargs == '{"duplicate":1,"duplicate":2}'
 
 
 def test_request_requires_exact_keys(identity: ExecutionIdentity) -> None:
-    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value = json.loads(_encode_legacy_request(_inline_request(identity)))
     value["extra"] = "ignored only by the legacy adapter"
     _assert_request_rejection(
         _canonical(value),
@@ -419,7 +434,7 @@ def test_request_schema_and_body_types_fail_closed(
     change: dict[str, object],
     classification: ExecutionRequestRejection,
 ) -> None:
-    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value = json.loads(_encode_legacy_request(_inline_request(identity)))
     value.update(change)
 
     _assert_request_rejection(
@@ -432,7 +447,7 @@ def test_request_schema_and_body_types_fail_closed(
 def test_invalid_identity_precedes_unsupported_protocol(
     identity: ExecutionIdentity,
 ) -> None:
-    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value = json.loads(_encode_legacy_request(_inline_request(identity)))
     value["task_execution_pk"] = 0
     value["execution_protocol_version"] = 2
 
@@ -449,7 +464,7 @@ def test_invalid_identity_precedes_unsupported_protocol(
 def test_unsupported_protocol_exposes_only_bounded_identity_and_epoch(
     identity: ExecutionIdentity,
 ) -> None:
-    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value = json.loads(_encode_legacy_request(_inline_request(identity)))
     value["execution_protocol_version"] = 2
     value["serialized_args"] = '"password=must-not-be-retained"'
 
@@ -469,7 +484,7 @@ def test_unsupported_protocol_exposes_only_bounded_identity_and_epoch(
 def test_invalid_protocol_type_exposes_no_identity_for_persistence(
     identity: ExecutionIdentity,
 ) -> None:
-    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value = json.loads(_encode_legacy_request(_inline_request(identity)))
     value["execution_protocol_version"] = True
 
     error = _assert_request_rejection(
@@ -498,7 +513,7 @@ def test_external_expected_header_proof_rejects_mismatch(
     replacement: object,
     classification: ExecutionRequestRejection,
 ) -> None:
-    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value = json.loads(_encode_legacy_request(_inline_request(identity)))
     value[field] = replacement
 
     _assert_request_rejection(
@@ -512,7 +527,7 @@ def test_external_expected_header_proof_rejects_mismatch(
 
 
 def test_noncanonical_execution_request_is_rejected(identity: ExecutionIdentity) -> None:
-    value = json.loads(encode_execution_request(_inline_request(identity)))
+    value = json.loads(_encode_legacy_request(_inline_request(identity)))
 
     _assert_request_rejection(
         json.dumps(value),
@@ -524,7 +539,7 @@ def test_noncanonical_execution_request_is_rejected(identity: ExecutionIdentity)
 def test_request_duplicate_keys_and_nonfinite_metadata_are_rejected(
     identity: ExecutionIdentity,
 ) -> None:
-    serialized = encode_execution_request(_inline_request(identity))
+    serialized = _encode_legacy_request(_inline_request(identity))
     duplicate = serialized.replace(
         '"request_schema":',
         '"request_schema":"duplicate","request_schema":',
@@ -565,7 +580,7 @@ def test_request_decoder_rejects_nul_in_executor_facing_scalars(
     request = (
         _referenced_request(identity) if field == "input_reference" else _inline_request(identity)
     )
-    value = json.loads(encode_execution_request(request))
+    value = json.loads(_encode_legacy_request(request))
     value[field] = "value\x00forged"
 
     _assert_request_rejection(
@@ -649,7 +664,7 @@ def test_request_encoded_byte_limit_is_checked_before_decoding(
     identity: ExecutionIdentity,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    serialized = encode_execution_request(_inline_request(identity))
+    serialized = _encode_legacy_request(_inline_request(identity))
     byte_size = len(serialized.encode("utf-8"))
     monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", byte_size)
     assert _decode_request(serialized).identity == identity
@@ -671,17 +686,17 @@ def test_multibyte_request_encode_and_decode_use_the_exact_utf8_byte_limit(
         _inline_request(identity),
         serialized_args=json.dumps(["\u00e9"], ensure_ascii=False, separators=(",", ":")),
     )
-    serialized = encode_execution_request(request)
+    serialized = _encode_legacy_request(request)
     byte_size = len(serialized.encode("utf-8"))
     assert len(serialized) < byte_size
 
     monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", byte_size)
-    assert encode_execution_request(request) == serialized
+    assert _encode_legacy_request(request) == serialized
     assert _decode_request(serialized) == request
 
     monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_BYTES", byte_size - 1)
     with pytest.raises(ExecutionRequestEncodeError) as caught:
-        encode_execution_request(request)
+        _encode_legacy_request(request)
     assert caught.value.classification is ExecutionRequestRejection.RESOURCE_LIMIT
     _assert_request_rejection(
         serialized,
@@ -711,7 +726,7 @@ def test_request_depth_and_node_budgets_precede_json_allocation(
     identity: ExecutionIdentity,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    serialized = encode_execution_request(_inline_request(identity))
+    serialized = _encode_legacy_request(_inline_request(identity))
     monkeypatch.setattr(codec_module, "EXECUTION_REQUEST_MAX_DEPTH", 1)
     _assert_request_rejection(
         serialized,
@@ -751,7 +766,7 @@ def test_request_runtime_identity_has_an_independent_byte_budget(
         "EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
         identity_size,
     )
-    serialized = encode_execution_request(request)
+    serialized = _encode_legacy_request(request)
     assert (
         _decode_request(serialized).runtime_env_plan_identity == request.runtime_env_plan_identity
     )
@@ -762,7 +777,7 @@ def test_request_runtime_identity_has_an_independent_byte_budget(
         identity_size - 1,
     )
     with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid") as caught:
-        encode_execution_request(request)
+        _encode_legacy_request(request)
     assert caught.value.classification is ExecutionRequestRejection.RESOURCE_LIMIT
     _assert_request_rejection(
         serialized,
@@ -776,7 +791,7 @@ def test_request_encoder_stops_aggregate_json_before_detached_parse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = replace(_inline_request(identity), serialized_args='["' + "x" * 200 + '"]')
-    serialized = encode_execution_request(request)
+    serialized = _encode_legacy_request(request)
     monkeypatch.setattr(
         codec_module,
         "EXECUTION_REQUEST_MAX_BYTES",
@@ -788,7 +803,7 @@ def test_request_encoder_stops_aggregate_json_before_detached_parse(
 
     monkeypatch.setattr(codec_module, "_bounded_request_json_loads", fail_parse)
     with pytest.raises(ExecutionRequestEncodeError, match="execution request is invalid") as caught:
-        encode_execution_request(request)
+        _encode_legacy_request(request)
     assert caught.value.classification is ExecutionRequestRejection.RESOURCE_LIMIT
 
 
@@ -851,7 +866,7 @@ def test_request_rejection_encodes_a_canonical_enriched_failure(
 
     if protocol == 2:
         with pytest.raises(ValueError, match="execution completion is invalid"):
-            encode_execution_completion(decoded.completion)
+            _encode_legacy_completion(decoded.completion)
 
 
 @pytest.mark.parametrize("classification", list(ExecutionRequestRejection))
@@ -977,7 +992,7 @@ def test_enriched_success_round_trips_as_exact_canonical_flat_schema(
 ) -> None:
     completion = _success(identity)
 
-    serialized = encode_execution_completion(completion)
+    serialized = _encode_legacy_completion(completion)
     value = json.loads(serialized)
     decoded = _decode(serialized, identity)
 
@@ -1012,7 +1027,7 @@ def test_enriched_failure_round_trips_with_executor_provenance(
 ) -> None:
     completion = _failure(identity)
 
-    decoded = _decode(encode_execution_completion(completion), identity)
+    decoded = _decode(_encode_legacy_completion(completion), identity)
 
     assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
     assert decoded.completion == completion
@@ -1024,7 +1039,7 @@ def test_encoder_normalizes_numeric_mapping_keys_before_canonical_sorting(
 ) -> None:
     completion = replace(_success(identity), result={10: "ten", 2: "two"})
 
-    serialized = encode_execution_completion(completion)
+    serialized = _encode_legacy_completion(completion)
     decoded = _decode(serialized, identity)
 
     assert decoded.completion.result == {"10": "ten", "2": "two"}
@@ -1037,7 +1052,7 @@ def test_encoder_rejects_keys_that_collide_after_json_stringification(
     completion = replace(_success(identity), result={1: "numeric", "1": "text"})
 
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(completion)
+        _encode_legacy_completion(completion)
 
 
 @pytest.mark.parametrize(
@@ -1061,7 +1076,7 @@ def test_encoder_rejects_invalid_enriched_values(
     completion = replace(_success(identity), **changes)
 
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(completion)
+        _encode_legacy_completion(completion)
 
 
 @pytest.mark.parametrize(
@@ -1079,7 +1094,7 @@ def test_encoder_rejects_invalid_enriched_values(
 )
 def test_encoder_rejects_invalid_identity(identity: ExecutionIdentity) -> None:
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(_success(identity))
+        _encode_legacy_completion(_success(identity))
 
 
 @pytest.mark.parametrize(
@@ -1099,7 +1114,7 @@ def test_enriched_schema_protocol_and_body_types_fail_closed(
     change: dict[str, object],
     classification: ExecutionCompletionRejection,
 ) -> None:
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     value.update(change)
 
     _assert_rejection(
@@ -1125,7 +1140,7 @@ def test_enriched_identity_and_executor_shape_are_strict(
     field: str,
     replacement: object,
 ) -> None:
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     value[field] = replacement
 
     _assert_rejection(
@@ -1148,7 +1163,7 @@ def test_enriched_failure_union_rejects_invalid_values(
     identity: ExecutionIdentity,
     change: dict[str, object],
 ) -> None:
-    value = json.loads(encode_execution_completion(_failure(identity)))
+    value = json.loads(_encode_legacy_completion(_failure(identity)))
     value.update(change)
 
     _assert_rejection(
@@ -1165,7 +1180,7 @@ def test_encoder_rejects_nul_in_failure_diagnostics(
     field: str,
 ) -> None:
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(replace(_failure(identity), **{field: "value\x00forged"}))
+        _encode_legacy_completion(replace(_failure(identity), **{field: "value\x00forged"}))
 
 
 @pytest.mark.parametrize(
@@ -1185,7 +1200,7 @@ def test_decoder_rejects_nul_in_enriched_raw_persisted_scalars(
     failure: bool,
 ) -> None:
     completion = _failure(identity) if failure else _success(identity)
-    value = json.loads(encode_execution_completion(completion))
+    value = json.loads(_encode_legacy_completion(completion))
     value[field] = "value\x00forged"
 
     _assert_rejection(
@@ -1197,7 +1212,7 @@ def test_decoder_rejects_nul_in_enriched_raw_persisted_scalars(
 
 
 def test_enriched_requires_exact_keys(identity: ExecutionIdentity) -> None:
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     value["extra"] = "ignored only by legacy"
     _assert_rejection(
         _canonical(value),
@@ -1230,7 +1245,7 @@ def test_enriched_identity_mismatch_is_distinct_and_untrusted(
     field: str,
     replacement: object,
 ) -> None:
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     value[field] = replacement
 
     error = _assert_rejection(
@@ -1243,7 +1258,7 @@ def test_enriched_identity_mismatch_is_distinct_and_untrusted(
 
 
 def test_supported_but_different_protocol_is_a_mismatch(identity: ExecutionIdentity) -> None:
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     value["execution_protocol_version"] = 2
 
     _assert_rejection(
@@ -1258,7 +1273,7 @@ def test_supported_but_different_protocol_is_a_mismatch(identity: ExecutionIdent
 def test_noncanonical_enriched_json_is_rejected_after_identity_verification(
     identity: ExecutionIdentity,
 ) -> None:
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     noncanonical = json.dumps(value)
 
     error = _assert_rejection(
@@ -1325,6 +1340,7 @@ def test_explicit_legacy_adapter_is_bounded_and_rejects_reserved_keys(
         '{"success":true,"result":42}',
         expected_identity=identity,
         expected_execution_protocol_version=1,
+        supported_protocols=_PROTOCOL_V1,
     )
     assert accepted.source is ExecutionCompletionSource.ACCEPTED_LEGACY_V1
 
@@ -1333,6 +1349,7 @@ def test_explicit_legacy_adapter_is_bounded_and_rejects_reserved_keys(
             '{"success":true,"result":42,"task_id":"task-41"}',
             expected_identity=identity,
             expected_execution_protocol_version=1,
+            supported_protocols=_PROTOCOL_V1,
         )
     assert caught.value.classification is ExecutionCompletionRejection.INVALID_VERSIONED
     assert caught.value.attempted_versioned is True
@@ -1424,9 +1441,9 @@ def test_legacy_v1_accepts_released_escaped_unpaired_surrogate_result(
 
 def test_enriched_rejects_unpaired_surrogate_result(identity: ExecutionIdentity) -> None:
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(replace(_success(identity), result="\ud800"))
+        _encode_legacy_completion(replace(_success(identity), result="\ud800"))
 
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     value["result"] = "\ud800"
     _assert_rejection(
         json.dumps(value, sort_keys=True, separators=(",", ":")),
@@ -1505,9 +1522,9 @@ def test_enriched_rejects_nonfinite_results(
     result: float,
 ) -> None:
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(replace(_success(identity), result=result))
+        _encode_legacy_completion(replace(_success(identity), result=result))
 
-    value = json.loads(encode_execution_completion(_success(identity)))
+    value = json.loads(_encode_legacy_completion(_success(identity)))
     value["result"] = result
     serialized = json.dumps(
         value,
@@ -1528,9 +1545,9 @@ def test_enriched_float_parser_rejects_overflow_and_accepts_finite_values(
     identity: ExecutionIdentity,
 ) -> None:
     finite = replace(_success(identity), result=1.25)
-    assert _decode(encode_execution_completion(finite), identity).completion.result == 1.25
+    assert _decode(_encode_legacy_completion(finite), identity).completion.result == 1.25
 
-    serialized = encode_execution_completion(_success(identity)).replace(
+    serialized = _encode_legacy_completion(_success(identity)).replace(
         '"result":{"answer":[42]}',
         '"result":1e999',
     )
@@ -1600,7 +1617,7 @@ def test_diagnostics_are_utf8_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(codec_module, "EXECUTION_COMPLETION_DIAGNOSTIC_MAX_BYTES", 4)
-    serialized = encode_execution_completion(
+    serialized = _encode_legacy_completion(
         replace(
             _failure(identity),
             error="éé",
@@ -1750,20 +1767,20 @@ def test_encoder_enforces_depth_bytes_and_json_types(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     completion = _success(identity)
-    serialized = encode_execution_completion(completion)
+    serialized = _encode_legacy_completion(completion)
 
     monkeypatch.setattr(codec_module, "EXECUTION_COMPLETION_MAX_DEPTH", 1)
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(completion)
+        _encode_legacy_completion(completion)
 
     monkeypatch.setattr(codec_module, "EXECUTION_COMPLETION_MAX_DEPTH", 64)
     monkeypatch.setattr(codec_module, "EXECUTION_COMPLETION_MAX_BYTES", len(serialized) - 1)
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(completion)
+        _encode_legacy_completion(completion)
 
     monkeypatch.setattr(codec_module, "EXECUTION_COMPLETION_MAX_BYTES", 128 * 1024 * 1024)
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(replace(completion, result=object()))
+        _encode_legacy_completion(replace(completion, result=object()))
 
 
 def test_encoder_stops_aggregate_json_before_detached_parse(
@@ -1771,7 +1788,7 @@ def test_encoder_stops_aggregate_json_before_detached_parse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     completion = replace(_success(identity), result=["abcdefghij"] * 20)
-    serialized = encode_execution_completion(completion)
+    serialized = _encode_legacy_completion(completion)
     byte_limit = len(serialized.encode("utf-8")) - 1
     assert all(len(item.encode("utf-8")) < byte_limit for item in completion.result)
     monkeypatch.setattr(codec_module, "EXECUTION_COMPLETION_MAX_BYTES", byte_limit)
@@ -1781,7 +1798,7 @@ def test_encoder_stops_aggregate_json_before_detached_parse(
 
     monkeypatch.setattr(codec_module, "_bounded_json_loads", fail_parse)
     with pytest.raises(ValueError, match="execution completion is invalid"):
-        encode_execution_completion(completion)
+        _encode_legacy_completion(completion)
 
 
 @pytest.mark.parametrize("serialized", [None, b"{}", [], {}, "[1]", "not-json", "\ud800"])
@@ -1890,14 +1907,64 @@ def _workflow_nested_request(identity: ExecutionIdentity) -> NestedExecutionRequ
     )
 
 
+def test_current_default_codecs_round_trip_outer_nested_and_completion(identity):
+    from tests.unit.test_cohort_transport import nested_request, outer_request
+
+    outer, _claim = outer_request()
+    nested, _leaf = nested_request()
+    completion = replace(_success(identity), execution_protocol_version=3)
+    assert (
+        codec_module.decode_execution_request(codec_module.encode_execution_request(outer)) == outer
+    )
+    assert (
+        codec_module.decode_nested_execution_request(
+            codec_module.encode_nested_execution_request(nested)
+        )
+        == nested
+    )
+    decoded = codec_module.decode_execution_completion(
+        codec_module.encode_execution_completion(completion),
+        expected_identity=identity,
+        expected_execution_protocol_version=3,
+    )
+    assert decoded.completion == completion
+
+
+def test_current_default_codecs_refuse_legacy_wire_without_changing_history_helpers(identity):
+    request = _inline_request(identity)
+    nested = _workflow_nested_request(identity)
+    completion = _success(identity)
+    with pytest.raises(ExecutionRequestEncodeError):
+        codec_module.encode_execution_request(request)
+    with pytest.raises(ExecutionRequestDecodeError) as outer_error:
+        codec_module.decode_execution_request(_encode_legacy_request(request))
+    assert outer_error.value.classification is ExecutionRequestRejection.UNSUPPORTED_PROTOCOL
+    with pytest.raises(NestedExecutionRequestEncodeError):
+        codec_module.encode_nested_execution_request(nested)
+    with pytest.raises(NestedExecutionRequestRejected) as nested_error:
+        codec_module.decode_nested_execution_request(_encode_legacy_nested_request(nested))
+    assert nested_error.value.classification is NestedExecutionRequestRejection.UNSUPPORTED_PROTOCOL
+    with pytest.raises(ValueError):
+        codec_module.encode_execution_completion(completion)
+    with pytest.raises(ExecutionCompletionDecodeError) as completion_error:
+        codec_module.decode_execution_completion(
+            _encode_legacy_completion(completion),
+            expected_identity=identity,
+            expected_execution_protocol_version=1,
+        )
+    assert (
+        completion_error.value.classification is ExecutionCompletionRejection.UNSUPPORTED_PROTOCOL
+    )
+
+
 def test_nested_workflow_request_round_trips_as_canonical_strict_schema(
     identity: ExecutionIdentity,
 ) -> None:
     request = _workflow_nested_request(identity)
-    serialized = encode_nested_execution_request(request)
+    serialized = _encode_legacy_nested_request(request)
     value = json.loads(serialized)
 
-    decoded = decode_nested_execution_request(
+    decoded = _decode_legacy_nested_request(
         serialized,
         expected_outer_identity=identity,
         expected_execution_protocol_version=1,
@@ -1935,9 +2002,9 @@ def test_nested_workflow_output_preview_path_is_canonical_and_exactly_bound(
         _workflow_nested_request(identity),
         output_preview_callable_path="testproject.tasks.preview_add_numbers",
     )
-    serialized = encode_nested_execution_request(request)
+    serialized = _encode_legacy_nested_request(request)
 
-    decoded = decode_nested_execution_request(
+    decoded = _decode_legacy_nested_request(
         serialized,
         expected_output_preview_callable_path=request.output_preview_callable_path,
     )
@@ -1958,7 +2025,7 @@ def test_nested_output_preview_wire_tamper_missing_and_extra_are_classified(
         _workflow_nested_request(identity),
         output_preview_callable_path=expected_path,
     )
-    payload = json.loads(encode_nested_execution_request(request))
+    payload = json.loads(_encode_legacy_nested_request(request))
     if mutation == "tamper":
         payload["output_preview_callable_path"] = "testproject.tasks.other_preview"
         expected = NestedExecutionRequestRejection.CALLABLE_MISMATCH
@@ -1970,7 +2037,7 @@ def test_nested_output_preview_wire_tamper_missing_and_extra_are_classified(
         expected = NestedExecutionRequestRejection.INVALID_VERSIONED
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(
+        _decode_legacy_nested_request(
             _canonical(payload),
             expected_output_preview_callable_path=expected_path,
         )
@@ -1981,11 +2048,11 @@ def test_nested_output_preview_wire_tamper_missing_and_extra_are_classified(
 def test_nested_expected_null_output_preview_rejects_an_added_callable(
     identity: ExecutionIdentity,
 ) -> None:
-    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload = json.loads(_encode_legacy_nested_request(_workflow_nested_request(identity)))
     payload["output_preview_callable_path"] = "testproject.tasks.unexpected_preview"
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(
+        _decode_legacy_nested_request(
             _canonical(payload),
             expected_output_preview_callable_path=None,
         )
@@ -2009,11 +2076,11 @@ def test_nested_output_preview_is_null_outside_workflow_steps(
         runtime_env_plan_digest=str(runtime_env_identity["digest"]),
         runtime_env_transport_digest=str(runtime_env_identity["transport_digest"]),
     )
-    serialized = encode_nested_execution_request(request)
+    serialized = _encode_legacy_nested_request(request)
     assert json.loads(serialized)["output_preview_callable_path"] is None
 
     with pytest.raises(NestedExecutionRequestEncodeError):
-        encode_nested_execution_request(
+        _encode_legacy_nested_request(
             replace(
                 request,
                 output_preview_callable_path="testproject.tasks.preview_add_numbers",
@@ -2023,7 +2090,7 @@ def test_nested_output_preview_is_null_outside_workflow_steps(
     payload = json.loads(serialized)
     payload["output_preview_callable_path"] = "testproject.tasks.preview_add_numbers"
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(_canonical(payload))
+        _decode_legacy_nested_request(_canonical(payload))
     assert caught.value.classification is NestedExecutionRequestRejection.INVALID_VERSIONED
 
 
@@ -2047,7 +2114,7 @@ def test_nested_distributed_digest_binding_round_trips_and_verifies_bytes(
         runtime_env_transport_digest=str(runtime_env_identity["transport_digest"]),
     )
 
-    decoded = decode_nested_execution_request(encode_nested_execution_request(request))
+    decoded = _decode_legacy_nested_request(_encode_legacy_nested_request(request))
 
     assert decoded == request
     assert_nested_callable_binding(decoded, serialized_callable=serialized_callable)
@@ -2076,8 +2143,8 @@ def test_nested_expected_distributed_item_identity_rejects_boolean_alias(
     )
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(
-            encode_nested_execution_request(request),
+        _decode_legacy_nested_request(
+            _encode_legacy_nested_request(request),
             expected_boundary_identity=NestedDistributedBoundaryIdentity(
                 "operation",
                 True,
@@ -2135,7 +2202,7 @@ def test_marker_free_nested_requests_are_the_only_legacy_fallback(
     serialized: object,
 ) -> None:
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(serialized)
+        _decode_legacy_nested_request(serialized)
 
     error = caught.value
     assert error.classification is NestedExecutionRequestRejection.LEGACY_REQUEST
@@ -2156,7 +2223,7 @@ def test_any_nested_strict_marker_permanently_suppresses_legacy_fallback(
     serialized: str,
 ) -> None:
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(serialized)
+        _decode_legacy_nested_request(serialized)
 
     error = caught.value
     assert error.classification is NestedExecutionRequestRejection.INVALID_VERSIONED
@@ -2200,11 +2267,11 @@ def test_nested_decode_rejections_are_fixed_and_classified(
     value: object,
     classification: NestedExecutionRequestRejection,
 ) -> None:
-    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload = json.loads(_encode_legacy_nested_request(_workflow_nested_request(identity)))
     payload[field] = value
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(_canonical(payload))
+        _decode_legacy_nested_request(_canonical(payload))
 
     error = caught.value
     assert error.classification is classification
@@ -2244,11 +2311,11 @@ def test_nested_decoder_rejects_invalid_exact_union_shapes(
     value: object,
     classification: NestedExecutionRequestRejection,
 ) -> None:
-    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload = json.loads(_encode_legacy_nested_request(_workflow_nested_request(identity)))
     payload[field] = value
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(_canonical(payload))
+        _decode_legacy_nested_request(_canonical(payload))
 
     assert caught.value.classification is classification
     assert caught.value.allows_legacy_fallback is False
@@ -2258,17 +2325,17 @@ def test_nested_decoder_rejects_partial_or_invalid_expected_callable_controls(
     identity: ExecutionIdentity,
 ) -> None:
     request = _workflow_nested_request(identity)
-    serialized = encode_nested_execution_request(request)
+    serialized = _encode_legacy_nested_request(request)
 
     with pytest.raises(NestedExecutionRequestDecodeError) as partial:
-        decode_nested_execution_request(
+        _decode_legacy_nested_request(
             serialized,
             expected_callable_binding_kind=NestedCallableBindingKind.PATH,
         )
     assert partial.value.classification is NestedExecutionRequestRejection.CALLABLE_MISMATCH
 
     with pytest.raises(NestedExecutionRequestDecodeError) as invalid:
-        decode_nested_execution_request(
+        _decode_legacy_nested_request(
             serialized,
             expected_callable_binding_kind=cast(
                 NestedCallableBindingKind,
@@ -2283,7 +2350,7 @@ def test_nested_decode_fences_every_independent_expected_value(
     identity: ExecutionIdentity,
 ) -> None:
     request = _workflow_nested_request(identity)
-    serialized = encode_nested_execution_request(request)
+    serialized = _encode_legacy_nested_request(request)
     cases = (
         (
             {"expected_outer_identity": replace(identity, execution_generation=4)},
@@ -2319,20 +2386,20 @@ def test_nested_decode_fences_every_independent_expected_value(
     )
     for kwargs, classification in cases:
         with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-            decode_nested_execution_request(serialized, **kwargs)
+            _decode_legacy_nested_request(serialized, **kwargs)
         assert caught.value.classification is classification
 
 
 def test_nested_protocol_is_checked_before_callable_or_runtime_env(
     identity: ExecutionIdentity,
 ) -> None:
-    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload = json.loads(_encode_legacy_nested_request(_workflow_nested_request(identity)))
     payload["execution_protocol_version"] = 2
     payload["callable_binding"] = "password.secret"
     payload["runtime_env_plan_identity"] = {"secret": "credential"}
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(
+        _decode_legacy_nested_request(
             _canonical(payload),
             supported_protocols=ExecutionProtocolRange(1, 1),
         )
@@ -2343,10 +2410,10 @@ def test_nested_protocol_is_checked_before_callable_or_runtime_env(
 
 
 def test_nested_request_requires_canonical_wire_bytes(identity: ExecutionIdentity) -> None:
-    serialized = encode_nested_execution_request(_workflow_nested_request(identity))
+    serialized = _encode_legacy_nested_request(_workflow_nested_request(identity))
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(" " + serialized)
+        _decode_legacy_nested_request(" " + serialized)
 
     assert caught.value.classification is NestedExecutionRequestRejection.INVALID_VERSIONED
 
@@ -2356,22 +2423,22 @@ def test_nested_request_has_independent_aggregate_and_runtime_identity_budgets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _workflow_nested_request(identity)
-    serialized = encode_nested_execution_request(request)
+    serialized = _encode_legacy_nested_request(request)
     aggregate_bytes = len(serialized.encode())
     identity_bytes = len(_canonical(request.runtime_env_plan_identity).encode())
 
     monkeypatch.setattr(codec_module, "NESTED_EXECUTION_REQUEST_MAX_BYTES", aggregate_bytes)
-    assert decode_nested_execution_request(serialized) == request
+    assert _decode_legacy_nested_request(serialized) == request
     monkeypatch.setattr(
         codec_module,
         "NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES",
         identity_bytes,
     )
-    assert encode_nested_execution_request(request) == serialized
+    assert _encode_legacy_nested_request(request) == serialized
 
     monkeypatch.setattr(codec_module, "NESTED_EXECUTION_REQUEST_MAX_BYTES", aggregate_bytes - 1)
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(serialized)
+        _decode_legacy_nested_request(serialized)
     assert caught.value.classification is NestedExecutionRequestRejection.RESOURCE_LIMIT
     assert caught.value.allows_legacy_fallback is False
 
@@ -2382,9 +2449,9 @@ def test_nested_request_has_independent_aggregate_and_runtime_identity_budgets(
         identity_bytes - 1,
     )
     with pytest.raises(NestedExecutionRequestEncodeError):
-        encode_nested_execution_request(request)
+        _encode_legacy_nested_request(request)
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(serialized)
+        _decode_legacy_nested_request(serialized)
     assert caught.value.classification is NestedExecutionRequestRejection.RESOURCE_LIMIT
 
 
@@ -2401,7 +2468,7 @@ def test_nested_preparse_depth_limit_cannot_fall_back_to_legacy() -> None:
     )
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(serialized)
+        _decode_legacy_nested_request(serialized)
 
     assert caught.value.classification is NestedExecutionRequestRejection.RESOURCE_LIMIT
     assert caught.value.allows_legacy_fallback is False
@@ -2431,12 +2498,12 @@ def test_nested_runtime_env_rejects_minimal_or_checksum_forged_identity(
         "transport_digest": request.runtime_env_transport_digest,
     }
     with pytest.raises(NestedExecutionRequestEncodeError):
-        encode_nested_execution_request(replace(request, runtime_env_plan_identity=minimal))
+        _encode_legacy_nested_request(replace(request, runtime_env_plan_identity=minimal))
 
-    payload = json.loads(encode_nested_execution_request(request))
+    payload = json.loads(_encode_legacy_nested_request(request))
     payload["runtime_env_plan_identity"]["profile"] = "forged-profile"
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(_canonical(payload))
+        _decode_legacy_nested_request(_canonical(payload))
 
     assert caught.value.classification is NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
 
@@ -2444,11 +2511,11 @@ def test_nested_runtime_env_rejects_minimal_or_checksum_forged_identity(
 def test_nested_runtime_env_rejects_unknown_identity_fields(
     identity: ExecutionIdentity,
 ) -> None:
-    payload = json.loads(encode_nested_execution_request(_workflow_nested_request(identity)))
+    payload = json.loads(_encode_legacy_nested_request(_workflow_nested_request(identity)))
     payload["runtime_env_plan_identity"]["python_version"] = "3.99"
 
     with pytest.raises(NestedExecutionRequestDecodeError) as caught:
-        decode_nested_execution_request(_canonical(payload))
+        _decode_legacy_nested_request(_canonical(payload))
 
     assert caught.value.classification is NestedExecutionRequestRejection.RUNTIME_ENV_MISMATCH
 
@@ -2585,4 +2652,4 @@ def test_nested_encoder_rejects_noncanonical_or_mismatched_values(
         NestedExecutionRequestEncodeError,
         match="nested execution request is invalid",
     ):
-        encode_nested_execution_request(request)
+        _encode_legacy_nested_request(request)

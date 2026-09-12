@@ -8,6 +8,8 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 
 @pytest.mark.django_db(transaction=True)
 def test_existing_and_rolling_writer_rows_gain_nullable_plan_fields() -> None:
@@ -58,6 +60,5 @@ def test_existing_and_rolling_writer_rows_gain_nullable_plan_fields() -> None:
             field.name for field in reverted_execution._meta.get_fields()
         }
     finally:
-        MigrationExecutor(connection).migrate(
-            [("django_ray", "0026_ray_task_target_execution_evidence")]
-        )
+        clear_historical_admission_fixtures()
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])

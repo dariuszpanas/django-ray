@@ -17,21 +17,29 @@ outcomes were produced by real remote execution.
 
 1. Read-only inventory observes two nonterminal tasks and an active lease. It
    verifies the database is unchanged; that state must block a real upgrade.
-2. The released lifecycle cancels the queued fixture and records the explicitly
+2. Back up that blocked snapshot and restore it into an independent database.
+   The candidate applies migrations through `0034` there, then attempts `0035`. The
+   activation must refuse the old queued/running work and leave every original
+   field, the protocol 1 policy and the legacy admission token unchanged. The
+   source database is never opened by the candidate during this negative phase;
+   its blocked backup digest must still match after the entire rehearsal.
+3. The released lifecycle cancels the queued fixture and records the explicitly
    synthetic uncertain fixture as LOST without retry. Its synthetic lease is
    stopped. This is fixture preparation, **not deployed drain evidence**.
-3. Back up the settled database and all fixture artifacts. SQLite uses its native
+4. Back up the settled database and all fixture artifacts. SQLite uses its native
    backup API; PostgreSQL uses `pg_dump` with a separate socket-only database.
-4. Restore into an independent database and artifact directory. A fresh released
+5. Restore into an independent database and artifact directory. A fresh released
    process compares every original model field and reads the actual filesystem
    input and result through released storage APIs.
-5. The candidate migrates that restored database. It compares all historical
+6. The candidate migrates that restored database. It compares all historical
    fields, reads input/result artifacts, and proves historical result reads do
    not import the removed callable or let the historical Task enqueue work.
    Temporarily missing and corrupt result files are rejected by the storage API;
    the original bytes are restored and the complete artifact digest must match.
-6. Enqueue one current task without starting a worker.
-7. Restore the original backup into a second independent database and read it
+7. Enqueue one current protocol 3 task and read its persisted immutable intent
+   back against the package, configured declaration and normalized RuntimeEnv
+   snapshot. No worker starts and the application callable must not execute.
+8. Restore the settled backup into another independent database and read it
    with the old version. The candidate-only write is absent: restoring this
    backup after new writes would lose those writes. The rehearsal never replaces
    the database that received the candidate write.
@@ -131,15 +139,145 @@ Linux CI checkpoint and exact-source application/release evidence remain require
 Mixed-version running cohorts, live ObjectRef migration and two-cluster handoff
 are outside the coordinated Beta commitment.
 
-## Remaining execution-retirement inventory
+## Native runtime fixture preparation
 
-The database fixture deliberately does not remove these current paths:
+The `runtime_*` modules, `RuntimeDockerfile`, and `runtime.yaml` prepare the
+separate real-execution stage. They do **not yet provide an end-to-end runner**.
+Do not apply the entire template document or treat its unit tests as a passing
+upgrade rehearsal.
+
+The image recipe installs the exact released 0.4.0/Ray 2.56.0 or candidate
+0.5.0/Ray 2.58.0 environment, then adds only the reviewed qualification modules.
+`runtime_source.prepare_runtime_sources` exports clean committed Git sources and
+returns build arguments; it does not run Docker. Installed package bytes must
+match the corresponding archive, and candidate source must not shadow the
+released wheel in baseline observers.
+
+The `Upgrade Runtime Images` hosted job builds those two recipes sequentially,
+checks the PostgreSQL client executables during build, and probes installed
+identities in bounded containers with networking disabled. It retains source
+and image receipts separately from database preservation. A passing image job
+does not execute scratch creation, backup/restore, Ray, or the native rehearsal.
+
+`runtime_tasks` supplies finite success, failure, cancellation, retry, gated
+recovery, and two-leaf workflow cases. `runtime_steps` uses real public enqueue
+and cancellation APIs and compares actual stored model fields. Its blocked
+migration check runs against the restored scratch database: a released observer
+captures that clone before the candidate attempts activation. Sampling primary
+before a backup would race with the old manager's heartbeat timestamps.
+
+`runtime_history` reads retained payloads and encrypted RuntimeEnv through the
+installed version. Candidate history reads also reject callable imports,
+historical task re-enqueue, and unsupported-protocol retry. Legacy workflow
+presentation remains `LEGACY_ONLY`; it does not establish schema-v3 graph or
+HTML rendering support. The admin page loads workflow diagnostics lazily through
+JavaScript, so rendering its initial template alone cannot prove that the retained
+legacy state is visible to an operator.
+
+The resource template requires one admitted node, one PostgreSQL server, one
+live Ray generation, one manager, and one observer at a time. Two 1 GiB PVCs hold
+the database and artifacts. The declared peak is 2.15 CPU and 8448 MiB memory,
+excluding operator and build resources. Those declarations are admission inputs;
+rendering a manifest does not reserve capacity or establish a Pod PID limit.
+
+Before writers start, `runtime_artifacts.bind_artifact_store` binds the empty
+prepared artifact root to the orchestrator's observed run digest. Artifact
+backups copy only `inputs`, `results`, `runtime-effects`, and `observations`.
+The blocked and final copies are distinct; rollback always restores the original
+final copy. Each restore uses new files and an exact bounded inventory, refuses
+existing or incomplete destinations, and publishes its completion record last.
+This proves copied bytes only. It does not authenticate the PVC, snapshot the
+database, retire a writer, or establish database/artifact consistency.
+
+Scratch observers mount only the fixed `.upgrade-restores/blocked`, `final`, or
+`rollback` subPath at `/artifacts`. Primary managers and Ray nodes keep the root
+mount, so persisted paths and encrypted profiles stay unchanged. The renderer
+requires the appropriate restore point; it never creates or verifies a copy.
+The caller must finish and verify both the database and artifact restoration
+before launching a scratch reader. A kubelet-created empty subPath is not proof.
+
+`runtime_database.backup_database` uses fixed PostgreSQL 17 client commands to
+corroborate the observed primary database identity and produce a bounded custom
+dump alongside its matching artifact backup. `runtime_restore.restore_database`
+accepts only an already created, empty scratch database with the expected OID.
+It restores in one transaction and retains failed attempt reservations. Neither
+helper creates or drops databases, stops foreign sessions, or proves that the
+previous scratch observer has exited. The host must establish that ownership
+and sequencing before calling the helper. A successful restore still needs the
+fresh released-history reader; mock client tests are not native SQL evidence.
+
+The fixed `runtime_steps` commands are `bind-store`, `backup-artifacts`,
+`restore-artifacts`, `backup-database`, `restore-database`, `create-scratch`,
+`retire-scratch`, and `observe-database`.
+Each accepts only
+its exact `RuntimeStoreArguments` fields: a run digest, a fixed restore point,
+the relevant artifact/dump digests, and observed PostgreSQL identifiers where
+needed. Missing and unused arguments are refused. The manifest renderer accepts
+that same typed argument object as `store_arguments`, so its generated command
+and the runtime parser share the same validation. These commands use the
+baseline image, primary settings, and PVC-root mount; the database restore
+helper internally selects only the validated scratch target. They never run
+Django setup or a manager. Subsequent scratch readers use the separate restored
+subPath selection described above.
+
+`observe-database` reads the primary PostgreSQL system identifier, database OID,
+and server version twice through read-only connections. It requires the bound
+artifact run but writes no receipt or database state. The host must attribute
+the observer to its owned server before using these values for later commands;
+the returned identifiers alone do not authenticate resource ownership.
+
+`create-scratch` corroborates the primary PostgreSQL identity, refuses an
+existing scratch database, and reserves the attempt before calling the fixed
+PostgreSQL 17 `createdb` client. It uses `template0`, then checks the new OID,
+owner, empty schema, and absence of other sessions before publishing its receipt.
+An interrupted or failed attempt cannot be retried or adopted automatically.
+The host still has to own the server and serialize observers; these checks do
+not fence an external administrator. No native creation has been executed by
+the local tests.
+
+`retire-scratch` requires that restore point's successful creation receipt,
+the same primary and scratch identities, current scratch ownership, and absence
+of other sessions. It reserves the attempt before a bounded `dropdb` call,
+without force or missing-database suppression, and verifies primary preservation
+and scratch absence before recording completion. An uncertain drop stays reserved
+and cannot be retried or adopted automatically. The host must serialize observers
+and supply the independently observed identifiers; these checks do not fence an
+external administrator. A later restore point needs a fresh creation and new OID.
+Host sequencing and native creation/retirement proof remain unimplemented.
+
+`runtime_observer` collects a completed observer through read-only Kubernetes
+calls. It verifies the expected Job UID, owner reference, rendered pod settings,
+image digest, zero restarts and successful exit before accepting one bounded
+JSON result. It re-reads the pod, Job and namespace after log collection;
+replacement or ambiguous pods are refused. Timestamp checks retain Kubernetes'
+whole-second precision. The fixed-executable Linux transport applies a 20-second
+deadline per call, live output limits and owned process cleanup without exposing
+provider diagnostics. The host must supply the admitted kubeconfig and the
+identities observed during resource creation. Caller-supplied snapshots alone
+do not authenticate events, and collection does not interpret an upgrade phase
+or grant resource admission. The serial lifecycle runner is still required.
+
+Still required: Linux backup/restore execution with exact scratch ownership,
+scratch retirement/recreation sequencing and the source-owned host orchestrator, real phase
+observations, old-writer and Ray retirement, manager-loss recovery without
+resubmission, current Core/Jobs
+completion, rendered historical reads, rollback refusal and data-loss evidence,
+and verified cleanup. `runtime_contract` validates receipt structure and
+consistency; it cannot authenticate observations. These helpers always retain
+`complete_upgrade_gate: false`; the full release acceptance requires its own
+independent assessment.
+
+## Separate runtime preservation boundaries
+
+The current runtime closes the old generic execution entries when protocol 3 is
+active. This database fixture does not exercise their remote rejection or the
+following preservation boundaries:
 
 | Boundary | Current source to audit in the retirement change |
 | --- | --- |
-| Old Ray Job payload execution | `src/django_ray/runtime/entrypoint.py`, `_execute_legacy_payload` |
-| Positional unversioned remote invocation | `src/django_ray/runtime/remote.py` |
-| Non-strict Job failure/log fallback | `src/django_ray/management/commands/django_ray_worker.py`, legacy `get_logs` path; `src/django_ray/runner/ray_job.py` |
+| Old Ray Job payload refusal before invocation | `src/django_ray/runtime/entrypoint.py`, `_execute_legacy_payload` |
+| Positional unversioned remote refusal | `src/django_ray/runtime/remote.py` |
+| Exact current Job completion and retained uncertainty | `src/django_ray/management/commands/django_ray_worker.py`, cohort completion/control paths; `src/django_ray/runner/ray_job.py` |
 | Strict request-family discrimination | `src/django_ray/ray_job_protocol.py`, rq1/rq2 classification |
 | Input artifact purgers and reference readers | `src/django_ray/input_storage.py`, `src/django_ray/ray_job_request_storage.py` and their cleanup commands |
 

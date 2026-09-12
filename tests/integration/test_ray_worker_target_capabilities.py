@@ -1,4 +1,4 @@
-"""SQLite and PostgreSQL contracts for dormant worker target capabilities."""
+"""Current worker capabilities plus explicit historical malformed-lease checks."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from django.test.utils import CaptureQueriesContext
 
 import django_ray.target.capabilities as capabilities
 from django_ray.models import (
+    RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT,
     RayTarget,
     RayTargetAttestationRevision,
     RayTargetDesiredState,
@@ -68,10 +69,16 @@ from django_ray.target.capabilities import (
     withdraw_ray_worker_target_capability,
 )
 from django_ray.target.coordination import (
+    _record_ray_target_attestation_locked,
+    _register_ray_target_locked,
     record_ray_target_attestation,
     register_ray_target,
     transition_ray_target_desired_state,
 )
+from tests.migration_cleanup import (
+    closed_preactivation_protocol_schema as closed_preactivation_protocol_schema,
+)
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -83,7 +90,7 @@ NODE_ID = "b" * 56
 def _runtime(**changes: object) -> RayRuntimeVersion:
     values: dict[str, object] = {
         "ray_major": 2,
-        "ray_minor": 56,
+        "ray_minor": 58,
         "ray_patch": 0,
         "python_implementation": "cpython",
         "python_major": 3,
@@ -180,8 +187,8 @@ def _lease(
         pid=2101,
         capability_schema_version=1,
         django_ray_version="0.5.0-test",
-        min_supported_execution_protocol_version=1,
-        max_supported_execution_protocol_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
         legacy_admission_token=None,
         started_at=NOW - timedelta(minutes=1),
         last_heartbeat_at=heartbeat_at,
@@ -397,11 +404,15 @@ def test_advertisement_requires_an_exact_fresh_explicit_lease(
         ("worker-protocol-maximum-overflow", 1, 32768),
     ),
 )
+@pytest.mark.usefixtures("closed_preactivation_protocol_schema")
 def test_sqlite_raw_lease_protocol_poison_maps_to_fixed_refusal(
     poisoned_worker_id: str,
     minimum: object,
     maximum: object,
 ) -> None:
+    # The current activation trigger refuses these malformed active leases at
+    # INSERT. Retain the older capability-service corruption boundary on the
+    # actual preactivation schema; the fixture restores0035 after assertions.
     if connection.vendor != "sqlite":
         pytest.skip("SQLite storage-class regression")
 
@@ -1292,3 +1303,186 @@ def test_private_surface_has_no_probe_claim_or_task_selection_writer() -> None:
     assert "ray" not in vars(capabilities)
     assert "RayTaskExecution" not in vars(capabilities)
     assert "probe_ray_target" not in vars(capabilities)
+
+
+def _verified_target(index: int, runner_family: RayRunnerFamily) -> RayTargetExpectation:
+    expectation = _expectation(
+        f"verified.target-{index}",
+        session_suffix=str(index),
+        runner_family=runner_family,
+    )
+    with transaction.atomic():
+        _register_ray_target_locked(expectation, now=NOW)
+        _record_ray_target_attestation_locked(
+            expectation.target_key,
+            _attestation(expectation),
+            expected_policy_revision=1,
+            expected_attestation_revision=0,
+            now=NOW,
+        )
+    return expectation
+
+
+def _locked_advertise(identity, expectation, **overrides):
+    values = {
+        "manager_runner_family": expectation.runner_family,
+        "expected_policy_revision": 1,
+        "expected_attestation_revision": 1,
+        "expected_capability_revision": 0,
+        "now": ADVERTISED_AT,
+    }
+    values.update(overrides)
+    return capabilities._advertise_ray_worker_target_capability_locked(
+        identity,
+        expectation.target_key,
+        expectation.runtime,
+        **values,
+    )
+
+
+def test_locked_capability_requires_caller_transaction() -> None:
+    _lease_row, identity = _lease()
+    expectation = _expectation(runner_family=RayRunnerFamily.RAY_JOB)
+    with pytest.raises(
+        capabilities.RayWorkerTargetCapabilityError, match="caller-owned transaction"
+    ):
+        _locked_advertise(identity, expectation)
+    assert not RayWorkerTargetCapability.objects.exists()
+
+
+@pytest.mark.parametrize("runner_family", [RayRunnerFamily.RAY_CORE, RayRunnerFamily.RAY_JOB])
+def test_locked_publication_rolls_back_target_proof_and_capability_together(runner_family) -> None:
+    _lease_row, identity = _lease()
+    expectation = _expectation(runner_family=runner_family)
+    with pytest.raises(RuntimeError, match="abort publication"), transaction.atomic():
+        capabilities._locked_exact_lease(identity, using="default", vendor=connection.vendor)
+        with CaptureQueriesContext(connection) as queries:
+            _register_ray_target_locked(expectation, now=NOW)
+            _record_ray_target_attestation_locked(
+                expectation.target_key,
+                _attestation(expectation),
+                expected_policy_revision=1,
+                expected_attestation_revision=0,
+                now=NOW,
+            )
+            change = _locked_advertise(identity, expectation)
+        assert change.changed and change.manager_runner_family is runner_family
+        assert not any(
+            query["sql"].lstrip().upper().startswith(("BEGIN", "SAVEPOINT"))
+            for query in queries.captured_queries
+        )
+        raise RuntimeError("abort publication")
+    assert not RayTarget.objects.exists()
+    assert not RayTargetPolicyRevision.objects.exists()
+    assert not RayTargetAttestationRevision.objects.exists()
+    assert not RayWorkerTargetCapability.objects.exists()
+    assert TaskWorkerLease.objects.count() == 1
+
+
+@pytest.mark.parametrize(
+    ("first_family", "second_family"),
+    [
+        (RayRunnerFamily.RAY_CORE, RayRunnerFamily.RAY_CORE),
+        (RayRunnerFamily.RAY_CORE, RayRunnerFamily.RAY_JOB),
+        (RayRunnerFamily.RAY_JOB, RayRunnerFamily.RAY_CORE),
+    ],
+)
+def test_locked_capabilities_reject_core_overflow_and_family_mixing(
+    first_family, second_family
+) -> None:
+    _lease_row, identity = _lease()
+    first = _verified_target(1, first_family)
+    second = _verified_target(2, second_family)
+    with transaction.atomic():
+        _locked_advertise(identity, first)
+    with transaction.atomic(), pytest.raises(RayWorkerTargetCapabilityLimitError):
+        _locked_advertise(identity, second)
+    assert RayWorkerTargetCapability.objects.get().target_id == first.target_key
+
+
+def test_locked_jobs_support_exactly_64_targets_and_renew_at_capacity() -> None:
+    _lease_row, identity = _lease()
+    targets = [
+        _verified_target(index, RayRunnerFamily.RAY_JOB)
+        for index in range(RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT + 1)
+    ]
+    with transaction.atomic():
+        for target in targets[:-1]:
+            _locked_advertise(identity, target)
+        renewed = _locked_advertise(
+            identity,
+            targets[0],
+            expected_capability_revision=1,
+            now=ADVERTISED_AT + timedelta(seconds=1),
+        )
+    with transaction.atomic(), pytest.raises(RayWorkerTargetCapabilityLimitError):
+        _locked_advertise(identity, targets[-1])
+    assert renewed.revision == 2
+    assert RayWorkerTargetCapability.objects.count() == 64
+
+
+def test_locked_jobs_preserve_runtime_lease_revision_and_time_guards() -> None:
+    _lease_row, identity = _lease()
+    target = _verified_target(1, RayRunnerFamily.RAY_JOB)
+    with transaction.atomic(), pytest.raises(RayWorkerTargetCapabilityLeaseError):
+        _locked_advertise(replace(identity, pid=identity.pid + 1), target)
+    with transaction.atomic(), pytest.raises(RayWorkerTargetCapabilityRuntimeMismatchError):
+        _locked_advertise(identity, replace(target, runtime=_runtime(python_patch=13)))
+    cases = (
+        (RayWorkerTargetCapabilityPolicyRevisionConflictError, {"expected_policy_revision": 2}),
+        (
+            RayWorkerTargetCapabilityAttestationRevisionConflictError,
+            {"expected_attestation_revision": 2},
+        ),
+        (RayWorkerTargetCapabilityRevisionConflictError, {"expected_capability_revision": 1}),
+        (RayWorkerTargetCapabilityAttestationStateError, {"now": NOW + timedelta(seconds=50)}),
+    )
+    for error_type, overrides in cases:
+        with transaction.atomic(), pytest.raises(error_type):
+            _locked_advertise(identity, target, **overrides)
+    with transaction.atomic():
+        created = _locked_advertise(identity, target)
+        replay = _locked_advertise(identity, target)
+        renewed = _locked_advertise(
+            identity,
+            target,
+            expected_capability_revision=1,
+            now=ADVERTISED_AT + timedelta(seconds=1),
+        )
+    assert created.changed and not replay.changed and renewed.revision == 2
+    for error_type, overrides in (
+        (RayWorkerTargetCapabilityRevisionConflictError, {"expected_capability_revision": 0}),
+        (
+            RayWorkerTargetCapabilityAdvertisementRegressionError,
+            {"expected_capability_revision": 2},
+        ),
+    ):
+        with transaction.atomic(), pytest.raises(error_type):
+            _locked_advertise(identity, target, **overrides)
+    retained = RayWorkerTargetCapability.objects.get()
+    assert retained.revision == 2
+    assert retained.target_policy.desired_state == "draining"
+
+
+@pytest.mark.postgresql
+def test_postgresql_locked_jobs_final_capacity_slot_is_serialized_by_lease() -> None:
+    _require_postgresql()
+    _lease_row, identity = _lease()
+    targets = [
+        _verified_target(index, RayRunnerFamily.RAY_JOB)
+        for index in range(RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT + 1)
+    ]
+    with transaction.atomic():
+        for target in targets[:-2]:
+            _locked_advertise(identity, target)
+
+    def publish(target):
+        with transaction.atomic():
+            return _locked_advertise(identity, target)
+
+    outcomes = _run_concurrently(
+        *(lambda target=target: publish(target) for target in targets[-2:])
+    )
+    assert sum(isinstance(result, RayWorkerTargetCapabilityChange) for result in outcomes) == 1
+    assert sum(isinstance(result, RayWorkerTargetCapabilityLimitError) for result in outcomes) == 1
+    assert RayWorkerTargetCapability.objects.count() == 64

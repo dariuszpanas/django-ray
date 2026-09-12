@@ -141,7 +141,7 @@ def _postgres(root):
                 ) as connection:
                     assert connection.info.server_version // 10000 == 17
                     assert connection.execute("SHOW listen_addresses").fetchone()[0] == ""
-                    for name in ("baseline", "restored", "rollback"):
+                    for name in ("baseline", "blocked", "restored", "rollback"):
                         connection.execute(
                             psycopg.sql.SQL("CREATE DATABASE {}").format(
                                 psycopg.sql.Identifier(name),
@@ -157,8 +157,10 @@ def _postgres(root):
         stop_server(server)
 
 
-def _backup(root, backend):
-    backup = root / "backup"
+def _backup(root, backend, *, backup_name="backup"):
+    if backup_name not in ("backup", "blocked-backup"):
+        raise wheel.QualificationError("invalid-upgrade-backup-name")
+    backup = root / backup_name
     if backend == "sqlite":
         with sqlite3.connect(root / "baseline.sqlite3") as source:
             with sqlite3.connect(backup) as destination:
@@ -184,11 +186,12 @@ def _backup(root, backend):
     return wheel._sha256(backup)
 
 
-def _restore(root, backend, database):
-    if database not in ("restored", "rollback"):
+def _restore(root, backend, database, *, backup_name="backup"):
+    allowed = {"blocked": "blocked-backup", "restored": "backup", "rollback": "backup"}
+    if allowed.get(database) != backup_name:
         raise wheel.QualificationError("invalid-upgrade-restore-destination")
     if backend == "sqlite":
-        with sqlite3.connect(root / "backup") as source:
+        with sqlite3.connect(root / backup_name) as source:
             with sqlite3.connect(root / f"{database}.sqlite3") as destination:
                 source.backup(destination)
                 assert destination.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -204,7 +207,7 @@ def _restore(root, backend, database):
                 database,
                 "--exit-on-error",
                 "--no-owner",
-                root / "backup",
+                root / backup_name,
             ],
             cwd=root,
         )
@@ -247,7 +250,7 @@ def _backend(parent, backend, released_target, candidate_target):
         artifacts.mkdir()
         manager = _postgres(root) if backend == "postgresql" else contextlib.nullcontext()
         with manager:
-            for phase in PHASES[:3]:
+            for phase in PHASES[:2]:
                 phases.append(
                     _phase(
                         root,
@@ -259,6 +262,33 @@ def _backend(parent, backend, released_target, candidate_target):
                         artifacts=artifacts,
                     )
                 )
+            # Activation is attempted only against an independently restored
+            # blocker snapshot. The released database remains at its own schema.
+            blocked_digest = _backup(root, backend, backup_name="blocked-backup")
+            _restore(root, backend, "blocked", backup_name="blocked-backup")
+            shutil.copytree(artifacts, root / "blocked-artifacts")
+            phases.append(
+                _phase(
+                    root,
+                    backend,
+                    "candidate-blocked-activation",
+                    candidate_target,
+                    released=False,
+                    database="blocked",
+                    artifacts=root / "blocked-artifacts",
+                )
+            )
+            phases.append(
+                _phase(
+                    root,
+                    backend,
+                    "baseline-settle-fixture",
+                    released_target,
+                    released=True,
+                    database="baseline",
+                    artifacts=artifacts,
+                )
+            )
             backup_digest = _backup(root, backend)
             artifacts_digest = wheel._package_tree_digest(artifacts)
             shutil.copytree(artifacts, root / "artifact-backup")
@@ -316,11 +346,13 @@ def _backend(parent, backend, released_target, candidate_target):
                 )
             )
             assert wheel._sha256(root / "backup") == backup_digest
+            assert wheel._sha256(root / "blocked-backup") == blocked_digest
             assert wheel._package_tree_digest(root / "artifact-backup") == artifacts_digest
     receipt = {
         "backend": backend,
         "phases": phases,
         "backup_sha256": backup_digest,
+        "blocked_backup_sha256": blocked_digest,
         "artifacts_sha256": artifacts_digest,
         "fixture_cleanup": not root.exists(),
         "server_stopped": True,

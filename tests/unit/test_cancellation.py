@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
 
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+from django_ray.execution_protocol import ExecutionProtocolRange
+from django_ray.models import RayTaskCohortClaim, RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import (
     CancellationOutcome,
@@ -17,6 +19,35 @@ from django_ray.runner.cancellation import (
     request_cancellation,
     request_remote_cancellation,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+
+@pytest.fixture
+def current_claim(monkeypatch):
+    """Use a real current claim and the existing stopped SQLite ledger teardown."""
+    from tests.integration.test_cohort_claim_storage import (
+        case,
+        isolated_sqlite_ledger_maintenance,
+    )
+
+    cleanup = isolated_sqlite_ledger_maintenance.__wrapped__()
+    next(cleanup)
+    try:
+        yield case.__wrapped__(monkeypatch)
+    finally:
+        with pytest.raises(StopIteration):
+            next(cleanup)
+
+
+@pytest.fixture
+def historical_generation(preactivation_protocol_schema, monkeypatch):
+    """Retain the released raw owner/generation replacement fixture on0034."""
+    from django_ray.lifecycle import _request_task_cancellation
+
+    monkeypatch.setattr(
+        "django_ray.runner.cancellation.request_task_cancellation",
+        partial(_request_task_cancellation, supported_protocols=ExecutionProtocolRange(1, 1)),
+    )
 
 
 @pytest.mark.django_db
@@ -38,15 +69,16 @@ class TestCancellationHelpers:
         assert ok is False
         assert task.state == TaskState.SUCCEEDED
 
-    def test_request_cancellation_does_not_overwrite_stale_terminal_state(self) -> None:
-        task = RayTaskExecution.objects.create(
-            task_id="cancel-stale-terminal-001",
-            callable_path="testproject.tasks.add_numbers",
-            state=TaskState.RUNNING,
-            args_json="[]",
-            kwargs_json="{}",
-        )
-        RayTaskExecution.objects.filter(pk=task.pk).update(state=TaskState.SUCCEEDED)
+    @pytest.mark.django_db(transaction=True)
+    def test_request_cancellation_does_not_overwrite_stale_terminal_state(
+        self, current_claim
+    ) -> None:
+        from tests.integration.test_cohort_completion import _apply, _started
+
+        dispatch = _started(current_claim)
+        task = RayTaskExecution.objects.get(pk=dispatch.execution.pk)
+        assert _apply(dispatch, current_claim).applied
+        assert task.state == TaskState.RUNNING
 
         seen: list[object] = []
         ok = request_cancellation(
@@ -59,9 +91,12 @@ class TestCancellationHelpers:
         assert task.state == TaskState.SUCCEEDED
         assert seen == []
 
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.usefixtures("historical_generation")
     def test_request_cancellation_does_not_overwrite_newer_generation(self) -> None:
         task = RayTaskExecution.objects.create(
             task_id="cancel-stale-generation-001",
+            execution_protocol_version=1,
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
             execution_generation=4,
@@ -236,33 +271,43 @@ class TestCancellationHelpers:
         assert ok is True
         assert task.state == TaskState.CANCELLING
 
-    def test_finalize_cancellation_sets_terminal_state(self) -> None:
-        task = RayTaskExecution.objects.create(
-            task_id="cancel-004",
-            callable_path="testproject.tasks.add_numbers",
-            state=TaskState.CANCELLING,
-            args_json="[]",
-            kwargs_json="{}",
-        )
+    @pytest.mark.django_db(transaction=True)
+    def test_finalize_cancellation_sets_terminal_state(self, current_claim) -> None:
+        from django_ray.lifecycle import request_task_cancellation
+        from django_ray.runner.cohort_cancellation import apply_cohort_cancellation
+        from tests.integration.test_cohort_completion import _started
 
-        finalize_cancellation(task)
+        dispatch = _started(current_claim, "ray_core")
+        task = dispatch.execution
+        assert request_task_cancellation(task.pk).accepted
+        applied = apply_cohort_cancellation(
+            dispatch,
+            evidence_kind="owned_core_terminal",
+            apply_cancel=finalize_cancellation,
+            now=current_claim.now,
+        )
+        assert applied.applied
         task.refresh_from_db()
 
         assert task.state == TaskState.CANCELLED
         assert task.finished_at is not None
+        assert TaskAttempt.objects.get(execution=task).state == TaskState.CANCELLED
+        assert RayTaskCohortClaim.objects.get(pk=dispatch.claim.claim_id).disposition == "RESOLVED"
 
-    def test_finalize_cancellation_does_not_overwrite_race(self) -> None:
-        task = RayTaskExecution.objects.create(
-            task_id="cancel-race-001",
-            callable_path="testproject.tasks.add_numbers",
-            state=TaskState.CANCELLING,
-            claimed_by_worker="worker-a",
-            args_json="[]",
-            kwargs_json="{}",
+    @pytest.mark.django_db(transaction=True)
+    def test_finalize_cancellation_does_not_overwrite_race(self, current_claim) -> None:
+        from django_ray.lifecycle import request_task_cancellation
+        from tests.integration.test_cohort_completion import _apply, _started
+
+        dispatch = _started(current_claim)
+        assert request_task_cancellation(dispatch.execution.pk).accepted
+        task = RayTaskExecution.objects.get(pk=dispatch.execution.pk)
+        assert _apply(dispatch, current_claim).applied
+        assert task.state == TaskState.CANCELLING
+
+        assert (
+            finalize_cancellation(task, expected_worker_id=current_claim.owner.worker_id) is False
         )
-        RayTaskExecution.objects.filter(pk=task.pk).update(state=TaskState.SUCCEEDED)
-
-        assert finalize_cancellation(task, expected_worker_id="worker-a") is False
         task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
 

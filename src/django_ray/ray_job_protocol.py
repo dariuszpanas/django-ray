@@ -724,3 +724,19 @@ def fixed_safe_ray_job_metadata(metadata: object) -> dict[str, str] | None:
         else:
             selected[key] = value
     return selected or None
+
+
+def _build_cohort_job_metadata(
+    prepared, request_reference: str, request_locator: str
+) -> dict[str, str]:
+    """Private p3 bindings; neither custom metadata nor reserved ID is physical proof."""
+    from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+    request, _contract = validate_prepared_cohort_execution(prepared)
+    metadata = build_ray_job_request_reference_metadata(
+        request, prepared.request_json, request_reference, request_locator
+    )
+    metadata["cohort_request_digest"] = prepared.request_digest
+    metadata["cohort_contract_digest"] = prepared.contract_digest
+    _bounded_metadata_values_size(metadata.values())
+    return metadata

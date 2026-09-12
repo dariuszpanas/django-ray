@@ -10,6 +10,7 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from threading import Barrier, Event, Lock, get_ident
@@ -79,6 +80,8 @@ from django_ray.workflow.progress.summary import (
     serialize_workflow_progress_summary,
 )
 from testproject import api as testproject_api
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+from tests.protocol_epochs import encode_legacy_execution_request
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
@@ -91,6 +94,87 @@ def _require_postgresql() -> None:
     """Keep the default SQLite suite fast while making this gate explicit."""
     if connection.vendor != "postgresql":
         pytest.skip("requires tests.postgres_settings and a PostgreSQL test database")
+
+
+_LEGACY_PROTOCOLS = ExecutionProtocolRange(1, 1)
+
+
+@pytest.fixture
+def historical_coordination(_require_postgresql, preactivation_protocol_schema, monkeypatch):
+    """Scope released direct-method contracts without widening current defaults."""
+    import sys
+
+    from django_ray import lifecycle
+    from django_ray.management.commands import django_ray_worker as worker
+    from django_ray.runner import reconciliation
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_execution", partial(_execution, execution_protocol_version=1))
+    monkeypatch.setattr(module, "_claim_command", partial(_claim_command, historical=True))
+    for name in ("record_failure", "succeed_task"):
+        monkeypatch.setattr(
+            module, name, partial(getattr(lifecycle, name), supported_protocols=_LEGACY_PROTOCOLS)
+        )
+    for name in ("record_failure", "record_lost"):
+        monkeypatch.setattr(
+            reconciliation,
+            name,
+            partial(getattr(lifecycle, name), supported_protocols=_LEGACY_PROTOCOLS),
+        )
+    # These released convenience functions have no per-call range argument;
+    # bind only their consumers in this explicitly historical test.
+    cancellation = partial(lifecycle.cancel_task, supported_protocols=_LEGACY_PROTOCOLS)
+    monkeypatch.setattr(module, "finalize_cancellation", cancellation)
+    monkeypatch.setattr(worker, "finalize_cancellation", cancellation)
+    monkeypatch.setattr(
+        module,
+        "request_task_cancellation",
+        partial(_request_task_cancellation, supported_protocols=_LEGACY_PROTOCOLS),
+    )
+    original_retry = retry_task
+
+    def retry(execution, **options):
+        assert original_retry(execution, **options) is None
+        return _request_task_retry(execution, supported_protocols=_LEGACY_PROTOCOLS, **options)[1]
+
+    monkeypatch.setattr(module, "retry_task", retry)
+    monkeypatch.setattr(worker, "retry_task", retry)
+
+
+@pytest.fixture
+def historical_rq2(historical_coordination, monkeypatch):
+    """Retain released local request storage/submit checks, never a remote entry."""
+    from django_ray.ray_job_request_storage import (
+        _prepare_ray_job_request,
+        _register_and_attach_ray_job_request,
+    )
+    from django_ray.runner import ray_job
+
+    monkeypatch.setattr(ray_job, "encode_execution_request", encode_legacy_execution_request)
+    monkeypatch.setattr(
+        ray_job,
+        "prepare_ray_job_request",
+        partial(_prepare_ray_job_request, supported_protocols=_LEGACY_PROTOCOLS),
+    )
+    monkeypatch.setattr(
+        ray_job,
+        "register_and_attach_ray_job_request",
+        partial(_register_and_attach_ray_job_request, supported_protocols=_LEGACY_PROTOCOLS),
+    )
+
+
+def _encode_historical_completion(completion):
+    from django_ray.execution_codec import _encode_execution_completion_for_protocols
+
+    return _encode_execution_completion_for_protocols(completion, _LEGACY_PROTOCOLS)
+
+
+def _attach_historical_request(*args, **kwargs):
+    from django_ray.ray_job_request_storage import _register_and_attach_ray_job_request
+
+    return _register_and_attach_ray_job_request(
+        *args, supported_protocols=_LEGACY_PROTOCOLS, **kwargs
+    )
 
 
 def _run_concurrently(*operations: Callable[[], object]) -> list[object]:
@@ -198,10 +282,19 @@ def _run_contended_recovery(
         return [future.result(timeout=20) for future in futures]
 
 
-def _claim_command(worker_id: str, claimed: list[int]):
+def _claim_command(worker_id: str, claimed: list[int], *, historical=False):
     from django_ray.management.commands.django_ray_worker import Command
 
-    command = Command()
+    class HistoricalCommand(Command):
+        def _handle_task_failure(self, *args, **kwargs):
+            kwargs.setdefault("supported_protocols", _LEGACY_PROTOCOLS)
+            return super()._handle_task_failure(*args, **kwargs)
+
+        def _store_and_succeed_task(self, *args, **kwargs):
+            kwargs.setdefault("supported_protocols", _LEGACY_PROTOCOLS)
+            return super()._store_and_succeed_task(*args, **kwargs)
+
+    command = HistoricalCommand() if historical else Command()
     command.stdout = StringIO()
     command.worker_id = worker_id
     command.execution_mode = "local"
@@ -209,13 +302,36 @@ def _claim_command(worker_id: str, claimed: list[int]):
     command.active_tasks = {}
     command.ray_core_runner = None
     command.process_task = lambda task: claimed.append(task.pk)
-    command._create_lease("default")
+    if historical:
+        import os
+        import socket
+
+        now = datetime.now(UTC)
+        command.lease = TaskWorkerLease.objects.create(
+            worker_id=worker_id,
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            queue_name="default",
+            capability_schema_version=1,
+            django_ray_version=django_ray_version,
+            min_supported_execution_protocol_version=1,
+            max_supported_execution_protocol_version=1,
+            legacy_admission_token=None,
+            started_at=now,
+            last_heartbeat_at=now,
+        )
+        command.lease_identity = WorkerLeaseIdentity(
+            worker_id, command.lease.hostname, command.lease.pid, now
+        )
+    else:
+        command._create_lease("default")
     return command
 
 
 def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
     values: dict[str, object] = {
         "task_id": task_id,
+        "execution_protocol_version": 3,
         "callable_path": "testproject.tasks.add_numbers",
         "queue_name": "default",
         "state": TaskState.QUEUED,
@@ -277,9 +393,8 @@ def _prepared_rq2_request(execution: RayTaskExecution, root: Path) -> Any:
     from django_ray.execution_codec import (
         ExecutionIdentity,
         ExecutionRequest,
-        encode_execution_request,
     )
-    from django_ray.ray_job_request_storage import prepare_ray_job_request
+    from django_ray.ray_job_request_storage import _prepare_ray_job_request
 
     assert execution.pk is not None
     request = ExecutionRequest(
@@ -300,12 +415,13 @@ def _prepared_rq2_request(execution: RayTaskExecution, root: Path) -> Any:
         runtime_env_plan_identity={},
         compiled_graph_submission_transport="ray-job",
     )
-    return prepare_ray_job_request(
-        encode_execution_request(request),
+    return _prepare_ray_job_request(
+        encode_legacy_execution_request(request),
         {
             "INPUT_STORAGE_BACKEND": "filesystem",
             "INPUT_STORAGE_FILESYSTEM_PATH": str(root),
         },
+        supported_protocols=_LEGACY_PROTOCOLS,
     )
 
 
@@ -346,6 +462,7 @@ def _ray_core_runner_with_handle(handle: RayCoreHandle) -> RayCoreRunner:
     return runner
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_incompatible_candidate_does_not_wait_for_locked_source_lease() -> None:
     close_legacy_worker_admission(
         expected_revision=1,
@@ -413,6 +530,7 @@ def test_incompatible_candidate_does_not_wait_for_locked_source_lease() -> None:
     assert candidate.shutdown_requested is False
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_nested_compatible_takeover_preserves_global_lease_lock_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -664,6 +782,7 @@ def _workflow_snapshot(
     }
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_two_workers_claim_each_execution_exactly_once() -> None:
     tasks = [_execution(f"postgres-claim-{index:02d}") for index in range(12)]
     claimed_a: list[int] = []
@@ -697,6 +816,7 @@ def test_two_workers_claim_each_execution_exactly_once() -> None:
     }
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_two_workers_claim_global_priority_frontier_with_fifo_ties() -> None:
     created_at = datetime.now(UTC) - timedelta(minutes=1)
     highest = _execution(
@@ -747,6 +867,7 @@ def test_two_workers_claim_global_priority_frontier_with_fifo_ties() -> None:
     assert {owners[task.pk] for task in lower_priority} == {None}
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_skip_locked_claims_available_row_then_locked_row_without_starvation() -> None:
     locked_task = _execution("postgres-skip-locked-001")
     available_task = _execution("postgres-skip-locked-002")
@@ -784,6 +905,7 @@ def test_skip_locked_claims_available_row_then_locked_row_without_starvation() -
     assert RayTaskExecution.objects.filter(state=TaskState.QUEUED).count() == 0
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_external_result_storage_and_cancellation_share_the_execution_lock(
     settings, tmp_path, monkeypatch
 ) -> None:
@@ -829,6 +951,7 @@ def test_external_result_storage_and_cancellation_share_the_execution_lock(
                 {"message": "x" * 128},
                 expected_attempt_number=2,
                 expected_execution_generation=5,
+                supported_protocols=_LEGACY_PROTOCOLS,
             )
         finally:
             close_old_connections()
@@ -862,6 +985,7 @@ def test_external_result_storage_and_cancellation_share_the_execution_lock(
     assert json.loads(stored_result) == {"message": "x" * 128}
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_ray_core_cancellation_committed_after_ready_result_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -983,6 +1107,7 @@ def test_ray_core_cancellation_committed_after_ready_result_wins(
     ],
     ids=("success", "failure"),
 )
+@pytest.mark.usefixtures("historical_coordination")
 def test_ray_core_exact_lease_loss_after_get_is_a_durable_noop(
     monkeypatch: pytest.MonkeyPatch,
     result_json: str,
@@ -1070,6 +1195,7 @@ def test_ray_core_exact_lease_loss_after_get_is_a_durable_noop(
     assert runner.pending_count == 0
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_enriched_ray_core_completion_blocked_by_task_replacement_is_a_durable_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1078,7 +1204,6 @@ def test_enriched_ray_core_completion_blocked_by_task_replacement_is_a_durable_n
         ExecutionCompletionSource,
         ExecutionIdentity,
         decode_execution_completion,
-        encode_execution_completion,
     )
 
     command = _claim_command("postgres-enriched-completion-owner", [])
@@ -1101,7 +1226,7 @@ def test_enriched_ray_core_completion_blocked_by_task_replacement_is_a_durable_n
         attempt_number=3,
         execution_generation=7,
     )
-    result_json = encode_execution_completion(
+    result_json = _encode_historical_completion(
         ExecutionCompletion(
             identity=completion_identity,
             execution_protocol_version=int(task.execution_protocol_version),
@@ -1148,6 +1273,7 @@ def test_enriched_ray_core_completion_blocked_by_task_replacement_is_a_durable_n
             result_json,
             expected_identity=completion_identity,
             expected_execution_protocol_version=int(task.execution_protocol_version),
+            supported_protocols=_LEGACY_PROTOCOLS,
         )
         assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
         completion_ready.set()
@@ -1248,6 +1374,7 @@ def test_enriched_ray_core_completion_blocked_by_task_replacement_is_a_durable_n
     assert runner.pending_count == 0
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_strict_ray_job_completion_blocked_by_task_replacement_is_a_durable_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1255,8 +1382,6 @@ def test_strict_ray_job_completion_blocked_by_task_replacement_is_a_durable_noop
         ExecutionCompletion,
         ExecutionIdentity,
         ExecutionRequest,
-        encode_execution_completion,
-        encode_execution_request,
     )
     from django_ray.ray_job_protocol import (
         STRICT_RAY_JOB_SUBMISSION_ID_PREFIX,
@@ -1288,7 +1413,7 @@ def test_strict_ray_job_completion_blocked_by_task_replacement_is_a_durable_noop
         attempt_number=3,
         execution_generation=7,
     )
-    completion_data = encode_execution_completion(
+    completion_data = _encode_historical_completion(
         ExecutionCompletion(
             identity=completion_identity,
             execution_protocol_version=int(task.execution_protocol_version),
@@ -1315,7 +1440,7 @@ def test_strict_ray_job_completion_blocked_by_task_replacement_is_a_durable_noop
         runtime_env_plan_identity={},
         compiled_graph_submission_transport="ray-job",
     )
-    serialized_request = encode_execution_request(request)
+    serialized_request = encode_legacy_execution_request(request)
     metadata = build_ray_job_request_metadata(request, serialized_request)
 
     completion_published = Event()
@@ -1466,6 +1591,7 @@ def test_strict_ray_job_completion_blocked_by_task_replacement_is_a_durable_noop
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_expired_lease_allows_exactly_one_orphan_adopter() -> None:
     now = datetime.now(UTC)
     TaskWorkerLease.objects.create(
@@ -1535,6 +1661,11 @@ def test_admin_bulk_deactivation_locks_leases_in_worker_id_order(
             hostname=f"{worker_id}-host",
             pid=1000,
             queue_name="default",
+            capability_schema_version=1,
+            django_ray_version=django_ray_version,
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             is_active=True,
         )
     admin_object = TaskWorkerLeaseAdmin(TaskWorkerLease, AdminSite())
@@ -1572,6 +1703,11 @@ def test_admin_bulk_deletion_locks_inactive_leases_in_worker_id_order(
             hostname=f"{worker_id}-host",
             pid=1000,
             queue_name="default",
+            capability_schema_version=1,
+            django_ray_version=django_ray_version,
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             is_active=False,
         )
     admin_object = TaskWorkerLeaseAdmin(TaskWorkerLease, AdminSite())
@@ -1681,6 +1817,7 @@ def test_postgresql_lease_freshness_is_measured_after_waiting_for_lock(
     assert command.lease_ownership_lost is True
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_concurrent_timeout_recovery_issues_one_stop_and_one_terminal_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1756,6 +1893,7 @@ def test_concurrent_timeout_recovery_issues_one_stop_and_one_terminal_write(
     assert TaskAttempt.objects.filter(execution=task, attempt_number=3).count() == 1
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_concurrent_lost_recovery_has_one_owner_and_one_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1821,6 +1959,7 @@ def test_concurrent_lost_recovery_has_one_owner_and_one_archive(
     assert TaskAttempt.objects.filter(execution=task, attempt_number=3).count() == 1
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_concurrent_cancellation_recovery_issues_one_stop_and_one_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2102,6 +2241,7 @@ def test_progress_publication_invalidates_waiting_stale_lost_transition() -> Non
     assert not TaskAttempt.objects.filter(execution=task).exists()
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_completion_retry_and_timeout_race_has_one_winner() -> None:
     task = _execution(
         "postgres-terminal-race-001",
@@ -2144,6 +2284,7 @@ def test_completion_retry_and_timeout_race_has_one_winner() -> None:
         assert "timed out" in str(task.error_message).lower()
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_cancellation_and_completion_race_cannot_overwrite_winner() -> None:
     task = _execution(
         "postgres-cancellation-race-001",
@@ -2274,6 +2415,7 @@ def test_concurrent_manual_retry_advances_attempt_and_generation_once() -> None:
     )
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> None:
     close_legacy_worker_admission(
         expected_revision=1,
@@ -2327,12 +2469,15 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
     assert retried is not None
     retry_projections = _execution_select_projections(retry_queries)
     assert [fields for fields, _sql in retry_projections] == [
+        {"execution_protocol_version", "state", "attempt_number", "execution_generation"},
         {
             "id",
             "state",
             "attempt_number",
             "execution_generation",
             "execution_protocol_version",
+            "task_id",
+            "queue_name",
             "workflow_run_id",
             "workflow_plan_fingerprint",
         },
@@ -2357,7 +2502,8 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
             "executor_django_ray_version",
         },
     ]
-    assert "FOR UPDATE" in retry_projections[0][1].upper()
+    assert "FOR UPDATE" not in retry_projections[0][1].upper()
+    assert "FOR UPDATE" in retry_projections[1][1].upper()
     forbidden_payload_columns = {
         "args_json",
         "kwargs_json",
@@ -2495,6 +2641,7 @@ def test_postgresql_lifecycle_locks_exclude_oversized_unrelated_payloads() -> No
     )
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_stale_unknown_stop_holds_execution_lock_until_outcome_is_durable(
     monkeypatch,
 ) -> None:
@@ -2690,6 +2837,7 @@ def test_automatic_retry_and_stale_cancellation_cannot_control_same_attempt() ->
         assert task.attempt_number == 2
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_stale_generation_cannot_write_over_replacement_execution() -> None:
     stale = _execution(
         "postgres-generation-guard-001",
@@ -2735,6 +2883,7 @@ def test_stale_generation_cannot_write_over_replacement_execution() -> None:
     assert stale.result_data is None
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_workflow_progress_retry_race_cannot_resurrect_cleared_snapshot() -> None:
     task = _execution(
         "postgres-workflow-retry-race-001",
@@ -2767,6 +2916,7 @@ def test_workflow_progress_retry_race_cannot_resurrect_cleared_snapshot() -> Non
     assert persist_workflow_progress(identity, _workflow_snapshot(identity, 3)) is False
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_v3_summary_retry_race_cannot_resurrect_cleared_summary() -> None:
     task = _execution(
         "postgres-v3-summary-retry-race-001",
@@ -2824,6 +2974,7 @@ def test_v3_summary_retry_race_cannot_resurrect_cleared_summary() -> None:
     )
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_v3_summary_terminal_race_leaves_terminal_state_authoritative() -> None:
     task = _execution(
         "postgres-v3-summary-terminal-race-001",
@@ -2876,6 +3027,7 @@ def test_v3_summary_terminal_race_leaves_terminal_state_authoritative() -> None:
     )
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_v3_conflicting_terminal_writer_cannot_override_lost_outcome() -> None:
     task = _execution(
         "postgres-v3-conflicting-terminal-race-001",
@@ -3260,6 +3412,7 @@ def test_workflow_progress_cancellation_race_disables_late_writer() -> None:
     assert persist_workflow_progress(identity, _workflow_snapshot(identity, 2)) is False
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_workflow_progress_timeout_race_cannot_write_after_terminal_state() -> None:
     task = _execution(
         "postgres-workflow-timeout-race-001",
@@ -3283,6 +3436,7 @@ def test_workflow_progress_timeout_race_cannot_write_after_terminal_state() -> N
     assert persist_workflow_progress(identity, _workflow_snapshot(identity, 2)) is False
 
 
+@pytest.mark.usefixtures("historical_coordination")
 def test_workflow_progress_lost_recovery_clears_obsolete_run() -> None:
     task = _execution(
         "postgres-workflow-lost-race-001",
@@ -3535,6 +3689,7 @@ def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_p
     ) == ([large_value], {})
 
 
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
     settings,
     tmp_path: Path,
@@ -3543,8 +3698,7 @@ def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
     """A purge-first race cannot delete the request selected by attachment."""
     import django_ray.input_storage as input_storage_module
     from django_ray.ray_job_request_storage import (
-        load_ray_job_request,
-        register_and_attach_ray_job_request,
+        _load_ray_job_request,
     )
 
     storage_config = {
@@ -3601,7 +3755,7 @@ def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
                 cursor.execute("SELECT pg_backend_pid()")
                 attach_backend_pid.append(int(cursor.fetchone()[0]))
             attach_connected.set()
-            return register_and_attach_ray_job_request(
+            return _attach_historical_request(
                 prepared,
                 task_execution=execution,
                 submission_handle=handle,
@@ -3629,10 +3783,16 @@ def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
     assert payload.last_used_at > cutoff
     assert execution.ray_job_request_reference == prepared.reference
     assert request_path.is_file()
-    assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
+    assert (
+        _load_ray_job_request(
+            prepared.encoded_locator, supported_protocols=_LEGACY_PROTOCOLS
+        ).request
+        == prepared.request
+    )
 
 
 @pytest.mark.parametrize("transition", ["cancel", "owner-loss", "replacement"])
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_attach_rejects_a_concurrent_execution_transition_exactly(
     tmp_path: Path,
     transition: str,
@@ -3641,7 +3801,6 @@ def test_rq2_attach_rejects_a_concurrent_execution_transition_exactly(
     from django_ray.ray_job_request_storage import (
         RayJobRequestStorageError,
         RayJobRequestStorageRejection,
-        register_and_attach_ray_job_request,
     )
 
     execution, handle = _rq2_reserved_execution(f"postgres-rq2-attach-{transition}-001")
@@ -3688,7 +3847,7 @@ def test_rq2_attach_rejects_a_concurrent_execution_transition_exactly(
                 cursor.execute("SELECT pg_backend_pid()")
                 attach_backend_pid.append(int(cursor.fetchone()[0]))
             attach_connected.set()
-            return register_and_attach_ray_job_request(
+            return _attach_historical_request(
                 prepared,
                 task_execution=execution,
                 submission_handle=handle,
@@ -3715,18 +3874,18 @@ def test_rq2_attach_rejects_a_concurrent_execution_transition_exactly(
     assert _rq2_request_path(prepared).is_file()
 
 
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_definite_release_leaves_a_concurrent_replacement_untouched(
     tmp_path: Path,
 ) -> None:
     """A stale definite-failure cleanup cannot clear a replacement tuple."""
     from django_ray.ray_job_request_storage import (
-        register_and_attach_ray_job_request,
         release_ray_job_request_reservation,
     )
 
     execution, handle = _rq2_reserved_execution("postgres-rq2-release-replacement-001")
     prepared = _prepared_rq2_request(execution, tmp_path)
-    register_and_attach_ray_job_request(
+    _attach_historical_request(
         prepared,
         task_execution=execution,
         submission_handle=handle,
@@ -3794,13 +3953,13 @@ def test_rq2_definite_release_leaves_a_concurrent_replacement_untouched(
     assert _rq2_request_path(prepared).is_file()
 
 
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_completion_committed_during_status_precedes_binding_rejection(
     tmp_path: Path,
 ) -> None:
     """A committed exact completion wins over stale rq2 status metadata."""
-    from django_ray.execution_codec import ExecutionCompletion, encode_execution_completion
+    from django_ray.execution_codec import ExecutionCompletion
     from django_ray.ray_job_protocol import build_ray_job_request_reference_metadata
-    from django_ray.ray_job_request_storage import register_and_attach_ray_job_request
     from django_ray.runner.base import JobInfo, JobStatus
 
     command = _claim_command("postgres-rq2-completion-owner", [])
@@ -3809,12 +3968,12 @@ def test_rq2_completion_committed_during_status_precedes_binding_rejection(
         worker_id=command.worker_id,
     )
     prepared = _prepared_rq2_request(execution, tmp_path)
-    register_and_attach_ray_job_request(
+    _attach_historical_request(
         prepared,
         task_execution=execution,
         submission_handle=handle,
     )
-    completion_data = encode_execution_completion(
+    completion_data = _encode_historical_completion(
         ExecutionCompletion(
             identity=prepared.request.identity,
             execution_protocol_version=int(execution.execution_protocol_version),
@@ -3922,6 +4081,7 @@ def test_rq2_completion_committed_during_status_precedes_binding_rejection(
     ],
     ids=("exact-max", "multibyte-exact-max", "max-plus-one"),
 )
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_public_submit_enforces_utf8_request_boundary_on_postgresql(
     settings,
     tmp_path: Path,
@@ -3936,7 +4096,6 @@ def test_rq2_public_submit_enforces_utf8_request_boundary_on_postgresql(
     from django_ray.execution_codec import (
         ExecutionIdentity,
         ExecutionRequest,
-        encode_execution_request,
     )
     from django_ray.runner.errors import (
         RayJobRequestPreparationError,
@@ -3989,7 +4148,7 @@ def test_rq2_public_submit_enforces_utf8_request_boundary_on_postgresql(
         ).as_transport_dict(),
         compiled_graph_submission_transport="ray-job",
     )
-    serialized_request = encode_execution_request(request)
+    serialized_request = encode_legacy_execution_request(request)
     request_size_bytes = len(serialized_request.encode("utf-8"))
     request_limit = request_size_bytes + limit_delta
     assert request_size_bytes == request_limit + (0 if accepted else 1)
@@ -4038,6 +4197,7 @@ def test_rq2_public_submit_enforces_utf8_request_boundary_on_postgresql(
         ).exists()
 
 
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_public_submit_preserves_external_input_reference_on_postgresql(
     settings,
     tmp_path: Path,
@@ -4045,7 +4205,7 @@ def test_rq2_public_submit_preserves_external_input_reference_on_postgresql(
 ) -> None:
     """The public rq2 path nests one durable input reference without hydration."""
     import django_ray.runner.ray_job as ray_job_module
-    from django_ray.ray_job_request_storage import load_ray_job_request
+    from django_ray.ray_job_request_storage import _load_ray_job_request
     from django_ray.runner.ray_job import RayJobRunner
     from django_ray.runtime.runtime_env import normalize_runtime_env
 
@@ -4103,7 +4263,7 @@ def test_rq2_public_submit_preserves_external_input_reference_on_postgresql(
     assert len(client.submissions) == 1
     submission = client.submissions[0]
     encoded_locator = str(submission["entrypoint"]).rsplit(" ", maxsplit=1)[1]
-    request = load_ray_job_request(encoded_locator).request
+    request = _load_ray_job_request(encoded_locator, supported_protocols=_LEGACY_PROTOCOLS).request
     assert request.transport_version == 2
     assert request.serialized_args == EXTERNAL_INPUT_PLACEHOLDER
     assert request.serialized_kwargs == EXTERNAL_INPUT_PLACEHOLDER
@@ -4116,6 +4276,7 @@ def test_rq2_public_submit_preserves_external_input_reference_on_postgresql(
     assert private_marker not in json.dumps(submission, default=str)
 
 
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_concurrent_public_submit_creates_one_remote_job_on_postgresql(
     settings,
     tmp_path: Path,
@@ -4211,6 +4372,7 @@ def test_rq2_concurrent_public_submit_creates_one_remote_job_on_postgresql(
     )
 
 
+@pytest.mark.usefixtures("historical_rq2")
 def test_rq2_duplicate_stays_uncertain_when_owner_fails_before_remote_request(
     settings,
     tmp_path: Path,

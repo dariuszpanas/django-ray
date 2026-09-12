@@ -17,6 +17,23 @@ EXPECTED_TARGET_MODULE_FILES = {
     "django_ray/target/__init__.py",
     "django_ray/target/attestation.py",
     "django_ray/target/capabilities.py",
+    "django_ray/target/cohort_claim.py",
+    "django_ray/target/cohort_claim_storage.py",
+    "django_ray/target/cohort_contract.py",
+    "django_ray/target/cohort_intent.py",
+    "django_ray/target/cohort_intent_storage.py",
+    "django_ray/target/cohort_job_cleanup.py",
+    "django_ray/target/cohort_job_control.py",
+    "django_ray/target/cohort_job_retirement.py",
+    "django_ray/target/cohort_job_http.py",
+    "django_ray/target/cohort_job_receipt.py",
+    "django_ray/target/cohort_job_receipt_storage.py",
+    "django_ray/target/cohort_probe.py",
+    "django_ray/target/cohort_probe_challenges.py",
+    "django_ray/target/cohort_publication.py",
+    "django_ray/target/cohort_runtime.py",
+    "django_ray/target/cohort_sync.py",
+    "django_ray/target/cohort_transport.py",
     "django_ray/target/coordination.py",
     "django_ray/target/execution_codec.py",
     "django_ray/target/execution_evidence.py",
@@ -45,6 +62,8 @@ EXPECTED_WORKFLOW_MODULE_FILES = {
 EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/admin.py",
+    "django_ray/doctor.py",
+    "django_ray/maintenance.py",
     "django_ray/execution_codec.py",
     "django_ray/execution_protocol.py",
     "django_ray/ray_job_protocol.py",
@@ -55,6 +74,12 @@ EXPECTED_FILES = {
     *EXPECTED_WORKFLOW_MODULE_FILES,
     "django_ray/models.py",
     "django_ray/runtime/runtime_env_encryption.py",
+    "django_ray/runtime/cohort_entrypoint.py",
+    "django_ray/runtime/cohort_execution.py",
+    "django_ray/runtime/cohort_job.py",
+    "django_ray/runtime/cohort_job_entrypoint.py",
+    "django_ray/runtime/cohort_nested.py",
+    "django_ray/runtime_env_transport.py",
     "django_ray/static/django_ray/admin/diagnostics.css",
     "django_ray/static/django_ray/admin/task_live.css",
     "django_ray/static/django_ray/admin/task_live.js",
@@ -79,16 +104,47 @@ EXPECTED_FILES = {
     "django_ray/migrations/0024_ray_target_routes.py",
     "django_ray/migrations/0025_ray_worker_target_capabilities.py",
     "django_ray/migrations/0026_ray_task_target_execution_evidence.py",
+    "django_ray/migrations/0027_ray_target_probe_challenges.py",
+    "django_ray/migrations/0028_ray_task_cohort_intent.py",
+    "django_ray/migrations/0029_cohort_job_receipts.py",
+    "django_ray/migrations/0030_cohort_claims.py",
+    "django_ray/migrations/0031_maintenance_admission.py",
+    "django_ray/migrations/0032_maintenance_controls.py",
+    "django_ray/migrations/0033_cohort_job_cleanup.py",
+    "django_ray/migrations/0034_cohort_timeouts.py",
+    "django_ray/migrations/0035_activate_current_cohort.py",
     "django_ray/management/commands/django_ray_worker.py",
+    "django_ray/management/commands/django_ray_doctor.py",
+    "django_ray/management/commands/django_ray_maintenance.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/runner/ray_core.py",
+    "django_ray/runner/cohort_qualification.py",
+    "django_ray/runner/cohort_configuration.py",
+    "django_ray/runner/cohort_claims.py",
+    "django_ray/runner/cohort_cancel_request.py",
+    "django_ray/runner/cohort_cancellation.py",
+    "django_ray/runner/cohort_cleanup_recovery.py",
+    "django_ray/runner/cohort_completion.py",
+    "django_ray/runner/cohort_connection.py",
+    "django_ray/runner/cohort_core.py",
+    "django_ray/runner/cohort_dispatch.py",
+    "django_ray/runner/cohort_expiration.py",
+    "django_ray/runner/cohort_jobs.py",
+    "django_ray/runner/cohort_client_discovery.py",
+    "django_ray/runner/cohort_job_control.py",
+    "django_ray/runner/cohort_job_execution_control.py",
+    "django_ray/runner/cohort_job_helper.py",
+    "django_ray/runner/cohort_process.py",
+    "django_ray/runner/cohort_recovery.py",
+    "django_ray/runner/cohort_timeout.py",
+    "django_ray/runner/cohort_worker.py",
     "django_ray/runner/ray_job.py",
     "django_ray/runtime/entrypoint.py",
     "django_ray/runtime/remote.py",
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0026_ray_task_target_execution_evidence",
+    "0035_activate_current_cohort",
 )
 
 
@@ -132,9 +188,9 @@ def _verify_ray_security_floor(requirements: list[str], *, source: str) -> None:
         .replace("_", "-")
         .startswith("ray[default]")
     ]
-    if ray_requirements != ["ray[default]>=2.56.0"]:
+    if ray_requirements != ["ray[default]>=2.58.0"]:
         raise RuntimeError(
-            f"{source} must contain exactly one ray[default]>=2.56.0 runtime security floor"
+            f"{source} must contain exactly one ray[default]>=2.58.0 runtime security floor"
         )
 
 
@@ -267,8 +323,8 @@ def verify_installed_wheel(expected_version: str) -> None:
         source="installed wheel metadata",
     )
     installed_ray = Version(importlib.metadata.version("ray"))
-    if installed_ray < Version("2.56.0"):
-        raise RuntimeError(f"installed Ray {installed_ray} is below the 2.56.0 security floor")
+    if installed_ray < Version("2.58.0"):
+        raise RuntimeError(f"installed Ray {installed_ray} is below the 2.58.0 security floor")
 
     import cryptography
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -317,6 +373,8 @@ def verify_installed_wheel(expected_version: str) -> None:
             raise RuntimeError(f"{model.__name__} did not retain standard admin compatibility")
 
     expected_commands = {
+        "django_ray_doctor",
+        "django_ray_maintenance",
         "django_ray_protocol_status",
         "django_ray_worker",
     }
@@ -339,6 +397,24 @@ def verify_installed_wheel(expected_version: str) -> None:
     if EXPECTED_MIGRATION_LEAF not in applied:
         raise RuntimeError(f"installed migration leaf was not applied: {EXPECTED_MIGRATION_LEAF!r}")
 
+    maintenance_output = io.StringIO()
+    call_command("django_ray_maintenance", "--json", stdout=maintenance_output)
+    encoded_maintenance = maintenance_output.getvalue()
+    if len(encoded_maintenance.encode("utf-8")) > 262_144:
+        raise RuntimeError("django_ray_maintenance exceeded its output budget")
+    maintenance = json.loads(encoded_maintenance)
+    if (
+        maintenance.get("schema_version") != 1
+        or maintenance.get("mode") != "status"
+        or maintenance.get("changed") is not False
+        or maintenance.get("revision") != 1
+        or maintenance.get("pause_enqueues") is not False
+        or maintenance.get("pause_claims") is not False
+        or maintenance.get("scopes") != []
+        or maintenance.get("drain_verified") is not False
+    ):
+        raise RuntimeError("django_ray_maintenance did not report the seeded admission policy")
+
     protocol_status_output = io.StringIO()
     call_command(
         "django_ray_protocol_status",
@@ -354,6 +430,15 @@ def verify_installed_wheel(expected_version: str) -> None:
         or protocol_status.get("schema_version") != 1
     ):
         raise RuntimeError("django_ray_protocol_status did not emit its versioned JSON schema")
+
+    doctor_output = io.StringIO()
+    call_command("django_ray_doctor", "--json", stdout=doctor_output)
+    encoded_doctor = doctor_output.getvalue()
+    if len(encoded_doctor.encode("utf-8")) > 65_536:
+        raise RuntimeError("django_ray_doctor exceeded its output budget")
+    doctor = json.loads(encoded_doctor)
+    if doctor.get("schema") != "django-ray.doctor" or doctor.get("schema_version") != 1:
+        raise RuntimeError("django_ray_doctor did not emit its versioned JSON schema")
 
 
 def main() -> int:

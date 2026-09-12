@@ -52,6 +52,7 @@ def execute(
 ) -> int:
     started = time.monotonic()
     candidate = dependencies = target_metadata = receipt = fixture_root = None
+    execution_protocol_version = None
     failure = None
     expected_module = str((target / "django_ray/__init__.py").resolve())
     wheel._ensure_evidence_root(evidence_root)
@@ -93,6 +94,7 @@ def execute(
                 wheel._bounded_regular_bytes(receipt_path, maximum=MAX_PROBE_BYTES)
             )
             validate_probe(receipt, expected_module=expected_module)
+            execution_protocol_version = receipt["execution_protocol_version"]
         if (
             wheel._package_tree_digest(target / "django_ray")
             != candidate.installed_package_tree_sha256
@@ -119,6 +121,7 @@ def execute(
         "outcome": "passed" if failure is None else "failed",
         "failure": failure,
         "elapsed_seconds": time.monotonic() - started,
+        "execution_protocol_version": execution_protocol_version,
         "observations": receipt,
         "fixture_cleanup": fixture_cleanup,
     }

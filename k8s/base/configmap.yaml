@@ -18,7 +18,7 @@ data:
   DJANGO_RAY_INPUT_STORAGE_BACKEND: "filesystem"
   DJANGO_RAY_INPUT_STORAGE_FILESYSTEM_PATH: "/payload-storage/inputs"
   RAY_DASHBOARD_HOST: "0.0.0.0"
-  RAY_DASHBOARD_URL: "http://localhost:30265"
+  RAY_DASHBOARD_URL: "http://127.0.0.1:30265"
   RAY_STATE_API_ADDRESS: "http://ray-head-svc:8265"
   # Bundled database configuration for evaluation and local validation only.
   DATABASE_ENGINE: "django.db.backends.postgresql"

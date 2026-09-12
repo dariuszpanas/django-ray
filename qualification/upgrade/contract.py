@@ -14,6 +14,7 @@ BACKENDS = ("sqlite", "postgresql")
 PHASES = (
     "baseline-seed",
     "baseline-blocked",
+    "candidate-blocked-activation",
     "baseline-settle-fixture",
     "restored-baseline-read",
     "candidate-migrate-read",
@@ -36,6 +37,7 @@ def validate_backend(value: object, *, backend: str) -> dict:
         "backend",
         "phases",
         "backup_sha256",
+        "blocked_backup_sha256",
         "artifacts_sha256",
         "fixture_cleanup",
         "server_stopped",
@@ -54,7 +56,7 @@ def validate_backend(value: object, *, backend: str) -> dict:
         or [phase.get("phase") for phase in phases if isinstance(phase, dict)] != list(PHASES)
     ):
         raise QualificationError("incomplete-upgrade-receipt")
-    for field in ("backup_sha256", "artifacts_sha256"):
+    for field in ("backup_sha256", "blocked_backup_sha256", "artifacts_sha256"):
         digest = value[field]
         if (
             not isinstance(digest, str)
@@ -79,12 +81,26 @@ def validate_backend(value: object, *, backend: str) -> dict:
     fixed = {
         "baseline-seed": {"tasks": 8, "fixture_kind": "synthetic-released-models"},
         "baseline-blocked": {"blocked_tasks": 2, "active_leases": 1, "read_only": True},
+        "candidate-blocked-activation": {
+            "blocked_tasks": 2,
+            "active_leases": 1,
+            "activation_refused": True,
+            "activation_recorded": False,
+            "active_write_protocol_version": 1,
+            "legacy_token_present": True,
+            "original_fields_unchanged": True,
+        },
         "baseline-settle-fixture": {
             "nonterminal_tasks": 0,
             "active_leases": 0,
             "settlement": "synthetic-only",
         },
-        "candidate-new-write": {"current_enqueue": True, "candidate_only_rows": 1},
+        "candidate-new-write": {
+            "current_enqueue": True,
+            "candidate_only_rows": 1,
+            "execution_protocol_version": 3,
+            "persisted_intent_matches": True,
+        },
     }
     historical_digests = []
     for phase in phases:

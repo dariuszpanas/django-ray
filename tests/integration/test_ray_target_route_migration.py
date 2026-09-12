@@ -44,10 +44,13 @@ from django_ray.target.attestation import (
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
 
 MIGRATE_FROM = [("django_ray", "0023_ray_task_target_binding")]
 MIGRATE_TO = [("django_ray", "0024_ray_target_routes")]
-LATEST = [("django_ray", "0026_ray_task_target_execution_evidence")]
+HISTORICAL_LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGERS = {
@@ -139,6 +142,7 @@ def _create_binding(
     task_id: str = "task-target-route",
 ) -> RayTaskTargetBinding:
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id=task_id,
         callable_path="testproject.tasks.add_numbers",
     )
@@ -824,7 +828,7 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
             RayTargetRouteRevision.objects.all().delete()
         if RayTargetRoute._meta.db_table in table_names:
             RayTargetRoute.objects.all().delete()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -901,7 +905,7 @@ def test_sqlite_active_route_writer_cannot_partially_reverse_schema() -> None:
         assert _SQLITE_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_route_tables()
 
 
@@ -978,5 +982,5 @@ def test_postgresql_route_writer_serializes_before_reverse_guard() -> None:
         assert _POSTGRESQL_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_route_tables()

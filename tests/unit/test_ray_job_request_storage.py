@@ -30,6 +30,7 @@ from django_ray.models import (
     RayTaskExecution,
     TaskInputPayload,
     TaskState,
+    TaskWorkerLease,
 )
 from django_ray.ray_job_request_storage import (
     RAY_JOB_REQUEST_LOCATOR_MAX_CHARS,
@@ -49,6 +50,9 @@ from django_ray.ray_job_request_storage import (
 )
 from django_ray.result_storage import ResultStorageError, ResultStorageIntegrityError
 from django_ray.runner.base import SubmissionHandle
+from django_ray.target.attestation import RayRunnerFamily
+from django_ray.target.cohort_contract import encode_cohort_execution_contract
+from tests.unit.test_cohort_contract import contract
 
 
 def _filesystem_config(root: Path) -> dict[str, Any]:
@@ -86,15 +90,18 @@ def _request(
     runtime_env_profile: str | None = None,
     runtime_env_hash: str = "a" * 64,
 ) -> ExecutionRequest:
+    identity = identity or ExecutionIdentity(
+        task_execution_pk=1,
+        task_id="opaque-public-task",
+        attempt_number=1,
+        execution_generation=2,
+    )
+    # Storage validates canonical bytes without publishing runtime eligibility.
+    parent = replace(contract(family=RayRunnerFamily.RAY_JOB), identity=identity)
     return ExecutionRequest(
-        identity=identity
-        or ExecutionIdentity(
-            task_execution_pk=1,
-            task_id="opaque-public-task",
-            attempt_number=1,
-            execution_generation=2,
-        ),
-        execution_protocol_version=1,
+        identity=identity,
+        execution_protocol_version=3,
+        cohort_contract_json=encode_cohort_execution_contract(parent),
         callable_path=callable_path,
         transport_version=2 if input_reference else 1,
         serialized_args="null" if input_reference else serialized_args,
@@ -992,7 +999,7 @@ assert "django_ray.models" not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
-def _reserved_execution() -> tuple[RayTaskExecution, SubmissionHandle]:
+def _reserved_execution(*, state=TaskState.RUNNING) -> tuple[RayTaskExecution, SubmissionHandle]:
     from django_ray.ray_job_protocol import (
         STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
         coordination_sha256,
@@ -1002,10 +1009,10 @@ def _reserved_execution() -> tuple[RayTaskExecution, SubmissionHandle]:
     execution = RayTaskExecution.objects.create(
         task_id="reserved-public-task",
         callable_path="testproject.tasks.add_numbers",
-        state=TaskState.RUNNING,
+        state=state,
         attempt_number=1,
         execution_generation=2,
-        execution_protocol_version=1,
+        execution_protocol_version=3,
         claimed_by_worker="rq2-worker",
         ray_address=address,
         args_json="[1]",
@@ -1029,6 +1036,21 @@ def _reserved_execution() -> tuple[RayTaskExecution, SubmissionHandle]:
         ray_address=address,
         submitted_at=datetime.now(UTC),
     )
+
+
+def _replacement_owner() -> str:
+    lease = TaskWorkerLease.objects.create(
+        worker_id="replacement-worker",
+        hostname="request-storage-test",
+        pid=123,
+        started_at=datetime.now(UTC),
+        capability_schema_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
+        django_ray_version="0.5.0",
+        legacy_admission_token=None,
+    )
+    return lease.worker_id
 
 
 def _prepared_for_execution(
@@ -1355,9 +1377,15 @@ def test_register_rejects_cancelled_transferred_or_replaced_reservation(
     field: str,
     value: Any,
 ) -> None:
-    execution, handle = _reserved_execution()
+    # A terminal row may be observed with an older RUNNING caller snapshot.
+    # Do not manufacture a terminal transition without its resolved claim.
+    execution, handle = _reserved_execution(state=value if field == "state" else TaskState.RUNNING)
+    execution.state = TaskState.RUNNING
     prepared = _prepared_for_execution(execution, tmp_path)
-    RayTaskExecution.objects.filter(pk=execution.pk).update(**{field: value})
+    if field == "claimed_by_worker":
+        assert _replacement_owner() == value
+    if field != "state":
+        RayTaskExecution.objects.filter(pk=execution.pk).update(**{field: value})
 
     with pytest.raises(RayJobRequestStorageError) as caught:
         register_and_attach_ray_job_request(
@@ -1434,7 +1462,7 @@ def test_release_refuses_stale_reservation_and_preserves_tuple(tmp_path: Path) -
         task_execution=execution,
         submission_handle=handle,
     )
-    RayTaskExecution.objects.filter(pk=execution.pk).update(claimed_by_worker="replacement-worker")
+    RayTaskExecution.objects.filter(pk=execution.pk).update(claimed_by_worker=_replacement_owner())
 
     released = release_ray_job_request_reservation(
         execution,

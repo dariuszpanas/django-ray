@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import math
 import os
-from dataclasses import dataclass, field
+import sys
+import time
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from threading import BoundedSemaphore, Event, Thread
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from django_ray.redaction import materialize_exception_message, safe_exception_type_name
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
@@ -42,6 +46,46 @@ class RayCoreHandle:
     target_expectation: RayTargetExpectation | None = field(default=None, kw_only=True)
     claim_attestation: RayClusterAttestation | None = field(default=None, kw_only=True)
     target_execution_claimed_at: datetime | None = field(default=None, kw_only=True)
+    cohort_prepared: Any | None = field(default=None, repr=False, kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class RayCoreCohortRunnerResult:
+    handle: RayCoreHandle
+    result: Any | None
+    uncertainty: str | None
+    terminal_cancelled: bool = field(default=False, kw_only=True)
+
+
+class RayCoreCohortCancellationStatus(StrEnum):
+    REQUESTED = "requested"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class RayCoreCohortCancellationTicket:
+    """In-memory ownership only; a copied ticket cannot authorize a poll."""
+
+    handle: RayCoreHandle = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RayCoreCohortCancellationResult:
+    ticket: RayCoreCohortCancellationTicket
+    status: RayCoreCohortCancellationStatus
+    uncertainty: str | None
+
+
+@dataclass(slots=True)
+class _CohortCancellationOperation:
+    ticket: RayCoreCohortCancellationTicket
+    deadline: float
+    last_monotonic: float
+    completed: Event = field(default_factory=Event)
+    thread: Thread | None = None
+    requested: bool = False
+    uncertainty: str | None = None
+    slot_owned: bool = True
 
 
 @dataclass(frozen=True)
@@ -97,6 +141,63 @@ class _RayCoreSubmissionHandle(SubmissionHandle):
 
 
 @dataclass(frozen=True, slots=True)
+class _CohortCoreTaskSnapshot:
+    pk: int
+    task_id: str
+    attempt_number: int
+    execution_generation: int
+    execution_protocol_version: int
+    callable_path: str
+    args_json: str = field(repr=False)
+    kwargs_json: str = field(repr=False)
+    input_reference: str | None = field(repr=False)
+    runtime_env_profile: str | None
+    runtime_env_hash: str
+    runtime_env_json: str = field(repr=False)
+    claimed_by_worker: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CohortCoreSubmissionInput:
+    task: _CohortCoreTaskSnapshot = field(repr=False)
+    prepared: Any = field(repr=False)
+    configuration: dict[str, Any] = field(repr=False)
+    package_version: str
+    runtime: Any
+    transport: str
+    ray_module: Any = field(repr=False)
+    context: Any = field(repr=False)
+    connection_worker: Any = field(repr=False)
+
+
+def _cohort_connection_identity(package_version, runtime):
+    """Read only the exact2.58 default-context local connection identity.
+
+    RayAPIStub.get_context initializes new threads with the default context.
+    Non-default/multiple Client contexts are refused by the shared probe guard.
+    Reusing the default context after disconnect creates a different worker.
+    """
+    from django_ray.runner.cohort_core import _supported_connection
+
+    ray = _supported_connection(package_version, runtime)
+    import ray.util.client as client
+
+    if client.ray.is_connected() is True:
+        context = client.ray.get_context()
+        connection_worker = context.client_worker
+        transport = "ray-client"
+    else:
+        from ray._private.worker import global_worker
+
+        context = global_worker
+        connection_worker = getattr(global_worker, "core_worker", None)
+        transport = "direct-ray-core"
+    if connection_worker is None:
+        raise ValueError("Current-cohort Core connection unavailable")
+    return ray, transport, context, connection_worker
+
+
+@dataclass(frozen=True, slots=True)
 class _TargetExecutionSubmissionEvidence:
     """Canonical p2 claim controls admitted by the private submission seam."""
 
@@ -114,6 +215,7 @@ class _TargetExecutionSubmissionEvidence:
 # inside hot paths like submit_task or _RayExecutor.__init__ causes OOMs.
 
 _execute_django_task_remote_cached = None
+_execute_cohort_task_remote_cached = None
 
 # Ray Client's terminate-task RPC has no caller-visible timeout in Ray 2.56.
 # Keep the worker's database ownership locks bounded while matching the Ray Job
@@ -256,10 +358,28 @@ def _get_remote_execute_django_task() -> Any:
     return _execute_django_task_remote_cached
 
 
+def _get_remote_execute_cohort_task():
+    global _execute_cohort_task_remote_cached
+    if _execute_cohort_task_remote_cached is None:
+        import ray
+
+        from django_ray.runtime.remote import execute_cohort_django_task_remote
+
+        _execute_cohort_task_remote_cached = ray.remote(
+            cast(Any, execute_cohort_django_task_remote)
+        )
+    return _execute_cohort_task_remote_cached
+
+
 def _discard_remote_execute_django_task() -> None:
     """Discard a Ray Client definition that failed before submission."""
     global _execute_django_task_remote_cached
     _execute_django_task_remote_cached = None
+
+
+def _discard_remote_execute_cohort_task() -> None:
+    global _execute_cohort_task_remote_cached
+    _execute_cohort_task_remote_cached = None
 
 
 def _compiled_graph_submission_transport(ray: Any) -> str | None:
@@ -300,8 +420,24 @@ class RayCoreRunner(BaseRunner):
 
     def __init__(self) -> None:
         """Initialize the Ray Core runner."""
-        self._pending_tasks: dict[int, RayCoreHandle] = {}
+        self._initialize_tracking()
         self._ensure_ray_initialized()
+
+    def _initialize_tracking(self) -> None:
+        self._pending_tasks: dict[int, RayCoreHandle] = {}
+        self._cohort_cancellations: dict[int, _CohortCancellationOperation] = {}
+        self._cohort_cancellation_active: _CohortCancellationOperation | None = None
+
+    @classmethod
+    def _from_existing_connection(cls) -> RayCoreRunner:
+        """Allocate cohort tracking without connecting or replacing its owned epoch.
+
+        The controller alone owns connection startup and cleanup. Its earlier
+        connected observation may already be stale; submit rechecks the SDK.
+        """
+        runner = cls.__new__(cls)
+        runner._initialize_tracking()
+        return runner
 
     def _ensure_ray_initialized(self) -> None:
         """Ensure Ray is initialized."""
@@ -360,6 +496,104 @@ class RayCoreRunner(BaseRunner):
             input_reference=getattr(task_execution, "input_reference", None),
         )
 
+    def submit_cohort_task(self, task_execution, *, prepared):
+        """Submit only an independently claimed p3 request on the existing connection.
+
+        The owner retains the connection epoch, persists prepare/dispatch first,
+        and treats every missing return as uncertainty. This never initializes
+        or reconnects Ray and never infers authority from prepared data alone.
+        """
+        import ray
+
+        from django_ray.target.cohort_contract import CohortExecutionContract
+        from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+        request, contract = validate_prepared_cohort_execution(prepared, task=task_execution)
+        if type(contract) is not CohortExecutionContract or ray.is_initialized() is not True:
+            raise ValueError("Cohort Core connection unavailable")
+        submission = self._submit_serialized_request(
+            task_execution=task_execution,
+            callable_path=request.callable_path,
+            args_json=request.serialized_args,
+            kwargs_json=request.serialized_kwargs,
+            input_reference=request.input_reference,
+            cohort_prepared=prepared,
+        )
+        return submission.pending_handle
+
+    def _capture_cohort_submission(self, task_execution, *, prepared):
+        """Copy callback inputs without retaining an ORM object or reading files."""
+        from django_ray.conf.settings import get_settings
+        from django_ray.target.cohort_contract import CohortExecutionContract
+        from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+        request, contract = validate_prepared_cohort_execution(prepared, task=task_execution)
+        if type(contract) is not CohortExecutionContract:
+            raise ValueError("Current-cohort Core contract unavailable")
+        ray, transport, context, worker = _cohort_connection_identity(
+            contract.expected_django_ray_version, contract.target_expectation.runtime
+        )
+        if request.compiled_graph_submission_transport != transport:
+            raise ValueError("Current-cohort Core transport changed")
+        fields = _CohortCoreTaskSnapshot.__dataclass_fields__
+        snapshot = _CohortCoreTaskSnapshot(
+            **{name: getattr(task_execution, name) for name in fields}
+        )
+        if (
+            type(snapshot.runtime_env_json) is not str
+            or type(snapshot.runtime_env_hash) is not str
+            or type(snapshot.claimed_by_worker) is not str
+            or not snapshot.claimed_by_worker
+            or snapshot.runtime_env_profile != request.runtime_env_profile
+            or snapshot.runtime_env_hash != request.runtime_env_hash
+        ):
+            raise ValueError("Current-cohort Core snapshot changed")
+        return _CohortCoreSubmissionInput(
+            snapshot,
+            prepared,
+            deepcopy(get_settings()),
+            contract.expected_django_ray_version,
+            contract.target_expectation.runtime,
+            transport,
+            ray,
+            context,
+            worker,
+        )
+
+    def _submit_captured_cohort_submission(self, source, *, check_pending, on_handle, on_cleanup):
+        """One callback owns all filesystem/SDK work; no DB or reconnection."""
+        if type(source) is not _CohortCoreSubmissionInput:
+            raise ValueError("Current-cohort Core capture unavailable")
+
+        def fresh():
+            check_pending()
+            ray, transport, context, worker = _cohort_connection_identity(
+                source.package_version, source.runtime
+            )
+            if (
+                ray is not source.ray_module
+                or transport != source.transport
+                or context is not source.context
+                or worker is not source.connection_worker
+            ):
+                raise ValueError("Current-cohort Core connection changed")
+
+        fresh()
+        task = source.task
+        submission = self._submit_serialized_request(
+            task_execution=task,
+            callable_path=task.callable_path,
+            args_json=task.args_json,
+            kwargs_json=task.kwargs_json,
+            input_reference=task.input_reference,
+            cohort_prepared=source.prepared,
+            cohort_configuration=source.configuration,
+            check_pending=fresh,
+            on_handle=on_handle,
+            on_cleanup=on_cleanup,
+        )
+        return submission.pending_handle
+
     def _submit_target_execution(
         self,
         task_execution: RayTaskExecution,
@@ -397,6 +631,11 @@ class RayCoreRunner(BaseRunner):
         kwargs_json: str,
         input_reference: str | None,
         target_execution_evidence: _TargetExecutionSubmissionEvidence | None = None,
+        cohort_prepared: Any | None = None,
+        cohort_configuration: dict[str, Any] | None = None,
+        check_pending: Any | None = None,
+        on_handle: Any | None = None,
+        on_cleanup: Any | None = None,
     ) -> SubmissionHandle:
         """Submit one strict request without hydrating its application input."""
         existing_handle = self._pending_tasks.get(task_execution.pk)
@@ -409,6 +648,12 @@ class RayCoreRunner(BaseRunner):
 
         import ray
 
+        def fresh():
+            if check_pending is not None:
+                check_pending()
+
+        fresh()
+
         # Extract task name for Ray dashboard visibility
         task_name = callable_path.split(".")[-1] if callable_path else "task"
 
@@ -420,16 +665,36 @@ class RayCoreRunner(BaseRunner):
 
         # Keep the executor importable at module scope so Ray can reuse worker
         # processes without serializing a new nested function for every task.
-        runtime_env = runtime_env_for_execution(task_execution)
+        runtime_env = (
+            runtime_env_for_execution(task_execution)
+            if cohort_configuration is None
+            else runtime_env_for_execution(task_execution, config=cohort_configuration)
+        )
         from django_ray.conf.settings import get_settings
         from django_ray.workflow.plans import runtime_env_plan_identity
 
-        trust_identity = get_settings().get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+        settings = get_settings() if cohort_configuration is None else cohort_configuration
+        trust_identity = settings.get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
         plan_runtime_env_identity = runtime_env_plan_identity(
             runtime_env,
             trust_identity=trust_identity,
         )
-        with snapshot_local_runtime_env(runtime_env) as immutable_snapshot:
+        if cohort_prepared is not None:
+            from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+            request, _ = validate_prepared_cohort_execution(cohort_prepared, task=task_execution)
+            if request.runtime_env_plan_identity != plan_runtime_env_identity.as_transport_dict():
+                from django_ray.workflow.plans import WorkflowPlanMismatchError
+
+                raise WorkflowPlanMismatchError(
+                    "Prepared Core RuntimeEnv plan differs from current content or trust"
+                )
+        fresh()
+        snapshot_manager = snapshot_local_runtime_env(runtime_env)
+        if on_cleanup is not None:
+            on_cleanup(False)
+        immutable_snapshot = snapshot_manager.__enter__()
+        try:
             snapshot_runtime_env_identity = runtime_env_plan_identity(
                 immutable_snapshot,
                 trust_identity=trust_identity,
@@ -443,7 +708,13 @@ class RayCoreRunner(BaseRunner):
                 raise WorkflowPlanMismatchError(
                     "Outer RuntimeEnv immutable snapshot differs from its effective plan"
                 )
+            fresh()
             submitted_runtime_env = prepare_runtime_env_for_ray_core(immutable_snapshot)
+        finally:
+            snapshot_manager.__exit__(*sys.exc_info())
+            if on_cleanup is not None:
+                on_cleanup(True)
+        fresh()
         verified_runtime_env_identity = runtime_env_plan_identity(
             runtime_env,
             trust_identity=trust_identity,
@@ -470,7 +741,12 @@ class RayCoreRunner(BaseRunner):
         if submitted_runtime_env:
             remote_options["runtime_env"] = submitted_runtime_env
 
-        execute_django_task = _get_remote_execute_django_task().options(**remote_options)
+        fresh()
+        execute_django_task = (
+            _get_remote_execute_cohort_task()
+            if cohort_prepared is not None
+            else _get_remote_execute_django_task()
+        ).options(**remote_options)
 
         # Submit to Ray (non-blocking)
         submitted_at = datetime.now(UTC)
@@ -490,7 +766,27 @@ class RayCoreRunner(BaseRunner):
         submitted_target_expectation: RayTargetExpectation | None = None
         submitted_claim_attestation: RayClusterAttestation | None = None
         submitted_target_execution_claimed_at: datetime | None = None
-        if target_execution_evidence is None:
+        if cohort_prepared is not None:
+            from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+            request, _contract = validate_prepared_cohort_execution(
+                cohort_prepared, task=task_execution
+            )
+            if (
+                request.runtime_env_hash != runtime_env.digest
+                or request.runtime_env_profile != runtime_env.profile
+                or request.compiled_graph_submission_transport
+                != compiled_graph_submission_transport
+            ):
+                raise ValueError("Cohort prepared RuntimeEnv or transport changed")
+            execution_request = cohort_prepared.request_json
+            target_execution_evidence_id = target_execution_evidence_digest = None
+            target_expectation_digest = claim_attestation_digest = None
+            remote_expected_target = {
+                "expected_request_digest": cohort_prepared.request_digest,
+                "expected_cohort_contract_digest": cohort_prepared.contract_digest,
+            }
+        elif target_execution_evidence is None:
             from django_ray.execution_codec import (
                 ExecutionRequest,
                 encode_execution_request,
@@ -592,6 +888,7 @@ class RayCoreRunner(BaseRunner):
                     decoded_target_request.claim_attestation_digest
                 ),
             }
+        fresh()
         try:
             object_ref = execute_django_task.remote(
                 execution_request,
@@ -606,24 +903,13 @@ class RayCoreRunner(BaseRunner):
             # Ray Client leaves a failed ClientRemoteFunc in an in-progress
             # state. Reusing it turns the original serialization error into an
             # unrelated InProgressSentinel failure on the next attempt.
-            _discard_remote_execute_django_task()
+            if cohort_prepared is not None:
+                _discard_remote_execute_cohort_task()
+            else:
+                _discard_remote_execute_django_task()
             raise
 
-        # Get Ray job ID (the worker's client connection job ID)
-        ray_job_id = ""
-        ray_task_id = ""
-        try:
-            # Get the current job ID from Ray runtime context
-            ctx = ray.get_runtime_context()
-            ray_job_id = _ray_id_to_string(ctx.get_job_id())
-            # Get the task ID from the ObjectRef
-            # The hex() returns 56 chars but Ray Dashboard uses only first 48
-            full_hex = object_ref.hex()
-            ray_task_id = full_hex[:48] if len(full_hex) >= 48 else full_hex
-        except Exception:
-            pass
-
-        # Track the pending task
+        # Retain ObjectRef ownership before diagnostic RPCs or a deadline check.
         handle = RayCoreHandle(
             task_pk=task_execution.pk,
             object_ref=object_ref,
@@ -640,10 +926,27 @@ class RayCoreRunner(BaseRunner):
             target_expectation=submitted_target_expectation,
             claim_attestation=submitted_claim_attestation,
             target_execution_claimed_at=submitted_target_execution_claimed_at,
-            ray_job_id=ray_job_id,
-            ray_task_id=ray_task_id,
+            cohort_prepared=cohort_prepared,
         )
         self._pending_tasks[task_execution.pk] = handle
+        if on_handle is not None:
+            on_handle(handle)
+        fresh()
+
+        # Diagnostics do not authenticate completion or permit submission replay.
+        ray_job_id = ray_task_id = ""
+        try:
+            ctx = ray.get_runtime_context()
+            ray_job_id = _ray_id_to_string(ctx.get_job_id())
+            full_hex = object_ref.hex()
+            ray_task_id = full_hex[:48] if len(full_hex) >= 48 else full_hex
+        except Exception:
+            pass
+        handle = replace(handle, ray_job_id=ray_job_id, ray_task_id=ray_task_id)
+        self._pending_tasks[task_execution.pk] = handle
+        if on_handle is not None:
+            on_handle(handle)
+        fresh()
 
         # Build a composite ID that includes both job and task IDs for dashboard linking
         # Format: job_id:task_id (e.g., "02000000:67a2e8cfa5a06db3ffff...")
@@ -747,6 +1050,14 @@ class RayCoreRunner(BaseRunner):
                 )
             core_handle = self._pending_tasks[task_pk]
 
+        if core_handle.cohort_prepared is not None:
+            # Ordinary status has no authority to consume a cohort result or
+            # retire its exact reference while the ledger owner is retrying.
+            return JobInfo(
+                job_id=handle.ray_job_id,
+                status=JobStatus.UNKNOWN,
+                message="Cohort result requires authenticated protocol-3 polling",
+            )
         if core_handle.target_execution_evidence_id is not None:
             try:
                 ready, _ = ray.wait([core_handle.object_ref], timeout=0)
@@ -856,6 +1167,11 @@ class RayCoreRunner(BaseRunner):
 
         if self._pending_tasks.get(handle.task_pk) is not handle:
             return CancellationOutcome(CancellationOutcomeStatus.NOT_APPLICABLE)
+        if handle.cohort_prepared is not None:
+            return CancellationOutcome(
+                CancellationOutcomeStatus.NOT_APPLICABLE,
+                "Cohort cancellation requires the retained-ticket API",
+            )
 
         timeout = (
             _RAY_CORE_CANCEL_TIMEOUT_SECONDS
@@ -928,6 +1244,138 @@ class RayCoreRunner(BaseRunner):
             )
         return result[0]
 
+    @property
+    def cohort_cancellation_busy(self) -> bool:
+        """Whether an owned callback still forbids connection teardown.
+
+        A returned cancellation RPC is never descendant-cleanup evidence.
+        Retiring its ledger handle cannot stop or hide a live callback.
+        """
+        operation = self._cohort_cancellation_active
+        if operation is None:
+            return False
+        if operation.thread is not None and operation.thread.is_alive():
+            return True
+        if operation.slot_owned:
+            _RAY_CORE_CANCEL_SLOT.release()
+            operation.slot_owned = False
+        handle = operation.ticket.handle
+        if self._pending_tasks.get(handle.task_pk) is not handle:
+            if self._cohort_cancellations.get(handle.task_pk) is operation:
+                self._cohort_cancellations.pop(handle.task_pk)
+        self._cohort_cancellation_active = None
+        return False
+
+    def begin_cohort_cancellation(
+        self,
+        handle: RayCoreHandle,
+        *,
+        timeout_seconds: float = _RAY_CORE_CANCEL_TIMEOUT_SECONDS,
+    ) -> RayCoreCohortCancellationTicket | None:
+        """Request one recursive graceful cancellation outside DB locks.
+
+        None means no owned request started (stale handle or occupied slot).
+        Once issued, the same handle always returns its original ticket,
+        including after timeout or failure. No caller wait or retry can launch
+        another cancellation. The callback touches only its captured ObjectRef.
+        """
+        if self._pending_tasks.get(handle.task_pk) is not handle or handle.cohort_prepared is None:
+            return None
+        existing = self._cohort_cancellations.get(handle.task_pk)
+        if existing is not None and existing.ticket.handle is handle:
+            return existing.ticket
+        if (
+            type(timeout_seconds) not in {int, float}
+            or not math.isfinite(timeout_seconds)
+            or not 0 < timeout_seconds <= _RAY_CORE_CANCEL_TIMEOUT_SECONDS
+        ):
+            raise ValueError("Invalid cohort cancellation timeout")
+        try:
+            now = time.monotonic()
+            if type(now) not in {int, float} or not math.isfinite(now):
+                raise ValueError
+        except Exception:
+            raise ValueError("Cohort cancellation clock unavailable") from None
+        if self.cohort_cancellation_busy or not _RAY_CORE_CANCEL_SLOT.acquire(blocking=False):
+            return None
+
+        operation = _CohortCancellationOperation(
+            RayCoreCohortCancellationTicket(handle), now + timeout_seconds, now
+        )
+        self._cohort_cancellations[handle.task_pk] = operation
+        self._cohort_cancellation_active = operation
+
+        def request_exact_cancellation() -> None:
+            try:
+                import ray
+
+                ray.cancel(handle.object_ref, force=False, recursive=True)
+                operation.requested = True
+            except BaseException:
+                # No backend exception, returned ack or timeout proves that
+                # the outer task or any descendant has stopped.
+                operation.requested = False
+            finally:
+                operation.completed.set()
+
+        try:
+            operation.thread = Thread(
+                target=request_exact_cancellation,
+                name="django-ray-cohort-cancel",
+                daemon=True,
+            )
+            operation.thread.start()
+        except Exception:
+            _RAY_CORE_CANCEL_SLOT.release()
+            operation.slot_owned = False
+            operation.thread = None
+            operation.uncertainty = "callback_start_failed"
+            operation.completed.set()
+        return operation.ticket
+
+    def poll_cohort_cancellation(
+        self, ticket: RayCoreCohortCancellationTicket
+    ) -> RayCoreCohortCancellationResult | None:
+        """Poll only local state; cancellation acknowledgement is nonterminal.
+
+        Deadline/clock refusal is sticky even if the callback later returns.
+        Completion polling independently accepts a late exact-ref result.
+        """
+        if type(ticket) is not RayCoreCohortCancellationTicket:
+            raise ValueError("Unknown cohort cancellation ticket")
+        operation = self._cohort_cancellations.get(ticket.handle.task_pk)
+        if operation is None or operation.ticket is not ticket:
+            raise ValueError("Unknown cohort cancellation ticket")
+        # Local callback retirement remains possible even if the parent clock
+        # is invalid. No late network acknowledgement becomes terminal proof.
+        callback_busy = self.cohort_cancellation_busy
+        try:
+            now = time.monotonic()
+            if (
+                type(now) not in {int, float}
+                or not math.isfinite(now)
+                or now < operation.last_monotonic
+            ):
+                raise ValueError
+            operation.last_monotonic = now
+            if now >= operation.deadline:
+                operation.uncertainty = operation.uncertainty or "deadline"
+        except Exception:
+            operation.uncertainty = operation.uncertainty or "clock_unavailable"
+        if operation.uncertainty is not None:
+            return RayCoreCohortCancellationResult(
+                ticket, RayCoreCohortCancellationStatus.UNCERTAIN, operation.uncertainty
+            )
+        if not operation.completed.is_set() or callback_busy:
+            return None
+        return RayCoreCohortCancellationResult(
+            ticket,
+            RayCoreCohortCancellationStatus.REQUESTED
+            if operation.requested
+            else RayCoreCohortCancellationStatus.UNCERTAIN,
+            None if operation.requested else "request_uncertain",
+        )
+
     def get_pending_handle(
         self,
         task_pk: int,
@@ -961,6 +1409,14 @@ class RayCoreRunner(BaseRunner):
         if self._pending_tasks.get(handle.task_pk) is not handle:
             return False
         self._pending_tasks.pop(handle.task_pk, None)
+        operation = (
+            self._cohort_cancellations.get(handle.task_pk)
+            if handle.cohort_prepared is not None
+            else None
+        )
+        if operation is not None and operation.ticket.handle is handle:
+            if operation.thread is None or not operation.thread.is_alive():
+                self._cohort_cancellations.pop(handle.task_pk)
         return True
 
     def poll_completed(
@@ -983,7 +1439,7 @@ class RayCoreRunner(BaseRunner):
             selected_handles = tuple(
                 handle
                 for handle in self._pending_tasks.values()
-                if handle.target_execution_evidence_id is None
+                if handle.target_execution_evidence_id is None and handle.cohort_prepared is None
             )
         else:
             selected_by_task = {
@@ -991,6 +1447,7 @@ class RayCoreRunner(BaseRunner):
                 for handle in handles
                 if self._pending_tasks.get(handle.task_pk) is handle
                 and handle.target_execution_evidence_id is None
+                and handle.cohort_prepared is None
             }
             selected_handles = tuple(selected_by_task.values())
 
@@ -1059,6 +1516,63 @@ class RayCoreRunner(BaseRunner):
             self.retire_pending_handle(handle)
 
         return completed
+
+    def poll_cohort_completed(self, handles):
+        """Read only exact owned refs; leave retirement to the fenced ledger owner."""
+        import ray
+        from ray.exceptions import TaskCancelledError
+
+        from django_ray.target.cohort_transport import decode_cohort_execution_result
+
+        selected = tuple(
+            handle
+            for handle in handles
+            if self._pending_tasks.get(handle.task_pk) is handle
+            and handle.cohort_prepared is not None
+        )
+        if not selected:
+            return []
+        try:
+            ready, _ = ray.wait(
+                [handle.object_ref for handle in selected], num_returns=len(selected), timeout=0
+            )
+        except Exception:
+            return [
+                RayCoreCohortRunnerResult(handle, None, "transport_uncertain")
+                for handle in selected
+            ]
+        results = []
+        for handle in selected:
+            if handle.object_ref not in ready:
+                continue
+            prepared = handle.cohort_prepared
+            try:
+                payload = ray.get(handle.object_ref)
+            except Exception as exc:
+                # RayTaskError can dynamically inherit its cause's type. Only
+                # the direct outer transport exception is terminal evidence;
+                # a nested TaskCancelledError/cause or text is insufficient.
+                cancelled = type(exc) is TaskCancelledError
+                results.append(
+                    RayCoreCohortRunnerResult(
+                        handle,
+                        None,
+                        None if cancelled else "transport_uncertain",
+                        terminal_cancelled=cancelled,
+                    )
+                )
+                continue
+            try:
+                result = decode_cohort_execution_result(
+                    payload,
+                    expected_identity=prepared.identity,
+                    expected_request_digest=prepared.request_digest,
+                    expected_cohort_contract_digest=prepared.contract_digest,
+                )
+                results.append(RayCoreCohortRunnerResult(handle, result, None))
+            except Exception:
+                results.append(RayCoreCohortRunnerResult(handle, None, "transport_uncertain"))
+        return results
 
     def _poll_target_execution_results(
         self,
@@ -1239,4 +1753,5 @@ class RayCoreRunner(BaseRunner):
 
     def clear_pending_tasks(self) -> None:
         """Forget all locally tracked tasks after a connection loss or handoff."""
-        self._pending_tasks.clear()
+        for handle in tuple(self._pending_tasks.values()):
+            self.retire_pending_handle(handle)

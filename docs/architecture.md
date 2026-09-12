@@ -600,10 +600,11 @@ For Ray Job mode, this envelope is also written to the task's `completion_data`
 field. It is the authoritative completion channel; logs may be unavailable or
 contain arbitrary application output.
 
-### Rolling upgrades
+### Coordinated upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0026_ray_task_target_execution_evidence` before starting upgraded workers:
+`0035_activate_current_cohort` after draining work and stopping old writers, before
+starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -614,11 +615,65 @@ Migration `0022` adds only dormant target intent and verified-attestation histor
 migration `0023` adds only an unseeded execution-to-target-policy relationship; and
 migration `0024` adds backend-alias route history plus a separate, unseeded binding-to-route
 selection record. Migration `0025` adds an unseeded current worker/target capability row and
-private compare-and-set coordinator. No production path creates, renews, reads, or treats a
-capability row as capacity. Migration `0026` adds unseeded, immutable per-generation claim evidence
+private compare-and-set coordinator. The later current-cohort publisher uses this
+capability storage for fresh qualification; the read-only doctor aggregates metadata.
+Migration `0026` adds unseeded, immutable per-generation claim evidence
 and an optional create-once outcome without a production writer or reader. Existing exact-lease
-deletion may only fail-closed cascade-withdraw an otherwise unreachable capability row; none of
+deletion may only fail-closed cascade-withdraw a capability row; none of
 these migrations alone authorizes claims, activates routing, or enables protocol-2 writes.
+
+Migrations `0027` through `0030` prepare the separate current-cohort contract:
+single-use probe challenges, immutable producer intent, reserved Jobs probe receipts,
+and per-generation claim records. Schema-2 bindings distinguish Sync from Core and
+Jobs; Sync records its exact package and Python tuple without a Ray target. A claim
+retains its original evidence independently from ephemeral worker capability rows.
+Its mutable disposition and current owner are revision-fenced, with unknown outcomes
+held for authenticated resolution instead of expiring into automatic replay. The
+protocol-3 worker composes these services with lifecycle and transport ownership. See
+[current-cohort execution](compatibility.md#current-cohort-execution).
+
+Initial Core/Jobs preparation captures immutable task, claim, RuntimeEnv and trust
+inputs on the parent thread. Owned callbacks build filesystem manifests and snapshots,
+upload artifacts and submit remote work; only the parent commits prepared requests
+and dispatch ownership to SQL. Polling those callbacks keeps heartbeats and completion
+handling moving. Core submission binds the exact retained connection ticket and keeps
+its final handle before diagnostic writes, including late uncertain outcomes. Pending
+preparation and submission retain capacity until actual callback exit and required
+local cleanup, even after SQL becomes terminal; connection teardown cannot race them.
+Database work and Sync execution can still block the parent, and local cleanup never
+proves that remote application work is quiescent.
+
+Migration `0033` keeps a durable Jobs driver cleanup obligation separate from an
+authenticated task result. An open obligation survives retries and owner loss,
+blocks the next execution generation, and prevents worker retirement. Closure
+requires a fresh, independently corroborated terminal observation of the exact
+original Job after its completion obligation was recorded. Missing request
+references preserve the truthful result with an explicitly uninspectable open
+obligation. This migration refuses pre-release completed protocol-3 Jobs history
+whose driver cleanup cannot be established; it does not synthesize cleanup proof
+or reinterpret protocol-1, Core, or Sync history. Closed cleanup history follows
+ordinary claim retention.
+
+Migration `0034` retains the original per-generation timeout request before
+requesting remote cancellation. It preserves the task's started time, timeout,
+and elapsed deadline without treating a cancellation acknowledgment as terminal
+proof. Authentic late completion still wins; independently confirmed timeout
+cancellation records the existing failed-timeout outcome without automatic retry.
+Resolved timeout history can be purged with its original claim.
+
+Migration `0035` atomically selects protocol 3 and closes legacy admission under the
+stopped-writer maintenance barrier. Unsupported nonterminal tasks, active incompatible
+leases, unresolved claims and open Jobs cleanup obligations refuse activation. Historical
+terminal results remain intact; neither migration nor retry translates old payloads.
+New legacy inserts, legacy reentry and incompatible active leases are fenced in the
+database. Current-cohort history prevents reversal. See the
+[coordinated Beta procedure](stability.md#coordinated-beta-upgrades).
+
+The following migration and transport notes describe retained historical protocols.
+They explain stored records and earlier implementation boundaries, not supported
+rolling upgrades or execution by the current protocol-3 worker. In particular,
+legacy admission cannot reopen after `0035`, and current workers do not adopt
+released protocol-1 work. Use the coordinated procedure above for deployment.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -723,15 +778,16 @@ code rollback, stop new coordinators and drain active workflows first, retain mi
 `0018`, and then start the old code; reversing `0018` separately drops the allocation
 metadata and requires a stopped-writer maintenance window.
 
-Migration `0019` establishes the schema-first execution-protocol boundary. It records
+Migration `0019` established the historical schema-first execution-protocol boundary. It records
 protocol `1` on every existing execution and archived attempt, classifies existing and
 old-writer execution rows as metadata schema `0`, and leaves their package provenance
-null. Package-owned 0.5 producers explicitly write metadata schema `1`, protocol `1`,
-and their creator package version; an old writer that relies on database defaults
-continues to produce schema-`0` rows with unknown creator provenance. Existing and
+null. The intermediate, unreleased producer wrote metadata schema `1`, protocol `1`,
+and its creator package version; old writers relying on the database defaults could
+produce schema-`0` rows with unknown creator provenance before `0035`. Final 0.5
+producers write protocol `3`, and current workers advertise only `3..3`. Existing and
 pre-capability worker leases use capability schema `0`, a null protocol range, and the
-singleton legacy admission token; upgraded workers advertise capability schema `1`
-and the explicit supported range `1` through `1`. Database fences keep execution,
+singleton legacy admission token; the intermediate protocol-1 workers advertised capability schema `1`
+and range `1..1`. Database fences keep execution,
 attempt, and lease
 capability identity immutable. While protocol `1` and legacy admission remain open,
 the ownership fence is deliberately dormant so existing recovery behavior is unchanged.
@@ -750,13 +806,15 @@ rows implement protocol `1`; drain or cancel them, or complete an application-sp
 audit, before applying `0019`. A migration number alone is not evidence that every
 writer followed the 0.4.0 execution contract.
 
-The seeded singleton policy has schema `1`, active write protocol `1`, legacy admission
-open, and revision `1`. This is a deliberately dormant rollout boundary: `0019` does
+The initial `0019` singleton seed has schema `1`, active write protocol `1`, legacy admission
+open, and revision `1`. Migration `0035` advances its revision, selects protocol `3`,
+closes legacy admission and removes the token. The initial seed alone was a dormant boundary: `0019` does
 not introduce a protocol-`2` writer, change the execution wire format, close legacy
 admission, or expose policy mutation through Admin. Admin displays the policy and the
 bounded lease capability as read-only operational evidence. The integer execution
-protocol is the normative compatibility decision; `django-ray` package versions are
-diagnostic provenance only and must not be used to infer admission or routing.
+protocol is the normative compatibility decision. Current-cohort admission also
+requires the exact package and runtime; a package version alone never proves routing,
+target identity or live qualification.
 
 After a compatible claim or ownership adoption, the execution records the package
 version of the manager for that current attempt. Terminal archival copies the exact
@@ -781,8 +839,9 @@ and apply configured presentation redaction. Historical or unreported provenance
 null; an oversized stored value becomes null or the Admin's fixed unavailable display
 instead of being transferred as an unbounded value.
 
-The private protocol-coordination primitive is implementation infrastructure for the
-later supported operator adapter; it is not itself an adopter-facing mutation API. A
+The historical private protocol-1 coordination primitive is not an adopter-facing
+mutation API and cannot reopen active protocol `3`. Current maintenance uses the
+separate audited admission, quarantine and retirement services. A historical
 changing call supplies the exact policy revision its caller reviewed, bounded to the
 database positive-bigint range; an exhausted revision refuses mutation explicitly.
 Closing also carries a caller assertion intended for the later operator adapter that
@@ -814,11 +873,11 @@ worker. SQLite begins with its database writer fence.
 Migration `0020` persists the resulting invariant by rejecting a non-protocol-`1`
 nonterminal insert or terminal-to-nonterminal transition whenever legacy admission is
 open. Installation fails closed if an already-open policy contains such work. It is a
-prerequisite for a possible code-only rollback, not proof that upgraded producers,
+pre-activation schema prerequisite for a possible code-only rollback, not proof that upgraded producers,
 task managers, RuntimeEnv
 artifacts, or remote work have been retired safely. This service remains internal in
-this slice: operators must not import or invoke it directly, and there is no mutable
-Admin action, HTTP endpoint, public API export, or operator command yet.
+this historical protocol-1 boundary: operators must not import or invoke it directly.
+It is not the current `django_ray_maintenance` operator command.
 
 An upgraded task manager now derives its claim capability from the exact schema-`1`,
 token-free worker lease after that lease has been locked and proven live. Queued expiry
@@ -883,10 +942,12 @@ protocol under the authoritative lease-and-task lock before it canonicalizes a r
 reference, stores a result, changes lifecycle state, or records executor provenance.
 Package Semantic Version remains diagnostic and never decides compatibility.
 
-Unversioned 0.4 completions remain explicit protocol-v1 legacy envelopes. Their existing
-success/failure behavior and bounded malformed-envelope recovery remain available during
-a manager rolling handoff, but they cannot report executor provenance. A valid
-versioned-v1 completion can also be consumed by an older permissive v1 manager because
+Unversioned 0.4 completions are retained as historical protocol-v1 legacy envelopes.
+Their success/failure behavior and bounded malformed-envelope recovery belonged to
+the old manager, and they cannot report executor provenance. Current protocol-3
+workers do not consume them: finish that work with compatible old managers before
+the coordinated stopped-writer upgrade. A valid
+versioned-v1 completion could be consumed by an older permissive v1 manager because
 the legacy outcome keys remain at the top level. In contrast, a versioned schema,
 protocol, identity, or shape mismatch is uncertain: its result and reference are never
 inspected or stored and it is never automatically retried. A still-active Ray Job is
@@ -947,9 +1008,9 @@ is uncertainty rather than a proven compatibility rejection; its exact Ray handl
 available for reconciliation.
 
 This is a real by-value remote trust boundary, but it is not a production protocol-`2`
-activation. `EXECUTION_PROTOCOL_VERSION`, the package-supported range, the seeded active
-write policy, and every production lease remain protocol `1`/`1..1`. No backend writes the
-new request, no worker claims protocol `2`, no target-capability producer supplies a generation
+activation. The current producer, supported range and active write policy use protocol `3`;
+no backend writes the protocol-2 request, no worker claims protocol `2`, and no
+protocol-2 target-capability producer supplies a generation
 claim, and no production path calls the package-private submission seam.
 
 If Ray returns no executor completion for a strict handle, the manager records a fixed
@@ -1003,18 +1064,17 @@ A typed nested-request rejection remains fixed and pickle-safe through bounded
 `RayTaskError.cause` unwrapping. The outer completion records only its fixed classifier,
 no remote traceback, and `retryable=false`; it is never automatically replayed because
 sibling leaves may already have produced effects. Marker-free released direct calls
-remain the protocol-v1 compatibility path, while an explicitly strict context cannot
-downgrade. These boundaries still do not prove cross-version cloudpickle compatibility
+are historical protocol-v1 paths, refused by the current runtime. An explicitly
+strict context cannot downgrade. These boundaries do not prove cross-version cloudpickle compatibility
 or replace the separate exact Ray/Python and cluster-instance attestation required
 before serialization and submission.
 
-This completes the still-unreleased 0.5 explicit protocol-`1` worker contract. The
-supported rolling boundary is released 0.4 legacy/schema-`0` workers versus one exact
-final 0.5 candidate; intermediate development snapshots that advertised schema `1`
-before this boundary landed are not a supported cohort and must be stopped and drained.
+The protocol-1 worker contract was an intermediate, unreleased development boundary.
+It does not define the final 0.5 upgrade contract. Released and intermediate workers
+must drain their work and stop before the current protocol-3 activation.
 Protocol fields deliberately do not encode Git commits or package Semantic Versions.
 
-The guarded local KubeRay gate validates that boundary with the real released and current
+The retained full KubeRay script tests that historical boundary with released and old-current
 manager implementations rather than synthesizing their lease metadata. A manager built
 from the pinned released `v0.4.0` tree acquires a capability-schema-`0` lease and submits a
 slow protocol-`1` Ray Job through its released transport. After that manager stops, the exact
@@ -1053,7 +1113,7 @@ surface can report end-to-end capacity.
 The first target-attestation slice is deliberately Django-free and dormant. Its
 canonical contract binds an operator target key and policy revision to the runner
 family, one Ray cluster session, and an exact Ray/Python runtime tuple. A bounded Ray
-2.56.0 adapter takes resource-state snapshots before and after one hard-affinity probe
+2.58.0 adapter takes resource-state snapshots before and after one hard-affinity probe
 on every live schedulable node. The cluster session and exact sorted node set must stay
 unchanged across that interval, every node must report the expected tuple and its own
 identity, and the resource-state and per-node counters must not regress. Those counters
@@ -1156,8 +1216,9 @@ fresh lease, canonical proof, and latest `active` or `draining` policy. `drainin
 needed so already-pinned work can retain compatible capacity; it never makes that target eligible
 for a new route or enqueue. Ray Job capability APIs remain unsupported pending their authenticated
 pre-Django proof channel. No production lease creation, heartbeat, reconnect, enqueue, claim,
-adoption, reconciliation, cancellation, status, runner, or transport path creates, renews, reads,
-or treats a capability row as capacity. Existing exact-lease deletion, including supported Admin
+adoption, reconciliation, cancellation, status, runner, or transport path creates, renews,
+or treats a capability row as capacity. The read-only doctor aggregates scalar metadata
+without granting eligibility. Existing exact-lease deletion, including supported Admin
 inactive-lease cleanup, may only fail-closed cascade-withdraw an otherwise unreachable row; it
 does not advertise or consume capacity.
 
@@ -1208,14 +1269,15 @@ uncertain. Both tables are initially empty. No enqueue, claim, capability, worke
 runner, lifecycle, status, or Admin path writes or reads them in production, and Ray Job is
 unsupported.
 
-Exact 0.4.0 code ignores the `0022` through `0026` tables, so a code-only rollback retains the
+Before activation, exact 0.4.0 code ignored the `0022` through `0026` tables, so a schema-only code rollback retained the
 durable policy, attestation, binding, route, generation-claim, and outcome history while no old
 process consumes capability rows. Schema reversal is a separate stopped-writer operation: delete
 every outcome and generation claim before reversing `0026`; delete every current capability before
 reversing `0025`; `0024` then refuses to reverse while any route, route revision, or selection
 remains; `0023` refuses while any binding remains; and `0022` finally refuses while target history
 remains. The deliberate maintenance-delete path follows the same protected-parent ordering and is
-not part of an ordinary binary rollback.
+not part of an ordinary binary rollback. This historical observation does not permit
+a code-only downgrade after `0035` or erase current claim and cleanup obligations.
 
 The read-only protocol-status service exposes only the database facts this boundary can
 support. One versioned immutable report aggregates policy/token consistency, active and
@@ -1232,15 +1294,15 @@ package-version, or payload identity. Building or rendering the report never loc
 mutation and never changes rollout state; every changing transition rechecks its own
 durable preconditions.
 
-A code-only rollback and a schema reversal are different operations. To return to exact
-0.4.0 code, first keep the policy at protocol `1` with legacy admission open, verify
-that nonterminal work is protocol `1`, stop upgraded task managers, and reconcile their
-in-flight work; retain migration `0019` so old writers receive its legacy database
-defaults and token, and retain `0020` so reopening cannot race incompatible work.
-Reverse `0020` and then `0019` only in a separate stopped-writer maintenance window
-after confirming no retained diagnostics require their fields. Reversal removes the
-protocol and provenance columns, worker capability metadata, singleton policy and token,
-and database fences; it is not required for a code rollback.
+Final 0.5 rollback requires the coordinated stopped-writer backup/restore procedure.
+After `0035`, changing only application binaries to 0.4.0 or reopening legacy
+admission is not supported. Stop the new fleet, reconcile its remote work and
+preserve its evidence, then restore the independently verified pre-upgrade backup
+with matching artifacts and encryption keys before restarting the old fleet.
+Current-cohort history blocks activation reversal. The earlier code-only rollback
+recipe applied solely to the intermediate protocol-1/open schema state; reversing
+`0020` and `0019` drops protocol, provenance, capability, policy, token and database
+fences and is not a substitute for the final release's restore rehearsal.
 
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
 reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain
@@ -1253,12 +1315,12 @@ making it active and retains every old key until no durable row needs it; this r
 does not rewrite or rewrap historical rows.
 
 The completion envelope and `execution_generation` fields are part of the Ray Job
-protocol. This release's explicit legacy-v1 adapter permits compatible 0.4 completions
-to finish while upgraded task managers reconcile them, and the flat enriched-v1 shape
-retains the old top-level outcome keys. A future incompatible request or completion
-schema still requires a reader-first rollout and a compatible manager cohort until every
-older in-flight Ray Job drains. Never retry an uncertain remote execution merely to
-complete an upgrade; first prove its exact remote identity and quiescence.
+protocol. The retained legacy-v1 codec explains historical 0.4 data; the current
+runtime refuses its execution entry points and current workers do not reconcile
+old active work. Final 0.5 therefore requires draining old Jobs with compatible
+old managers before stopping writers and activating protocol 3. Never retry an
+uncertain remote execution merely to complete an upgrade; first prove its exact
+remote identity and quiescence.
 
 ## Reliability Controls
 

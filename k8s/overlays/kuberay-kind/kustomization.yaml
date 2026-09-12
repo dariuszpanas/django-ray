@@ -1,39 +1,46 @@
-# Evaluation-only KubeRay deployment for local kind clusters.
-# Do not apply it to a production cluster.
-# This path keeps django-web/django workers in Deployments and delegates
-# Ray head/worker lifecycle to a RayCluster custom resource.
+# Local evaluation only; credentials are prepared separately.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 namespace: django-ray
-
 resources:
   - ../../base
   - ray-cluster-kuberay.yaml
   - worker-ml.yaml
   - worker-ray-job.yaml
   - worker-sync.yaml
-
 patches:
-  # This overlay targets a local kind cluster, not production.
-  - patch: |-
+  - patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_DEMO_WORKLOADS_ENABLED
+          value: 'true'
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DJANGO_DEMO_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: django-ray-demo
+              key: DJANGO_DEMO_TOKEN
+    target:
+      kind: Deployment
+      name: django-web
+  - patch: |
       - op: replace
         path: /data/DJANGO_DEPLOYMENT_MODE
-        value: "demo"
+        value: demo
     target:
       kind: ConfigMap
       name: django-ray-config
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /data/DJANGO_ALLOWED_HOSTS
-        value: "localhost,127.0.0.1,django-ray.localhost"
+        value: localhost,127.0.0.1,django-ray.localhost
     target:
       kind: ConfigMap
       name: django-ray-config
-
-  # Kubelet connects to the pod IP but sends this stable, allowed Host header.
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/template/spec/containers/0/readinessProbe/httpGet/httpHeaders/0/value
         value: django-ray.localhost
@@ -43,11 +50,7 @@ patches:
     target:
       kind: Deployment
       name: django-web
-
-  # Exercise encrypted RuntimeEnv snapshots through the explicit Django-secret
-  # fallback. Keep these settings on Django application processes only: generic
-  # Ray pods neither encrypt nor decrypt durable task rows.
-  - patch: |-
+  - patch: |
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
@@ -62,12 +65,10 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
-          value: "true"
+          value: 'true'
     target:
       kind: Deployment
       name: django-web
-
-  # Remove legacy static Ray resources from base.
   - patch: |-
       $patch: delete
       apiVersion: apps/v1
@@ -78,7 +79,6 @@ patches:
     target:
       kind: Deployment
       name: ray-head
-
   - patch: |-
       $patch: delete
       apiVersion: apps/v1
@@ -89,7 +89,6 @@ patches:
     target:
       kind: Deployment
       name: ray-worker
-
   - patch: |-
       $patch: delete
       apiVersion: v1
@@ -100,42 +99,21 @@ patches:
     target:
       kind: Service
       name: ray-head-svc
-
-  # The guarded local gate requires this live Secret to be provisioned before
-  # it starts, hashes its complete data during preflight, and verifies that the
-  # data is unchanged after the run. Never render the base placeholder into an
-  # authoritative direct or inherited Kong apply stream.
-  - patch: |-
-      $patch: delete
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: django-ray-secret
-        namespace: django-ray
-    target:
-      kind: Secret
-      name: django-ray-secret
-
-  # Enable Django debug mode for local iteration.
-  - patch: |-
+  - patch: |
       - op: replace
         path: /data/DJANGO_DEBUG
-        value: "True"
+        value: 'True'
     target:
       kind: ConfigMap
       name: django-ray-config
-
-  # Keep one default/priority task manager for the bounded local exploratory
-  # profile. The heavier Kong overlay explicitly restores two replicas.
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/replicas
         value: 1
     target:
       kind: Deployment
       name: django-ray-worker
-
-  - patch: |-
+  - patch: |
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
@@ -150,12 +128,11 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
-          value: "true"
+          value: 'true'
     target:
       kind: Deployment
       name: django-ray-worker
-
-  - patch: |-
+  - patch: |
       - op: add
         path: /spec/template/spec/containers/0/env
         value:
@@ -164,12 +141,28 @@ patches:
           - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
             value: django-secret
           - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
-            value: "true"
+            value: 'true'
+          - name: DJANGO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DJANGO_SECRET_KEY
+          - name: DATABASE_USER
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_USER
+          - name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_PASSWORD
+          - name: DJANGO_API_ENABLED
+            value: 'false'
     target:
       kind: Deployment
       name: django-ray-worker-sync
-
-  - patch: |-
+  - patch: |
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
@@ -184,12 +177,11 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
-          value: "true"
+          value: 'true'
     target:
       kind: Deployment
       name: django-ray-worker-ml
-
-  - patch: |-
+  - patch: |
       - op: add
         path: /spec/template/spec/containers/0/env
         value:
@@ -198,23 +190,41 @@ patches:
           - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
             value: django-secret
           - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK
-            value: "true"
+            value: 'true'
+          - name: DJANGO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DJANGO_SECRET_KEY
+          - name: DATABASE_USER
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_USER
+          - name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_PASSWORD
+          - name: RAY_AUTH_MODE
+            value: token
+          - name: RAY_AUTH_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-auth
+                key: RAY_AUTH_TOKEN
+          - name: DJANGO_API_ENABLED
+            value: 'false'
     target:
       kind: Deployment
       name: django-ray-worker-ray-job
-
-  # Also consume the high-priority and low-priority queues from the default
-  # worker pool so tasks submitted to them aren't stuck with no consumer.
-  # ml/sync have their own dedicated worker deployments (worker-ml.yaml,
-  # worker-sync.yaml) since they have different resource/runtime needs.
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/template/spec/containers/0/env/1/value
-        value: "default,high-priority,low-priority"
+        value: default,high-priority,low-priority
     target:
       kind: Deployment
       name: django-ray-worker
-
 images:
   - name: django-ray
     newName: django-ray

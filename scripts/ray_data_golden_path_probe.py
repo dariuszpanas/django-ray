@@ -8,16 +8,18 @@ import json
 import os
 import platform
 import re
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-# Ray 2.56 otherwise detects this script's ``uv run`` ancestor and propagates
+# Ray otherwise detects this script's ``uv run`` ancestor and propagates
 # the outer editable-project command into each minimal immutable working-dir
 # archive. The disposable environment already contains the exact dependency
 # set, so workers must use that preinstalled interpreter directly.
@@ -101,6 +103,132 @@ def _use_preinstalled_probe_dependencies(django_settings: Any) -> None:
     }
 
 
+def _run_probe_worker() -> int:
+    """Give the owned worker the same fixed profile as its producer."""
+    import django
+    from django.conf import settings as django_settings
+    from django.core.management import call_command
+
+    django.setup()
+    _use_preinstalled_probe_dependencies(django_settings)
+
+    from django_ray.management.commands.django_ray_worker import Command
+
+    class ProbeWorkerCommand(Command):
+        def send_heartbeat(self):
+            super().send_heartbeat()
+            diagnostic = _worker_qualification_diagnostic(self)
+            previous = getattr(self, "_probe_diagnostic", None)
+            count = getattr(self, "_probe_diagnostic_count", 0)
+            if diagnostic != previous and count < 16:
+                self._probe_diagnostic = diagnostic
+                self._probe_diagnostic_count = count + 1
+                self.stdout.write(f"Qualification progress (not authority): {diagnostic}")
+                self.stdout.flush()
+
+    call_command(ProbeWorkerCommand(), queue="ray-data", concurrency=1)
+    return 0
+
+
+def _worker_qualification_diagnostic(command) -> str:
+    """Read fixed parent-owned scalars; never poll, reap, query DB or contact Ray."""
+    try:
+        from django_ray.runner.cohort_jobs import JobsCohortAdapterReason, JobsCohortPhase
+        from django_ray.runner.cohort_process import CohortProcessPhase, CohortProcessReason
+
+        controller = command._cohort_controller
+        if controller is None:
+            return '{"controller_present":false}'
+        operation = controller.adapter._operation
+        running = controller.adapter._supervisor._running
+        result = {
+            "controller_present": True,
+            "adapter_phase": operation.phase.value
+            if operation is not None and type(operation.phase) is JobsCohortPhase
+            else "idle",
+            "adapter_reason": operation.blocked.value
+            if operation is not None and type(operation.blocked) is JobsCohortAdapterReason
+            else None,
+            "helper_phase": running.phase.value
+            if running is not None and type(running.phase) is CohortProcessPhase
+            else "idle",
+            "helper_reason": running.reason.value
+            if running is not None and type(running.reason) is CohortProcessReason
+            else None,
+            "helper_reap_attempted": running is not None and running.reap_attempted is True,
+            "helper_reaped": running is not None and running.reaped is True,
+        }
+        return json.dumps(result, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return '{"progress_diagnostic":"unavailable"}'
+
+
+def _verify_current_completion(execution: Any) -> None:
+    """Read the exact resolved claim; this receipt grants no execution authority."""
+    from django_ray.execution_codec import ExecutionIdentity, decode_execution_completion
+    from django_ray.execution_protocol import ExecutionProtocolRange
+    from django_ray.models import RayTaskCohortClaim
+    from django_ray.runner.cohort_completion import _digest
+    from django_ray.runner.cohort_dispatch import _contract
+    from django_ray.target.cohort_claim import CohortRunnerFamily
+    from django_ray.target.cohort_claim_storage import _record
+    from django_ray.target.cohort_contract import cohort_execution_contract_digest
+    from django_ray.target.cohort_transport import decode_cohort_execution_result
+
+    identity = ExecutionIdentity(
+        execution.pk,
+        execution.task_id,
+        execution.attempt_number,
+        execution.execution_generation,
+    )
+    claim = RayTaskCohortClaim.objects.get(
+        binding_id=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+    )
+    record = _record(claim)
+    contract = _contract(record)
+    if (
+        execution.execution_protocol_version != 3
+        or record.facts.identity != identity
+        or record.facts.binding.runner_family is not CohortRunnerFamily.RAY_JOB
+        or record.facts.job_qualification is None
+        or record.facts.job_qualification.jobs_endpoint != execution.ray_address
+        or claim.disposition != "RESOLVED"
+        or claim.resolution_kind != "application_completed"
+        or not claim.dispatched_at
+        or not claim.resolved_at
+        or not execution.finished_at
+        or not record.facts.claimed_at
+        <= claim.dispatched_at
+        <= claim.resolved_at
+        <= execution.finished_at
+    ):
+        raise AssertionError("Ray Data completion lacks a matching resolved current claim")
+    result = decode_cohort_execution_result(
+        execution.completion_data,
+        expected_identity=identity,
+        expected_request_digest=record.prepared_request_digest,
+        expected_cohort_contract_digest=cohort_execution_contract_digest(contract),
+    )
+    if result.completion_json is None or claim.resolution_digest != _digest(
+        execution.completion_data
+    ):
+        raise AssertionError("Ray Data completion does not match its resolved claim evidence")
+    completion = decode_execution_completion(
+        result.completion_json,
+        expected_identity=identity,
+        expected_execution_protocol_version=3,
+        supported_protocols=ExecutionProtocolRange(3, 3),
+    ).completion
+    if (
+        completion.success is not True
+        or completion.executor_django_ray_version != contract.expected_django_ray_version
+        or execution.executor_django_ray_version != completion.executor_django_ray_version
+    ):
+        raise AssertionError("Ray Job driver did not persist a successful current completion")
+
+
 def _path_from_uri(uri: str) -> Path:
     parsed = urlsplit(uri)
     if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
@@ -158,8 +286,204 @@ def _worker_log_tail(path: Path, *, maximum_chars: int = 8_000) -> str:
     return contents[-maximum_chars:]
 
 
+def _reserved_probe_diagnostics(row, *, lease, configuration_digest, jobs_endpoint) -> dict:
+    """Inspect one exact owned reservation; statuses never grant execution authority."""
+    from ray.dashboard.modules.job.pydantic_models import JobDetails, JobType
+
+    from django_ray.runtime.cohort_job import (
+        decode_probe_job_request,
+        probe_job_metadata,
+        probe_job_request_digest,
+        probe_job_submission_id,
+    )
+    from django_ray.runtime.cohort_job_entrypoint import (
+        CohortJobEntrypointReason,
+        CohortProbeJobLaunch,
+        probe_job_launch_entrypoint,
+    )
+    from django_ray.target.attestation import RayRunnerFamily
+    from django_ray.target.cohort_job_control import (
+        cohort_probe_entrypoint_digest,
+        cohort_probe_submitted_runtime_env_digest,
+    )
+    from django_ray.target.cohort_job_http import fetch_reserved_cohort_job_details
+
+    request = decode_probe_job_request(row["request_json"])
+    launch = CohortProbeJobLaunch(
+        request,
+        probe_job_request_digest(request),
+        jobs_endpoint,
+        row["submitted_runtime_env_digest"],
+        "testproject.settings",
+    )
+    if (
+        request.lease != lease
+        or request.runner_family is not RayRunnerFamily.RAY_JOB
+        or request.configuration_digest != configuration_digest
+        or request.challenge_id != row["challenge_id"]
+        or request.challenge_revision != row["challenge_revision"]
+        or launch.request_digest != row["request_digest"]
+        or probe_job_submission_id(request) != row["submission_id"]
+        or row["ray_address"] != jobs_endpoint
+        or cohort_probe_entrypoint_digest(probe_job_launch_entrypoint(launch))
+        != row["entrypoint_digest"]
+    ):
+        return {"reservation_binding": False}
+    result: dict[str, object] = {
+        "reservation_binding": True,
+        "receipt_present": row["received_at"] is not None,
+    }
+    try:
+        details = fetch_reserved_cohort_job_details(
+            jobs_endpoint, row["submission_id"], timeout_seconds=5.0
+        )
+        matched = (
+            type(details) is JobDetails
+            and details.type is JobType.SUBMISSION
+            and details.submission_id == row["submission_id"]
+            and details.metadata == probe_job_metadata(request)
+            and details.entrypoint == probe_job_launch_entrypoint(launch)
+            and cohort_probe_submitted_runtime_env_digest(details.runtime_env)
+            == row["submitted_runtime_env_digest"]
+            and (details.driver_info is None or details.driver_info.id == details.job_id)
+        )
+        result["job_binding"] = matched
+        if matched:
+            result["job_status"] = details.status.value
+            result["native_id_present"] = details.job_id is not None
+            # JobDetails is already byte-bounded. Do not emit its message/logs,
+            # paths, IDs, launch carrier, RuntimeEnv or arbitrary error text.
+            reasons = {item.value for item in CohortJobEntrypointReason}
+            found = (
+                set(
+                    re.findall(
+                        r"^Cohort probe driver refused: ([a-z_]+)\r?$",
+                        details.message or "",
+                        flags=re.MULTILINE,
+                    )
+                )
+                & reasons
+            )
+            result["driver_refusal"] = next(iter(found)) if len(found) == 1 else None
+    except Exception:
+        result["job_read"] = "unavailable"
+    return result
+
+
+def _receipt_publication_diagnostic(row) -> dict:
+    """Report finite publication/expiry state without reconstructing eligibility."""
+    from django_ray.models import RayTargetPolicyRevision
+    from django_ray.runtime.cohort_job import decode_probe_job_request
+    from django_ray.target.cohort_job_receipt import decode_cohort_job_receipt
+
+    request = decode_probe_job_request(row["request_json"])
+    now = datetime.now(UTC)
+    result = {
+        "challenge_consumed": row["challenge__consumed_at"] is not None,
+        "request_fresh": request.issued_at <= now < request.expires_at,
+        "refresh_policy_requested": request.expected_target_policy_id is not None,
+    }
+    if row["receipt_json"] is not None:
+        receipt = decode_cohort_job_receipt(
+            row["receipt_json"],
+            expected_request=request,
+            expected_request_digest=row["request_digest"],
+            expected_submission_id=row["submission_id"],
+            expected_receipt_digest=row["receipt_digest"],
+        )
+        proof = receipt.attestation
+        result["receipt_fresh"] = proof.observed_at <= now < proof.expires_at
+        policy = (
+            RayTargetPolicyRevision.objects.filter(target_id=proof.expectation.target_key)
+            .order_by("-revision")
+            .values("revision", "desired_state")
+            .first()
+        )
+        result["target_policy_present"] = policy is not None
+        if policy is not None:
+            result["receipt_matches_latest_policy"] = (
+                policy["revision"] == proof.expectation.policy_revision
+            )
+            result["latest_policy_active"] = policy["desired_state"] == "active"
+    return result
+
+
+def _probe_timeout_diagnostics(execution_pk, worker, *, started_after, jobs_endpoint) -> str:
+    """Read only this disposable worker's current slot before fixture teardown."""
+    try:
+        from django_ray.models import RayTargetProbeJobReceipt, TaskWorkerLease
+        from django_ray.runtime.cohort_job import CohortProbeJobLease
+        from django_ray.target.cohort_intent_storage import read_cohort_intent
+
+        # A live owned subprocess plus its creation window prevents an older
+        # same-PID lease from directing this diagnostic to another reservation.
+        now = datetime.now(UTC)
+        if worker.poll() is not None or not started_after <= now:
+            return '{"worker_binding":false}'
+        leases = list(
+            TaskWorkerLease.objects.filter(
+                hostname=socket.gethostname(),
+                pid=worker.pid,
+                started_at__gte=started_after,
+                started_at__lte=now,
+                queue_name="ray-data",
+            ).values("worker_id", "hostname", "pid", "started_at")[:2]
+        )
+        if len(leases) != 1:
+            return '{"worker_binding":false}'
+        lease = CohortProbeJobLease(**leases[0])
+        intent = read_cohort_intent(execution_pk)
+        rows = list(
+            RayTargetProbeJobReceipt.objects.filter(
+                challenge__lease_id=lease.worker_id,
+                challenge__lease_hostname=lease.hostname,
+                challenge__lease_pid=lease.pid,
+                challenge__lease_started_at=lease.started_at,
+                challenge__configuration_digest=intent.configuration_digest,
+                challenge__runner_family="ray_job",
+            ).values(
+                "challenge_id",
+                "challenge_revision",
+                "request_json",
+                "request_digest",
+                "ray_address",
+                "submission_id",
+                "entrypoint_digest",
+                "submitted_runtime_env_digest",
+                "received_at",
+                "receipt_json",
+                "receipt_digest",
+                "challenge__consumed_at",
+            )[:2]
+        )
+        result: dict[str, object] = {"worker_binding": True, "reservation_present": len(rows) == 1}
+        if len(rows) == 1:
+            result.update(
+                _reserved_probe_diagnostics(
+                    rows[0],
+                    lease=lease,
+                    configuration_digest=intent.configuration_digest,
+                    jobs_endpoint=jobs_endpoint,
+                )
+            )
+            if result.get("reservation_binding") is True:
+                try:
+                    result.update(_receipt_publication_diagnostic(rows[0]))
+                except Exception:
+                    result["publication_diagnostic"] = "unavailable"
+        return json.dumps(result, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        # Diagnostics must not replace the original timeout or its finally cleanup.
+        return '{"diagnostics":"unavailable"}'
+
+
 def _wait_for_recovered_execution(
-    execution_pk: int, worker: subprocess.Popen[str], log: Path
+    execution_pk: int,
+    worker: subprocess.Popen[str],
+    log: Path,
+    *,
+    started_after: datetime,
+    jobs_endpoint: str,
 ) -> Any:
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 
@@ -184,7 +508,13 @@ def _wait_for_recovered_execution(
                 f"{_worker_log_tail(log)}"
             )
         time.sleep(0.25)
-    raise AssertionError(f"Ray Data recovery task timed out:\n{_worker_log_tail(log)}")
+    diagnostic = _probe_timeout_diagnostics(
+        execution_pk, worker, started_after=started_after, jobs_endpoint=jobs_endpoint
+    )
+    raise AssertionError(
+        f"Ray Data recovery task timed out:\n{_worker_log_tail(log)}\n"
+        f"Qualification diagnostic (not authority): {diagnostic}"
+    )
 
 
 def _build_rq2_submission_candidates(
@@ -402,7 +732,12 @@ def _stop_worker(worker: subprocess.Popen[str]) -> None:
         worker.wait(timeout=15)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments == ["--worker"]:
+        return _run_probe_worker()
+    if arguments:
+        raise AssertionError("Ray Data probe received unsupported arguments")
     import ray
 
     fixture = (
@@ -462,6 +797,8 @@ def main() -> int:
             call_command("migrate", "django_ray", interactive=False, verbosity=0)
 
             from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
+            from django_ray.target.cohort_intent import CohortSelectionPolicy
+            from django_ray.target.cohort_intent_storage import read_cohort_intent
             from testproject.apps.cluster_tasks.tasks import (
                 RAY_DATA_AFTER_MANIFEST_FAILURE_FIXTURE,
                 RAY_DATA_AFTER_MANIFEST_FAILURE_MESSAGE,
@@ -489,7 +826,14 @@ def main() -> int:
         try:
             task_result = ray_data_batch_score.enqueue(**enqueue_request)
             execution = RayTaskExecution.objects.get(task_id=task_result.id)
-            if execution.queue_name != "ray-data" or execution.runtime_env_profile != "ray-data":
+            intent = read_cohort_intent(execution.pk)
+            if (
+                execution.queue_name != "ray-data"
+                or execution.runtime_env_profile != "ray-data"
+                or execution.execution_protocol_version != 3
+                or intent.backend_alias != "ray-data"
+                or intent.selection_policy is not CohortSelectionPolicy.JOBS_ONLY
+            ):
                 raise AssertionError(
                     "Ray Data task was not durably routed to its dedicated profile"
                 )
@@ -500,15 +844,12 @@ def main() -> int:
             worker_environment = dict(os.environ)
             worker_environment["PYTHONUNBUFFERED"] = "1"
             with worker_log_path.open("w", encoding="utf-8") as worker_log:
+                worker_started_after = datetime.now(UTC)
                 worker = subprocess.Popen(
                     [
                         sys.executable,
-                        "testproject/manage.py",
-                        "django_ray_worker",
-                        "--queue",
-                        "ray-data",
-                        "--concurrency",
-                        "1",
+                        str(Path(__file__).resolve()),
+                        "--worker",
                     ],
                     cwd=ROOT,
                     env=worker_environment,
@@ -516,7 +857,13 @@ def main() -> int:
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
-                execution = _wait_for_recovered_execution(execution.pk, worker, worker_log_path)
+                execution = _wait_for_recovered_execution(
+                    execution.pk,
+                    worker,
+                    worker_log_path,
+                    started_after=worker_started_after,
+                    jobs_endpoint="http://" + str(ray_context.address_info["webui_url"]),
+                )
                 submissions = _load_ray_job_submission_evidence(
                     ray_address=probe_ray_address,
                     execution_pk=execution.pk,
@@ -537,6 +884,8 @@ def main() -> int:
                 raise AssertionError(
                     f"expected one archived failure then success, found {attempt_states}"
                 )
+            if any(attempt.execution_protocol_version != 3 for attempt in attempts):
+                raise AssertionError("Ray Data retry crossed execution protocols")
             if RAY_DATA_AFTER_MANIFEST_FAILURE_MESSAGE not in str(attempts[0].error_message or ""):
                 raise AssertionError("first archived attempt did not retain fixture failure")
             if set(submissions) != {1, 2}:
@@ -555,17 +904,7 @@ def main() -> int:
             second = json.loads(execution.result_data)
             if not isinstance(second, dict):
                 raise AssertionError("routed Ray Data task did not return bounded metadata")
-            completion_envelope = json.loads(execution.completion_data or "null")
-            if (
-                not isinstance(completion_envelope, dict)
-                or completion_envelope.get("success") is not True
-                or completion_envelope.get("completion_schema") != "django-ray.execution-completion"
-                or completion_envelope.get("execution_protocol_version") != 1
-                or not completion_envelope.get("executor_django_ray_version")
-            ):
-                raise AssertionError(
-                    "Ray Job driver did not persist a strict successful completion envelope"
-                )
+            _verify_current_completion(execution)
             if not all(attempt.executor_django_ray_version for attempt in attempts):
                 raise AssertionError("archived Ray Job attempts lost executor provenance")
 
@@ -723,6 +1062,8 @@ def main() -> int:
                 "strict_ray_job_request_binding": True,
                 "request_reference_transport": True,
                 "versioned_completion_envelope": True,
+                "execution_protocol_version": 3,
+                "current_cohort_claim_correlated": True,
                 "executor_provenance_archived": True,
                 "preinstalled_ray_data_environment": True,
                 "disposable_cluster_target_pinned": True,

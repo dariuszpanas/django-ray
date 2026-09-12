@@ -212,6 +212,39 @@ def _execute_target_bound_django_task_remote(
     return result
 
 
+def execute_cohort_django_task_remote(
+    request_json: str,
+    *,
+    expected_task_execution_pk: int,
+    expected_task_id: str,
+    expected_attempt_number: int,
+    expected_execution_generation: int,
+    expected_request_digest: str,
+    expected_cohort_contract_digest: str,
+    expected_execution_protocol_version: int = 3,
+) -> str:
+    """Explicit p3 adapter; no application import occurs before the point guard."""
+    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.runtime.cohort_execution import execute_cohort_request
+
+    if (
+        type(expected_execution_protocol_version) is not int
+        or expected_execution_protocol_version != 3
+    ):
+        raise ValueError("Invalid cohort protocol")
+    return execute_cohort_request(
+        request_json,
+        expected_identity=ExecutionIdentity(
+            expected_task_execution_pk,
+            expected_task_id,
+            expected_attempt_number,
+            expected_execution_generation,
+        ),
+        expected_request_digest=expected_request_digest,
+        expected_cohort_contract_digest=expected_cohort_contract_digest,
+    )
+
+
 def execute_django_task_remote(
     request_or_callable_path: str,
     args_json: str | None = None,
@@ -238,6 +271,15 @@ def execute_django_task_remote(
     _target_execution_transport: bool = False,
 ) -> str:
     """Execute one durable task through the strict or released-v1 boundary."""
+    from django_ray.execution_protocol import (
+        EXECUTION_PROTOCOL_VERSION,
+        LEGACY_EXECUTION_PROTOCOL_VERSION,
+    )
+
+    # This generic adapter cannot establish a cohort contract or independent
+    # claim expectations. Current-cohort execution owns its separate entrypoint.
+    if EXECUTION_PROTOCOL_VERSION != LEGACY_EXECUTION_PROTOCOL_VERSION:
+        return _fixed_legacy_request_rejection("unsupported_protocol")
     if _target_execution_transport is True:
         from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
 
@@ -399,6 +441,7 @@ def _nested_task_execution(request: Any | None) -> Any:
     if request is None:
         return nullcontext()
 
+    from django_ray.runtime.cohort_nested import nested_cohort_context
     from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
     from django_ray.runtime.context import durable_task_execution
 
@@ -416,6 +459,7 @@ def _nested_task_execution(request: Any | None) -> Any:
             CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
         ),
         strict_execution_request=True,
+        **nested_cohort_context(request),
     )
 
 
@@ -433,6 +477,8 @@ def _decode_workflow_step_request(
     expected_node_id: str | None,
     expected_runtime_env_plan_digest: str | None,
     expected_runtime_env_transport_digest: str | None,
+    expected_cohort_leaf_digest: str | None = None,
+    expected_outer_contract_digest: str | None = None,
 ) -> Any | None:
     """Fence a strict workflow leaf before setup/import, or admit legacy."""
     from django_ray.execution_codec import (
@@ -443,7 +489,6 @@ def _decode_workflow_step_request(
         NestedExecutionRequestRejection,
         NestedWorkflowBoundaryIdentity,
         assert_nested_callable_binding,
-        decode_nested_execution_request,
     )
 
     expectations = (
@@ -478,7 +523,9 @@ def _decode_workflow_step_request(
         workflow_run_id=expected_workflow_run_id,
         node_id=expected_node_id,
     )
-    request = decode_nested_execution_request(
+    from django_ray.runtime.cohort_nested import decode_runtime_nested_request
+
+    request = decode_runtime_nested_request(
         serialized,
         expected_outer_identity=expected_identity,
         expected_execution_protocol_version=expected_execution_protocol_version,
@@ -489,6 +536,8 @@ def _decode_workflow_step_request(
         expected_output_preview_callable_path=output_preview_path,
         expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+        expected_cohort_leaf_digest=expected_cohort_leaf_digest,
+        expected_outer_contract_digest=expected_outer_contract_digest,
     )
     assert_nested_callable_binding(request, callable_path=callable_path)
     return request
@@ -571,6 +620,8 @@ def execute_workflow_step_remote(
     expected_node_id: str | None = None,
     expected_runtime_env_plan_digest: str | None = None,
     expected_runtime_env_transport_digest: str | None = None,
+    expected_cohort_leaf_digest: str | None = None,
+    expected_outer_contract_digest: str | None = None,
 ) -> Any:
     """Execute one strict nested workflow step or a released direct call."""
     request = _decode_workflow_step_request(
@@ -586,6 +637,8 @@ def execute_workflow_step_remote(
         expected_node_id=expected_node_id,
         expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+        expected_cohort_leaf_digest=expected_cohort_leaf_digest,
+        expected_outer_contract_digest=expected_outer_contract_digest,
     )
     if request is not None:
         _assert_workflow_step_transport(

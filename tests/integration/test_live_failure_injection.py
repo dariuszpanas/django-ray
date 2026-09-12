@@ -16,8 +16,9 @@ from typing import cast
 import pytest
 
 from django_ray.management.commands.django_ray_worker import Command
-from django_ray.models import RayTaskExecution, TaskState
+from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 
 def _truthy(value: str | None) -> bool:
@@ -32,7 +33,7 @@ LIVE_MIN_NODES = int(os.environ.get("DJANGO_RAY_LIVE_MIN_NODES", "2"))
 LIVE_WORKING_DIR_URI = os.environ.get("DJANGO_RAY_LIVE_WORKING_DIR_URI")
 
 pytestmark = [
-    pytest.mark.django_db,
+    pytest.mark.django_db(transaction=True),
     pytest.mark.live_cluster,
 ]
 if not LIVE_CLUSTER_ENABLED:
@@ -92,7 +93,48 @@ def live_ray_cluster():
         ray.shutdown()
 
 
-def _make_live_command(worker_id: str = "live-failure-worker") -> Command:
+@pytest.fixture
+def historical_protocol(preactivation_protocol_schema, monkeypatch):
+    """Only the retained local polling cases use actual protocol-1 admission."""
+    from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION, ExecutionProtocolRange
+    from django_ray.lifecycle import cancel_task
+    from django_ray.models import TaskExecutionProtocolPolicy
+
+    assert EXECUTION_PROTOCOL_VERSION == 3
+    assert TaskExecutionProtocolPolicy.objects.get().active_write_protocol_version == 1
+
+    def finalize(task, **fences):
+        # The current public lifecycle defaults to 3..3. This retained released
+        # adapter explicitly selects its historical epoch without widening it.
+        return cancel_task(task, supported_protocols=ExecutionProtocolRange(1, 1), **fences)
+
+    monkeypatch.setattr(
+        "django_ray.management.commands.django_ray_worker.finalize_cancellation", finalize
+    )
+
+
+@pytest.fixture
+def stopped_live_cohort_ledger():
+    """Reuse the existing isolated ledger cleanup after this fixture's Ray exit."""
+    from tests.integration.test_cohort_claim_storage import isolated_sqlite_ledger_maintenance
+
+    yield from isolated_sqlite_ledger_maintenance.__wrapped__()
+
+
+@pytest.fixture
+def current_cohort_live_cluster(stopped_live_cohort_ledger, live_ray_cluster):
+    # Dependencies tear down in reverse order: owned Ray connection first,
+    # isolated stopped ledger second. Neither exit invents positive proof.
+    yield live_ray_cluster
+
+
+def _make_historical_live_command(worker_id: str = "live-failure-worker") -> Command:
+    """Build an exact historical lease without changing current startup defaults."""
+    import socket
+
+    from django_ray import __version__
+    from django_ray.runner.leasing import WorkerLeaseIdentity
+
     cmd = Command()
     cmd.stdout = StringIO()
     cmd.style = cmd.style
@@ -102,7 +144,21 @@ def _make_live_command(worker_id: str = "live-failure-worker") -> Command:
     cmd.sync_mode = False
     cmd.active_tasks = {}
     cmd.ray_core_runner = RayCoreRunner()
-    cmd._create_lease("default")
+    now = datetime.now(UTC)
+    cmd.lease = TaskWorkerLease.objects.create(
+        worker_id=worker_id,
+        hostname=socket.gethostname(),
+        pid=os.getpid(),
+        queue_name="default",
+        started_at=now,
+        last_heartbeat_at=now,
+        capability_schema_version=1,
+        django_ray_version=__version__,
+        min_supported_execution_protocol_version=1,
+        max_supported_execution_protocol_version=1,
+        legacy_admission_token=None,
+    )
+    cmd.lease_identity = WorkerLeaseIdentity(worker_id, cmd.lease.hostname, cmd.lease.pid, now)
     return cmd
 
 
@@ -134,7 +190,7 @@ class TestLiveFailureInjection:
         self,
         live_ray_cluster,
     ):
-        """The dormant probe observes the exact two-node Ray Client target."""
+        """The current pure probe observes the exact two-node Ray Client target."""
         import platform
         import sys
 
@@ -156,7 +212,7 @@ class TestLiveFailureInjection:
             policy_revision=1,
             runtime=RayRuntimeVersion(
                 ray_major=2,
-                ray_minor=56,
+                ray_minor=58,
                 ray_patch=0,
                 python_implementation=platform.python_implementation().lower(),
                 python_major=sys.version_info.major,
@@ -202,68 +258,174 @@ class TestLiveFailureInjection:
         not LIVE_WORKING_DIR_URI,
         reason="DJANGO_RAY_LIVE_WORKING_DIR_URI is required for the submission smoke test",
     )
-    def test_ray_core_runner_submits_project_code_to_generic_cluster(self, live_ray_cluster):
-        """The package-free Ray Client head must accept django-ray's bootstrap."""
-        from django_ray.runtime.runtime_env import normalize_runtime_env
+    def test_ray_core_runner_submits_project_code_to_generic_cluster(
+        self, current_cohort_live_cluster, settings
+    ):
+        """Actual protocol3 qualification/claim/bootstrap produces result5 on generic nodes."""
+        from django_ray.conf.settings import get_settings
+        from django_ray.lifecycle import succeed_task
+        from django_ray.runner.cohort_claims import CohortClaimAlias, claim_cohort_tasks
+        from django_ray.runner.cohort_completion import apply_cohort_completion
+        from django_ray.runner.cohort_configuration import prepare_cohort_worker_configuration
+        from django_ray.runner.cohort_core import CoreCohortManagerAdapter
+        from django_ray.runner.cohort_dispatch import (
+            mark_cohort_dispatch_started,
+            prepare_claimed_cohort_dispatch,
+        )
+        from django_ray.runner.cohort_qualification import CohortQualificationLifecycle
+        from django_ray.runner.ray_core import _compiled_graph_submission_transport
+        from django_ray.runtime.cohort_job import CohortProbeJobLease
+        from django_ray.target.attestation import RayRunnerFamily
+        from django_ray.target.cohort_claim import (
+            CohortManagerRuntime,
+            CohortPythonVersion,
+            CohortRunnerFamily,
+        )
+        from django_ray.target.cohort_runtime import _local_runtime
+        from testproject.tasks import add_numbers
 
-        assert LIVE_WORKING_DIR_URI is not None
-        runtime_env = normalize_runtime_env(
-            _live_project_runtime_env_spec(),
-            profile="live-project",
-        )
-        task = RayTaskExecution.objects.create(
-            task_id=f"live-ray-core-submit-{time.time_ns()}",
-            callable_path="testproject.tasks.add_numbers",
-            queue_name="default",
-            state=TaskState.RUNNING,
-            args_json="[2, 3]",
-            kwargs_json="{}",
-            runtime_env_profile=runtime_env.profile,
-            runtime_env_json=runtime_env.serialized,
-            runtime_env_hash=runtime_env.digest,
-        )
+        ray = current_cohort_live_cluster
+        settings.TASKS = {
+            "default": {
+                "BACKEND": "django_ray.backends.RayTaskBackend",
+                "QUEUES": ["default"],
+                "OPTIONS": {
+                    "RAY_ADDRESS": LIVE_RAY_ADDRESS,
+                    "RAY_RUNTIME_ENV": _live_project_runtime_env_spec(),
+                },
+            }
+        }
+        enqueued = add_numbers.enqueue(2, 3)
+        task = RayTaskExecution.objects.get(task_id=enqueued.id)
+        assert task.execution_protocol_version == 3
+        from django_ray.runtime.runtime_env import runtime_env_for_execution
 
-        runner = RayCoreRunner()
-        runner.submit(
-            task_execution=task,
-            callable_path=task.callable_path,
-            args=(2, 3),
-            kwargs={},
+        # Verify the real producer consumed this backend declaration before
+        # qualifying or crossing Ray; an ignored option otherwise stores {}.
+        assert runtime_env_for_execution(task).spec == _live_project_runtime_env_spec()
+        command = Command()
+        command._set_worker_id("live-current-core-bootstrap")
+        command._create_lease("default")
+        identity = command.lease_identity
+        assert identity is not None
+        package, runtime = _local_runtime(ray)
+        local = LIVE_RAY_ADDRESS == "auto"
+        configuration = prepare_cohort_worker_configuration(
+            tasks=settings.TASKS,
+            validated_aliases=("default",),
+            selected_queues=("default",),
+            manager_settings=get_settings(),
+            django_settings_module="testproject.settings",
+            runner_family=RayRunnerFamily.RAY_CORE,
+            execution_mode="local" if local else "cluster",
+            core_address=None if local else LIVE_RAY_ADDRESS,
         )
-        payload = live_ray_cluster.get(
-            runner._pending_tasks[task.pk].object_ref,
-            timeout=120,
-        )
-        from django_ray.execution_codec import (
-            ExecutionCompletionSource,
-            ExecutionIdentity,
-            decode_execution_completion,
-        )
-
-        decoded = decode_execution_completion(
-            payload,
-            expected_identity=ExecutionIdentity(
-                task_execution_pk=int(task.pk),
-                task_id=str(task.task_id),
-                attempt_number=int(task.attempt_number),
-                execution_generation=int(task.execution_generation),
+        lifecycle = CohortQualificationLifecycle(
+            CohortProbeJobLease(
+                identity.worker_id, identity.hostname, identity.pid, identity.started_at
             ),
-            expected_execution_protocol_version=int(task.execution_protocol_version),
+            package,
+            runtime,
+            RayRunnerFamily.RAY_CORE,
         )
+        lifecycle.configure_aliases(configuration.aliases)
+        manager = CoreCohortManagerAdapter(lifecycle)
+        assert configuration.core_configuration_digest is not None
+        deadline = time.monotonic() + 140
 
-        assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
-        assert decoded.completion.success is True
-        assert decoded.completion.result == 5
-        assert decoded.completion.executor_django_ray_version
+        def heartbeat():
+            assert time.monotonic() < deadline, "Current Core bootstrap exceeded its deadline"
+            assert command._update_lease_heartbeat()
 
-    def test_disconnect_retries_pending_ray_core_task(self, live_ray_cluster):
-        """Client disconnect should trigger retry path for tracked pending tasks."""
-        cmd = _make_live_command()
+        try:
+            publications = []
+            for _ in range(2):
+                manager.begin(configuration.core_configuration_digest, 1, timeout_seconds=30)
+                result = None
+                while result is None:
+                    heartbeat()
+                    result = manager.poll()
+                    time.sleep(0.02)
+                publications.append(result.shared)
+            assert publications[0].desired_state == "draining"
+            assert publications[0].activation_policy_id == publications[1].target_policy_id
+            assert publications[1].desired_state == "active"
+            assert publications[0].attestation_id != publications[1].attestation_id
+            qualified = manager.eligible_aliases()
+            assert len(qualified) == 1
+            heartbeat()
+            aliases = tuple(
+                CohortClaimAlias(
+                    item.alias, item.declaration_digest, item.selection_policy, item.queues
+                )
+                for item in configuration.aliases
+            )
+            claimed = claim_cohort_tasks(
+                identity,
+                aliases=aliases,
+                qualifications=qualified,
+                runner_family=CohortRunnerFamily.RAY_CORE,
+                manager_runtime=CohortManagerRuntime(
+                    package,
+                    CohortPythonVersion(
+                        runtime.python_implementation,
+                        runtime.python_major,
+                        runtime.python_minor,
+                        runtime.python_patch,
+                    ),
+                    (runtime.ray_major, runtime.ray_minor, runtime.ray_patch),
+                ),
+                limit=1,
+                now=datetime.now(UTC),
+            )
+            assert len(claimed) == 1 and claimed[0].execution.pk == task.pk
+            dispatch = prepare_claimed_cohort_dispatch(
+                claimed[0], transport=_compiled_graph_submission_transport(ray)
+            )
+            heartbeat()
+            dispatch = mark_cohort_dispatch_started(dispatch)
+            # This test owns the already-connected fixture's default context.
+            # The runner must not initialize or adopt a replacement connection.
+            runner = RayCoreRunner._from_existing_connection()
+            handle = runner.submit_cohort_task(dispatch.execution, prepared=dispatch.prepared)
+            while not ray.wait([handle.object_ref], timeout=0.05)[0]:
+                heartbeat()
+            payload = ray.get(handle.object_ref, timeout=1)
+            heartbeat()
+
+            def apply(current, decoded, *, retry_admitted):
+                assert decoded.completion.success is True
+                assert decoded.completion.result == 5
+                assert decoded.completion.executor_django_ray_version == package
+                return succeed_task(
+                    current,
+                    result_data=json.dumps(decoded.completion.result),
+                    result_reference=None,
+                    expected_claimed_by_worker=identity.worker_id,
+                    expected_attempt_number=dispatch.claim.facts.identity.attempt_number,
+                    expected_execution_generation=dispatch.claim.facts.identity.execution_generation,
+                )
+
+            outcome = apply_cohort_completion(
+                dispatch, payload, provenance="owned_direct", apply_completion=apply
+            )
+            assert outcome.applied and outcome.dispatch.execution.state == TaskState.SUCCEEDED
+            assert outcome.dispatch.claim.disposition.value == "RESOLVED"
+            assert runner.retire_pending_handle(handle)
+            enqueued.refresh()
+            assert enqueued.return_value == 5
+        finally:
+            lifecycle.invalidate()
+
+    def test_disconnect_retries_pending_ray_core_task(self, historical_protocol, live_ray_cluster):
+        """Historical protocol1 local poll retains its old disconnect/retry behavior."""
+        cmd = _make_historical_live_command()
         task = RayTaskExecution.objects.create(
             task_id="live-fi-disconnect-001",
             callable_path="time.sleep",
             queue_name="default",
             state=TaskState.RUNNING,
+            execution_protocol_version=1,
             args_json="[30]",
             kwargs_json="{}",
             attempt_number=1,
@@ -290,14 +452,17 @@ class TestLiveFailureInjection:
         assert "Ray connection lost" in (task.error_message or "")
         assert cmd.ray_core_runner._pending_tasks == {}
 
-    def test_cancellation_finalizes_live_pending_task(self, live_ray_cluster):
-        """Cancelling a live pending Ray Core task should finalize CANCELLED state."""
-        cmd = _make_live_command()
+    def test_cancellation_finalizes_live_pending_task(self, historical_protocol, live_ray_cluster):
+        """Historical protocol1 local cancellation retains its terminal transition."""
+        from ray.exceptions import TaskCancelledError
+
+        cmd = _make_historical_live_command()
         task = RayTaskExecution.objects.create(
             task_id="live-fi-cancel-001",
             callable_path="time.sleep",
             queue_name="default",
             state=TaskState.CANCELLING,
+            execution_protocol_version=1,
             args_json="[30]",
             kwargs_json="{}",
             attempt_number=1,
@@ -317,6 +482,11 @@ class TestLiveFailureInjection:
         cmd.active_tasks[task.pk] = f"ray_core:{task.pk}"
 
         cmd.process_cancellations()
+
+        # The old SQL transition only records its cancellation request outcome.
+        # Independently require terminal cancellation of this exact native task.
+        with pytest.raises(TaskCancelledError):
+            live_ray_cluster.get(object_ref, timeout=10)
 
         task.refresh_from_db()
         assert task.state == TaskState.CANCELLED

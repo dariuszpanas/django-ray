@@ -806,7 +806,7 @@ def test_candidate_versions_remain_policy_data_without_a_hosted_native_smoke() -
 def test_gpu_dependencies_are_not_mandatory_application_dependencies() -> None:
     project = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert '"ray[default]>=2.56.0"' in project
+    assert '"ray[default]>=2.58.0"' in project
     assert "cupy" not in project.lower()
     assert '"ray[cgraph]' not in project
 

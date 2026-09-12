@@ -392,7 +392,7 @@ The renderer includes:
 
 - `django_ray_tasks_total{state=...}`, queued, and running gauges;
 - `django_ray_tasks_by_execution_protocol_total{protocol=...,state=...}` with exactly
-  the fixed protocol buckets `1` and `other` crossed with every fixed `TaskState`;
+  the fixed protocol buckets `1`, `3` and `other` crossed with every fixed `TaskState`;
 - `django_ray_queue_depth{queue=...}` for explicitly allowed queues;
 - count, sum, average, and maximum gauges for queue wait, claim latency, and execution
   duration;

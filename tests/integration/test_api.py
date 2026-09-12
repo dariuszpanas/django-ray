@@ -29,17 +29,39 @@ from django_ray.protocol_coordination import close_legacy_worker_admission
 from django_ray.redaction import REDACTED, redact_text
 from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from testproject import api as testproject_api
+from tests.integration.test_cohort_activation_migration import LATEST, _migrate
+from tests.integration.test_cohort_activation_migration import historical as historical
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def client(settings) -> Client:
-    """Django test client."""
+def client(settings, db) -> Client:
+    """Explicitly opted-in demo client for existing positive route coverage."""
     token = settings.DJANGO_API_TOKEN
     assert isinstance(token, str) and token
-    return Client(HTTP_AUTHORIZATION=f"Bearer {token}")
+    settings.DEPLOYMENT_MODE = "demo"
+    settings.DJANGO_DEMO_WORKLOADS_ENABLED = True
+    settings.DJANGO_DEMO_TOKEN = "dedicated-demo-route-test-credential"
+    from django.utils import timezone
+
+    from testproject.models import SampleAdmissionBudget
+
+    SampleAdmissionBudget.objects.get_or_create(
+        pk=1, defaults={"window_started_at": timezone.now()}
+    )
+
+    class DemoClient(Client):
+        def post(self, path, *args, **kwargs):
+            from testproject.api_boundary import is_demo_route
+
+            if is_demo_route(path.split("?", 1)[0]):
+                kwargs.setdefault("HTTP_AUTHORIZATION", f"Bearer {settings.DJANGO_DEMO_TOKEN}")
+            return super().post(path, *args, **kwargs)
+
+    return DemoClient(HTTP_AUTHORIZATION=f"Bearer {token}")
 
 
 @pytest.fixture
@@ -936,7 +958,7 @@ class TestTasksAPI:
         assert data["state"] == TaskState.QUEUED
         assert data["attempt_number"] == 1
         assert data["execution_generation"] == 0
-        assert data["execution_protocol_version"] == 1
+        assert data["execution_protocol_version"] == 3
         assert data["created_with_django_ray_version"] == django_ray_version
         assert data["managed_with_django_ray_version"] is None
         assert data["executor_django_ray_version"] is None
@@ -1845,8 +1867,10 @@ class TestExecutionsAPI:
             milliseconds=1
         )
 
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.usefixtures("preactivation_protocol_schema")
     def test_protocol_visibility_is_consistent_across_bounded_surfaces(self, client):
-        """All execution reads expose one fixed protocol-capacity projection."""
+        """Retained protocol-1 reads use their actual preactivation schema."""
         TaskWorkerLease.objects.create(
             worker_id="protocol-api-reader",
             hostname="protocol-api-host",
@@ -1862,6 +1886,7 @@ class TestExecutionsAPI:
             task_id="protocol-visible-api-task",
             callable_path="test.task",
             queue_name="target-queue",
+            execution_protocol_version=1,
             created_with_django_ray_version="0.5.0-producer",
             managed_with_django_ray_version="0.5.0-manager",
             executor_django_ray_version="0.5.0-executor",
@@ -3005,6 +3030,7 @@ class TestExecutionsAPI:
         assert "cancellation_error" not in data
 
     @pytest.mark.django_db(transaction=True)
+    @pytest.mark.usefixtures("preactivation_protocol_schema")
     def test_cancel_unsupported_protocol_is_an_explicit_conflict_without_mutation(
         self,
         client,
@@ -3034,8 +3060,8 @@ class TestExecutionsAPI:
             "attempt_number": 3,
             "execution_generation": 7,
             "next_action": (
-                "Route this execution to a django-ray build that supports its protocol "
-                "before cancelling."
+                "Keep historical executions unchanged. Resolve any unsupported active work "
+                "through the coordinated upgrade procedure."
             ),
             "response_max_bytes": testproject_api._CANCELLATION_RESPONSE_MAX_BYTES,
         }
@@ -3195,11 +3221,13 @@ class TestExecutionsAPI:
         assert "FAILED, CANCELLED, LOST, or EXPIRED" in duplicate_data["next_action"]
         assert TaskAttempt.objects.filter(execution=task).count() == 1
 
+    @pytest.mark.django_db(transaction=True)
     def test_retry_unsupported_protocol_is_an_explicit_conflict_without_mutation(
         self,
+        historical,
         client,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = historical.get_model("django_ray", "RayTaskExecution").objects.create(
             task_id="test-retry-unsupported-protocol",
             callable_path="test.task",
             state=TaskState.FAILED,
@@ -3208,6 +3236,8 @@ class TestExecutionsAPI:
             execution_generation=7,
             error_message="retained failure",
         )
+        _migrate(LATEST)
+        task = RayTaskExecution.objects.get(pk=task.pk)
         before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
 
         response = client.post(f"/api/executions/{task.pk}/retry")
@@ -3221,8 +3251,8 @@ class TestExecutionsAPI:
             "attempt_number": 3,
             "execution_generation": 7,
             "next_action": (
-                "Route this execution to a django-ray build that supports its protocol "
-                "before retrying."
+                "Keep this execution as history. Enqueue a new task under the current "
+                "application configuration, authorization, and idempotency policy."
             ),
         }
         assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before

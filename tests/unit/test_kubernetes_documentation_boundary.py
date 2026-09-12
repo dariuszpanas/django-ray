@@ -81,7 +81,10 @@ def _make_mutator_targets() -> set[tuple[Path, str]]:
         content = _read(path)
         for target in _make_target_names(content):
             section = _make_target_section(content, target)
-            if any(marker in section for marker in MAKE_MUTATION_MARKERS):
+            if any(marker in section for marker in MAKE_MUTATION_MARKERS) or re.search(
+                r"\bkubectl\b[^\n]*(?:\bapply\b|\bcreate\b|\bdelete\b|\bscale\b|\brollout\s+restart\b)",
+                section,
+            ):
                 targets.add((path, target))
     return targets
 
@@ -108,7 +111,7 @@ def test_every_make_kubernetes_mutator_warns_before_its_recipe() -> None:
     mutators = _make_mutator_targets()
     assert (Path("mk/tls.mk"), "k8s-create-tls-secret") in mutators
     assert (Path("mk/k8s.mk"), "k8s-install-kuberay") in mutators
-    assert (Path("mk/k8s.mk"), "k8s-install-kong-local") in mutators
+    assert (Path("mk/k8s.mk"), "k8s-install-kong-local") not in mutators
     assert (Path("mk/k8s.mk"), "k8s-final-gate") in mutators
 
     for path, target in sorted(mutators):
@@ -147,7 +150,7 @@ def test_docs_keep_the_sample_hazards_and_production_checklist_explicit() -> Non
         "mutable `latest`",
         "sample superuser",
         "operator-token",
-        "shared `django-ray-secret`",
+        "component-scoped credentials",
     ):
         assert hazard in guide
 
@@ -175,17 +178,12 @@ def test_docs_keep_the_sample_hazards_and_production_checklist_explicit() -> Non
     assert "not deployment certification" in local_gate
 
     shared_secret = _read(Path("k8s/base/secret.yaml")).lower()
-    assert "render reference for evaluation and local validation only" in shared_secret
-    assert "component-scoped credentials" in shared_secret
-
-    assert (
-        "generic upstream kuberay head and worker pods import every value through `envfrom`"
-        in normalized_guide
-    )
-    assert "evaluation-only credential blast radius" in normalized_guide
+    assert "no secret resource is rendered" in shared_secret
+    assert "component-scoped credentials" in normalized_guide
     ray_profile = _read(Path("k8s/overlays/kuberay-kind/ray-cluster-kuberay.yaml")).lower()
     assert ray_profile.count("image: rayproject/ray:") == 2
-    assert ray_profile.count("name: django-ray-secret") == 2
+    assert "name: django-ray-secret" not in ray_profile
+    assert ray_profile.count("name: ray_auth_token") == 2
 
     testproject_apps = _read(Path("testproject/apps/__init__.py")).lower()
     assert "remote ray cluster integration example" in testproject_apps
@@ -279,7 +277,7 @@ def test_dormant_task_target_binding_has_a_database_only_gate_boundary() -> None
     assert "tested task and policy cleanup ordering" in normalized_guide
 
 
-def test_dormant_task_target_binding_has_no_production_consumer() -> None:
+def test_task_target_binding_has_only_reviewed_cohort_consumers() -> None:
     production_root = ROOT / "src" / "django_ray"
     references = {
         path.relative_to(ROOT).as_posix()
@@ -288,10 +286,16 @@ def test_dormant_task_target_binding_has_no_production_consumer() -> None:
     }
 
     assert references == {
+        "src/django_ray/lifecycle.py",
+        "src/django_ray/management/commands/django_ray_benchmark_polling.py",
         "src/django_ray/migrations/0023_ray_task_target_binding.py",
         "src/django_ray/migrations/0024_ray_target_routes.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
+        "src/django_ray/migrations/0030_cohort_claims.py",
+        "src/django_ray/migrations/0031_maintenance_admission.py",
+        "src/django_ray/migrations/0033_cohort_job_cleanup.py",
         "src/django_ray/models.py",
+        "src/django_ray/target/cohort_claim_storage.py",
     }
 
 
@@ -353,7 +357,8 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "KubeRay not applicable" in row
     assert "mandatory SQLite and PostgreSQL capability migration/coordination evidence" in row
     assert "private compare-and-set coordinator" in row
-    assert "no production path creates, renews, reads, or treats capability rows as capacity" in row
+    assert "no production path creates, renews, or treats capability rows as capacity" in row
+    assert "read-only diagnostics may aggregate scalar metadata" in row
     assert "exact-lease deletion may only fail-closed cascade-withdraw" in row
     assert "CAS renewal, lease-cascade withdrawal" in row
     assert "latest `active` or `draining` Ray Core policy" in row
@@ -361,7 +366,8 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "Row presence alone is never claim authority" in row
     assert "Policy and attestation revisions remain the audit history" in row
     assert "future generations or attempts must archive their own observed tuple" in row
-    assert "Ray Job capability APIs remain unsupported" in row
+    assert "Standalone Ray Job capability APIs remain unsupported" in row
+    assert "current-cohort publisher uses its own authenticated pre-Django proof channel" in row
     assert "supported Admin inactive-lease cleanup" in row
     assert "KubeRay remains not applicable because no production producer can create" in row
     assert "production activation requires every affected scenario gate" in row
@@ -380,19 +386,29 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "no production producer can create, renew, or advertise" in normalized_guide
 
 
-def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
+def test_worker_target_capability_has_only_reviewed_cohort_consumers() -> None:
     production_root = ROOT / "src" / "django_ray"
+    model_pattern = re.compile(r"\bRayWorkerTargetCapability\b")
     references = {
         path.relative_to(ROOT).as_posix()
         for path in production_root.rglob("*.py")
-        if "RayWorkerTargetCapability" in path.read_text(encoding="utf-8")
+        if model_pattern.search(path.read_text(encoding="utf-8"))
     }
 
     assert references == {
+        "src/django_ray/doctor.py",
+        "src/django_ray/maintenance.py",
         "src/django_ray/migrations/0025_ray_worker_target_capabilities.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
+        "src/django_ray/migrations/0030_cohort_claims.py",
+        "src/django_ray/migrations/0032_maintenance_controls.py",
         "src/django_ray/models.py",
+        "src/django_ray/runner/cohort_claims.py",
+        "src/django_ray/runner/cohort_core.py",
+        "src/django_ray/runner/cohort_jobs.py",
         "src/django_ray/target/capabilities.py",
+        "src/django_ray/target/cohort_claim_storage.py",
+        "src/django_ray/target/cohort_publication.py",
     }
 
     coordinator_symbols = (
@@ -406,7 +422,83 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
             for path in production_root.rglob("*.py")
             if symbol in path.read_text(encoding="utf-8")
         }
-        assert callers == {"src/django_ray/target/capabilities.py"}
+        expected = {"src/django_ray/target/capabilities.py"}
+        if symbol == "advertise_ray_worker_target_capability":
+            expected.add("src/django_ray/target/cohort_publication.py")
+        elif symbol == "withdraw_all_ray_worker_target_capabilities":
+            expected.add("src/django_ray/runner/cohort_core.py")
+            expected.add("src/django_ray/management/commands/django_ray_worker.py")
+        elif symbol == "withdraw_ray_worker_target_capability":
+            expected.add("src/django_ray/runner/cohort_jobs.py")
+        assert callers == expected
+
+    # Current-cohort lifecycle callers are finite and reviewed separately from
+    # the retained protocol-2 routing ledger. This inventory is not runtime proof.
+    claim_callers = {
+        "claim_cohort_execution": {"src/django_ray/runner/cohort_claims.py"},
+        "adopt_cohort_claim": {"src/django_ray/runner/cohort_recovery.py"},
+        "prepare_cohort_claim": {"src/django_ray/runner/cohort_dispatch.py"},
+        "mark_cohort_claim_dispatched": {"src/django_ray/runner/cohort_dispatch.py"},
+        "hold_cohort_claim": {
+            "src/django_ray/management/commands/django_ray_worker.py",
+            "src/django_ray/runner/cohort_cancel_request.py",
+            "src/django_ray/runner/cohort_completion.py",
+            "src/django_ray/runner/cohort_dispatch.py",
+            "src/django_ray/runner/cohort_timeout.py",
+        },
+        "resolve_cohort_claim": {
+            "src/django_ray/management/commands/django_ray_benchmark_polling.py",
+            "src/django_ray/runner/cohort_cancellation.py",
+            "src/django_ray/runner/cohort_completion.py",
+        },
+    }
+    for symbol, expected in claim_callers.items():
+        callers = {
+            path.relative_to(ROOT).as_posix()
+            for path in production_root.rglob("*.py")
+            if symbol in path.read_text(encoding="utf-8")
+        }
+        assert callers == expected | {"src/django_ray/target/cohort_claim_storage.py"}
+
+    # Only the owned manager adapters invoke split publication; application
+    # execution, cancellation and recovery do not mint fresh qualification.
+    publication_symbols = (
+        "publish_core_cohort_probe",
+        "publish_cohort_job_probe",
+        "publish_prepared_core_cohort_probe",
+        "publish_prepared_cohort_job_probe",
+    )
+    for symbol in publication_symbols:
+        callers = {
+            path.relative_to(ROOT).as_posix()
+            for path in production_root.rglob("*.py")
+            if symbol in path.read_text(encoding="utf-8")
+        }
+        expected = {"src/django_ray/target/cohort_publication.py"}
+        if symbol == "publish_prepared_core_cohort_probe":
+            expected.add("src/django_ray/runner/cohort_core.py")
+        elif symbol == "publish_prepared_cohort_job_probe":
+            expected.add("src/django_ray/runner/cohort_jobs.py")
+        assert callers == expected
+
+    adapter_callers = {
+        path.relative_to(ROOT).as_posix()
+        for path in production_root.rglob("*.py")
+        if "CoreCohortManagerAdapter" in path.read_text(encoding="utf-8")
+    }
+    assert adapter_callers == {
+        "src/django_ray/runner/cohort_core.py",
+        "src/django_ray/runner/cohort_worker.py",
+    }
+    jobs_adapter_callers = {
+        path.relative_to(ROOT).as_posix()
+        for path in production_root.rglob("*.py")
+        if "JobsCohortManagerAdapter" in path.read_text(encoding="utf-8")
+    }
+    assert jobs_adapter_callers == {
+        "src/django_ray/runner/cohort_jobs.py",
+        "src/django_ray/runner/cohort_worker.py",
+    }
 
 
 def test_protocol_v2_evidence_has_no_production_persistence_consumer() -> None:

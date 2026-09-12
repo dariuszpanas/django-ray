@@ -38,6 +38,10 @@ class DurableTaskContext:
     task_id: str | None = None
     execution_protocol_version: int | None = None
     strict_execution_request: bool = False
+    cohort_contract_json: str | None = None
+    cohort_contract_digest: str | None = None
+    cohort_leaf_contract_json: str | None = None
+    cohort_leaf_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -182,13 +186,36 @@ def require_strict_task_execution_context(
         or current.strict_execution_request is not True
         or not is_valid_execution_identity(identity)
         or type(protocol) is not int
-        or not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(protocol)
+        or not (SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(protocol) or protocol == 3)
         or not isinstance(current.runtime_env_plan_identity, dict)
     )
     if not invalid:
         try:
             nested_runtime_env_digests(current.runtime_env_plan_identity)
-        except NestedExecutionRequestRejected:
+            if protocol == 3:
+                from django_ray.target.cohort_contract import decode_cohort_leaf_contract
+                from django_ray.target.cohort_transport import decode_cohort_outer_contract
+
+                if current.cohort_contract_json is not None:
+                    if current.cohort_contract_digest is None:
+                        raise ValueError
+                    decode_cohort_outer_contract(
+                        current.cohort_contract_json,
+                        expected_identity=identity,
+                        expected_contract_digest=current.cohort_contract_digest,
+                    )
+                elif current.cohort_leaf_contract_json is not None:
+                    if current.cohort_leaf_digest is None or current.cohort_contract_digest is None:
+                        raise ValueError
+                    decode_cohort_leaf_contract(
+                        current.cohort_leaf_contract_json,
+                        expected_identity=identity,
+                        expected_contract_digest=current.cohort_leaf_digest,
+                        expected_outer_contract_digest=current.cohort_contract_digest,
+                    )
+                else:
+                    raise ValueError
+        except (NestedExecutionRequestRejected, ValueError):
             invalid = True
     if invalid:
         raise NestedExecutionRequestRejected(
@@ -238,6 +265,10 @@ def durable_task_execution(
     ray_job_driver: bool = False,
     compiled_graph_submission_transport: str | None = None,
     strict_execution_request: bool = False,
+    cohort_contract_json: str | None = None,
+    cohort_contract_digest: str | None = None,
+    cohort_leaf_contract_json: str | None = None,
+    cohort_leaf_digest: str | None = None,
 ) -> Iterator[None]:
     """Expose a durable task identity to nested workflow coordination."""
     token = _current_task.set(
@@ -257,6 +288,10 @@ def durable_task_execution(
             ray_job_driver=ray_job_driver,
             compiled_graph_submission_transport=compiled_graph_submission_transport,
             strict_execution_request=strict_execution_request,
+            cohort_contract_json=cohort_contract_json,
+            cohort_contract_digest=cohort_contract_digest,
+            cohort_leaf_contract_json=cohort_leaf_contract_json,
+            cohort_leaf_digest=cohort_leaf_digest,
         )
     )
     try:

@@ -1,12 +1,14 @@
-"""Lifecycle coverage for normalized workflow-progress detail retention."""
+"""Historical direct-lifecycle coverage for normalized workflow-detail retention."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import pytest
 
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.lifecycle import (
     cancel_task,
     record_failure,
@@ -25,12 +27,33 @@ from django_ray.workflow.progress.summary import (
     deserialize_workflow_progress_summary,
     serialize_workflow_progress_summary,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
+
+historical_succeed_task = partial(succeed_task, supported_protocols=ExecutionProtocolRange(1, 1))
+historical_record_failure = partial(
+    record_failure, supported_protocols=ExecutionProtocolRange(1, 1)
+)
+historical_cancel_task = partial(cancel_task, supported_protocols=ExecutionProtocolRange(1, 1))
+historical_record_lost = partial(record_lost, supported_protocols=ExecutionProtocolRange(1, 1))
+
+
+def historical_retry_task(execution):
+    """Public current retry stays closed; exercise the retained per-call path."""
+    from django_ray.lifecycle import _request_task_retry
+
+    assert retry_task(execution) is None
+    _, retried = _request_task_retry(execution, supported_protocols=ExecutionProtocolRange(1, 1))
+    return retried
+
 
 RUN_ID = "00000000-0000-0000-0000-000000000126"
 
 
 def _execution(*, state: str = TaskState.RUNNING) -> RayTaskExecution:
     return RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="workflow-terminal-detail-expiry",
         callable_path="tests.unit.test_workflows.increment",
         state=state,
@@ -180,7 +203,7 @@ def _assert_exact_expiry(
     return archived
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("transition", "terminal_state"),
     [
@@ -199,15 +222,15 @@ def test_outer_terminal_transition_stamps_detail_when_producer_only_reported_run
     run_storage = _run_storage(execution, identity)
 
     if transition == "success":
-        assert succeed_task(execution, result_data="{}", result_reference=None)
+        assert historical_succeed_task(execution, result_data="{}", result_reference=None)
     elif transition == "permanent_failure":
-        assert record_failure(execution, error_message="failed", retry=False)
+        assert historical_record_failure(execution, error_message="failed", retry=False)
     elif transition == "lost":
-        assert record_lost(execution, error_message="owner lost")
+        assert historical_record_lost(execution, error_message="owner lost")
     else:
         RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.CANCELLING)
         execution.refresh_from_db()
-        assert cancel_task(execution)
+        assert historical_cancel_task(execution)
 
     _assert_exact_expiry(
         execution,
@@ -217,13 +240,13 @@ def test_outer_terminal_transition_stamps_detail_when_producer_only_reported_run
     )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_zero_day_retention_uses_the_exact_canonical_terminal_timestamp() -> None:
     execution = _execution()
     identity = _attach_summary(execution, detail_days=0)
     run_storage = _run_storage(execution, identity, retention_days=0)
 
-    assert succeed_task(execution, result_data=None, result_reference=None)
+    assert historical_succeed_task(execution, result_data=None, result_reference=None)
 
     archived = _assert_exact_expiry(
         execution,
@@ -234,13 +257,13 @@ def test_zero_day_retention_uses_the_exact_canonical_terminal_timestamp() -> Non
     assert archived["retention"]["detail_expires_at"] == archived["terminal"]["finished_at"]
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_automatic_retry_stamps_and_retains_the_completed_attempt_run() -> None:
     execution = _execution()
     identity = _attach_summary(execution, detail_days=3)
     run_storage = _run_storage(execution, identity, retention_days=3)
 
-    assert record_failure(execution, error_message="retry", retry=True)
+    assert historical_record_failure(execution, error_message="retry", retry=True)
 
     execution.refresh_from_db()
     assert execution.state == TaskState.QUEUED
@@ -255,7 +278,7 @@ def test_automatic_retry_stamps_and_retains_the_completed_attempt_run() -> None:
     )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_manual_retry_stamps_and_retains_the_completed_attempt_run() -> None:
     execution = _execution()
     identity = _attach_summary(execution, detail_days=5)
@@ -266,7 +289,7 @@ def test_manual_retry_stamps_and_retains_the_completed_attempt_run() -> None:
         finished_at=finished_at,
     )
 
-    assert retry_task(execution.pk) is not None
+    assert historical_retry_task(execution.pk) is not None
 
     execution.refresh_from_db()
     assert execution.state == TaskState.QUEUED
@@ -282,7 +305,7 @@ def test_manual_retry_stamps_and_retains_the_completed_attempt_run() -> None:
     )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_authoritative_terminal_summary_extends_an_earlier_producer_deadline() -> None:
     execution = _execution()
     identity = _identity(execution)
@@ -308,7 +331,7 @@ def test_authoritative_terminal_summary_extends_an_earlier_producer_deadline() -
     earlier_expiry = _timestamp(producer_summary["retention"]["detail_expires_at"])
     run_storage = _run_storage(execution, identity, expires_at=earlier_expiry)
 
-    assert record_failure(execution, error_message="failed", retry=False)
+    assert historical_record_failure(execution, error_message="failed", retry=False)
 
     archived = _archived_summary(execution)
     assert archived["summary_revision"] == 3
@@ -318,7 +341,7 @@ def test_authoritative_terminal_summary_extends_an_earlier_producer_deadline() -
     assert run_storage.detail_expires_at == authoritative_expiry
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     ("summary_case", "retention_days"),
     [("missing", 4), ("corrupt", 0)],
@@ -338,7 +361,7 @@ def test_terminal_lifecycle_falls_back_to_persisted_policy_without_canonical_sum
         retention_days=retention_days,
     )
 
-    assert succeed_task(execution, result_data=None, result_reference=None)
+    assert historical_succeed_task(execution, result_data=None, result_reference=None)
 
     attempt = TaskAttempt.objects.get(execution=execution, attempt_number=2)
     assert attempt.workflow_progress_summary_json is None
@@ -349,13 +372,13 @@ def test_terminal_lifecycle_falls_back_to_persisted_policy_without_canonical_sum
     assert run_storage.detail_expires_at == expected
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_canonical_terminal_summary_preserves_exact_detail_revision_fence() -> None:
     execution = _execution()
     identity = _attach_summary(execution)
     run_storage = _run_storage(execution, identity, detail_revision=2)
 
-    assert succeed_task(execution, result_data=None, result_reference=None)
+    assert historical_succeed_task(execution, result_data=None, result_reference=None)
 
     archived = _archived_summary(execution)
     assert archived["detail_revision"] == 1
@@ -363,7 +386,7 @@ def test_canonical_terminal_summary_preserves_exact_detail_revision_fence() -> N
     assert run_storage.detail_expires_at is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("case", ["summary_only", "invalid", "missing_run"])
 def test_non_stampable_progress_never_blocks_the_outer_terminal_transition(case: str) -> None:
     execution = _execution()
@@ -375,7 +398,7 @@ def test_non_stampable_progress_never_blocks_the_outer_terminal_transition(case:
     else:
         _attach_summary(execution)
 
-    assert succeed_task(execution, result_data="{}", result_reference=None)
+    assert historical_succeed_task(execution, result_data="{}", result_reference=None)
 
     execution.refresh_from_db()
     assert execution.state == TaskState.SUCCEEDED

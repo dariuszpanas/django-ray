@@ -11,7 +11,7 @@ import pytest
 
 from django_ray import execution_codec as codec
 from django_ray.runtime import distributed
-from tests.unit.test_distributed_mocked import _strict_execution
+from tests.protocol_epochs import cohort_sender_context
 
 
 def _square(value: int) -> int:
@@ -73,7 +73,7 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
     pickled: list[object] = []
     original_request = distributed._nested_distributed_request
     original_digest = codec.nested_callable_digest
-    original_encode = codec.encode_nested_execution_request
+    original_encode = codec._encode_nested_request_for_protocols
     original_pickle = pickle.dumps
 
     def request(operation, serialized: bytes, index: int):
@@ -86,9 +86,9 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
         hashed.append(serialized)
         return original_digest(serialized)
 
-    def encode(value) -> str:
+    def encode(value, protocols) -> str:
         encodings.append(value)
-        return original_encode(value)
+        return original_encode(value, protocols)
 
     def serialize(value, *args, **kwargs) -> bytes:
         pickled.append(value)
@@ -98,9 +98,9 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
 
     monkeypatch.setattr(distributed, "_nested_distributed_request", request)
     monkeypatch.setattr(codec, "nested_callable_digest", digest)
-    monkeypatch.setattr(codec, "encode_nested_execution_request", encode)
+    monkeypatch.setattr(codec, "_encode_nested_request_for_protocols", encode)
     monkeypatch.setattr(pickle, "dumps", serialize)
-    with _strict_execution() if strict else nullcontext():
+    with cohort_sender_context() if strict else nullcontext():
         if helper == "map":
             result = distributed.parallel_map(_square, list(range(count)), max_concurrency=window)
         elif helper == "starmap":
@@ -118,7 +118,9 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
     assert len(hashed) == ((count if helper == "scatter" else 1) if strict else 0)
     assert requests == (list(range(count)) if strict else [])
     if strict:
-        decoded = [codec.decode_nested_execution_request(call[-10]) for call in sender.calls]
+        decoded = [codec.decode_nested_execution_request(call[-12]) for call in sender.calls]
+        assert all(request.execution_protocol_version == 3 for request in decoded)
+        assert all(request.cohort_leaf_contract_json is not None for request in decoded)
         assert [request.boundary_identity.item_index for request in decoded] == list(range(count))
         assert len({request.boundary_identity.operation_id for request in decoded}) == 1
         assert all(request.outer_identity.task_id == "task-41" for request in decoded)
@@ -144,7 +146,7 @@ def test_later_scatter_pickle_failure_cleans_owned_sibling_without_replay(
 
     monkeypatch.setattr(pickle, "dumps", serialize)
     with (
-        _strict_execution() if strict else nullcontext(),
+        cohort_sender_context() if strict else nullcontext(),
         pytest.raises(pickle.PicklingError) as caught,
     ):
         distributed.scatter_gather(
@@ -204,7 +206,7 @@ def test_later_map_request_failure_uses_owned_cleanup(
         return original(operation, serialized, index)
 
     monkeypatch.setattr(distributed, "_nested_distributed_request", request)
-    with _strict_execution(), pytest.raises(codec.NestedExecutionRequestEncodeError) as caught:
+    with cohort_sender_context(), pytest.raises(codec.NestedExecutionRequestEncodeError) as caught:
         distributed.parallel_map(_square, list(range(5)), max_concurrency=2)
     assert caught.value is failure
     assert len(sender.calls) == 2

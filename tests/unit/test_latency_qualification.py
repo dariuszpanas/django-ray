@@ -294,7 +294,11 @@ def test_fixed_definition_and_optimized_interpreter_refusal(tmp_path):
 
 
 def test_fresh_django_fixture_enqueues_and_observes_real_completion_writes(tmp_path):
-    """Validate fixture bootstrap and SQL observation without starting Ray."""
+    """Exercise the current Sync boundary and real receipt writer without Ray.
+
+    This observes the SQL writer only; native Jobs qualification must also prove
+    the independently owned transport and manager receipt consumption.
+    """
     import django_ray
 
     root = Path(__file__).resolve().parents[2]
@@ -325,28 +329,45 @@ from django.db import connections
 from django_ray.conf.settings import get_settings
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskState
-from django_ray.runtime.entrypoint import execute_task
+from django_ray.runner.cohort_dispatch import (
+    prepare_claimed_cohort_dispatch, mark_cohort_dispatch_started,
+)
+from django_ray.runtime.cohort_execution import execute_cohort_request
+from django_ray.runtime.entrypoint import _persist_task_completion
+from django_ray.target.cohort_transport import decode_cohort_execution_result
+settings.TASKS["default"]["OPTIONS"]["RAY_JOB_ONLY"] = False
 from qualification.latency.tasks import held_result
 call_command("migrate", verbosity=0)
 command = Command()
-command.execution_mode = "ray"
+command.execution_mode = "sync"
 command._validate_execution_mode_configuration(get_settings())
+command._create_lease("default")
+command._initialize_cohort_execution(("default",))
 for fail in (False, True):
     queued = held_result.enqueue(fail=fail)
     row = RayTaskExecution.objects.get(task_id=queued.id)
     assert row.state == TaskState.QUEUED and row.ray_job_id is None
-    row.state = TaskState.RUNNING
-    row.attempt_number = row.execution_generation = 1
-    row.save()
+    claimed, = command._cohort_controller.claim(limit=1)
+    assert claimed.execution.pk == row.pk
+    prepared = prepare_claimed_cohort_dispatch(claimed)
+    dispatched = mark_cohort_dispatch_started(prepared)
+    identity = dispatched.claim.facts.identity
+    assert identity.attempt_number == identity.execution_generation == 1
     (settings.ROOT / f"release-{row.pk}").touch()
-    result = json.loads(execute_task(
-        callable_path=row.callable_path, serialized_args=row.args_json,
-        serialized_kwargs=row.kwargs_json, task_execution_pk=row.pk,
-        attempt_number=1, execution_generation=1, ray_job_driver=True,
-    ))
+    expected = dict(
+        expected_identity=identity,
+        expected_request_digest=dispatched.prepared.request_digest,
+        expected_cohort_contract_digest=dispatched.prepared.contract_digest,
+    )
+    encoded = execute_cohort_request(dispatched.prepared.request_json, **expected)
+    envelope = decode_cohort_execution_result(encoded, **expected)
+    assert envelope.refusal is None
+    result = json.loads(envelope.completion_json)
     assert result["success"] is (not fail), result
+    assert result["execution_protocol_version"] == 3
+    _persist_task_completion(row.pk, 1, 1, encoded)
     row.refresh_from_db()
-    assert row.completion_data
+    assert row.completion_data == encoded
     observed = json.loads((settings.ROOT / f"completion-{row.pk}.json").read_text())
     assert observed["committed_ns"] > 0
     started = json.loads((settings.ROOT / f"started-{row.pk}.json").read_text())

@@ -79,6 +79,8 @@ from django_ray.workflow.progress.storage import (
 )
 from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
 from django_ray.workflows import map_step
+from tests.integration.test_cohort_activation_migration import LATEST, _migrate
+from tests.integration.test_cohort_activation_migration import historical as historical
 from tests.workflow_progress_storage_helpers import (
     workflow_detail,
     workflow_node,
@@ -305,8 +307,8 @@ class TestRayTaskExecutionAdmin:
             queue_name="informational-only",
             capability_schema_version=1,
             django_ray_version="0.5.0-reader",
-            min_supported_execution_protocol_version=1,
-            max_supported_execution_protocol_version=1,
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
             legacy_admission_token=None,
         )
         execution = RayTaskExecution.objects.create(
@@ -888,8 +890,8 @@ class TestRayTaskExecutionAdmin:
             queue_name="another-queue",
             capability_schema_version=1,
             django_ray_version="0.5.0-reader",
-            min_supported_execution_protocol_version=1,
-            max_supported_execution_protocol_version=1,
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
             legacy_admission_token=None,
         )
         user_model = get_user_model()
@@ -923,7 +925,7 @@ class TestRayTaskExecutionAdmin:
         assert payload["id"] == execution.pk
         assert payload["state"] == TaskState.SUCCEEDED
         assert payload["attempt_number"] == 2
-        assert payload["execution_protocol_version"] == 1
+        assert payload["execution_protocol_version"] == 3
         assert payload["created_with_django_ray_version"] == "[REDACTED]"
         assert payload["managed_with_django_ray_version"] == "0.5.0-manager"
         assert payload["executor_django_ray_version"] == "[REDACTED]"
@@ -3993,8 +3995,10 @@ class TestRayTaskExecutionAdmin:
 
         assert messages[-1] == "No failed, lost, or expired tasks found in selection."
 
+    @pytest.mark.django_db(transaction=True)
     def test_retry_and_cancel_actions_report_unsupported_protocol_without_mutation(
         self,
+        historical,
         monkeypatch,
     ) -> None:
         admin_obj = _task_admin()
@@ -4004,7 +4008,7 @@ class TestRayTaskExecutionAdmin:
             "message_user",
             lambda request, message: messages.append(str(message)),
         )
-        task = RayTaskExecution.objects.create(
+        task = historical.get_model("django_ray", "RayTaskExecution").objects.create(
             task_id="admin-unsupported-protocol-actions",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.FAILED,
@@ -4013,6 +4017,8 @@ class TestRayTaskExecutionAdmin:
             execution_generation=7,
             error_message="retained failure",
         )
+        _migrate(LATEST)
+        task = RayTaskExecution.objects.get(pk=task.pk)
         before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
         queryset = RayTaskExecution.objects.filter(pk=task.pk)
 
@@ -4952,6 +4958,11 @@ class TestTaskWorkerLeaseAdmin:
     def test_worker_id_short_and_time_since_heartbeat(self) -> None:
         admin_obj = _lease_admin()
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="worker-1234567890abcdef",
             hostname="host-a",
             pid=1111,
@@ -4979,6 +4990,11 @@ class TestTaskWorkerLeaseAdmin:
         )
 
         active = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="active-worker",
             hostname="host-b",
             pid=2222,
@@ -4986,6 +5002,11 @@ class TestTaskWorkerLeaseAdmin:
             is_active=True,
         )
         inactive = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="inactive-worker",
             hostname="host-c",
             pid=3333,
@@ -5056,6 +5077,11 @@ class TestTaskWorkerLeaseAdmin:
         assert "delete_selected" not in actions
 
         active = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="view-only-action-target",
             hostname="view-only-host",
             pid=6666,
@@ -5098,6 +5124,11 @@ class TestTaskWorkerLeaseAdmin:
     def test_lease_displays_actions_and_filter_variants(self, monkeypatch) -> None:
         admin_obj = _lease_admin()
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="lease-display-worker",
             hostname="host-d",
             pid=4444,
@@ -5110,6 +5141,11 @@ class TestTaskWorkerLeaseAdmin:
         assert admin_obj.time_since_heartbeat(lease).endswith("h 3m ago")
 
         inactive = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="lease-inactive-worker",
             hostname="host-e",
             pid=5555,

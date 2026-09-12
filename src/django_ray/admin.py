@@ -3247,6 +3247,13 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         blocked = 0
         changed = 0
         unsupported = 0
+        admission_blocked = 0
+        admission_statuses = {
+            TaskRetryRequestStatus.MAINTENANCE_UNAVAILABLE,
+            TaskRetryRequestStatus.MAINTENANCE_PAUSED,
+            TaskRetryRequestStatus.QUARANTINED,
+            TaskRetryRequestStatus.CLEANUP_PENDING,
+        }
         for row in snapshot:
             try:
                 result = request_task_retry(
@@ -3264,9 +3271,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 continue
             count += int(result.accepted)
             unsupported += int(result.status is TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL)
+            admission_blocked += int(result.status in admission_statuses)
             changed += int(
                 not result.accepted
                 and result.status is not TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL
+                and result.status not in admission_statuses
             )
 
         message = f"Queued {count} task(s) for retry."
@@ -3281,6 +3290,12 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             message += (
                 f" Skipped {unsupported} task(s) because this django-ray build does not "
                 "support their execution protocol."
+            )
+        if admission_blocked:
+            message += (
+                f" Skipped {admission_blocked} task(s) because retry admission is paused or "
+                "unavailable, quarantined, or waiting for Ray Job cleanup. Inspect "
+                "maintenance and cleanup diagnostics before retrying."
             )
         self.message_user(
             request,

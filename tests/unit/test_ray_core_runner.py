@@ -38,6 +38,9 @@ class _FakeObjectRef:
 class _FakeExceptions:
     RayTaskError = RuntimeError
 
+    class TaskCancelledError(Exception):
+        pass
+
 
 class _FakeJobID:
     def hex(self) -> str:
@@ -167,8 +170,32 @@ def _task_execution(
     )
 
 
+@pytest.fixture
+def historical_execution_epoch(monkeypatch):
+    """Opt in only retained v1 adapter cases; current Core proof lives in cohort tests."""
+    from tests.protocol_epochs import install_legacy_execution_epoch
+
+    install_legacy_execution_epoch(monkeypatch)
+
+
 class TestRayCoreRunnerRuntime:
     """Coverage for RayCoreRunner execution branches."""
+
+    def test_current_epoch_refuses_legacy_submission_before_remote(self, monkeypatch) -> None:
+        from django_ray.execution_codec import ExecutionRequestEncodeError
+        from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
+
+        assert EXECUTION_PROTOCOL_VERSION == 3
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner._from_existing_connection()
+        with pytest.raises(ExecutionRequestEncodeError):
+            runner.submit_durable(
+                task_execution=_task_execution(
+                    11, callable_path="testproject.tasks.add_numbers", args_json="[3,4]"
+                )
+            )
+        assert fake.remote_invocations == []
+        assert runner.pending_count == 0
 
     def test_ensure_ray_initialized_uses_env_address(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
@@ -179,6 +206,7 @@ class TestRayCoreRunnerRuntime:
 
         assert fake.init_calls == [{"address": "ray://unit:10001", "ignore_reinit_error": True}]
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_builds_composite_handle_and_tracks_pending(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         monkeypatch.setattr(
@@ -218,6 +246,7 @@ class TestRayCoreRunnerRuntime:
         assert json.loads(submitted_request.serialized_args) == [3, 4]
         assert json.loads(submitted_request.serialized_kwargs) == {"x": 1}
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_uses_durable_json_as_the_opaque_request_source(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         monkeypatch.setattr(
@@ -265,6 +294,7 @@ class TestRayCoreRunnerRuntime:
             "expected_execution_protocol_version": 1,
         }
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_decrypts_stored_runtime_env_before_remote_submission(
         self,
         monkeypatch,
@@ -323,6 +353,7 @@ class TestRayCoreRunnerRuntime:
             "expected_execution_protocol_version": 1,
         }
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_rejects_duplicate_pk_before_remote_submission(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         runner = RayCoreRunner()
@@ -391,6 +422,7 @@ class TestRayCoreRunnerRuntime:
 
         assert fake.remote_calls == []
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_transports_external_input_by_reference(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         captured: dict[str, object] = {}
@@ -437,6 +469,7 @@ class TestRayCoreRunnerRuntime:
             "input_reference": reference,
         }
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_propagates_progress_fence_identity(self, monkeypatch) -> None:
         _install_fake_ray(monkeypatch)
         captured: dict[str, object] = {}
@@ -514,6 +547,7 @@ class TestRayCoreRunnerRuntime:
 
         assert _compiled_graph_submission_transport(fake) is None
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_registers_remote_module_for_ray_cloudpickle(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         registered: list[object] = []
@@ -537,6 +571,7 @@ class TestRayCoreRunnerRuntime:
 
         assert registered == [remote_module]
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_discards_failed_ray_client_definition_before_retry(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         fake.remote_error = ModuleNotFoundError("django_ray")
@@ -572,6 +607,7 @@ class TestRayCoreRunnerRuntime:
         assert runner.pending_count == 1
         assert sum(call == {} for call in fake.remote_calls) == 2
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_applies_persisted_runtime_env(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         monkeypatch.setattr(
@@ -625,6 +661,7 @@ class TestRayCoreRunnerRuntime:
         assert fake.remote_calls == []
         assert "arbitrary-customer-marker-7cf3" not in str(exc_info.value)
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_normalizes_ray_job_id_to_hex(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         fake.runtime_job_id = _FakeJobID()
@@ -646,6 +683,7 @@ class TestRayCoreRunnerRuntime:
         assert handle.ray_job_id.startswith("02000000:")
         assert runner._pending_tasks[13].ray_job_id == "02000000"
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_falls_back_to_legacy_id_when_runtime_context_fails(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         fake.runtime_context_error = RuntimeError("no runtime context")
@@ -671,6 +709,7 @@ class TestRayCoreRunnerRuntime:
         assert status_after_cancel.status == JobStatus.UNKNOWN
         assert status_after_cancel.message == "Submission handle is no longer tracked"
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_returned_legacy_handle_does_not_poll_or_cancel_replacement(self, monkeypatch) -> None:
         fake = _install_fake_ray(monkeypatch)
         fake.runtime_context_error = RuntimeError("no runtime context")

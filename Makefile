@@ -111,12 +111,42 @@ test-postgres:
 	python scripts/require_linux.py
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
+		tests/integration/test_sample_admission.py \
 		tests/integration/test_transactional_enqueue.py \
 		tests/integration/test_postgresql_workflow_progress_storage.py \
 		tests/integration/test_postgresql_workflow_progress_reads.py \
 		tests/integration/test_postgresql_polling.py \
 		tests/integration/test_postgresql_metrics.py \
 		tests/integration/test_protocol_coordination.py \
+		tests/integration/test_cohort_probe_challenges.py \
+		tests/integration/test_cohort_intent_storage.py \
+		tests/integration/test_cohort_claim_storage.py \
+		tests/integration/test_cohort_selection.py \
+		tests/integration/test_cohort_selection_postgres.py \
+		tests/integration/test_cohort_dispatch.py \
+		tests/integration/test_cohort_completion.py \
+		tests/integration/test_cohort_recovery.py \
+		tests/integration/test_cohort_cleanup_recovery.py \
+		tests/integration/test_cohort_job_cleanup.py \
+		tests/integration/test_cohort_timeout.py \
+		tests/integration/test_cohort_activation_migration.py \
+		tests/integration/test_cohort_activation_operations.py \
+		tests/integration/test_upgrade_activation_snapshot.py \
+		tests/integration/test_cohort_expiration.py \
+		tests/integration/test_cohort_cancellation.py \
+		tests/integration/test_cohort_cancel_request.py \
+		tests/integration/test_cohort_worker.py \
+		tests/integration/test_cohort_worker_jobs_dispatch.py \
+		tests/integration/test_cohort_worker_control.py \
+		tests/integration/test_cohort_worker_jobs_control.py \
+		tests/integration/test_maintenance_admission.py \
+		tests/integration/test_maintenance_controls.py \
+		tests/integration/test_doctor.py \
+		tests/integration/test_cohort_job_receipts.py \
+		tests/integration/test_cohort_publication.py \
+		tests/integration/test_cohort_core.py \
+		tests/integration/test_cohort_jobs.py \
+		tests/integration/test_cohort_job_retirement.py \
 		tests/integration/test_ray_target_coordination.py \
 		tests/integration/test_ray_target_routing_coordination.py \
 		tests/integration/test_ray_worker_target_capabilities.py \
@@ -140,6 +170,8 @@ test-testproject:
 	python scripts/require_linux.py
 	python testproject/manage.py check
 	pytest tests/integration/test_api.py \
+		tests/integration/test_sample_admission.py \
+		tests/unit/test_sample_workload_limits.py \
 		tests/integration/test_testproject_admin_theme.py \
 		tests/integration/test_workflow_progress_api.py \
 		tests/unit/test_sample_security.py \

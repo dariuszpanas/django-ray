@@ -57,7 +57,11 @@ def test_profile_waits_for_assertions_around_identical_cold_replacement():
         if op.get("assert", {}).get("resource", {}).get("metadata", {}).get("name")
         == "assert-before"
     )
-    deleted = next(i for i, op in enumerate(sequence) if "delete" in op)
+    deleted = next(
+        i
+        for i, op in enumerate(sequence)
+        if op.get("delete", {}).get("ref", {}).get("kind") == "RayCluster"
+    )
     assert sequence[before]["assert"]["resource"]["status"] == {"succeeded": 1}
     assert sequence[deleted]["delete"]["ref"] == {
         "apiVersion": "ray.io/v1",
@@ -81,7 +85,7 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
     test = definition()
     assert test["apiVersion"] == "chainsaw.kyverno.io/v1alpha1"
     assert test["kind"] == "Test"
-    assert len(test["spec"]["steps"]) == 13
+    assert len(test["spec"]["steps"]) == 16
     for generation in ("before", "after"):
         job = resources()["Job", f"assert-{generation}"]
         assert job["spec"]["parallelism"] == job["spec"]["completions"] == 1
@@ -89,7 +93,17 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
         assert job["spec"]["activeDeadlineSeconds"] == 600
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
         assert command[:2] == ["/bin/sh", "-ec"]
-        node_command, core_command = command[2].split(" && ")
+        commands = command[2].split(" && ")
+        node_command, core_command = commands[:2]
+        assert len(commands) == (3 if generation == "before" else 2)
+        if generation == "before":
+            assert (
+                commands[2]
+                == "python -m qualification.application.retire_manager --before-core /receipts/before-core.json --receipt /receipts/before-retirement.json"
+            )
+        assert ("--previous-retirement /receipts/before-retirement.json" in core_command) == (
+            generation == "after"
+        )
         assert node_command.startswith("python -m qualification.application.generic_nodes ")
         assert core_command.startswith("python -m qualification.application.run_core ")
         assert f"--receipt /receipts/{generation}-nodes.json" in node_command
@@ -216,3 +230,28 @@ def test_profile_uses_fixed_generic_ray_and_postgresql_images():
             assert resource["spec"]["type"] == "ClusterIP"
             assert resource["spec"]["clusterIP"] == "None"
             assert not set(resource["spec"]) & {"externalIPs", "externalName"}
+
+
+def test_manager_is_finite_retired_and_reaped_before_ray_replacement():
+    sequence = operations()
+    manager = resources()["Job", "django-manager"]
+    assert manager["spec"]["backoffLimit"] == 0
+    assert manager["spec"]["activeDeadlineSeconds"] == 1800
+    assert manager["spec"]["parallelism"] == manager["spec"]["completions"] == 1
+    assert manager["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+    reaped = next(
+        i
+        for i, op in enumerate(sequence)
+        if op.get("delete", {}).get("ref", {}).get("kind") == "Job"
+    )
+    assert sequence[reaped - 1]["assert"]["resource"]["status"] == {"succeeded": 1}
+    assert sequence[reaped]["delete"]["ref"]["name"] == "django-manager"
+    assert sequence[reaped]["delete"]["deletionPropagationPolicy"] == "Foreground"
+    assert sequence[reaped + 1]["delete"]["ref"]["kind"] == "RayCluster"
+    creates = [
+        i
+        for i, op in enumerate(sequence)
+        if op.get("create", {}).get("resource", {}).get("metadata", {}).get("name")
+        == "django-manager"
+    ]
+    assert len(creates) == 2 and creates[0] < reaped < creates[1]

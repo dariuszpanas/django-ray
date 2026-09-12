@@ -220,6 +220,8 @@ def _decode_result_fold_request(
     expected_node_id: str | None,
     expected_runtime_env_plan_digest: str | None,
     expected_runtime_env_transport_digest: str | None,
+    expected_cohort_leaf_digest: str | None = None,
+    expected_outer_contract_digest: str | None = None,
 ) -> Any | None:
     """Decode a fold boundary before bootstrap, import, or initialization."""
     from django_ray.execution_codec import (
@@ -230,7 +232,6 @@ def _decode_result_fold_request(
         NestedExecutionRequestRejection,
         NestedWorkflowBoundaryIdentity,
         assert_nested_callable_binding,
-        decode_nested_execution_request,
     )
 
     expectations = (
@@ -255,7 +256,9 @@ def _decode_result_fold_request(
             NestedExecutionRequestRejection.MISSING_CONTEXT
         ) from None
 
-    request = decode_nested_execution_request(
+    from django_ray.runtime.cohort_nested import decode_runtime_nested_request
+
+    request = decode_runtime_nested_request(
         serialized,
         expected_outer_identity=ExecutionIdentity(
             task_execution_pk=expected_outer_task_execution_pk,
@@ -273,6 +276,8 @@ def _decode_result_fold_request(
         expected_callable_binding=callable_path,
         expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+        expected_cohort_leaf_digest=expected_cohort_leaf_digest,
+        expected_outer_contract_digest=expected_outer_contract_digest,
     )
     assert_nested_callable_binding(request, callable_path=callable_path)
     return request
@@ -302,6 +307,8 @@ class WorkflowMapResultFold:
         expected_node_id: str | None = None,
         expected_runtime_env_plan_digest: str | None = None,
         expected_runtime_env_transport_digest: str | None = None,
+        expected_cohort_leaf_digest: str | None = None,
+        expected_outer_contract_digest: str | None = None,
     ) -> None:
         self._nested_request = None
         self._nested_rejection = None
@@ -318,6 +325,8 @@ class WorkflowMapResultFold:
                 expected_node_id=expected_node_id,
                 expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
                 expected_runtime_env_transport_digest=(expected_runtime_env_transport_digest),
+                expected_cohort_leaf_digest=expected_cohort_leaf_digest,
+                expected_outer_contract_digest=expected_outer_contract_digest,
             )
         except Exception as error:
             from django_ray.execution_codec import NestedExecutionRequestRejected
@@ -402,8 +411,21 @@ class WorkflowMapResultFold:
         request = self._nested_request
         if request is None:
             return nullcontext()
+        from django_ray.runtime.cohort_nested import nested_cohort_context
         from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
         from django_ray.runtime.context import durable_task_execution
+
+        if request.execution_protocol_version == 3:
+            from django_ray.target.cohort_contract import decode_cohort_leaf_contract
+            from django_ray.target.cohort_runtime import verify_cohort_runtime
+
+            # A retained actor may outlive membership changes. Recheck before
+            # each reducer/serialization boundary, not just actor construction.
+            verify_cohort_runtime(
+                decode_cohort_leaf_contract(
+                    request.cohort_leaf_contract_json, expected_identity=request.outer_identity
+                )
+            )
 
         profile = request.runtime_env_plan_identity.get("profile")
         return durable_task_execution(
@@ -419,6 +441,7 @@ class WorkflowMapResultFold:
                 CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
             ),
             strict_execution_request=True,
+            **nested_cohort_context(request),
         )
 
     @property

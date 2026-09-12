@@ -9,9 +9,10 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
-from django.db import transaction
+from django.db import DatabaseError, router, transaction
 
 from django_ray.execution_protocol import (
+    COHORT_EXECUTION_PROTOCOL_VERSION,
     SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     ExecutionProtocolRange,
 )
@@ -60,6 +61,8 @@ _ATTEMPT_ARCHIVE_READ_FIELDS = (
 )
 _RETRY_LOCK_FIELDS = (
     *_LIFECYCLE_LOCK_FIELDS,
+    "task_id",
+    "queue_name",
     "workflow_run_id",
     "workflow_plan_fingerprint",
 )
@@ -98,10 +101,14 @@ def _locked_execution(
     execution_id: int,
     *,
     fields: tuple[str, ...],
+    using: str | None = None,
 ) -> RayTaskExecution | None:
     """Lock one row while selecting only the lifecycle fields this path needs."""
     try:
-        return RayTaskExecution.objects.select_for_update().only(*fields).get(pk=execution_id)
+        queryset = RayTaskExecution.objects.select_for_update()
+        if using is not None:
+            queryset = queryset.using(using)
+        return queryset.only(*fields).get(pk=execution_id)
     except RayTaskExecution.DoesNotExist:
         return None
 
@@ -193,6 +200,10 @@ class TaskRetryRequestStatus(StrEnum):
     STALE_GENERATION = "STALE_GENERATION"
     STALE_WORKFLOW_IDENTITY = "STALE_WORKFLOW_IDENTITY"
     UNSUPPORTED_PROTOCOL = "UNSUPPORTED_PROTOCOL"
+    MAINTENANCE_UNAVAILABLE = "MAINTENANCE_UNAVAILABLE"
+    MAINTENANCE_PAUSED = "MAINTENANCE_PAUSED"
+    QUARANTINED = "QUARANTINED"
+    CLEANUP_PENDING = "CLEANUP_PENDING"
 
 
 @dataclass(frozen=True)
@@ -634,11 +645,90 @@ def _request_task_retry(
     expected_workflow_identity: tuple[str | None, str | None] | None = None,
     supported_protocols: ExecutionProtocolRange,
 ) -> tuple[TaskRetryRequestResult, RayTaskExecution | None]:
+    """Retain current-cohort admission before locking or hydrating a retry."""
+    from django_ray.maintenance import (
+        MaintenanceAdmissionError,
+        MaintenanceReason,
+        maintenance_admission_barrier,
+    )
+
+    execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
+    allowed = tuple(allowed_states)
+
+    using = router.db_for_write(RayTaskExecution)
+
+    def apply_locked(admission_barrier=None):
+        return _request_task_retry_locked(
+            execution_id,
+            allowed_states=allowed,
+            next_attempt_at=next_attempt_at,
+            expected_attempt_number=expected_attempt_number,
+            expected_execution_generation=expected_execution_generation,
+            expected_workflow_identity=expected_workflow_identity,
+            supported_protocols=supported_protocols,
+            admission_barrier=admission_barrier,
+            using=using,
+        )
+
+    # This preview grants no permission. Protocol and eligibility are rechecked
+    # under the task lock; older terminal history never needs current policy.
+    preview = (
+        RayTaskExecution.objects.using(using)
+        .filter(pk=execution_id)
+        .values("execution_protocol_version", "state", "attempt_number", "execution_generation")
+        .first()
+    )
+    if (
+        preview is None
+        or preview["execution_protocol_version"] != COHORT_EXECUTION_PROTOCOL_VERSION
+        or not supported_protocols.supports(COHORT_EXECUTION_PROTOCOL_VERSION)
+        or preview["state"] not in allowed
+    ):
+        return apply_locked()
+    try:
+        with transaction.atomic(using=using):
+            # Translate only an unavailable admission entry, not errors from
+            # lifecycle writes, and let the surrounding transaction roll back.
+            from contextlib import ExitStack
+
+            with ExitStack() as stack:
+                try:
+                    barrier = stack.enter_context(maintenance_admission_barrier(using=using))
+                except DatabaseError:
+                    raise MaintenanceAdmissionError(MaintenanceReason.UNAVAILABLE) from None
+                return apply_locked(barrier)
+    except MaintenanceAdmissionError as error:
+        status = (
+            TaskRetryRequestStatus.MAINTENANCE_PAUSED
+            if error.reason is MaintenanceReason.PAUSED
+            else TaskRetryRequestStatus.MAINTENANCE_UNAVAILABLE
+        )
+        return TaskRetryRequestResult(
+            status,
+            execution_id,
+            preview["state"],
+            preview["attempt_number"],
+            preview["execution_generation"],
+        ), None
+
+
+def _request_task_retry_locked(
+    execution: RayTaskExecution | int,
+    *,
+    allowed_states: Iterable[str],
+    next_attempt_at: Any | None,
+    expected_attempt_number: int | None,
+    expected_execution_generation: int | None,
+    expected_workflow_identity: tuple[str | None, str | None] | None,
+    supported_protocols: ExecutionProtocolRange,
+    admission_barrier=None,
+    using: str,
+) -> tuple[TaskRetryRequestResult, RayTaskExecution | None]:
     """Apply one retry request and retain its bounded transition outcome."""
     execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
     allowed = tuple(allowed_states)
-    with transaction.atomic():
-        current = _locked_execution(execution_id, fields=_RETRY_LOCK_FIELDS)
+    with transaction.atomic(using=using):
+        current = _locked_execution(execution_id, fields=_RETRY_LOCK_FIELDS, using=using)
         if current is None:
             return (
                 TaskRetryRequestResult(
@@ -721,6 +811,49 @@ def _request_task_retry(
                 ),
                 None,
             )
+        if current.execution_protocol_version == COHORT_EXECUTION_PROTOCOL_VERSION:
+            from django_ray.maintenance import (
+                check_maintenance_admission,
+                task_quarantine_retry_allowed,
+            )
+            from django_ray.models import RayTaskTargetBinding
+            from django_ray.target.cohort_job_cleanup import (
+                CohortJobCleanupError,
+                check_no_pending_job_cleanup,
+            )
+
+            def refused(status):
+                return TaskRetryRequestResult(
+                    status, execution_id, state, attempt_number, generation
+                ), None
+
+            if admission_barrier is None:
+                return refused(TaskRetryRequestStatus.MAINTENANCE_UNAVAILABLE)
+            target_id = (
+                RayTaskTargetBinding.objects.using(using)
+                .filter(execution_id=current.pk)
+                .values_list("target_policy__target_id", flat=True)
+                .first()
+            )
+            # Manual retry advances generation as well as enqueueing another
+            # attempt. Match both authoritative SQL admission predicates.
+            for operation in ("enqueue", "claim"):
+                check_maintenance_admission(
+                    current.queue_name,
+                    COHORT_EXECUTION_PROTOCOL_VERSION,
+                    target_id=target_id,
+                    operation=operation,
+                    barrier=admission_barrier,
+                    using=using,
+                )
+            if not task_quarantine_retry_allowed(current, barrier=admission_barrier, using=using):
+                return refused(TaskRetryRequestStatus.QUARANTINED)
+            try:
+                check_no_pending_job_cleanup(current, using=using)
+            except CohortJobCleanupError as error:
+                if error.reason != "pending":
+                    raise
+                return refused(TaskRetryRequestStatus.CLEANUP_PENDING)
         _load_locked_execution_fields(current, fields=_RETRY_ACCEPTED_READ_FIELDS)
         runtime_env_for_execution(current)
         _record_attempt(current)
@@ -748,7 +881,8 @@ def _request_task_retry(
         current.claimed_by_worker = None
         current.managed_with_django_ray_version = None
         current.executor_django_ray_version = None
-        promote_legacy_ray_target(current)
+        if current.execution_protocol_version != COHORT_EXECUTION_PROTOCOL_VERSION:
+            promote_legacy_ray_target(current)
         current.ray_job_id = None
         current.ray_job_request_reference = None
         current.ray_address = None
@@ -881,6 +1015,7 @@ def record_failure(
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
     supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    _allow_cancelling_completion: bool = False,
     _executor_django_ray_version: str | None | _ExecutorDjangoRayVersionUnset = (
         _EXECUTOR_DJANGO_RAY_VERSION_UNSET
     ),
@@ -888,6 +1023,10 @@ def record_failure(
     """Persist a failure and optionally queue the next attempt atomically."""
     with transaction.atomic():
         filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
+        if _allow_cancelling_completion:
+            filters.pop("state")
+            filters["state__in"] = (TaskState.RUNNING, TaskState.CANCELLING)
+            filters["execution_protocol_version"] = 3
         if expected_ray_job_id is not None:
             filters["ray_job_id"] = expected_ray_job_id
         if expected_claimed_by_worker is not None:
@@ -902,6 +1041,8 @@ def record_failure(
         if current is None:
             return False
         if not supported_protocols.supports(int(current.execution_protocol_version)):
+            return False
+        if retry and current.state == TaskState.CANCELLING:
             return False
         if retry:
             runtime_env_for_execution(current)
@@ -1061,12 +1202,17 @@ def succeed_task(
     expected_completion_data: str | None = None,
     require_completion_data_match: bool = False,
     supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    _allow_cancelling_completion: bool = False,
     _executor_django_ray_version: str | None | _ExecutorDjangoRayVersionUnset = (
         _EXECUTOR_DJANGO_RAY_VERSION_UNSET
     ),
 ) -> bool:
     """Persist a successful terminal transition with stale-write protection."""
     filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
+    if _allow_cancelling_completion:
+        filters.pop("state")
+        filters["state__in"] = (TaskState.RUNNING, TaskState.CANCELLING)
+        filters["execution_protocol_version"] = 3
     if expected_ray_job_id is not None:
         filters["ray_job_id"] = expected_ray_job_id
     if expected_claimed_by_worker is not None:

@@ -302,7 +302,20 @@ capability, or its protocol range as proof that Ray is ready. Ray/Python version
 cluster-instance attestation, normalized target capacity, and supported blue/green drain
 status are separate rollout requirements.
 
-Use the read-only protocol report before reviewing any later rollout transition:
+Use the [read-only doctor](reference/cli.md#django_ray_doctor) to collect database,
+migration, protocol and recorded current-cohort diagnostics together:
+
+```bash
+python manage.py django_ray_doctor --database=default --json
+```
+
+Check its blockers and unverified fields before deciding the next action. An empty
+queue, a recent lease timestamp, or a recorded proof window does not establish remote
+quiescence or a safe upgrade. The doctor does not change admission or certify drain;
+the coordinated Beta procedure still requires the independent execution, cleanup and
+backup/restore evidence.
+
+The narrower protocol report remains available before reviewing any later rollout transition:
 
 ```bash
 python manage.py django_ray_protocol_status

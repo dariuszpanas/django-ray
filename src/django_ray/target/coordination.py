@@ -20,6 +20,7 @@ from django.db import (
 )
 from django.db.models import F
 from django.db.utils import ConnectionDoesNotExist
+from django.utils import timezone
 
 from django_ray.models import (
     RayTarget,
@@ -210,6 +211,13 @@ def _require_outermost_transaction(*, using: str) -> None:
     database_connection = connections[using]
     if database_connection.in_atomic_block or not database_connection.get_autocommit():
         raise NestedRayTargetTransactionError
+
+
+def _require_locked_transaction(*, using: str) -> None:
+    if not connections[using].in_atomic_block:
+        raise RayTargetCoordinationError(
+            "Ray target locked coordination requires a caller-owned transaction"
+        )
 
 
 def _target_key(value: object) -> str:
@@ -439,6 +447,103 @@ def _policy_result(
     )
 
 
+def _register_canonical_ray_target_locked(
+    expectation: RayTargetExpectation,
+    expectation_json: str,
+    expectation_digest: str,
+    *,
+    now: datetime,
+    using: str,
+    vendor: str,
+    ray_core_only: bool,
+) -> RayTargetPolicyChange:
+    _require_locked_transaction(using=using)
+    target = _locked_or_absent_target(
+        target_key=expectation.target_key,
+        using=using,
+        vendor=vendor,
+    )
+    if target is not None:
+        policy, retained, desired_state = _latest_policy(target, using=using)
+        if ray_core_only:
+            _require_ray_core(retained)
+        if (
+            int(policy.revision) == 1
+            and desired_state is RayTargetDesiredState.DRAINING
+            and retained == expectation
+        ):
+            return _policy_result(
+                expectation=retained,
+                desired_state=desired_state,
+                changed=False,
+                previous_revision=1,
+            )
+        raise RayTargetRegistrationConflictError
+
+    runtime = expectation.runtime
+    target = RayTarget.objects.using(using).create(
+        target_key=expectation.target_key,
+        runner_family=expectation.runner_family.value,
+        cluster_session=expectation.cluster_session,
+        ray_major=runtime.ray_major,
+        ray_minor=runtime.ray_minor,
+        ray_patch=runtime.ray_patch,
+        python_implementation=runtime.python_implementation,
+        python_major=runtime.python_major,
+        python_minor=runtime.python_minor,
+        python_patch=runtime.python_patch,
+        created_at=now,
+    )
+    RayTargetPolicyRevision.objects.using(using).create(
+        target=target,
+        revision=1,
+        desired_state=RayTargetDesiredState.DRAINING,
+        expectation_schema_version=RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
+        expectation_json=expectation_json,
+        expectation_digest=expectation_digest,
+        created_at=now,
+    )
+    return _policy_result(
+        expectation=expectation,
+        desired_state=RayTargetDesiredState.DRAINING,
+        changed=True,
+        previous_revision=0,
+    )
+
+
+def _register_ray_target_locked(
+    expectation: RayTargetExpectation,
+    *,
+    now: datetime,
+    using: str = DEFAULT_DB_ALIAS,
+) -> RayTargetPolicyChange:
+    """Register verified Core/Jobs identity inside the publisher's transaction.
+
+    The publisher must already hold its exact lease lock before this helper
+    takes the target lock. New identities always start draining at revision 1.
+    This helper does not establish probe authenticity or authorize a claim.
+    """
+
+    expectation, expectation_json, expectation_digest = _canonical_expectation(expectation)
+    if expectation.policy_revision != 1:
+        raise InvalidRayTargetArgumentError
+    now = _now(now)
+    vendor = _database_vendor(using=using)
+    _require_locked_transaction(using=using)
+    try:
+        return _register_canonical_ray_target_locked(
+            expectation,
+            expectation_json,
+            expectation_digest,
+            now=now,
+            using=using,
+            vendor=vendor,
+            ray_core_only=False,
+        )
+    except DatabaseError:
+        raise RayTargetPersistenceRaceError from None
+
+
 def register_ray_target(
     expectation: RayTargetExpectation,
     *,
@@ -454,53 +559,14 @@ def register_ray_target(
     try:
         _require_outermost_transaction(using=using)
         with transaction.atomic(using=using, durable=True):
-            target = _locked_or_absent_target(
-                target_key=expectation.target_key,
+            return _register_canonical_ray_target_locked(
+                expectation,
+                expectation_json,
+                expectation_digest,
+                now=_now(timezone.now()),
                 using=using,
                 vendor=vendor,
-            )
-            if target is not None:
-                policy, retained, desired_state = _latest_policy(target, using=using)
-                _require_ray_core(retained)
-                if (
-                    int(policy.revision) == 1
-                    and desired_state is RayTargetDesiredState.DRAINING
-                    and retained == expectation
-                ):
-                    return _policy_result(
-                        expectation=retained,
-                        desired_state=desired_state,
-                        changed=False,
-                        previous_revision=1,
-                    )
-                raise RayTargetRegistrationConflictError
-
-            runtime = expectation.runtime
-            target = RayTarget.objects.using(using).create(
-                target_key=expectation.target_key,
-                runner_family=expectation.runner_family.value,
-                cluster_session=expectation.cluster_session,
-                ray_major=runtime.ray_major,
-                ray_minor=runtime.ray_minor,
-                ray_patch=runtime.ray_patch,
-                python_implementation=runtime.python_implementation,
-                python_major=runtime.python_major,
-                python_minor=runtime.python_minor,
-                python_patch=runtime.python_patch,
-            )
-            RayTargetPolicyRevision.objects.using(using).create(
-                target=target,
-                revision=1,
-                desired_state=RayTargetDesiredState.DRAINING,
-                expectation_schema_version=RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
-                expectation_json=expectation_json,
-                expectation_digest=expectation_digest,
-            )
-            return _policy_result(
-                expectation=expectation,
-                desired_state=RayTargetDesiredState.DRAINING,
-                changed=True,
-                previous_revision=0,
+                ray_core_only=True,
             )
     except RayTargetCoordinationError:
         raise
@@ -571,6 +637,115 @@ def transition_ray_target_desired_state(
         raise RayTargetPersistenceRaceError from None
 
 
+def _record_canonical_ray_target_attestation_locked(
+    target_key: str,
+    attestation: RayClusterAttestation,
+    attestation_json: str,
+    *,
+    expected_policy_revision: int,
+    expected_attestation_revision: int,
+    now: datetime,
+    using: str,
+    vendor: str,
+    ray_core_only: bool,
+) -> RayTargetAttestationRecord:
+    _require_locked_transaction(using=using)
+    target = _locked_target(target_key=target_key, using=using, vendor=vendor)
+    policy, expectation, desired_state = _latest_policy(target, using=using)
+    if ray_core_only:
+        _require_ray_core(expectation)
+    if desired_state is RayTargetDesiredState.RETIRED:
+        raise RayTargetRetirementReservedError
+    _validate_policy_revision(policy, expected_revision=expected_policy_revision)
+    try:
+        compare_ray_target_attestation(expectation, attestation, now=now)
+    except RayTargetAttestationError as error:
+        raise RayTargetAttestationRejectedError(error.classification) from None
+
+    (
+        actual_attestation_revision,
+        latest_observed_at,
+        latest_recorded_at,
+    ) = _latest_attestation_head(
+        policy,
+        expectation,
+        using=using,
+    )
+    if actual_attestation_revision != expected_attestation_revision:
+        raise RayTargetAttestationRevisionConflictError(
+            expected_revision=expected_attestation_revision,
+            actual_revision=actual_attestation_revision,
+        )
+    if (
+        latest_observed_at is not None
+        and latest_recorded_at is not None
+        and (attestation.observed_at < latest_observed_at or now < latest_recorded_at)
+    ):
+        raise RayTargetAttestationRegressionError
+    if actual_attestation_revision >= _MAX_REVISION:
+        raise RayTargetAttestationRevisionExhaustedError
+
+    next_revision = actual_attestation_revision + 1
+    RayTargetAttestationRevision.objects.using(using).create(
+        policy=policy,
+        revision=next_revision,
+        attestation_schema_version=RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION,
+        attestation_json=attestation_json,
+        expectation_digest=attestation.expectation_digest,
+        membership_digest=attestation.membership_digest,
+        attestation_digest=attestation.attestation_digest,
+        observed_at=attestation.observed_at,
+        expires_at=attestation.expires_at,
+        recorded_at=now,
+    )
+    return RayTargetAttestationRecord(
+        target_key=target_key,
+        policy_revision=int(policy.revision),
+        previous_revision=actual_attestation_revision,
+        revision=next_revision,
+        attestation=attestation,
+        recorded_at=now,
+    )
+
+
+def _record_ray_target_attestation_locked(
+    target_key: str,
+    attestation: RayClusterAttestation,
+    *,
+    expected_policy_revision: int,
+    expected_attestation_revision: int,
+    now: datetime,
+    using: str = DEFAULT_DB_ALIAS,
+) -> RayTargetAttestationRecord:
+    """Append verified Core/Jobs proof within the publisher's transaction.
+
+    Probe authenticity belongs to the publisher. This helper locks the target
+    and retains all policy, proof, chronology and attestation CAS checks.
+    """
+
+    target_key = _target_key(target_key)
+    expected_policy_revision = _positive_revision(expected_policy_revision)
+    expected_attestation_revision = _attestation_revision(expected_attestation_revision)
+    now = _now(now)
+    attestation, attestation_json = _canonical_attestation(attestation)
+    vendor = _database_vendor(using=using)
+    _require_locked_transaction(using=using)
+    try:
+        return _record_canonical_ray_target_attestation_locked(
+            target_key,
+            attestation,
+            attestation_json,
+            expected_policy_revision=expected_policy_revision,
+            expected_attestation_revision=expected_attestation_revision,
+            now=now,
+            using=using,
+            vendor=vendor,
+            ray_core_only=False,
+        )
+    except DatabaseError:
+        raise RayTargetPersistenceRaceError from None
+
+
 def record_ray_target_attestation(
     target_key: str,
     attestation: RayClusterAttestation,
@@ -591,60 +766,16 @@ def record_ray_target_attestation(
     try:
         _require_outermost_transaction(using=using)
         with transaction.atomic(using=using, durable=True):
-            target = _locked_target(target_key=target_key, using=using, vendor=vendor)
-            policy, expectation, desired_state = _latest_policy(target, using=using)
-            _require_ray_core(expectation)
-            if desired_state is RayTargetDesiredState.RETIRED:
-                raise RayTargetRetirementReservedError
-            _validate_policy_revision(policy, expected_revision=expected_policy_revision)
-            try:
-                compare_ray_target_attestation(expectation, attestation, now=now)
-            except RayTargetAttestationError as error:
-                raise RayTargetAttestationRejectedError(error.classification) from None
-
-            (
-                actual_attestation_revision,
-                latest_observed_at,
-                latest_recorded_at,
-            ) = _latest_attestation_head(
-                policy,
-                expectation,
+            return _record_canonical_ray_target_attestation_locked(
+                target_key,
+                attestation,
+                attestation_json,
+                expected_policy_revision=expected_policy_revision,
+                expected_attestation_revision=expected_attestation_revision,
+                now=now,
                 using=using,
-            )
-            if actual_attestation_revision != expected_attestation_revision:
-                raise RayTargetAttestationRevisionConflictError(
-                    expected_revision=expected_attestation_revision,
-                    actual_revision=actual_attestation_revision,
-                )
-            if (
-                latest_observed_at is not None
-                and latest_recorded_at is not None
-                and (attestation.observed_at < latest_observed_at or now < latest_recorded_at)
-            ):
-                raise RayTargetAttestationRegressionError
-            if actual_attestation_revision >= _MAX_REVISION:
-                raise RayTargetAttestationRevisionExhaustedError
-
-            next_revision = actual_attestation_revision + 1
-            RayTargetAttestationRevision.objects.using(using).create(
-                policy=policy,
-                revision=next_revision,
-                attestation_schema_version=RAY_CLUSTER_ATTESTATION_SCHEMA_VERSION,
-                attestation_json=attestation_json,
-                expectation_digest=attestation.expectation_digest,
-                membership_digest=attestation.membership_digest,
-                attestation_digest=attestation.attestation_digest,
-                observed_at=attestation.observed_at,
-                expires_at=attestation.expires_at,
-                recorded_at=now,
-            )
-            return RayTargetAttestationRecord(
-                target_key=target_key,
-                policy_revision=int(policy.revision),
-                previous_revision=actual_attestation_revision,
-                revision=next_revision,
-                attestation=attestation,
-                recorded_at=now,
+                vendor=vendor,
+                ray_core_only=True,
             )
     except RayTargetCoordinationError:
         raise
