@@ -17,8 +17,11 @@ from typing import Any
 
 from django.tasks import task
 
+from testproject.workload_limits import bounded_sample_task
+
 
 @task(queue_name="ml")
+@bounded_sample_task
 def preprocess_data(
     raw_data: list[dict[str, Any]],
     operations: list[str] | None = None,
@@ -68,6 +71,7 @@ def preprocess_data(
 
 
 @task(queue_name="ml")
+@bounded_sample_task
 def train_model(
     dataset_id: str,
     hyperparams: dict[str, Any] | None = None,
@@ -128,6 +132,7 @@ def train_model(
 
 
 @task(queue_name="ml")
+@bounded_sample_task
 def batch_inference(
     model_id: str,
     samples: list[dict[str, Any]],
@@ -177,6 +182,7 @@ def batch_inference(
 
 
 @task(queue_name="ml")
+@bounded_sample_task
 def feature_engineering(
     records: list[dict[str, Any]],
     feature_configs: list[dict[str, Any]] | None = None,
@@ -240,6 +246,7 @@ def feature_engineering(
 
 
 @task(queue_name="ml")
+@bounded_sample_task
 def hyperparameter_search(
     dataset_id: str,
     param_grid: dict[str, list[Any]],
@@ -296,6 +303,7 @@ def hyperparameter_search(
 
 
 @task(queue_name="ml")
+@bounded_sample_task
 def evaluate_model(
     model_id: str,
     test_data: list[dict[str, Any]],

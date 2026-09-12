@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 from django_ray.workflows import Step, chain, group, map_step, report_progress, step
+from testproject.workload_limits import integer, number
 
 COMPLEX_WORKFLOW_FIXTURE_ERROR_MESSAGE = "Intentional complex workflow fixture failure"
 WORKFLOW_SHOWCASE_FIXTURE_ERROR_MESSAGE = "Intentional workflow showcase reserve_inventory failure"
@@ -61,6 +62,8 @@ def build_cpu_work_items(
     seconds_per_item: float,
 ) -> list[dict[str, Any]]:
     """Build the inputs for a dynamic workflow fan-out."""
+    integer(num_items, 1, 100)
+    number(seconds_per_item, 0.01, 10)
     return [
         {
             "item_id": item_id,
@@ -72,7 +75,9 @@ def build_cpu_work_items(
 
 def run_cpu_work_item(item: dict[str, Any]) -> dict[str, Any]:
     """Burn CPU for one workflow leaf and report its execution details."""
-    item_id = int(item["item_id"])
+    integer(item["item_id"], 0, 99)
+    number(item["seconds_per_item"], 0.01, 10)
+    item_id = item["item_id"]
     fail_fixture = item.get("_fail_complex_workflow_fixture") is True
     duration = float(item["seconds_per_item"])
     wall_started_at = time.time()
@@ -145,7 +150,7 @@ cpu_fanout_workflow = chain(
     map_step(
         run_cpu_work_item,
         ray_options={"num_cpus": 0.25},
-    ),
+    ).with_limits(max_items=100, max_concurrency=4),
     step(summarize_cpu_workflow),
 )
 
@@ -176,6 +181,12 @@ def build_complex_config(
     failure_item: int | None = None,
 ) -> dict[str, Any]:
     """Build shared input for two nested workflow branches."""
+    integer(fast_items, 1, 100)
+    integer(slow_items, 1, 100)
+    if fast_items + slow_items > 100:
+        raise ValueError("Sample workflow exceeds its total item limit")
+    number(fast_seconds, 0.01, 10)
+    number(slow_seconds, 0.01, 10)
     config: dict[str, Any] = {
         "fast": {"items": fast_items, "seconds": fast_seconds},
         "slow": {"items": slow_items, "seconds": slow_seconds},
@@ -194,6 +205,8 @@ def build_branch_work_items(
 ) -> list[dict[str, Any]]:
     """Expand one branch's dynamic work."""
     branch_config = config[branch]
+    integer(branch_config["items"], 1, 100)
+    number(branch_config["seconds"], 0.01, 10)
     failure = config.get("failure")
     items = []
     for item_id in range(int(branch_config["items"])):
@@ -237,13 +250,17 @@ def summarize_complex_workflow(
 
 fast_branch_workflow = chain(
     step(build_branch_work_items, "fast"),
-    map_step(run_cpu_work_item, ray_options={"num_cpus": 0.25}),
+    map_step(run_cpu_work_item, ray_options={"num_cpus": 0.25}).with_limits(
+        max_items=100, max_concurrency=4
+    ),
     step(summarize_branch, "fast"),
 )
 
 slow_branch_workflow = chain(
     step(build_branch_work_items, "slow"),
-    map_step(run_cpu_work_item, ray_options={"num_cpus": 0.25}),
+    map_step(run_cpu_work_item, ray_options={"num_cpus": 0.25}).with_limits(
+        max_items=100, max_concurrency=4
+    ),
     step(summarize_branch, "slow"),
 )
 
@@ -385,10 +402,12 @@ def select_validation_items(batch: dict[str, Any]) -> list[dict[str, Any]]:
 
 def validate_order_item(item: dict[str, Any]) -> dict[str, Any]:
     """Validate one order item without retaining the complete order payload."""
+    number(item["work_seconds"], 0, 1)
     work_seconds = float(item["work_seconds"])
     if work_seconds:
         time.sleep(work_seconds)
-    item_id = int(item["item_id"])
+    integer(item["item_id"], 0, 99)
+    item_id = item["item_id"]
     valid = bool(item["sku"]) and int(item["quantity"]) > 0
     report_progress(
         1,
@@ -504,7 +523,8 @@ def select_reservation_items(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 def reserve_inventory(item: dict[str, Any]) -> dict[str, Any]:
     """Reserve one item or raise the exact opt-in showcase failure."""
-    item_id = int(item["item_id"])
+    integer(item["item_id"], 0, 99)
+    item_id = item["item_id"]
     fail_fixture = item.get("_fail_workflow_showcase_fixture") is True
     report_progress(
         0,
@@ -763,7 +783,7 @@ _validation_showcase_branch = chain(
             validate_order_item,
             projector=preview_order_item_validation,
         )
-    ),
+    ).with_limits(max_items=100, max_concurrency=4),
 )
 
 _customer_showcase_branch = chain(
@@ -811,7 +831,7 @@ order_fulfillment_showcase_workflow = chain(
             reserve_inventory,
             projector=preview_inventory_reservation,
         ).with_options(max_retries=0)
-    ),
+    ).with_limits(max_items=100, max_concurrency=4),
     _showcase_step(join_fulfillment_decision),
     group(
         _showcase_step(write_primary_order),
@@ -838,7 +858,7 @@ order_fulfillment_recovery_showcase_workflow = chain(
     map_step(
         reserve_inventory,
         ray_options={"num_cpus": 0.1, "max_retries": 0},
-    ),
+    ).with_limits(max_items=100, max_concurrency=4),
     _showcase_step(join_fulfillment_decision),
     group(
         _showcase_step(write_primary_order),
@@ -912,6 +932,7 @@ def run_runtime_env_cache_benchmark(
     use_ray: bool | None = None,
 ) -> dict[str, Any]:
     """Run the same profile repeatedly to expose cold and cached setup time."""
+    integer(repeats, 2, 10)
     runs: list[dict[str, Any]] = []
     probe = step(inspect_runtime_environment, package, runtime_env=profile)
     for index in range(repeats):

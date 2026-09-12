@@ -38,11 +38,30 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def client(settings) -> Client:
-    """Django test client."""
+def client(settings, db) -> Client:
+    """Explicitly opted-in demo client for existing positive route coverage."""
     token = settings.DJANGO_API_TOKEN
     assert isinstance(token, str) and token
-    return Client(HTTP_AUTHORIZATION=f"Bearer {token}")
+    settings.DEPLOYMENT_MODE = "demo"
+    settings.DJANGO_DEMO_WORKLOADS_ENABLED = True
+    settings.DJANGO_DEMO_TOKEN = "dedicated-demo-route-test-credential"
+    from django.utils import timezone
+
+    from testproject.models import SampleAdmissionBudget
+
+    SampleAdmissionBudget.objects.get_or_create(
+        pk=1, defaults={"window_started_at": timezone.now()}
+    )
+
+    class DemoClient(Client):
+        def post(self, path, *args, **kwargs):
+            from testproject.api_boundary import is_demo_route
+
+            if is_demo_route(path.split("?", 1)[0]):
+                kwargs.setdefault("HTTP_AUTHORIZATION", f"Bearer {settings.DJANGO_DEMO_TOKEN}")
+            return super().post(path, *args, **kwargs)
+
+    return DemoClient(HTTP_AUTHORIZATION=f"Bearer {token}")
 
 
 @pytest.fixture

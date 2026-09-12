@@ -249,9 +249,19 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
     request.getfixturevalue("django_db_setup")
     django_db_blocker = request.getfixturevalue("django_db_blocker")
 
+    from django.apps import apps
+    from django.utils import timezone
+
     from django_ray.models import TaskExecutionProtocolPolicy
 
     with django_db_blocker.unblock():
+        # Installed-wheel qualification intentionally omits the sample app.
+        # Restore its migration seed only when that app owns a table here.
+        if apps.is_installed("testproject"):
+            SampleAdmissionBudget = apps.get_model("testproject", "SampleAdmissionBudget")
+            SampleAdmissionBudget.objects.get_or_create(
+                pk=1, defaults={"window_started_at": timezone.now()}
+            )
         TaskExecutionProtocolPolicy.objects.get_or_create(
             singleton_key=1,
             defaults={
@@ -267,7 +277,6 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
         from importlib import import_module
         from types import SimpleNamespace
 
-        from django.apps import apps
         from django.db import connections, transaction
 
         from django_ray.models import RayMaintenanceAudit, RayMaintenancePolicy

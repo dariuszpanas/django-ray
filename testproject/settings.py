@@ -77,15 +77,42 @@ if DEPLOYMENT_MODE == "production":
         )
 
 DJANGO_API_TOKEN = os.environ.get("DJANGO_API_TOKEN")
-if DEPLOYMENT_MODE == "production" and (
-    not DJANGO_API_TOKEN
-    or len(DJANGO_API_TOKEN) < 32
-    or len(set(DJANGO_API_TOKEN)) < 5
-    or _looks_like_placeholder(DJANGO_API_TOKEN)
+DJANGO_API_ENABLED = _env_bool("DJANGO_API_ENABLED", default=True)
+DJANGO_METRICS_TOKEN = os.environ.get("DJANGO_METRICS_TOKEN")
+DJANGO_DEMO_TOKEN = os.environ.get("DJANGO_DEMO_TOKEN")
+DJANGO_DEMO_WORKLOADS_ENABLED = _env_bool("DJANGO_DEMO_WORKLOADS_ENABLED", default=False)
+if (
+    DEPLOYMENT_MODE == "production"
+    and DJANGO_API_ENABLED
+    and (
+        not DJANGO_API_TOKEN
+        or len(DJANGO_API_TOKEN) < 32
+        or len(set(DJANGO_API_TOKEN)) < 5
+        or _looks_like_placeholder(DJANGO_API_TOKEN)
+    )
 ):
     raise ImproperlyConfigured(
         "DJANGO_API_TOKEN must be a random value of at least 32 characters in production."
     )
+if DEPLOYMENT_MODE == "production" and DJANGO_DEMO_WORKLOADS_ENABLED:
+    raise ImproperlyConfigured("Demo workloads cannot be enabled in production mode.")
+for _token_name in ("DJANGO_METRICS_TOKEN", "DJANGO_DEMO_TOKEN"):
+    _token = globals()[_token_name]
+    if _token and (len(_token) < 32 or len(set(_token)) < 5 or _looks_like_placeholder(_token)):
+        raise ImproperlyConfigured(
+            f"{_token_name} must be a random value of at least 32 characters."
+        )
+_configured_tokens = [
+    token for token in (DJANGO_API_TOKEN, DJANGO_METRICS_TOKEN, DJANGO_DEMO_TOKEN) if token
+]
+if len(set(_configured_tokens)) != len(_configured_tokens):
+    raise ImproperlyConfigured("API, metrics, and demo credentials must be distinct.")
+if DJANGO_DEMO_WORKLOADS_ENABLED and not DJANGO_DEMO_TOKEN:
+    raise ImproperlyConfigured("Demo workloads require a separate DJANGO_DEMO_TOKEN.")
+
+# Bounds can be reduced for a deployment, but cannot exceed the sample ceiling.
+SAMPLE_MAX_REQUESTS_PER_WINDOW = 30
+SAMPLE_MAX_OUTSTANDING_EXECUTIONS = 32
 
 # Application definition
 INSTALLED_APPS = [

@@ -56,6 +56,8 @@ from typing import Any, Literal
 from locust import HttpUser, between, events, task
 from locust.exception import StopTest
 
+from testproject.route_policy import is_demo_route
+
 _API_TOKEN_ENV = "DJANGO_API_TOKEN"
 _LOGGER = logging.getLogger(__name__)
 _INCOMPLETE_DEMO_TOUR_MESSAGE = "Observability demo ended before one complete task-family tour."
@@ -331,6 +333,13 @@ class TaskCreationMixin:
             "catch_response": True,
             "timeout": _REQUEST_TIMEOUT_SECONDS,
         }
+        if is_demo_route(endpoint.split("?", 1)[0]):
+            demo_token = os.environ.get("DJANGO_DEMO_TOKEN", "").strip()
+            if not demo_token or demo_token == _configured_api_token():
+                raise StopTest(
+                    "Demo routes require a distinct DJANGO_DEMO_TOKEN and an opted-in local web deployment"
+                )
+            kwargs["headers"] = {"Authorization": f"Bearer {demo_token}"}
         if payload:
             kwargs["json"] = payload
 
@@ -721,15 +730,15 @@ class TaskCreationMixin:
 
     def stress_memory(self, size_mb: int | None = None) -> dict[str, Any] | None:
         """Memory allocation stress test."""
-        size_mb = size_mb or random.randint(50, 200)
+        size_mb = size_mb or random.randint(8, 32)
         return self._post_task(f"/api/stress/memory?size_mb={size_mb}", "/api/stress/memory")
 
     def stress_compute(
         self, depth: int | None = None, width: int | None = None
     ) -> dict[str, Any] | None:
         """Nested computation stress test."""
-        depth = depth or random.randint(5, 12)
-        width = width or random.randint(50, 150)
+        depth = depth or random.randint(2, 4)
+        width = width or random.randint(5, 10)
         return self._post_task(
             f"/api/stress/compute?depth={depth}&width={width}", "/api/stress/compute"
         )
@@ -748,8 +757,8 @@ class TaskCreationMixin:
         self, size_kb: int | None = None, depth: int | None = None
     ) -> dict[str, Any] | None:
         """Large JSON structure stress test."""
-        size_kb = size_kb or random.randint(50, 200)
-        depth = depth or random.randint(3, 7)
+        size_kb = size_kb or random.randint(8, 32)
+        depth = depth or random.randint(1, 4)
         return self._post_task(
             f"/api/stress/json?size_kb={size_kb}&depth={depth}", "/api/stress/json"
         )
@@ -758,7 +767,7 @@ class TaskCreationMixin:
         self, task_count: int | None = None, duration_ms: int | None = None
     ) -> dict[str, Any] | None:
         """Throughput simulation stress test."""
-        task_count = task_count or random.randint(50, 200)
+        task_count = task_count or random.randint(8, 32)
         duration_ms = duration_ms or random.randint(5, 50)
         return self._post_task(
             f"/api/stress/throughput?task_count={task_count}&task_duration_ms={duration_ms}",
@@ -957,7 +966,7 @@ class WorkflowUser(AuthenticatedTaskUser):
     def complex_nested_workflow(self):
         """Submit a nested group/chain workflow and poll progress."""
         result = self.complex_workflow(
-            fast_items=random.randint(4, 8),
+            fast_items=random.randint(1, 4),
             slow_items=random.randint(2, 4),
         )
         if result:
@@ -1233,19 +1242,19 @@ class StressTestUser(AuthenticatedTaskUser):
 
     @task(2)
     def submit_stress_memory(self):
-        self.stress_memory(size_mb=random.randint(100, 300))
+        self.stress_memory(size_mb=random.randint(8, 32))
 
     @task(2)
     def submit_stress_compute(self):
-        self.stress_compute(depth=random.randint(8, 12), width=random.randint(80, 120))
+        self.stress_compute(depth=random.randint(2, 4), width=random.randint(5, 10))
 
     @task(2)
     def submit_stress_primes(self):
-        self.stress_primes(start=random.randint(500000, 2000000), count=random.randint(50, 150))
+        self.stress_primes(start=random.randint(100000, 1000000), count=random.randint(5, 10))
 
     @task(1)
     def submit_stress_json(self):
-        self.stress_json(size_kb=random.randint(100, 500), depth=random.randint(4, 8))
+        self.stress_json(size_kb=random.randint(8, 32), depth=random.randint(1, 4))
 
 
 class MonitoringUser(AuthenticatedTaskUser):
