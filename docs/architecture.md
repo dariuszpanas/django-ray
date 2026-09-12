@@ -603,7 +603,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0030_cohort_claims` before starting upgraded workers:
+`0034_cohort_timeouts` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -630,6 +630,24 @@ Its mutable disposition and current owner are revision-fenced, with unknown outc
 held for authenticated resolution instead of expiring into automatic replay. These
 private services have no production worker or lifecycle consumer yet. See
 [current-cohort guard preparation](compatibility.md#current-cohort-guard-preparation).
+
+Migration `0033` keeps a durable Jobs driver cleanup obligation separate from an
+authenticated task result. An open obligation survives retries and owner loss,
+blocks the next execution generation, and prevents worker retirement. Closure
+requires a fresh, independently corroborated terminal observation of the exact
+original Job after its completion obligation was recorded. Missing request
+references preserve the truthful result with an explicitly uninspectable open
+obligation. This migration refuses pre-release completed protocol-3 Jobs history
+whose driver cleanup cannot be established; it does not synthesize cleanup proof
+or reinterpret protocol-1, Core, or Sync history. Closed cleanup history follows
+ordinary claim retention.
+
+Migration `0034` retains the original per-generation timeout request before
+requesting remote cancellation. It preserves the task's started time, timeout,
+and elapsed deadline without treating a cancellation acknowledgment as terminal
+proof. Authentic late completion still wins; independently confirmed timeout
+cancellation records the existing failed-timeout outcome without automatic retry.
+Resolved timeout history can be purged with its original claim.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:

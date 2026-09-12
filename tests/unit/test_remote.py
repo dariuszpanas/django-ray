@@ -749,6 +749,10 @@ def test_real_ray_strict_workflow_step_round_trip_has_full_context(
         "task_id": _STRICT_IDENTITY.task_id,
         "execution_protocol_version": 1,
         "strict_execution_request": True,
+        "cohort_contract_json": None,
+        "cohort_contract_digest": None,
+        "cohort_leaf_contract_json": None,
+        "cohort_leaf_digest": None,
     }
     run_identity = {
         "schema_version": 1,

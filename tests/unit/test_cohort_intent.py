@@ -25,6 +25,7 @@ from django_ray.target.cohort_intent import (
     decode_cohort_intent,
     encode_cohort_intent,
     match_cohort_intent,
+    prepare_cohort_declaration,
 )
 
 OBSERVATION = "sha256:" + "a" * 64
@@ -199,20 +200,17 @@ def test_trust_uses_existing_normalization_without_mandatory_revisions() -> None
 
 
 @pytest.mark.parametrize(
-    "spec,reusable",
+    "spec",
     [
-        ({"pip": ["unpinned-package"]}, False),
-        ({"worker_process_setup_hook": "application.worker_only_hook"}, True),
-        ({"application_plugin": {"runtime_selected": True}}, False),
+        {"pip": ["unpinned-package"]},
+        {"worker_process_setup_hook": "application.worker_only_hook"},
+        {"application_plugin": {"runtime_selected": True}},
     ],
 )
-def test_dynamic_runtime_env_observation_needs_no_reusable_identity(spec, reusable) -> None:
+def test_dynamic_runtime_env_observation_needs_no_reusable_identity(spec) -> None:
     from django_ray.runtime.runtime_env import normalize_runtime_env
-    from django_ray.workflow.plans import runtime_env_plan_identity
 
-    logical = runtime_env_plan_identity(normalize_runtime_env(spec))
-    assert logical.reusable is reusable
-    original_digest = logical.manifest["digest"]
+    original_digest = "sha256:" + normalize_runtime_env(spec).digest
     value = build_cohort_intent(
         declaration(), package_version="0.5.0", runtime_env_identity_digest=original_digest
     )
@@ -230,6 +228,52 @@ def test_original_observation_must_be_a_canonical_digest(digest) -> None:
     assert caught.value.classification is CohortIntentRejection.INVALID
     with pytest.raises(CohortIntentError):
         encode_cohort_intent(replace(intent(), runtime_env_identity_digest=digest))
+
+
+def test_prepared_declaration_preserves_exact_address_and_freezes_normalized_trust():
+    settings = {
+        "RAY_ADDRESS": "ray://global:10001",
+        "WORKFLOW_PLAN_TRUST_IDENTITY": {"trust_domain": "cafe\u0301"},
+    }
+    options = {"RAY_ADDRESS": "https://EXACT:8265/", "RAY_JOB_ONLY": True}
+    value = prepare_cohort_declaration("default", options=options, current_settings=settings)
+    assert value.ray_address == "https://EXACT:8265/"
+    assert value.trust_identity == {"trust_domain": "café"}
+    expected = cohort_declaration_digest(value)
+    options["RAY_ADDRESS"] = "http://changed:8265"
+    settings["WORKFLOW_PLAN_TRUST_IDENTITY"]["trust_domain"] = "changed"
+    assert cohort_declaration_digest(value) == expected
+    with pytest.raises(TypeError):
+        value.trust_identity["trust_domain"] = "changed"
+
+
+@pytest.mark.parametrize(
+    "options,settings",
+    [
+        ({}, {}),
+        ({}, {"RAY_ADDRESS": "node:6379"}),
+        ({"RAY_ADDRESS": "auto"}, {"RAY_ADDRESS": "ignored:6379"}),
+    ],
+)
+def test_prepared_declaration_uses_only_the_supplied_snapshot_fallback(options, settings):
+    value = prepare_cohort_declaration("default", options=options, current_settings=settings)
+    assert value.ray_address == options.get("RAY_ADDRESS", settings.get("RAY_ADDRESS", "auto"))
+
+
+@pytest.mark.parametrize(
+    "options,settings",
+    [
+        (None, {}),
+        ({}, None),
+        ({"RAY_JOB_ONLY": 1}, {}),
+        ({"RAY_ADDRESS": "http://user:secret@host:8265"}, {}),
+        ({}, {"WORKFLOW_PLAN_TRUST_IDENTITY": {"unexpected": "private"}}),
+    ],
+)
+def test_prepared_declaration_refuses_invalid_finite_configuration(options, settings):
+    with pytest.raises(CohortIntentError) as caught:
+        prepare_cohort_declaration("default", options=options, current_settings=settings)
+    assert "secret" not in str(caught.value) and "private" not in str(caught.value)
 
 
 def test_old_dormant_wire_cannot_be_reinterpreted_as_finite_admission() -> None:

@@ -31,6 +31,25 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/runtime/entrypoint.py" in EXPECTED_FILES
     assert "django_ray/runtime/cohort_job.py" in EXPECTED_FILES
     assert "django_ray/runtime/cohort_job_entrypoint.py" in EXPECTED_FILES
+    assert {
+        "django_ray/maintenance.py",
+        "django_ray/management/commands/django_ray_maintenance.py",
+        "django_ray/runtime/cohort_entrypoint.py",
+        "django_ray/runtime/cohort_execution.py",
+        "django_ray/runtime/cohort_nested.py",
+        "django_ray/runner/cohort_claims.py",
+        "django_ray/runner/cohort_cancel_request.py",
+        "django_ray/runner/cohort_cancellation.py",
+        "django_ray/runner/cohort_cleanup_recovery.py",
+        "django_ray/runner/cohort_completion.py",
+        "django_ray/runner/cohort_connection.py",
+        "django_ray/runner/cohort_dispatch.py",
+        "django_ray/runner/cohort_expiration.py",
+        "django_ray/runner/cohort_job_execution_control.py",
+        "django_ray/runner/cohort_recovery.py",
+        "django_ray/runner/cohort_timeout.py",
+        "django_ray/runner/cohort_worker.py",
+    } <= EXPECTED_FILES
     assert "django_ray/runtime_env_transport.py" in EXPECTED_FILES
 
     assert EXPECTED_TARGET_MODULE_FILES == {
@@ -42,6 +61,7 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
         "django_ray/target/cohort_contract.py",
         "django_ray/target/cohort_intent.py",
         "django_ray/target/cohort_intent_storage.py",
+        "django_ray/target/cohort_job_cleanup.py",
         "django_ray/target/cohort_job_control.py",
         "django_ray/target/cohort_job_retirement.py",
         "django_ray/target/cohort_job_http.py",
@@ -51,6 +71,7 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
         "django_ray/target/cohort_probe_challenges.py",
         "django_ray/target/cohort_publication.py",
         "django_ray/target/cohort_runtime.py",
+        "django_ray/target/cohort_sync.py",
         "django_ray/target/cohort_transport.py",
         "django_ray/target/coordination.py",
         "django_ray/target/execution_codec.py",
@@ -92,9 +113,13 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/migrations/0028_ray_task_cohort_intent.py" in EXPECTED_FILES
     assert "django_ray/migrations/0029_cohort_job_receipts.py" in EXPECTED_FILES
     assert "django_ray/migrations/0030_cohort_claims.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0031_maintenance_admission.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0032_maintenance_controls.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0033_cohort_job_cleanup.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0034_cohort_timeouts.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0030_cohort_claims",
+        "0034_cohort_timeouts",
     )
 
 

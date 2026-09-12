@@ -120,6 +120,23 @@ test-postgres:
 		tests/integration/test_cohort_probe_challenges.py \
 		tests/integration/test_cohort_intent_storage.py \
 		tests/integration/test_cohort_claim_storage.py \
+		tests/integration/test_cohort_selection.py \
+		tests/integration/test_cohort_selection_postgres.py \
+		tests/integration/test_cohort_dispatch.py \
+		tests/integration/test_cohort_completion.py \
+		tests/integration/test_cohort_recovery.py \
+		tests/integration/test_cohort_cleanup_recovery.py \
+		tests/integration/test_cohort_job_cleanup.py \
+		tests/integration/test_cohort_timeout.py \
+		tests/integration/test_cohort_expiration.py \
+		tests/integration/test_cohort_cancellation.py \
+		tests/integration/test_cohort_cancel_request.py \
+		tests/integration/test_cohort_worker.py \
+		tests/integration/test_cohort_worker_jobs_dispatch.py \
+		tests/integration/test_cohort_worker_control.py \
+		tests/integration/test_cohort_worker_jobs_control.py \
+		tests/integration/test_maintenance_admission.py \
+		tests/integration/test_maintenance_controls.py \
 		tests/integration/test_doctor.py \
 		tests/integration/test_cohort_job_receipts.py \
 		tests/integration/test_cohort_publication.py \

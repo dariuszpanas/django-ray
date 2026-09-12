@@ -57,7 +57,14 @@ def _measure(helper: str, count: int, window: int) -> dict:
     first_submit_seconds: float | None = None
     wire_digest = hashlib.sha256()
     original_request = distributed._nested_distributed_request
-    original_encode = codec.encode_nested_execution_request
+    # Current preparation shares its full encoder with the explicit cohort
+    # codec. Older benchmark baselines called the public encoder directly.
+    encoder_name = (
+        "_encode_nested_request_for_protocols"
+        if hasattr(codec, "_encode_nested_request_for_protocols")
+        else "encode_nested_execution_request"
+    )
+    original_encode = getattr(codec, encoder_name)
     original_hash = codec.nested_callable_digest
 
     def request(*args):
@@ -67,9 +74,9 @@ def _measure(helper: str, count: int, window: int) -> dict:
         )
         return original_request(*args)
 
-    def encode(value):
+    def encode(value, *args, **kwargs):
         counters["full_encodings"] += 1
-        return original_encode(value)
+        return original_encode(value, *args, **kwargs)
 
     def callable_hash(value):
         counters["callable_hashes"] += 1
@@ -104,7 +111,7 @@ def _measure(helper: str, count: int, window: int) -> dict:
         patch.object(distributed, "_get_cached_remote", lambda _: remote),
         patch.object(distributed, "uuid4", lambda: UUID(int=1)),
         patch.object(distributed, "_nested_distributed_request", request),
-        patch.object(codec, "encode_nested_execution_request", encode),
+        patch.object(codec, encoder_name, encode),
         patch.object(codec, "nested_callable_digest", callable_hash),
         durable_task_execution(
             41,

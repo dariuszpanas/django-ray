@@ -63,7 +63,7 @@ from django_ray.target.cohort_probe_challenges import (
 from tests.integration.test_cohort_probe_challenges import NOW, _issue, _lease, _target
 
 pytestmark = pytest.mark.django_db(transaction=True)
-LATEST = [("django_ray", "0030_cohort_claims")]
+LATEST = [("django_ray", "0034_cohort_timeouts")]
 DIGEST = "sha256:" + "b" * 64
 
 

@@ -38,6 +38,9 @@ class _FakeObjectRef:
 class _FakeExceptions:
     RayTaskError = RuntimeError
 
+    class TaskCancelledError(Exception):
+        pass
+
 
 class _FakeJobID:
     def hex(self) -> str:

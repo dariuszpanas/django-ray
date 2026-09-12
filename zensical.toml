@@ -38,6 +38,7 @@ nav = [
     { "Docker" = "deployment/docker.md" },
     { "TLS" = "deployment/tls.md" },
     { "Operator Runbook" = "runbook.md" },
+    { "Maintenance Controls" = "operators/maintenance.md" },
   ] },
   { "Reference" = [
     { "CLI" = "reference/cli.md" },

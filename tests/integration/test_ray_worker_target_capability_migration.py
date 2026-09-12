@@ -46,7 +46,7 @@ from django_ray.target.attestation import (
 
 MIGRATE_FROM = [("django_ray", "0024_ray_target_routes")]
 MIGRATE_TO = [("django_ray", "0025_ray_worker_target_capabilities")]
-LATEST = [("django_ray", "0030_cohort_claims")]
+LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGERS = {

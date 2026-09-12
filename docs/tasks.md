@@ -309,9 +309,10 @@ operators can retry it through the admin or operational API after reviewing the 
 Ray Core tasks are cancelled through their object reference, and Ray Job tasks are
 stopped through the Ray Job API. Synchronous tasks cannot be interrupted while Python
 is executing. This includes a coroutine running in sync worker mode: its per-task loop
-owns the worker thread until the coroutine returns. Sync cancellation and timeout
-handling therefore occur only when the worker regains control. Application code should
-still use bounded client timeouts and cancellation-safe cleanup.
+owns the worker thread until the coroutine returns. Its returned result is applied
+when the worker regains control; the worker does not retrospectively replace that
+result with a timeout failure. Application code should still use bounded client
+timeouts and cancellation-safe cleanup.
 
 ## Queue expiration
 

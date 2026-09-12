@@ -98,7 +98,7 @@ def persist_cohort_intent(
         ):
             raise CohortIntentStorageError(CohortIntentStorageRejection.EXECUTION_UNAVAILABLE)
         return RayTaskCohortIntent.objects.using(using).create(
-            execution=execution,
+            execution_id=execution.pk,
             schema_version=COHORT_INTENT_SCHEMA_VERSION,
             package_version=canonical.package_version,
             backend_alias=canonical.backend_alias,

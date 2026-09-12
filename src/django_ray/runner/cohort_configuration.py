@@ -23,11 +23,11 @@ from django_ray.runner.cohort_qualification import PreparedCohortAlias
 from django_ray.runtime.runtime_env import normalize_runtime_env, resolve_runtime_env_profile
 from django_ray.target.attestation import RayRunnerFamily
 from django_ray.target.cohort_intent import (
-    CohortExecutionDeclaration,
     CohortIntentError,
     CohortSelectionPolicy,
     _endpoint,
     cohort_declaration_digest,
+    prepare_cohort_declaration,
 )
 from django_ray.target.cohort_job_control import (
     COHORT_PROBE_RUNTIME_ENV_MAX_BYTES,
@@ -189,11 +189,10 @@ def prepare_cohort_worker_configuration(
                 raise CohortConfigurationError
             if jobs_only and runner_family is not RayRunnerFamily.RAY_JOB:
                 continue
-            declaration = CohortExecutionDeclaration(
+            declaration = prepare_cohort_declaration(
                 alias,
-                options.get("RAY_ADDRESS", manager_settings.get("RAY_ADDRESS", "auto")),
-                jobs_only,
-                manager_settings.get("WORKFLOW_PLAN_TRUST_IDENTITY", {}),
+                options=options,
+                current_settings=manager_settings,
             )
             current.append(
                 PreparedCohortAlias(

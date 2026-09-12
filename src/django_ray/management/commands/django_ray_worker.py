@@ -188,6 +188,35 @@ class Command(BaseCommand):
         self.cluster_address: str | None = None
         self._ray_backend_queue_configuration: _RayBackendQueueConfiguration | None = None
         self._ray_job_queue_affinity: _RayJobQueueAffinity | None = None
+        self._cohort_controller: Any | None = None
+        self._cohort_dispatches: dict[int, Any] = {}
+        self._cohort_core_handles: dict[int, RayCoreHandle] = {}
+        self._cohort_job_handles: dict[int, SubmissionHandle] = {}
+        self._cohort_job_submission = None
+        self._cohort_job_submission_tickets: dict[int, Any] = {}
+        self._cohort_preparation = None
+        self._cohort_preparation_tickets: dict[int, Any] = {}
+        self._cohort_preparation_blocked: set[int] = set()
+        self._cohort_core_bindings: dict[int, Any] = {}
+        self._cohort_core_submission = None
+        self._cohort_core_submission_tickets: dict[int, Any] = {}
+        self._cohort_cancel_tickets: dict[int, Any] = {}
+        self._cohort_recovered: dict[int, Any] = {}
+        self._cohort_completion_cursor = 0
+        self._cohort_cancel_cursor = 0
+        self._cohort_retirement_requested = False
+        self._cohort_capabilities_withdrawn = False
+        self._cohort_retirement_finishing = False
+        self._cohort_job_control = None
+        self._cohort_job_control_ticket = None
+        self._cohort_job_control_observed = False
+        self._cohort_job_control_retired: set[ExecutionIdentity] = set()
+        self._cohort_job_cleanup: dict[int, Any] = {}
+        self._cohort_job_cleanup_cursor = 0
+        self._cohort_job_cleanup_load_cursor = 0
+        self._cohort_job_cleanup_binding = None
+        self._cohort_task_heartbeat_cursor = 0
+        self._cohort_timeout_cursor = 0
 
     def _new_polling_policy(self) -> AdaptivePollingPolicy:
         """Build polling jitter from the current worker identity."""
@@ -311,7 +340,13 @@ class Command(BaseCommand):
             self._write_worker_output(
                 f"  Polling: {self.poll_base_interval:g}s base, {self.poll_max_interval:g}s maximum"
             )
-            self._initialize_ray_execution()
+            if (
+                MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION == 3
+                and MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION == 3
+            ):
+                self._initialize_cohort_execution(queues)
+            else:
+                self._initialize_ray_execution()
             self.run_loop(
                 queues=queues,
                 concurrency=concurrency,
@@ -376,6 +411,60 @@ class Command(BaseCommand):
                     self.style.WARNING(f"Initial cluster connection failed: {diagnostic}")
                 )
                 self.stdout.write("Will retry connection during operation...")
+
+    def _initialize_cohort_execution(self, queues: Sequence[str]) -> None:
+        """Prepare admission after lease acquisition; native connect begins in the loop."""
+        import os
+        import sys
+        from copy import deepcopy
+
+        from django.conf import settings as django_settings
+
+        from django_ray.runner.cohort_worker import CohortWorkerController
+
+        if self.lease_identity is None:
+            raise CommandError("Current-cohort worker requires an acquired lease")
+        configuration = self._load_ray_backend_queue_configuration()
+        control = {}
+        connect = None
+        if self.execution_mode in ("local", "cluster"):
+            if self.execution_mode == "local":
+                control = {
+                    "address": "local",
+                    "dashboard_host": "127.0.0.1",
+                    "dashboard_port": 8265,
+                    "include_dashboard": True,
+                    "runtime_env": {"env_vars": {"PYTHONPATH": os.pathsep.join(sys.path)}},
+                    "_system_config": {
+                        "enable_timeline": True,
+                        "task_events_report_interval_ms": 100,
+                    },
+                }
+            else:
+                control = {"address": self.cluster_address}
+
+            def connect():
+                import ray
+
+                # Never disconnect or replace a context owned outside this epoch.
+                if ray.is_initialized():
+                    raise RuntimeError("Current-cohort Core context is already initialized")
+                # Ray normalizes nested configuration in place during startup.
+                # Keep the declared inputs stable for subsequent drift checks.
+                ray.init(**deepcopy(control), ignore_reinit_error=False)
+
+        self._cohort_controller = CohortWorkerController(
+            self.lease_identity,
+            execution_mode=self.execution_mode,
+            validated_aliases=configuration.aliases,
+            selected_queues=tuple(queues),
+            tasks=django_settings.TASKS,
+            manager_settings=get_settings(),
+            django_settings_module=os.environ.get("DJANGO_SETTINGS_MODULE"),
+            core_address=self.cluster_address,
+            core_control_settings=control,
+            connect=connect,
+        )
 
     def _get_default_execution_mode(self, settings: dict[str, Any]) -> tuple[str, str | None]:
         """Resolve default worker mode from settings when no CLI mode flag is set.
@@ -911,6 +1000,9 @@ class Command(BaseCommand):
             concurrency: Maximum concurrent tasks.
             heartbeat_interval: Seconds between heartbeats.
         """
+        if self._cohort_controller is not None:
+            self._run_cohort_loop(queues, concurrency, heartbeat_interval)
+            return
         now = time.monotonic()
         next_heartbeat = now
         next_completion_poll = now
@@ -1024,6 +1116,1242 @@ class Command(BaseCommand):
             sleep_seconds = max(0.0, min(deadlines) - time.monotonic())
             self._wait_for_poll_deadline(sleep_seconds)
 
+    def _run_cohort_loop(self, queues, concurrency, heartbeat_interval):
+        """Keep lease and completions moving while qualification is pending."""
+        from django.conf import settings as django_settings
+
+        controller = self._cohort_controller
+        next_heartbeat = next_claim = next_recovery = next_cancellation = 0.0
+        previous_reason = None
+        while not self.shutdown_requested:
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                self.send_heartbeat()
+                next_heartbeat = time.monotonic() + heartbeat_interval
+                controller.check_configuration(
+                    tasks=django_settings.TASKS, manager_settings=get_settings()
+                )
+                self._observe_cohort_retirement()
+            if self.shutdown_requested:
+                break
+            # Admission proof expiry and health changes must not discard a
+            # result already returned through an owned execution transport.
+            activity = bool(self._poll_cohort_preparations())
+            activity = bool(self._poll_cohort_submissions()) or activity
+            activity = bool(self._poll_cohort_completions()) or activity
+            controller.tick()
+            controller.poll_stopped_cleanup()
+            self._finish_cohort_retirement_admission()
+            if controller.connected and self.ray_core_runner is None:
+                self.ray_core_runner = RayCoreRunner._from_existing_connection()
+            if now >= next_recovery:
+                activity = bool(self._expire_cohort_tasks()) or activity
+                activity = bool(self._recover_cohort_jobs(concurrency)) or activity
+                next_recovery = time.monotonic() + heartbeat_interval
+            if now >= next_cancellation:
+                activity = bool(self._poll_cohort_timeouts()) or activity
+                activity = bool(self._poll_cohort_cancellations()) or activity
+                next_cancellation = time.monotonic() + 1.0
+            if self.shutdown_requested:
+                break
+            if now >= next_claim:
+                activity = bool(self._claim_and_process_cohort_tasks(concurrency)) or activity
+                next_claim = time.monotonic() + self.polling_policy.next_delay(activity=activity)
+            if controller.reason != previous_reason:
+                previous_reason = controller.reason
+                if previous_reason:
+                    self._write_worker_output(f"  Cohort qualification: {previous_reason}")
+            self._wait_for_poll_deadline(
+                max(0.0, min(next_heartbeat, next_claim, time.monotonic() + 0.1) - time.monotonic())
+            )
+
+    def _claim_and_process_cohort_tasks(self, concurrency):
+        from django_ray.target.cohort_claim import CohortRunnerFamily
+
+        active = RayTaskExecution.objects.filter(
+            claimed_by_worker=self.worker_id,
+            execution_protocol_version=3,
+            state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+        ).count()
+        available = max(0, concurrency - active - self._owned_cohort_cleanup_count())
+        if self._cohort_controller.family is CohortRunnerFamily.SYNC:
+            available = min(available, 1)
+        else:
+            if self._cohort_submission_busy():
+                return 0
+            available = min(available, 1)
+        claimed = self._cohort_controller.claim(limit=available)
+        for item in claimed:
+            if self.shutdown_requested:
+                break
+            self._dispatch_cohort_task(item)
+        return len(claimed)
+
+    def _dispatch_cohort_task(self, claimed):
+        from django_ray.runner.cohort_dispatch import prepare_claimed_cohort_dispatch
+        from django_ray.runner.cohort_preparation import CohortPreparationController
+        from django_ray.target.cohort_claim import CohortRunnerFamily
+
+        family = claimed.claim.facts.binding.runner_family
+        value = None
+        try:
+            task_pk = claimed.claim.facts.identity.task_execution_pk
+            if (
+                task_pk in self._cohort_preparation_tickets
+                or task_pk in self._cohort_dispatches
+                or task_pk in self._cohort_core_submission_tickets
+                or task_pk in self._cohort_job_submission_tickets
+            ):
+                return
+            if self.shutdown_requested:
+                raise RuntimeError("Current-cohort preparation stopped")
+            self._check_cohort_unprepared_claim(claimed)
+            if family is CohortRunnerFamily.SYNC:
+                value = prepare_claimed_cohort_dispatch(claimed)
+                self._cohort_dispatches[task_pk] = value
+                self._start_prepared_cohort_dispatch(value)
+                return
+            transport = "ray-job" if family is CohortRunnerFamily.RAY_JOB else None
+            binding = None
+            if family is CohortRunnerFamily.RAY_CORE:
+                import ray
+
+                from django_ray.runner.ray_core import _compiled_graph_submission_transport
+                from django_ray.target.cohort_intent import _endpoint
+
+                if self.ray_core_runner is None:
+                    raise RuntimeError("Current-cohort Core runner is unavailable")
+                controller = self._cohort_controller
+                if (
+                    controller is None
+                    or not controller.connected
+                    or controller.connection_ticket is None
+                ):
+                    raise RuntimeError("Current-cohort Core connection is unavailable")
+                if self.execution_mode == "local" and self.cluster_address is None:
+                    core_address = "local"
+                elif self.execution_mode == "cluster":
+                    core_address = _endpoint(self.cluster_address)
+                else:
+                    raise RuntimeError("Current-cohort Core connection selection is unavailable")
+                # The descriptor is diagnostic only. The request binds the live
+                # connection observation, which the runner rechecks before remote.
+                transport = _compiled_graph_submission_transport(ray)
+                if transport not in {"ray-client", "direct-ray-core"}:
+                    raise RuntimeError("Current-cohort Core transport is unavailable")
+                binding = (controller.connection_ticket, core_address, self.ray_core_runner)
+            if self._cohort_preparation is None:
+                self._cohort_preparation = CohortPreparationController()
+            ticket = self._cohort_preparation.begin(claimed, transport=transport)
+            if ticket is None:
+                raise RuntimeError("Current-cohort preparation capacity unavailable")
+            self._cohort_preparation_tickets[task_pk] = ticket
+            if binding is not None:
+                self._cohort_core_bindings[task_pk] = binding
+        except Exception:
+            self._hold_cohort_dispatch_failure(value=value, record=claimed.claim)
+
+    def _check_cohort_unprepared_claim(self, claimed):
+        """Reject a previously held/used claim before repeating local preparation."""
+        from django_ray.target import cohort_claim_storage
+
+        record = claimed.claim
+        with transaction.atomic():
+            row, _ = cohort_claim_storage._locked_claim(
+                record.owner,
+                record.claim_id,
+                record.facts.identity,
+                record.revision,
+                datetime.now(UTC),
+                using="default",
+            )
+            if (
+                cohort_claim_storage._record(row) != record
+                or row.disposition != "OPEN"
+                or row.prepared_request_digest is not None
+                or row.dispatched_at is not None
+                or not self._cohort_pending_task_running(record.facts.identity)
+            ):
+                raise RuntimeError("Current-cohort preparation claim changed")
+
+    def _cohort_core_binding_current(self, binding):
+        controller = self._cohort_controller
+        try:
+            return (
+                binding is not None
+                and controller is not None
+                and controller.connected
+                and controller.connection_ticket is binding[0]
+                and self.ray_core_runner is binding[2]
+            )
+        except Exception:
+            return False
+
+    def _start_prepared_cohort_dispatch(self, value):
+        from django_ray.runner.cohort_dispatch import mark_cohort_dispatch_started
+        from django_ray.target.cohort_claim import CohortRunnerFamily
+
+        task_pk = value.claim.facts.identity.task_execution_pk
+        family = value.claim.facts.binding.runner_family
+        try:
+            binding = self._cohort_core_bindings.get(task_pk)
+            if family is CohortRunnerFamily.RAY_CORE and not self._cohort_core_binding_current(
+                binding
+            ):
+                raise RuntimeError("Current-cohort Core connection changed")
+            jobs_handle = None
+            if family is CohortRunnerFamily.RAY_JOB:
+                from django_ray.runner.ray_job import RayJobRunner
+
+                runner = RayJobRunner()
+                endpoint = value.claim.facts.job_qualification.jobs_endpoint
+                jobs_handle = runner.cohort_submission_handle(
+                    value.execution, jobs_endpoint=endpoint
+                )
+                self._cohort_job_handles[task_pk] = jobs_handle
+            value = mark_cohort_dispatch_started(value, jobs_handle=jobs_handle)
+            self._cohort_dispatches[task_pk] = value
+            if family is CohortRunnerFamily.SYNC:
+                from django_ray.runtime.cohort_execution import execute_cohort_request
+
+                result = execute_cohort_request(
+                    value.prepared.request_json,
+                    expected_identity=value.prepared.identity,
+                    expected_request_digest=value.prepared.request_digest,
+                    expected_cohort_contract_digest=value.prepared.contract_digest,
+                )
+                self._apply_cohort_result(value, result, provenance="owned_direct")
+            elif family is CohortRunnerFamily.RAY_CORE:
+                from django_ray.runner.cohort_core_submission import CohortCoreSubmissionController
+
+                if binding is None or not self._cohort_core_binding_current(binding):
+                    raise RuntimeError("Current-cohort Core connection changed")
+                if self._cohort_core_submission is None:
+                    self._cohort_core_submission = CohortCoreSubmissionController()
+                ticket = self._cohort_core_submission.begin(
+                    binding[2],
+                    value.execution,
+                    prepared=value.prepared,
+                    connection_ticket=binding[0],
+                )
+                if ticket is None:
+                    raise RuntimeError("Current-cohort Core submission capacity unavailable")
+                self._cohort_core_submission_tickets[task_pk] = ticket
+            else:
+                from django_ray.runner.cohort_job_submission import CohortJobSubmissionController
+
+                if self._cohort_job_submission is None:
+                    self._cohort_job_submission = CohortJobSubmissionController()
+                ticket = self._cohort_job_submission.begin(
+                    value.execution, prepared=value.prepared, handle=jobs_handle, claim=value.claim
+                )
+                if ticket is None:
+                    raise RuntimeError("Current-cohort Jobs submission capacity unavailable")
+                self._cohort_job_submission_tickets[task_pk] = ticket
+        except Exception:
+            self._hold_cohort_dispatch_failure(value=value)
+
+    def _hold_cohort_dispatch_failure(self, *, value=None, record=None):
+        from django_ray.runner.cohort_dispatch import hold_cohort_dispatch
+        from django_ray.target.cohort_claim import CohortHoldBoundary, CohortHoldReason
+        from django_ray.target.cohort_claim_storage import hold_cohort_claim
+
+        # No ordinary failure/retry path consumes uncertain dispatch. A lost
+        # DB acknowledgement may prevent this CAS; the original OPEN claim
+        # still fences replay and remains available for exact reconciliation.
+        try:
+            if value is not None:
+                self._remember_cohort_value(
+                    hold_cohort_dispatch(value, reason=CohortHoldReason.DISPATCH_UNCERTAIN)
+                )
+            elif record is not None:
+                with transaction.atomic():
+                    hold_cohort_claim(
+                        record.owner,
+                        record.claim_id,
+                        expected_identity=record.facts.identity,
+                        expected_revision=record.revision,
+                        reason=CohortHoldReason.DISPATCH_UNCERTAIN,
+                        boundary=CohortHoldBoundary.CONTROL,
+                        evidence_digest=record.facts_digest,
+                        application_invoked=None,
+                        now=datetime.now(UTC),
+                    )
+        except Exception:
+            self._write_worker_output(
+                "  Cohort claim retained; dispatch outcome requires reconciliation"
+            )
+
+    def _poll_cohort_preparations(self, *, allow_dispatch=True):
+        controller = self._cohort_preparation
+        if controller is None:
+            return 0
+        activity = 0
+        for task_pk, ticket in tuple(self._cohort_preparation_tickets.items()):
+            binding = self._cohort_core_bindings.get(task_pk)
+            identity = ticket.identity
+            current = self._cohort_pending_task_running(identity)
+            if (
+                not current
+                or not allow_dispatch
+                or self.shutdown_requested
+                or (binding is not None and not self._cohort_core_binding_current(binding))
+            ):
+                controller.abort(ticket)
+            result = controller.poll(ticket)
+            if result.stage == "ready":
+                try:
+                    value = controller.commit(ticket)
+                    # Never discard a returned committed revision after a deadline.
+                    self._cohort_dispatches[task_pk] = value
+                    self._start_prepared_cohort_dispatch(value)
+                except Exception:
+                    controller.abort(ticket)
+                activity += 1
+                result = controller.poll(ticket)
+            if result.stage == "blocked" and task_pk not in self._cohort_preparation_blocked:
+                self._cohort_preparation_blocked.add(task_pk)
+                self._hold_cohort_dispatch_failure(
+                    value=self._cohort_dispatches.get(task_pk), record=ticket.claim
+                )
+                activity += 1
+            if result.stage in {"blocked", "committed"} and controller.retire(ticket):
+                del self._cohort_preparation_tickets[task_pk]
+                self._cohort_preparation_blocked.discard(task_pk)
+                if task_pk not in self._cohort_core_submission_tickets:
+                    self._cohort_core_bindings.pop(task_pk, None)
+                activity += 1
+        return activity
+
+    def _cohort_submission_busy(self):
+        return any(
+            controller is not None and controller.busy
+            for controller in (
+                self._cohort_preparation,
+                self._cohort_core_submission,
+                self._cohort_job_submission,
+            )
+        )
+
+    def _cohort_pending_task_running(self, identity):
+        try:
+            return RayTaskExecution.objects.filter(
+                pk=identity.task_execution_pk,
+                task_id=identity.task_id,
+                attempt_number=identity.attempt_number,
+                execution_generation=identity.execution_generation,
+                execution_protocol_version=3,
+                claimed_by_worker=self.worker_id,
+                state=TaskState.RUNNING,
+            ).exists()
+        except Exception:
+            # Unavailable SQL cannot prevent polling/reaping an owned callback.
+            return False
+
+    def _cohort_submission_task(self, dispatch, ticket):
+        """Revalidate the original live dispatch before parent request attachment."""
+        from django_ray.target import cohort_claim_storage
+        from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+        record = dispatch.claim
+        identity = record.facts.identity
+        handle = self._cohort_job_handles.get(identity.task_execution_pk)
+        if (
+            ticket.identity != identity
+            or ticket.request_digest != dispatch.prepared.request_digest
+            or ticket.contract_digest != dispatch.prepared.contract_digest
+            or handle is None
+            or handle.ray_job_id != ticket.submission_id
+            or handle.ray_address != ticket.jobs_endpoint
+        ):
+            raise RuntimeError("Current-cohort Jobs submission binding changed")
+        with transaction.atomic():
+            row, _ = cohort_claim_storage._locked_claim(
+                record.owner,
+                record.claim_id,
+                identity,
+                record.revision,
+                datetime.now(UTC),
+                using="default",
+            )
+            if (
+                cohort_claim_storage._record(row) != record
+                or row.disposition != "OPEN"
+                or row.dispatched_at is None
+                or row.prepared_request_digest != dispatch.prepared.request_digest
+            ):
+                raise RuntimeError("Current-cohort Jobs dispatch changed")
+            current = RayTaskExecution.objects.get(pk=identity.task_execution_pk)
+            validate_prepared_cohort_execution(dispatch.prepared, task=current)
+            if (
+                current.state != TaskState.RUNNING
+                or current.ray_job_id != ticket.submission_id
+                or current.ray_address != ticket.jobs_endpoint
+            ):
+                raise RuntimeError("Current-cohort Jobs reservation changed")
+        return current
+
+    def _poll_cohort_submissions(self, *, allow_submit=True):
+        return self._poll_cohort_core_submissions(
+            allow_submit=allow_submit
+        ) + self._poll_cohort_job_submissions(allow_submit=allow_submit)
+
+    def _poll_cohort_core_submissions(self, *, allow_submit=True):
+        controller = self._cohort_core_submission
+        if controller is None:
+            return 0
+        activity = 0
+        for task_pk, ticket in tuple(self._cohort_core_submission_tickets.items()):
+            binding = self._cohort_core_bindings.get(task_pk)
+            current_connection = (
+                binding[0]
+                if binding is not None and self._cohort_core_binding_current(binding)
+                else None
+            )
+            if (
+                not allow_submit
+                or self.shutdown_requested
+                or current_connection is None
+                or not self._cohort_pending_task_running(ticket.identity)
+            ):
+                controller.abort(ticket)
+            result = controller.poll(ticket, connection_ticket=current_connection)
+            value = self._cohort_dispatches.get(task_pk)
+            exact = (
+                value is not None
+                and value.claim.facts.identity == ticket.identity
+                and value.prepared.request_digest == ticket.request_digest
+                and value.prepared.contract_digest == ticket.contract_digest
+            )
+            failed = result.uncertainty is not None
+            if (
+                result.handle is not None
+                and self._cohort_core_handles.get(task_pk) is not result.handle
+            ):
+                # Only the exited callback exposes its final handle. Retain it
+                # before diagnostics, including uncertain post-remote outcomes.
+                self._cohort_core_handles[task_pk] = result.handle
+                activity += 1
+                if exact and binding is not None:
+                    try:
+                        self._persist_cohort_core_diagnostics(
+                            value, result.handle, address=binding[1]
+                        )
+                    except Exception:
+                        failed = True
+            if failed and exact:
+                self._hold_cohort_dispatch_failure(value=value)
+            if (
+                result.handle is not None
+                and self.shutdown_requested
+                and not self.lease_ownership_lost
+            ):
+                from django_ray.runner.cohort_cancel_request import (
+                    request_owned_cohort_cancellation,
+                )
+
+                try:
+                    self._remember_cohort_value(
+                        request_owned_cohort_cancellation(
+                            self._cohort_value(task_pk), now=datetime.now(UTC)
+                        )
+                    )
+                except Exception:
+                    pass
+            if result.stage in {"finished", "uncertain"} and controller.retire(ticket):
+                del self._cohort_core_submission_tickets[task_pk]
+                self._cohort_core_bindings.pop(task_pk, None)
+                activity += 1
+                if (
+                    value is not None
+                    and RayTaskExecution.objects.filter(
+                        pk=task_pk,
+                        attempt_number=ticket.identity.attempt_number,
+                        execution_generation=ticket.identity.execution_generation,
+                    )
+                    .exclude(state__in=(TaskState.RUNNING, TaskState.CANCELLING))
+                    .exists()
+                ):
+                    self._retire_cohort_execution(task_pk)
+        return activity
+
+    def _poll_cohort_job_submissions(self, *, allow_submit=True):
+        """Poll local callbacks; only the parent may attach and authorize requests."""
+        from django_ray.runner.cohort_dispatch import hold_cohort_dispatch
+        from django_ray.target.cohort_claim import CohortHoldReason
+
+        controller = self._cohort_job_submission
+        if controller is None:
+            return 0
+        activity = 0
+        for task_pk, ticket in tuple(self._cohort_job_submission_tickets.items()):
+            result = controller.poll(ticket)
+            value = self._cohort_dispatches.get(task_pk)
+            exact = (
+                value is not None
+                and value.claim.facts.identity == ticket.identity
+                and value.prepared.request_digest == ticket.request_digest
+                and value.prepared.contract_digest == ticket.contract_digest
+            )
+            if not exact or not allow_submit or self.shutdown_requested:
+                controller.abort(ticket)
+            elif result.stage == "prepared":
+                try:
+                    current = self._cohort_submission_task(value, ticket)
+                    controller.authorize(ticket, task_execution=current)
+                except Exception:
+                    controller.abort(ticket)
+                activity += 1
+            result = controller.poll(ticket)
+            if result.uncertainty is not None and exact:
+                try:
+                    self._remember_cohort_value(
+                        hold_cohort_dispatch(value, reason=CohortHoldReason.DISPATCH_UNCERTAIN)
+                    )
+                except Exception:
+                    # A lost CAS response cannot free the original pending Job.
+                    pass
+            if result.stage in {"finished", "uncertain"} and controller.retire(ticket):
+                del self._cohort_job_submission_tickets[task_pk]
+                activity += 1
+        return activity
+
+    def _persist_cohort_core_diagnostics(self, dispatch, handle, *, address):
+        """Attach diagnostics after retaining the callback, never submission authority.
+
+        Failure leaves the owned handle available for completion and cleanup. It
+        cannot undo dispatch, replace a HELD handle, or permit another submission.
+        """
+        from django_ray.runner.ray_core import RayCoreHandle
+        from django_ray.target import cohort_claim_storage
+        from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+        record = dispatch.claim
+        identity = record.facts.identity
+        if (
+            type(handle) is not RayCoreHandle
+            or handle.cohort_prepared is not dispatch.prepared
+            or (
+                handle.task_pk,
+                handle.durable_task_id,
+                handle.attempt_number,
+                handle.execution_generation,
+            )
+            != (
+                identity.task_execution_pk,
+                identity.task_id,
+                identity.attempt_number,
+                identity.execution_generation,
+            )
+        ):
+            raise RuntimeError("Current-cohort Core diagnostic identity changed")
+        composite = RayCoreRunner._build_composite_id(handle) or f"ray_core:{handle.task_pk}"
+        if type(composite) is not str or not 1 <= len(composite) <= 255:
+            raise RuntimeError("Current-cohort Core diagnostics are unavailable")
+        with transaction.atomic():
+            row, _ = cohort_claim_storage._locked_claim(
+                record.owner,
+                record.claim_id,
+                identity,
+                record.revision,
+                datetime.now(UTC),
+                using="default",
+            )
+            if (
+                cohort_claim_storage._record(row) != record
+                or row.disposition != "OPEN"
+                or row.dispatched_at is None
+                or row.prepared_request_digest != dispatch.prepared.request_digest
+            ):
+                raise RuntimeError("Current-cohort Core diagnostic claim changed")
+            current = RayTaskExecution.objects.using("default").get(pk=identity.task_execution_pk)
+            validate_prepared_cohort_execution(dispatch.prepared, task=current)
+            if current.ray_job_id is not None or current.ray_address is not None:
+                raise RuntimeError("Current-cohort Core diagnostics were already recorded")
+            current.ray_job_id, current.ray_address = composite, address
+            current.save(using="default", update_fields=["ray_job_id", "ray_address"])
+        dispatch.execution.ray_job_id, dispatch.execution.ray_address = composite, address
+
+    def _poll_cohort_completions(self):
+        from dataclasses import replace
+
+        from django_ray.runner.cohort_dispatch import hold_cohort_dispatch
+        from django_ray.target.cohort_claim import CohortHoldReason
+
+        applied = 0
+        if self.ray_core_runner is not None:
+            for outcome in self.ray_core_runner.poll_cohort_completed(
+                tuple(self._cohort_core_handles.values())
+            ):
+                handle = outcome.handle
+                if self._cohort_core_handles.get(handle.task_pk) is not handle:
+                    continue
+                value = self._cohort_dispatches.get(handle.task_pk)
+                if value is None:
+                    continue
+                if outcome.terminal_cancelled:
+                    from django_ray.runner.cohort_cancel_request import (
+                        request_owned_cohort_cancellation,
+                    )
+
+                    value = request_owned_cohort_cancellation(value, now=datetime.now(UTC))
+                    self._remember_cohort_value(value)
+                    applied += self._apply_cohort_cancelled(value, "owned_core_terminal")
+                elif outcome.result is None:
+                    self._cohort_dispatches[handle.task_pk] = hold_cohort_dispatch(
+                        value, reason=CohortHoldReason.TRANSPORT_UNCERTAIN
+                    )
+                else:
+                    applied += self._apply_cohort_result(
+                        value, outcome.result, provenance="owned_direct"
+                    )
+        candidates = (
+            RayTaskExecution.objects.filter(
+                pk__in=tuple(self._cohort_job_handles),
+                execution_protocol_version=3,
+                state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+                completion_data__isnull=False,
+                claimed_by_worker=self.worker_id,
+            )
+            .filter(pk__gt=self._cohort_completion_cursor)
+            .order_by("pk")
+        )
+        tasks = list(candidates[:100])
+        self._cohort_completion_cursor = tasks[-1].pk if tasks else 0
+        for task in tasks:
+            value = self._cohort_value(task.pk)
+            handle = self._cohort_job_handles[task.pk]
+            if (
+                value is None
+                or task.ray_job_id != handle.ray_job_id
+                or task.ray_address != handle.ray_address
+            ):
+                continue
+            applied += self._apply_cohort_result(
+                replace(value, execution=task),
+                task.completion_data,
+                provenance="durable_job_completion",
+            )
+        return applied
+
+    def _apply_cohort_result(self, value, result, *, provenance):
+        from django_ray.runner.cohort_completion import (
+            apply_cohort_completion,
+            apply_recovered_cohort_job_completion,
+        )
+        from django_ray.runner.cohort_recovery import RecoveredCohortJobCompletion
+
+        identity = value.claim.facts.identity
+
+        def apply(current, decoded, *, retry_admitted):
+            completion = decoded.completion
+            protocols = ExecutionProtocolRange(3, 3)
+            expected = {
+                "expected_claimed_by_worker": self.worker_id,
+                "expected_attempt_number": identity.attempt_number,
+                "expected_execution_generation": identity.execution_generation,
+                "expected_completion_data": current.completion_data,
+                "require_completion_data_match": True,
+                "supported_protocols": protocols,
+                "executor_django_ray_version": completion.executor_django_ray_version,
+                "_allow_cancelling_completion": True,
+            }
+            if completion.success:
+                from django_ray.result_storage import canonicalize_result_reference
+
+                reference = completion.result_reference
+                return self._store_and_succeed_task(
+                    current,
+                    completion.result,
+                    prepared_result_reference=canonicalize_result_reference(reference)
+                    if reference is not None
+                    else None,
+                    **expected,
+                )
+            return self._handle_task_failure(
+                current,
+                error_message=completion.error or "Unknown error",
+                error_traceback=completion.traceback,
+                exception_type=completion.exception_type,
+                retryable=completion.retryable if retry_admitted else False,
+                retry_blocked_reason=None
+                if retry_admitted
+                else "Current execution admission blocked automatic retry",
+                **expected,
+            )
+
+        if type(value) is RecoveredCohortJobCompletion:
+            if provenance != "durable_job_completion":
+                raise ValueError("Recovered Jobs require durable completion")
+            applied = apply_recovered_cohort_job_completion(value, result, apply_completion=apply)
+        else:
+            applied = apply_cohort_completion(
+                value, result, provenance=provenance, apply_completion=apply
+            )
+        self._remember_cohort_value(applied.dispatch)
+        if applied.applied:
+            if provenance == "durable_job_completion":
+                self._load_owned_cohort_job_cleanups()
+            self._retire_cohort_execution(identity.task_execution_pk)
+        return int(applied.applied)
+
+    def _cohort_value(self, task_pk):
+        return self._cohort_dispatches.get(task_pk) or self._cohort_recovered.get(task_pk)
+
+    def _observe_cohort_retirement(self):
+        from django_ray.maintenance import worker_retirement_requested
+
+        if not self._cohort_retirement_requested and worker_retirement_requested(
+            self.lease_identity
+        ):
+            self._cohort_retirement_requested = True
+            self._cohort_controller.request_retirement()
+            self._write_worker_output("  Worker retirement requested; finishing existing ownership")
+
+    def _finish_cohort_retirement_admission(self):
+        from django_ray.models import RayTaskCohortClaim
+        from django_ray.target.capabilities import withdraw_all_ray_worker_target_capabilities
+        from django_ray.target.cohort_job_cleanup import owned_job_cleanup_pending
+
+        if not self._cohort_retirement_requested or not self._cohort_controller.retirement_ready:
+            return
+        if (
+            self._cohort_job_cleanup
+            or owned_job_cleanup_pending(self.lease_identity)
+            or self._cohort_job_control_retired
+            or self._cohort_job_submission_tickets
+            or self._cohort_preparation_tickets
+            or self._cohort_core_submission_tickets
+            or self._cohort_submission_busy()
+            or (self._cohort_job_submission is not None and self._cohort_job_submission.busy)
+            or (self._cohort_job_control is not None and self._cohort_job_control.busy)
+        ):
+            return
+        if not self._cohort_capabilities_withdrawn:
+            withdraw_all_ray_worker_target_capabilities(self.lease_identity)
+            self._cohort_capabilities_withdrawn = True
+        if (
+            self._cohort_dispatches
+            or self._cohort_recovered
+            or self._cohort_core_handles
+            or self._cohort_job_handles
+        ):
+            return
+        identity = self.lease_identity
+        if (
+            RayTaskExecution.objects.filter(
+                claimed_by_worker=self.worker_id,
+                state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+            ).exists()
+            or RayTaskCohortClaim.objects.filter(
+                owner_lease_id=identity.worker_id,
+                owner_lease_hostname=identity.hostname,
+                owner_lease_pid=identity.pid,
+                owner_lease_started_at=identity.started_at,
+            )
+            .exclude(disposition="RESOLVED")
+            .exists()
+        ):
+            return
+        # This is admission quiescence only. Shutdown independently checks owned
+        # callbacks/probes and the local connection before recording RETIRED.
+        self._cohort_retirement_finishing = True
+        self.shutdown_requested = True
+
+    def _remember_cohort_value(self, value):
+        from django_ray.runner.cohort_recovery import RecoveredCohortJobCompletion
+
+        store = (
+            self._cohort_recovered
+            if type(value) is RecoveredCohortJobCompletion
+            else self._cohort_dispatches
+        )
+        store[value.claim.facts.identity.task_execution_pk] = value
+
+    def _retire_cohort_execution(self, task_pk):
+        value = self._cohort_value(task_pk)
+        preparation_ticket = self._cohort_preparation_tickets.get(task_pk)
+        if preparation_ticket is not None:
+            self._cohort_preparation.abort(preparation_ticket)
+            if self._cohort_preparation.retire(preparation_ticket):
+                del self._cohort_preparation_tickets[task_pk]
+                self._cohort_preparation_blocked.discard(task_pk)
+                self._cohort_core_bindings.pop(task_pk, None)
+        core_ticket = self._cohort_core_submission_tickets.get(task_pk)
+        if core_ticket is not None:
+            # Its final handle is not available before callback exit. Keep the
+            # original dispatch until that handle can be owned and retired.
+            self._cohort_core_submission.abort(core_ticket)
+            return
+        submission_ticket = self._cohort_job_submission_tickets.get(task_pk)
+        if submission_ticket is not None:
+            self._cohort_job_submission.abort(submission_ticket)
+            if self._cohort_job_submission.retire(submission_ticket):
+                del self._cohort_job_submission_tickets[task_pk]
+        if value is not None and self._cohort_job_control is not None:
+            identity = value.claim.facts.identity
+            if not self._cohort_job_control.retire_execution(identity):
+                self._cohort_job_control_retired.add(identity)
+            elif (
+                self._cohort_job_control_ticket is not None
+                and self._cohort_job_control_ticket.expectation.identity == identity
+            ):
+                self._cohort_job_control_ticket = None
+        handle = self._cohort_core_handles.get(task_pk)
+        if handle is not None and self.ray_core_runner is not None:
+            self.ray_core_runner.retire_pending_handle(handle)
+        self._cohort_core_handles.pop(task_pk, None)
+        self._cohort_job_handles.pop(task_pk, None)
+        self._cohort_dispatches.pop(task_pk, None)
+        self._cohort_recovered.pop(task_pk, None)
+        self._cohort_cancel_tickets.pop(task_pk, None)
+        self.tasks_processed_count += 1
+        self.last_task_processed = time.time()
+
+    def _recover_cohort_jobs(self, concurrency):
+        from django_ray.runner.cohort_cleanup_recovery import recover_cohort_job_cleanups
+        from django_ray.runner.cohort_recovery import recover_cohort_jobs
+        from django_ray.target.cohort_claim import CohortRunnerFamily
+
+        controller = self._cohort_controller
+        if controller.family is not CohortRunnerFamily.RAY_JOB:
+            return 0
+        self._load_owned_cohort_job_cleanups()
+        active = RayTaskExecution.objects.filter(
+            claimed_by_worker=self.worker_id,
+            execution_protocol_version=3,
+            state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+        ).count()
+        available = min(10, max(0, concurrency - active - self._owned_cohort_cleanup_count()))
+        if not available:
+            return 0
+        cleanups = recover_cohort_job_cleanups(
+            self.lease_identity,
+            qualifications=controller.qualifications(),
+            manager_runtime=controller.runtime,
+            limit=available,
+        )
+        for value in cleanups:
+            if value.cleanup.expectation_json is not None and len(self._cohort_job_cleanup) < 100:
+                self._cohort_job_cleanup[value.cleanup.cleanup_id] = value.cleanup
+        available -= len(cleanups)
+        if not available:
+            return len(cleanups)
+        recovered = recover_cohort_jobs(
+            self.lease_identity,
+            qualifications=controller.qualifications(),
+            manager_runtime=controller.runtime,
+            limit=available,
+        )
+        for value in recovered:
+            self._remember_cohort_value(value)
+            self._cohort_job_handles[value.execution.pk] = value.handle
+        return len(recovered) + len(cleanups)
+
+    def _owned_cohort_cleanup_rows(self):
+        from django_ray.models import RayCohortJobCleanup
+
+        identity = self.lease_identity
+        return RayCohortJobCleanup.objects.filter(
+            owner_lease_id=identity.worker_id,
+            owner_lease_hostname=identity.hostname,
+            owner_lease_pid=identity.pid,
+            owner_lease_started_at=identity.started_at,
+            state="OPEN",
+        )
+
+    def _owned_cohort_cleanup_count(self):
+        rows = self._owned_cohort_cleanup_rows()
+        count = rows.count()
+        tickets = (
+            *self._cohort_job_submission_tickets.values(),
+            *self._cohort_preparation_tickets.values(),
+            *self._cohort_core_submission_tickets.values(),
+        )
+        pending = {
+            (
+                item.identity.task_execution_pk,
+                item.identity.attempt_number,
+                item.identity.execution_generation,
+            )
+            for item in tickets
+        }
+        if not pending:
+            return count
+        task_ids = tuple(item[0] for item in pending)
+        active = set(
+            RayTaskExecution.objects.filter(
+                pk__in=task_ids,
+                claimed_by_worker=self.worker_id,
+                execution_protocol_version=3,
+                state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+            ).values_list("pk", "attempt_number", "execution_generation")
+        )
+        cleanup = set(
+            rows.filter(execution_id__in=task_ids).values_list(
+                "execution_id", "claim__attempt_number", "claim__execution_generation"
+            )
+        )
+        # A terminal row or a separately closed remote cleanup cannot release
+        # an outstanding local callback/snapshot. Count each identity once.
+        return count + len(pending - active - cleanup)
+
+    def _load_owned_cohort_job_cleanups(self):
+        from django_ray.models import RayCohortJobCleanup
+        from django_ray.target.cohort_job_cleanup import cleanup_record
+
+        # A committed CLOSE may lose its response. Reconcile its durable state
+        # without manufacturing another observation or changing task history.
+        closed = RayCohortJobCleanup.objects.filter(
+            pk__in=tuple(self._cohort_job_cleanup), state="CLOSED"
+        ).values_list("pk", flat=True)
+        for cleanup_id in closed:
+            retained = self._cohort_job_cleanup.pop(cleanup_id)
+            expected = retained.expectation
+            control = self._cohort_job_control
+            if expected is not None and control is not None:
+                if not control.retire_execution(expected.identity):
+                    self._cohort_job_control_retired.add(expected.identity)
+                elif (
+                    self._cohort_job_control_ticket is not None
+                    and self._cohort_job_control_ticket.expectation.identity == expected.identity
+                ):
+                    self._cohort_job_control_ticket = None
+                    self._cohort_job_cleanup_binding = None
+        available = max(0, 100 - len(self._cohort_job_cleanup))
+        if not available:
+            return
+        candidates = (
+            self._owned_cohort_cleanup_rows()
+            .filter(expectation_json__isnull=False)
+            .exclude(pk__in=tuple(self._cohort_job_cleanup))
+        )
+        rows = list(
+            candidates.filter(pk__gt=self._cohort_job_cleanup_load_cursor).order_by("pk")[
+                :available
+            ]
+        )
+        if not rows and self._cohort_job_cleanup_load_cursor:
+            self._cohort_job_cleanup_load_cursor = 0
+            rows = list(candidates.order_by("pk")[:available])
+        for row in rows:
+            self._cohort_job_cleanup[row.pk] = cleanup_record(row)
+        if rows:
+            self._cohort_job_cleanup_load_cursor = rows[-1].pk
+
+    def _expire_cohort_tasks(self):
+        from django_ray.runner.cohort_expiration import expire_cohort_queued_tasks
+
+        controller = self._cohort_controller
+        if controller.stopped:
+            return 0
+        return len(
+            expire_cohort_queued_tasks(
+                self.lease_identity,
+                aliases=controller.aliases,
+                manager_runtime=controller.runtime,
+                limit=100,
+            )
+        )
+
+    def _apply_cohort_cancelled(self, value, evidence_kind):
+        from django_ray.runner.cohort_cancellation import apply_cohort_cancellation
+
+        identity = value.claim.facts.identity
+
+        def apply(current):
+            return cancel_task(
+                current,
+                expected_worker_id=self.worker_id,
+                expected_attempt_number=identity.attempt_number,
+                expected_execution_generation=identity.execution_generation,
+                expected_completion_data=None,
+                require_completion_data_match=True,
+                supported_protocols=ExecutionProtocolRange(3, 3),
+            )
+
+        def apply_timeout(current):
+            from django_ray.models import RayTaskCohortTimeout
+
+            timeout = RayTaskCohortTimeout.objects.get(claim_id=value.claim.claim_id)
+            return record_failure(
+                current,
+                error_message=f"Task timed out after {timeout.timeout_seconds} seconds",
+                retry=False,
+                expected_claimed_by_worker=self.worker_id,
+                expected_attempt_number=identity.attempt_number,
+                expected_execution_generation=identity.execution_generation,
+                expected_completion_data=None,
+                require_completion_data_match=True,
+                supported_protocols=ExecutionProtocolRange(3, 3),
+                _allow_cancelling_completion=True,
+            )
+
+        outcome = apply_cohort_cancellation(
+            value, evidence_kind=evidence_kind, apply_cancel=apply, apply_timeout=apply_timeout
+        )
+        self._remember_cohort_value(outcome.dispatch)
+        if outcome.applied:
+            self._retire_cohort_execution(identity.task_execution_pk)
+        return int(outcome.applied)
+
+    def _poll_cohort_timeouts(self):
+        from dataclasses import replace
+
+        from django_ray.runner.cohort_timeout import CohortTimeoutError, request_cohort_timeout
+        from django_ray.target.cohort_claim import CohortRunnerFamily
+        from django_ray.target.cohort_claim_storage import CohortClaimStorageError
+
+        if self._cohort_controller.family is CohortRunnerFamily.SYNC:
+            return 0
+        candidates = list(
+            RayTaskExecution.objects.filter(
+                pk__in=tuple(self._cohort_dispatches) + tuple(self._cohort_recovered),
+                pk__gt=self._cohort_timeout_cursor,
+                claimed_by_worker=self.worker_id,
+                execution_protocol_version=3,
+                state=TaskState.RUNNING,
+                completion_data__isnull=True,
+                started_at__isnull=False,
+                timeout_seconds__gt=0,
+            ).order_by("pk")[:100]
+        )
+        self._cohort_timeout_cursor = candidates[-1].pk if candidates else 0
+        requested = 0
+        for current in candidates:
+            value = self._cohort_value(current.pk)
+            if value is None or value.claim.dispatched_at is None:
+                continue
+            try:
+                result = request_cohort_timeout(
+                    replace(value, execution=current), now=datetime.now(UTC)
+                )
+            except (CohortTimeoutError, CohortClaimStorageError):
+                continue
+            self._remember_cohort_value(result.dispatch)
+            requested += int(result.requested)
+        return requested
+
+    def _poll_cohort_cancellations(self):
+        from django_ray.runner.cohort_cancel_request import (
+            acknowledge_cohort_cancellation,
+            release_unstarted_cohort_cancellation,
+            reserve_cohort_cancellation,
+        )
+        from django_ray.runner.ray_core import RayCoreCohortCancellationStatus
+
+        activity = self._poll_cohort_jobs_control()
+        runner = self.ray_core_runner
+        if runner is None:
+            return activity
+        for task_pk, ticket in tuple(self._cohort_cancel_tickets.items()):
+            result = runner.poll_cohort_cancellation(ticket)
+            value = self._cohort_value(task_pk)
+            if result is None or value is None:
+                continue
+            self._remember_cohort_value(
+                acknowledge_cohort_cancellation(
+                    value,
+                    requested=result.status is RayCoreCohortCancellationStatus.REQUESTED,
+                )
+            )
+            # The runner retains its original one-shot ticket even after this
+            # observation. Durable status also prohibits replay after restart.
+            self._cohort_cancel_tickets.pop(task_pk, None)
+            activity += 1
+        if runner.cohort_cancellation_busy:
+            return activity
+        task = (
+            RayTaskExecution.objects.filter(
+                pk__in=tuple(self._cohort_core_handles),
+                state=TaskState.CANCELLING,
+                completion_data__isnull=True,
+                cancellation_status__isnull=True,
+                execution_protocol_version=3,
+                claimed_by_worker=self.worker_id,
+            )
+            .order_by("pk")
+            .first()
+        )
+        if task is None:
+            return activity
+        value = self._cohort_value(task.pk)
+        reservation = reserve_cohort_cancellation(value)
+        self._remember_cohort_value(reservation.dispatch)
+        if reservation.should_request:
+            ticket = runner.begin_cohort_cancellation(self._cohort_core_handles[task.pk])
+            if ticket is not None:
+                self._cohort_cancel_tickets[task.pk] = ticket
+            else:
+                self._remember_cohort_value(release_unstarted_cohort_cancellation(reservation))
+            activity += 1
+        return activity
+
+    def _poll_cohort_jobs_control(self, *, start_new=True):
+        from dataclasses import replace
+
+        from django_ray.runner.cohort_cancel_request import (
+            acknowledge_cohort_cancellation,
+            hold_cohort_cancellation,
+            release_unstarted_cohort_cancellation,
+            reserve_cohort_cancellation,
+        )
+        from django_ray.runner.cohort_job_execution_control import (
+            CohortJobExecutionController,
+            build_cohort_job_execution_expectation,
+        )
+        from django_ray.target.cohort_job_cleanup import (
+            CohortJobCleanupError,
+            close_cohort_job_cleanup,
+        )
+
+        control = self._cohort_job_control
+        if control is None:
+            if not start_new or not (self._cohort_job_handles or self._cohort_job_cleanup):
+                return 0
+            self._cohort_job_control = control = CohortJobExecutionController()
+        for identity in tuple(self._cohort_job_control_retired):
+            if control.retire_execution(identity):
+                self._cohort_job_control_retired.remove(identity)
+                if (
+                    self._cohort_job_control_ticket is not None
+                    and self._cohort_job_control_ticket.expectation.identity == identity
+                ):
+                    self._cohort_job_control_ticket = None
+                    self._cohort_job_cleanup_binding = None
+        activity = 0
+        ticket = self._cohort_job_control_ticket
+        if ticket is not None:
+            result = control.poll(ticket)
+            if result is not None and not self._cohort_job_control_observed:
+                identity = ticket.expectation.identity
+                value = self._cohort_value(identity.task_execution_pk)
+                if value is not None:
+                    try:
+                        if (
+                            value.claim.facts.identity != identity
+                            or build_cohort_job_execution_expectation(value) != ticket.expectation
+                        ):
+                            value = None
+                    except (RuntimeError, ValueError):
+                        value = None
+                if value is not None:
+                    if result.stop_requested is True:
+                        value = acknowledge_cohort_cancellation(value, requested=True)
+                        self._remember_cohort_value(value)
+                    if result.inspection is not None and result.inspection.outer_driver_terminal:
+                        activity += self._apply_cohort_cancelled(value, "exact_jobs_stopped")
+                    elif result.uncertainty is not None or (
+                        result.inspection is not None
+                        and result.inspection.status in {"FAILED", "SUCCEEDED"}
+                    ):
+                        self._remember_cohort_value(hold_cohort_cancellation(value))
+                elif result.inspection is not None:
+                    binding = self._cohort_job_cleanup_binding
+                    if (
+                        binding is not None
+                        and binding[0] is ticket
+                        and identity not in self._cohort_job_control_retired
+                        and self._cohort_job_cleanup.get(binding[1].cleanup_id) == binding[1]
+                    ):
+                        try:
+                            close_cohort_job_cleanup(
+                                self.lease_identity,
+                                binding[1],
+                                inspection=result.inspection,
+                                inspection_began_at=binding[2],
+                                observed_at=datetime.now(UTC),
+                            )
+                        except CohortJobCleanupError:
+                            # Refusal leaves the durable OPEN obligation intact.
+                            # A fresh observation may become usable later.
+                            pass
+                        else:
+                            self._cohort_job_cleanup.pop(binding[1].cleanup_id)
+                            control.retire_execution(identity)
+                            self._cohort_job_control_ticket = None
+                            self._cohort_job_cleanup_binding = None
+                self._cohort_job_control_observed = True
+                activity += 1
+            if control.busy:
+                return activity
+            if self._cohort_job_control_ticket is ticket:
+                if ticket.operation == "inspect":
+                    control.retire_inspection(ticket)
+                binding = self._cohort_job_cleanup_binding
+                if binding is not None and binding[0] is ticket:
+                    # The SQL obligation continues to block capacity/replay.
+                    # Rotate completed reads so a full cache of still-running
+                    # Jobs cannot hide later owned cleanup obligations.
+                    self._cohort_job_cleanup.pop(binding[1].cleanup_id, None)
+                self._cohort_job_control_ticket = None
+                self._cohort_job_cleanup_binding = None
+        if not start_new or control.busy:
+            return activity
+        cleanup = sorted(
+            pk for pk in self._cohort_job_cleanup if pk > self._cohort_job_cleanup_cursor
+        )
+        if cleanup:
+            cleanup_id = cleanup[0]
+            self._cohort_job_cleanup_cursor = cleanup_id
+            retained = self._cohort_job_cleanup[cleanup_id]
+            expected = retained.expectation
+            if expected is not None:
+                # Always discard any pre-completion operation before starting a
+                # read bound to the committed obligation's immutable snapshot.
+                if control.retire_execution(expected.identity):
+                    began = datetime.now(UTC)
+                    if began >= retained.updated_at:
+                        ticket = control.begin_inspection(expected)
+                        if ticket is not None:
+                            self._cohort_job_control_ticket = ticket
+                            self._cohort_job_control_observed = False
+                            self._cohort_job_cleanup_binding = (ticket, retained, began)
+                            return activity + 1
+        else:
+            self._cohort_job_cleanup_cursor = 0
+        task = (
+            RayTaskExecution.objects.filter(
+                pk__in=tuple(self._cohort_job_handles),
+                pk__gt=self._cohort_cancel_cursor,
+                claimed_by_worker=self.worker_id,
+                execution_protocol_version=3,
+                state=TaskState.CANCELLING,
+                completion_data__isnull=True,
+            )
+            .order_by("pk")
+            .first()
+        )
+        if task is None:
+            self._cohort_cancel_cursor = 0
+            return activity
+        self._cohort_cancel_cursor = task.pk
+        value = self._cohort_value(task.pk)
+        if value is None:
+            return activity
+        value = replace(value, execution=task)
+        try:
+            expected = build_cohort_job_execution_expectation(value)
+        except (RuntimeError, ValueError):
+            self._remember_cohort_value(hold_cohort_cancellation(value))
+            return activity
+        if task.cancellation_status is None:
+            reservation = reserve_cohort_cancellation(value)
+            self._remember_cohort_value(reservation.dispatch)
+            if not reservation.should_request:
+                return activity
+            ticket = control.begin_stop(expected)
+            if ticket is None:
+                self._remember_cohort_value(release_unstarted_cohort_cancellation(reservation))
+        else:
+            ticket = control.begin_inspection(expected)
+        if ticket is not None:
+            self._cohort_job_control_ticket = ticket
+            self._cohort_job_control_observed = False
+            self._cohort_job_cleanup_binding = None
+            activity += 1
+        return activity
+
     def send_heartbeat(self) -> None:
         """Send worker heartbeat, update lease, and check Ray connection."""
         identity = self.lease_identity
@@ -1041,6 +2369,8 @@ class Command(BaseCommand):
                     TaskWorkerLease.objects.filter(**identity.database_filters()).update(
                         queue_name=self.lease_queue_name
                     )
+                    if self._cohort_controller is not None:
+                        self._heartbeat_cohort_owned_tasks()
         except Exception as error:
             self._request_shutdown_for_lease_loss(
                 "worker lease heartbeat failed",
@@ -1058,7 +2388,7 @@ class Command(BaseCommand):
             return
 
         # Check Ray connection health for local/cluster modes
-        if self.execution_mode in ("local", "cluster"):
+        if self.execution_mode in ("local", "cluster") and self._cohort_controller is None:
             self._check_ray_connection()
 
         # Periodic status output (every ~60 seconds based on 15s heartbeat)
@@ -1080,6 +2410,44 @@ class Command(BaseCommand):
         else:
             self.stdout.write(".", ending="")
         self.stdout.flush()
+
+    def _heartbeat_cohort_owned_tasks(self):
+        """Refresh a bounded set of exact retained owners under the lease lock."""
+        from django.db.models import Exists, OuterRef
+
+        from django_ray.models import RayTaskCohortClaim
+        from django_ray.target.cohort_claim_storage import _claim_lease
+
+        identity = self.lease_identity
+        owned = RayTaskCohortClaim.objects.filter(
+            binding_id=OuterRef("pk"),
+            attempt_number=OuterRef("attempt_number"),
+            execution_generation=OuterRef("execution_generation"),
+            owner_lease_id=identity.worker_id,
+            owner_lease_hostname=identity.hostname,
+            owner_lease_pid=identity.pid,
+            owner_lease_started_at=identity.started_at,
+        ).exclude(disposition="RESOLVED")
+        rows = RayTaskExecution.objects.filter(
+            Exists(owned),
+            pk__gt=self._cohort_task_heartbeat_cursor,
+            pk__in=tuple(self._cohort_dispatches)
+            + tuple(self._cohort_recovered)
+            + tuple(self._cohort_preparation_tickets),
+            claimed_by_worker=self.worker_id,
+            execution_protocol_version=3,
+            state__in=(TaskState.RUNNING, TaskState.CANCELLING),
+        )
+        selected = list(
+            rows.select_for_update(skip_locked=True)
+            .order_by("pk")
+            .values_list("pk", flat=True)[:100]
+        )
+        self._cohort_task_heartbeat_cursor = selected[-1] if selected else 0
+        if selected:
+            observed = datetime.now(UTC)
+            _claim_lease(identity, observed, using="default")
+            rows.filter(pk__in=selected).update(last_heartbeat_at=observed)
 
     def _recreate_lease(self) -> bool:
         """Renew only a still-live exact lease identity."""
@@ -2005,6 +3373,7 @@ class Command(BaseCommand):
         require_completion_data_match: bool = False,
         supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
         executor_django_ray_version: str | None = None,
+        _allow_cancelling_completion: bool = False,
     ) -> bool:
         """Store and publish one successful result under the execution row lock.
 
@@ -2014,6 +3383,10 @@ class Command(BaseCommand):
         cancellation, retry, or replacement from winning in that window.
         """
         filters: dict[str, Any] = {"pk": task.pk, "state": TaskState.RUNNING}
+        if _allow_cancelling_completion:
+            filters.pop("state")
+            filters["state__in"] = (TaskState.RUNNING, TaskState.CANCELLING)
+            filters["execution_protocol_version"] = 3
         if expected_ray_job_id is not None:
             filters["ray_job_id"] = expected_ray_job_id
         if expected_claimed_by_worker is not None:
@@ -2051,6 +3424,7 @@ class Command(BaseCommand):
                 require_completion_data_match=require_completion_data_match,
                 supported_protocols=supported_protocols,
                 _executor_django_ray_version=executor_django_ray_version,
+                _allow_cancelling_completion=_allow_cancelling_completion,
             )
             if persisted:
                 task.__dict__.update(current.__dict__)
@@ -2067,6 +3441,7 @@ class Command(BaseCommand):
         exception_type: str | None = None,
         retryable: bool | None = None,
         *,
+        retry_blocked_reason: str | None = None,
         expected_ray_job_id: str | None = None,
         expected_claimed_by_worker: str | None = None,
         expected_attempt_number: int | None = None,
@@ -2077,6 +3452,7 @@ class Command(BaseCommand):
         cancellation_error: str | None = None,
         supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
         executor_django_ray_version: str | None = None,
+        _allow_cancelling_completion: bool = False,
     ) -> bool:
         """Handle a failed task, potentially scheduling a retry.
 
@@ -2088,8 +3464,12 @@ class Command(BaseCommand):
             retryable: Explicit executor decision for permanent input failures.
         """
         # Check if we should retry
+        if _allow_cancelling_completion and task.state == TaskState.CANCELLING:
+            retry_blocked_reason = "Cancellation requested for this execution"
         retry_decision = (
-            RetryDecision(should_retry=False, reason="Executor marked failure non-retryable")
+            RetryDecision(should_retry=False, reason=retry_blocked_reason)
+            if retry_blocked_reason is not None
+            else RetryDecision(should_retry=False, reason="Executor marked failure non-retryable")
             if retryable is False
             else should_retry(task, exception_type)
         )
@@ -2111,6 +3491,7 @@ class Command(BaseCommand):
                 cancellation_error=cancellation_error,
                 supported_protocols=supported_protocols,
                 _executor_django_ray_version=executor_django_ray_version,
+                _allow_cancelling_completion=_allow_cancelling_completion,
             )
         except RuntimeEnvSnapshotError as storage_error:
             retry_decision = RetryDecision(
@@ -2134,6 +3515,7 @@ class Command(BaseCommand):
                 cancellation_error=cancellation_error,
                 supported_protocols=supported_protocols,
                 _executor_django_ray_version=executor_django_ray_version,
+                _allow_cancelling_completion=_allow_cancelling_completion,
             )
         if not handled:
             return False
@@ -3270,6 +4652,12 @@ class Command(BaseCommand):
         # Freshness must therefore be measured only after every ordered lease
         # lock (or SQLite's write fence) is held.
         validation_time = datetime.now(UTC)
+        if self._cohort_controller is not None:
+            from django_ray.target.cohort_claim_storage import _claim_lease
+
+            # Reject future, expired or changed cohort lease metadata before
+            # renewal can overwrite the evidence of an invalid incarnation.
+            _claim_lease(identity, validation_time, using="default")
         cutoff = validation_time - get_lease_duration()
         lease_filters = {
             **identity.database_filters(),
@@ -4858,8 +6246,232 @@ class Command(BaseCommand):
                 self.active_tasks.pop(task_pk, None)
                 self.active_task_identities.pop(task_pk, None)
 
+    def _shutdown_cohort(self):
+        """Retain exact task ownership history and serialize local context teardown."""
+        from django_ray.runner.cohort_connection import CoreConnectionPhase
+        from django_ray.runner.cohort_dispatch import hold_cohort_dispatch
+        from django_ray.runner.leasing import release_lease
+        from django_ray.target.cohort_claim import CohortHoldReason
+
+        controller = self._cohort_controller
+        failed = False
+        for submission, tickets in (
+            (self._cohort_preparation, self._cohort_preparation_tickets),
+            (self._cohort_core_submission, self._cohort_core_submission_tickets),
+        ):
+            if submission is not None:
+                for submission_ticket in tuple(tickets.values()):
+                    submission.abort(submission_ticket)
+        if self._cohort_job_submission is not None:
+            for submission_ticket in tuple(self._cohort_job_submission_tickets.values()):
+                self._cohort_job_submission.abort(submission_ticket)
+        if not self.lease_ownership_lost:
+            for ticket in tuple(self._cohort_preparation_tickets.values()):
+                self._hold_cohort_dispatch_failure(record=ticket.claim)
+                self._cohort_preparation_blocked.add(ticket.identity.task_execution_pk)
+            try:
+                self._poll_cohort_completions()
+            except Exception:
+                failed = True
+            from django_ray.runner.cohort_cancel_request import request_owned_cohort_cancellation
+
+            for task_pk in tuple(self._cohort_core_handles):
+                try:
+                    self._remember_cohort_value(
+                        request_owned_cohort_cancellation(
+                            self._cohort_value(task_pk), now=datetime.now(UTC)
+                        )
+                    )
+                except Exception:
+                    failed = True
+            for task_pk, value in tuple(self._cohort_dispatches.items()):
+                try:
+                    self._cohort_dispatches[task_pk] = hold_cohort_dispatch(
+                        value, reason=CohortHoldReason.OWNER_LOST
+                    )
+                except Exception:
+                    failed = True
+        controller.invalidate()
+        # Stop/reap only this manager's qualification helper. Application Jobs
+        # retain their exact claim owner for a qualified stale-owner adoption.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            controller.poll_stopped_cleanup()
+            self._poll_cohort_preparations(allow_dispatch=False)
+            self._poll_cohort_submissions(allow_submit=False)
+            if not self.lease_ownership_lost:
+                try:
+                    if self.ray_core_runner is not None:
+                        self._poll_cohort_cancellations()
+                        self._poll_cohort_completions()
+                    else:
+                        self._poll_cohort_jobs_control(start_new=False)
+                except Exception:
+                    failed = True
+            outstanding = (
+                controller.lifecycle.outstanding if controller.lifecycle is not None else None
+            )
+            controls_busy = (
+                self._cohort_submission_busy()
+                or bool(self._cohort_job_control is not None and self._cohort_job_control.busy)
+                or bool(
+                    self._cohort_job_submission is not None and self._cohort_job_submission.busy
+                )
+                or bool(
+                    self.ray_core_runner is not None
+                    and self.ray_core_runner.cohort_cancellation_busy
+                )
+            )
+            if (
+                not controls_busy
+                and outstanding is None
+                and (
+                    controller.adapter is None
+                    or not hasattr(controller.adapter, "outstanding")
+                    or controller.adapter.outstanding is None
+                )
+            ):
+                break
+            time.sleep(_SHUTDOWN_WAIT_SLICE_SECONDS)
+
+        failed = (
+            failed
+            or bool(
+                controller.lifecycle is not None and controller.lifecycle.outstanding is not None
+            )
+            or bool(
+                controller.adapter is not None
+                and getattr(controller.adapter, "outstanding", None) is not None
+            )
+        )
+
+        connection = controller.connection
+        ticket = controller.connection_ticket
+        if connection is not None and ticket is not None:
+            # Never race a running init/probe/cancel callback with ray.shutdown.
+            snapshot = connection.poll(ticket)
+            busy = snapshot.callback_running or controller.lifecycle.outstanding is not None
+            busy = busy or self._cohort_submission_busy()
+            busy = busy or bool(
+                self.ray_core_runner is not None
+                and getattr(self.ray_core_runner, "cohort_cancellation_busy", False)
+            )
+            if busy:
+                failed = True
+            else:
+
+                def disconnect():
+                    import ray
+                    import ray.util.client as client
+
+                    # The retained creator may own local GCS/raylet processes.
+                    # Wait on that thread while the parent keeps its bounded
+                    # shutdown loop responsive; a shutdown ACK is insufficient.
+                    ray.shutdown(wait_for_processes=True)
+                    return ray.is_initialized() is False and client.num_connected_contexts() == 0
+
+                connection.begin_cleanup(ticket, cleanup=disconnect, timeout_seconds=5.0)
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    snapshot = connection.poll(ticket)
+                    if snapshot.phase is CoreConnectionPhase.CLEANED:
+                        break
+                    if (
+                        snapshot.phase is CoreConnectionPhase.BLOCKED
+                        and not snapshot.callback_running
+                    ):
+                        break
+                    time.sleep(_SHUTDOWN_WAIT_SLICE_SECONDS)
+                failed = failed or snapshot.phase is not CoreConnectionPhase.CLEANED
+        failed = failed or bool(
+            self.ray_core_runner is not None and self.ray_core_runner.cohort_cancellation_busy
+        )
+        failed = failed or bool(
+            self._cohort_job_control is not None and self._cohort_job_control.busy
+        )
+        failed = failed or bool(self._cohort_job_cleanup or self._cohort_job_control_retired)
+        failed = failed or bool(self._cohort_job_submission_tickets)
+        failed = failed or bool(
+            self._cohort_preparation_tickets or self._cohort_core_submission_tickets
+        )
+        if self.lease_identity is not None:
+            failed = failed or bool(self._owned_cohort_cleanup_count())
+        retired = False
+        if self._cohort_retirement_finishing and not failed:
+            from hashlib import sha256
+
+            from django_ray.maintenance import complete_worker_retirement
+
+            confirmed = datetime.now(UTC)
+            # A record of checks this process actually performed, not evidence
+            # inferred from row counts or a remote cancellation acknowledgment.
+            evidence = json.dumps(
+                {
+                    "schema": 1,
+                    "kind": "owned-worker-cleanup",
+                    "confirmed_at": confirmed.isoformat(),
+                    "lease": self.lease_identity.worker_id,
+                    "capabilities_withdrawn": self._cohort_capabilities_withdrawn,
+                    "owned_probes_finished": True,
+                    "owned_execution_callbacks_finished": True,
+                    "local_connection_closed": True,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            try:
+                complete_worker_retirement(
+                    self.lease_identity,
+                    expected_revision=1,
+                    independently_confirmed_cleanup=True,
+                    cleanup_evidence_digest="sha256:" + sha256(evidence.encode()).hexdigest(),
+                    cleanup_confirmed_at=confirmed,
+                    actor="django-ray-worker",
+                    reason="owned-cleanup-confirmed",
+                    authorized=True,
+                )
+                retired = True
+            except Exception:
+                failed = True
+        if self.lease_identity is not None and not retired:
+            try:
+                failed = not release_lease(self.lease_identity) or failed
+            except Exception:
+                failed = True
+        if failed:
+            if self.shutdown_exit_code is None:
+                self.shutdown_exit_code = 1
+            self._write_worker_output(
+                "Worker stopped with unconfirmed cleanup; exact cohort claims were retained"
+            )
+        elif retired:
+            self._write_worker_output("Worker retired after confirmed owned cleanup")
+        else:
+            self._write_worker_output(
+                "Worker stopped; any unfinished cohort claims retain their original identity"
+            )
+
     def shutdown(self) -> None:
         """Perform graceful shutdown."""
+        if self._cohort_controller is not None:
+            try:
+                self._shutdown_cohort()
+            except Exception:
+                # Failure in one cleanup stage must not retain a live lease or
+                # enter the legacy Core path and overlap an owned native call.
+                if self.shutdown_exit_code is None:
+                    self.shutdown_exit_code = 1
+                if self.lease_identity is not None:
+                    from django_ray.runner.leasing import release_lease
+
+                    try:
+                        release_lease(self.lease_identity)
+                    except Exception:
+                        pass
+                self._write_worker_output(
+                    "Worker cleanup is unconfirmed; cohort ownership history was retained"
+                )
+            return
         cleanup_failed = False
         try:
             self._prepare_shutdown_handoff()

@@ -6,7 +6,7 @@ authorization. Ordinary backends retain worker-selected Sync/Core/Jobs modes;
 the first verified claim must separately persist its actual execution binding.
 
 Admission compares a finite backend/endpoint/selection/trust declaration. The
-separate task RuntimeEnv digest records the producer's original bounded logical
+separate task RuntimeEnv digest records the producer's original normalized JSON
 observation; it is not a manager eligibility key or proof of imported source.
 This module does not compare observations made on different hosts, require a
 reusable identity, or change ordinary RuntimeEnv integrity/snapshot checks.
@@ -22,6 +22,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Never
 from urllib.parse import urlsplit
 
@@ -188,6 +189,37 @@ def cohort_declaration_digest(declaration: CohortExecutionDeclaration) -> str:
     return "sha256:" + hashlib.sha256(_DECLARATION_DOMAIN + _canonical(body).encode()).hexdigest()
 
 
+def prepare_cohort_declaration(
+    backend_alias: str,
+    *,
+    options: Mapping[str, object],
+    current_settings: Mapping[str, object],
+) -> CohortExecutionDeclaration:
+    """Snapshot the same finite declaration for producers and managers.
+
+    Preserve an explicit address exactly; otherwise use this settings snapshot's
+    global fallback. Normalized trust is copied so later configuration mutation
+    cannot change the declaration that was validated before input preparation.
+    """
+    if not isinstance(options, Mapping) or not isinstance(current_settings, Mapping):
+        _reject(CohortIntentRejection.INVALID)
+    jobs_only = options.get("RAY_JOB_ONLY", False)
+    if type(jobs_only) is not bool:
+        _reject(CohortIntentRejection.INVALID)
+    try:
+        trust = normalize_runtime_env_trust_identity(
+            current_settings.get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+        )
+    except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+        _reject(CohortIntentRejection.INVALID)
+    return CohortExecutionDeclaration(
+        _text(backend_alias, limit=128),
+        _endpoint(options.get("RAY_ADDRESS", current_settings.get("RAY_ADDRESS", "auto"))),
+        jobs_only,
+        MappingProxyType(trust),
+    )
+
+
 def build_cohort_intent(
     declaration: CohortExecutionDeclaration,
     *,
@@ -196,7 +228,7 @@ def build_cohort_intent(
 ) -> CohortIntent:
     """Bind admission and the original task observation before input preparation.
 
-    The logical digest is supplied independently by the producer. No RuntimeEnv
+    The normalized declaration digest is supplied by the producer. No RuntimeEnv
     contents, local files, current observations or reusability flags are read.
     """
     configuration_digest = cohort_declaration_digest(declaration)

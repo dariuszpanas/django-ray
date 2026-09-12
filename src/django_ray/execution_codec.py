@@ -894,12 +894,21 @@ def _detached_json_tree_for_encoding(
 
 def encode_execution_completion(completion: ExecutionCompletion) -> str:
     """Encode one exact canonical enriched-v1 completion."""
+    return _encode_execution_completion_for_protocols(
+        completion, SUPPORTED_EXECUTION_PROTOCOL_RANGE
+    )
+
+
+def _encode_execution_completion_for_protocols(
+    completion: ExecutionCompletion, supported_protocols: ExecutionProtocolRange
+) -> str:
+    """Explicit internal adapter; ordinary completion defaults remain unchanged."""
     identity = completion.identity
     if not _valid_identity_shape(identity):
         raise ValueError("execution completion is invalid")
     if (
         type(completion.execution_protocol_version) is not int
-        or not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(completion.execution_protocol_version)
+        or not supported_protocols.supports(completion.execution_protocol_version)
         or type(completion.executor_django_ray_version) is not str
         or not completion.executor_django_ray_version
         or len(completion.executor_django_ray_version) > _EXECUTOR_VERSION_MAX_CHARS
@@ -1459,11 +1468,9 @@ def _decode_versioned_execution_request(
     try:
         body = _normalize_request_body(value)
         if protocol == COHORT_EXECUTION_PROTOCOL_VERSION:
-            from django_ray.target.cohort_contract import decode_cohort_execution_contract
+            from django_ray.target.cohort_transport import decode_cohort_outer_contract
 
-            decode_cohort_execution_contract(
-                value["cohort_contract_json"], expected_identity=identity
-            )
+            decode_cohort_outer_contract(value["cohort_contract_json"], expected_identity=identity)
             body["cohort_contract_json"] = value["cohort_contract_json"]
         canonical = _bounded_json_dumps(
             value,
@@ -2345,6 +2352,8 @@ class _PreparedNestedDistributedRequest:
 
 def _prepare_nested_distributed_request(
     request: NestedExecutionRequest,
+    *,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> _PreparedNestedDistributedRequest:
     """Validate/detach one distributed operation before any application submission.
 
@@ -2352,7 +2361,7 @@ def _prepare_nested_distributed_request(
     user content. The ordinary encoder validates the prototype through the same
     strict decoder as before. Every remote leaf still performs full validation.
     """
-    canonical = encode_nested_execution_request(request)
+    canonical = _encode_nested_request_for_protocols(request, supported_protocols)
     value = json.loads(canonical)
     if (
         request.boundary_kind is NestedExecutionBoundaryKind.WORKFLOW_STEP

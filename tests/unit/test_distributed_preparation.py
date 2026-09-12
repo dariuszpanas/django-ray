@@ -73,7 +73,7 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
     pickled: list[object] = []
     original_request = distributed._nested_distributed_request
     original_digest = codec.nested_callable_digest
-    original_encode = codec.encode_nested_execution_request
+    original_encode = codec._encode_nested_request_for_protocols
     original_pickle = pickle.dumps
 
     def request(operation, serialized: bytes, index: int):
@@ -86,9 +86,9 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
         hashed.append(serialized)
         return original_digest(serialized)
 
-    def encode(value) -> str:
+    def encode(value, protocols) -> str:
         encodings.append(value)
-        return original_encode(value)
+        return original_encode(value, protocols)
 
     def serialize(value, *args, **kwargs) -> bytes:
         pickled.append(value)
@@ -98,7 +98,7 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
 
     monkeypatch.setattr(distributed, "_nested_distributed_request", request)
     monkeypatch.setattr(codec, "nested_callable_digest", digest)
-    monkeypatch.setattr(codec, "encode_nested_execution_request", encode)
+    monkeypatch.setattr(codec, "_encode_nested_request_for_protocols", encode)
     monkeypatch.setattr(pickle, "dumps", serialize)
     with _strict_execution() if strict else nullcontext():
         if helper == "map":

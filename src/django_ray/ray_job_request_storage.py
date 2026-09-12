@@ -730,12 +730,25 @@ def validate_ray_job_request_storage_config(config: Mapping[str, Any]) -> None:
 
 
 def prepare_ray_job_request(
-    serialized_request: str,
-    config: Mapping[str, Any],
+    serialized_request: str, config: Mapping[str, Any]
 ) -> PreparedRayJobRequest:
-    """Validate and immediately persist one canonical execution request."""
+    """Validate and immediately persist one ordinary execution request."""
+    return _prepare_ray_job_request(serialized_request, config)
+
+
+def _prepare_ray_job_request(
+    serialized_request: str, config: Mapping[str, Any], *, supported_protocols=None
+) -> PreparedRayJobRequest:
+    """Internal explicitly selected protocol adapter; no default widening."""
     try:
-        request = decode_execution_request(serialized_request)
+        request = decode_execution_request(
+            serialized_request,
+            **(
+                {"supported_protocols": supported_protocols}
+                if supported_protocols is not None
+                else {}
+            ),
+        )
         payload = serialized_request.encode("utf-8")
     except ExecutionRequestDecodeError as error:
         classification = (
@@ -818,7 +831,22 @@ def load_ray_job_request(
     expected_identity: ExecutionIdentity | None = None,
     expected_execution_protocol_version: int | None = None,
 ) -> LoadedRayJobRequest:
-    """Load and strictly validate one request without consulting Django."""
+    """Load one ordinary request without consulting Django."""
+    return _load_ray_job_request(
+        locator,
+        expected_identity=expected_identity,
+        expected_execution_protocol_version=expected_execution_protocol_version,
+    )
+
+
+def _load_ray_job_request(
+    locator: object | RayJobRequestLocator,
+    *,
+    expected_identity: ExecutionIdentity | None = None,
+    expected_execution_protocol_version: int | None = None,
+    supported_protocols=None,
+) -> LoadedRayJobRequest:
+    """Internal explicitly selected request decoder."""
     if isinstance(locator, RayJobRequestLocator):
         try:
             encoded_locator = encode_ray_job_request_locator(locator)
@@ -854,6 +882,11 @@ def load_ray_job_request(
             serialized_request,
             expected_identity=expected_identity,
             expected_execution_protocol_version=expected_execution_protocol_version,
+            **(
+                {"supported_protocols": supported_protocols}
+                if supported_protocols is not None
+                else {}
+            ),
         )
     except ExecutionRequestDecodeError as error:
         classification = (
@@ -886,6 +919,8 @@ def _restore_purged_request(prepared: PreparedRayJobRequest) -> None:
 
 def _validate_prepared_request(
     prepared: object,
+    *,
+    supported_protocols=None,
 ) -> PreparedRayJobRequest:
     if not isinstance(prepared, PreparedRayJobRequest):
         _reject(RayJobRequestStorageRejection.INVALID_REQUEST)
@@ -897,7 +932,14 @@ def _validate_prepared_request(
     ):
         _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
     try:
-        request = decode_execution_request(prepared.serialized_request)
+        request = decode_execution_request(
+            prepared.serialized_request,
+            **(
+                {"supported_protocols": supported_protocols}
+                if supported_protocols is not None
+                else {}
+            ),
+        )
         payload = prepared.serialized_request.encode("utf-8")
     except ExecutionRequestDecodeError as error:
         classification = (
@@ -938,8 +980,24 @@ def register_and_attach_ray_job_request(
     submission_handle: SubmissionHandle,
     using: str | None = None,
 ) -> str:
-    """Register then attach one request under the purge-safe global lock order."""
-    prepared = _validate_prepared_request(prepared)
+    """Register an ordinary request under the purge-safe global lock order."""
+    return _register_and_attach_ray_job_request(
+        prepared, task_execution=task_execution, submission_handle=submission_handle, using=using
+    )
+
+
+def _register_and_attach_ray_job_request(
+    prepared: PreparedRayJobRequest,
+    *,
+    task_execution: RayTaskExecution,
+    submission_handle: SubmissionHandle,
+    using: str | None = None,
+    supported_protocols=None,
+    restore_purged=True,
+    expected_cohort_claim=None,
+) -> str:
+    """Explicit internal registration retaining the existing purge fence."""
+    prepared = _validate_prepared_request(prepared, supported_protocols=supported_protocols)
 
     from django.db import transaction
     from django.utils import timezone
@@ -1024,12 +1082,45 @@ def register_and_attach_ray_job_request(
             update_fields = ["last_used_at"]
             payload.last_used_at = now
             if payload.state == InputPayloadState.PURGED:
+                if not restore_purged:
+                    _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
                 _restore_purged_request(prepared)
                 payload.state = InputPayloadState.ACTIVE
                 payload.purged_at = None
                 payload.cleanup_error = ""
                 update_fields.extend(["state", "purged_at", "cleanup_error"])
             payload.save(update_fields=update_fields, using=database)
+
+        if expected_cohort_claim is not None:
+            # Staged submissions take the registry lock before the existing
+            # lease -> task -> claim locks. Recheck after those waits, without
+            # calling a storage backend or trusting an earlier parent read.
+            from django_ray.target import cohort_claim_storage
+            from django_ray.target.cohort_claim import CohortClaimDisposition
+            from django_ray.target.cohort_transport import cohort_execution_request_digest
+
+            record = expected_cohort_claim
+            if (
+                type(record) is not cohort_claim_storage.CohortClaimRecord
+                or prepared.request.execution_protocol_version != 3
+                or record.facts.identity != identity
+                or record.owner.worker_id != expected_worker
+                or record.disposition is not CohortClaimDisposition.OPEN
+                or record.dispatched_at is None
+                or record.prepared_request_digest
+                != cohort_execution_request_digest(prepared.request)
+            ):
+                _reject(RayJobRequestStorageRejection.BINDING_MISMATCH)
+            row, _ = cohort_claim_storage._locked_claim(
+                record.owner,
+                record.claim_id,
+                identity,
+                record.revision,
+                cohort_claim_storage._clock(),
+                using=database,
+            )
+            if cohort_claim_storage._record(row) != record:
+                _reject(RayJobRequestStorageRejection.BINDING_MISMATCH)
 
         current = (
             RayTaskExecution.objects.using(database)

@@ -45,7 +45,7 @@ from django_ray.target.execution_evidence import (
 
 MIGRATE_FROM = [("django_ray", "0025_ray_worker_target_capabilities")]
 MIGRATE_TO = [("django_ray", "0026_ray_task_target_execution_evidence")]
-LATEST = [("django_ray", "0030_cohort_claims")]
+LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST_A = f"sha256:{'a' * 64}"
 _DIGEST_B = f"sha256:{'b' * 64}"

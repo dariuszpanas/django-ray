@@ -1,4 +1,4 @@
-"""Dormant database-only claim ledger; no worker or producer calls this seam.
+"""Database-only claim ledger for current-cohort execution.
 
 Callers own the transaction and acquire leases, sorted qualified targets,
 Jobs challenges/receipts, then capabilities BEFORE execution selection/LIMIT.
@@ -20,6 +20,13 @@ from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, transaction
 from django.db.models import F
 
 from django_ray.execution_codec import ExecutionIdentity, is_valid_execution_identity
+from django_ray.maintenance import (
+    MaintenanceAdmissionBarrier,
+    check_maintenance_admission,
+    check_worker_retirement_admission,
+    require_maintenance_admission_barrier,
+    task_quarantine_retry_allowed,
+)
 from django_ray.models import (
     RayTargetDesiredState,
     RayTargetPolicyRevision,
@@ -142,6 +149,17 @@ def _lease(identity, now, *, using):
     return lease
 
 
+def _claim_lease(identity, now, *, using):
+    """New coordinated claims require one exact epoch, unlike retained ownership."""
+    lease = _lease(identity, now, using=using)
+    if (
+        lease.min_supported_execution_protocol_version != 3
+        or lease.max_supported_execution_protocol_version != 3
+    ):
+        _reject(CohortClaimStorageReason.LEASE_UNAVAILABLE)
+    return lease
+
+
 def _identity(execution) -> ExecutionIdentity:
     return ExecutionIdentity(
         execution.pk, execution.task_id, execution.attempt_number, execution.execution_generation
@@ -195,12 +213,12 @@ def _task_snapshot(task) -> str:
     )
 
 
-def _lock_task(pk, *, using):
+def _lock_task(pk, *, using, skip_locked=False):
     query = RayTaskExecution.objects.using(using).filter(pk=pk)
     if connections[using].vendor == "sqlite":
         query.update(task_id=F("task_id"))
         return query.first()
-    return query.select_for_update().first()
+    return query.select_for_update(skip_locked=skip_locked).first()
 
 
 def _job_proof(lease, qualification, manager, policy, expectation, attestation, now, *, using):
@@ -364,6 +382,9 @@ def claim_cohort_execution(
     expected_intent_digest: str,
     expected_runtime_env_snapshot_digest: str,
     now: datetime,
+    admission_barrier: MaintenanceAdmissionBarrier | None = None,
+    skip_locked: bool = False,
+    expected_queue_name: str | None = None,
     capability_id: int | None = None,
     capability_revision: int | None = None,
     job_qualification: CohortJobQualificationProvenance | None = None,
@@ -379,6 +400,16 @@ def claim_cohort_execution(
     a positive manager cache. All qualification locks precede task selection.
     """
     with _operation(using):
+        require_maintenance_admission_barrier(admission_barrier, using=using)
+        if type(skip_locked) is not bool:
+            _reject(CohortClaimStorageReason.INVALID)
+        if expected_queue_name is not None and (
+            type(expected_queue_name) is not str
+            or not expected_queue_name.strip()
+            or "\x00" in expected_queue_name
+            or len(expected_queue_name) > 100
+        ):
+            _reject(CohortClaimStorageReason.INVALID)
         if type(expected_identity) is not ExecutionIdentity or not is_valid_execution_identity(
             expected_identity
         ):
@@ -392,7 +423,8 @@ def claim_cohort_execution(
         _digest(expected_runtime_env_snapshot_digest)
         now = capabilities._now(now)
         lease_identity = capabilities._identity(lease_identity)
-        lease = _lease(lease_identity, now, using=using)
+        lease = _claim_lease(lease_identity, now, using=using)
+        check_worker_retirement_admission(lease_identity, barrier=admission_barrier, using=using)
         proof = _proof(
             lease,
             binding_spec,
@@ -403,15 +435,16 @@ def claim_cohort_execution(
             job_qualification=job_qualification,
             using=using,
         )
-        task = _lock_task(expected_identity.task_execution_pk, using=using)
+        task = _lock_task(expected_identity.task_execution_pk, using=using, skip_locked=skip_locked)
         now = _fresh(now)
-        lease = _lease(lease_identity, now, using=using)
+        lease = _claim_lease(lease_identity, now, using=using)
         if (
             task is None
             or _identity(task) != expected_identity
             or task.state != TaskState.QUEUED
             or task.execution_protocol_version != 3
             or task.execution_generation >= (1 << 63) - 1
+            or (expected_queue_name is not None and task.queue_name != expected_queue_name)
         ):
             _reject(CohortClaimStorageReason.EXECUTION_CHANGED)
         if (
@@ -420,6 +453,25 @@ def claim_cohort_execution(
             or task.queue_deadline_at is not None
             and task.queue_deadline_at <= now
         ):
+            _reject(CohortClaimStorageReason.EXECUTION_CHANGED)
+        check_maintenance_admission(
+            task.queue_name,
+            task.execution_protocol_version,
+            target_id=proof[0].target_id if proof is not None else None,
+            operation="claim",
+            barrier=admission_barrier,
+            using=using,
+        )
+        if not task_quarantine_retry_allowed(task, barrier=admission_barrier, using=using):
+            _reject(CohortClaimStorageReason.EXECUTION_CHANGED)
+        from django_ray.target.cohort_job_cleanup import (
+            CohortJobCleanupError,
+            check_no_pending_job_cleanup,
+        )
+
+        try:
+            check_no_pending_job_cleanup(task, using=using)
+        except CohortJobCleanupError:
             _reject(CohortClaimStorageReason.EXECUTION_CHANGED)
         intent = read_cohort_intent(task.pk, using=using)
         if (
@@ -434,7 +486,7 @@ def claim_cohort_execution(
         # Raw RuntimeEnv bytes have no storage cap. Re-read time after hashing
         # them, before relying on lease liveness or the retained proof TTL.
         now = _fresh(now)
-        lease = _lease(lease_identity, now, using=using)
+        lease = _claim_lease(lease_identity, now, using=using)
         if (
             manager_runtime.package_version != binding_spec.package_version
             or lease.django_ray_version != manager_runtime.package_version

@@ -11,6 +11,7 @@ import pytest
 from django.db import DatabaseError, connection, transaction
 
 from django_ray.execution_codec import ExecutionIdentity
+from django_ray.maintenance import maintenance_admission_barrier
 from django_ray.models import (
     RayTaskCohortClaim,
     RayTaskExecution,
@@ -65,6 +66,20 @@ def isolated_sqlite_ledger_maintenance():
     yield
     if connection.vendor == "sqlite":
         with connection.constraint_checks_disabled(), connection.cursor() as cursor:
+            # This isolated database is stopped: discard fixture obligations
+            # without inventing a successful physical cleanup observation.
+            # Restore the exact product fence before any following test runs.
+            cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='ray_jobcleanup_delete_0033'"
+            )
+            cleanup_trigger = cursor.fetchone()
+            if cleanup_trigger is not None:
+                cursor.execute("DROP TRIGGER ray_jobcleanup_delete_0033")
+                try:
+                    cursor.execute("DELETE FROM django_ray_raycohortjobcleanup")
+                finally:
+                    cursor.execute(cleanup_trigger[0])
             cursor.execute(
                 "DELETE FROM django_ray_raytaskexecution WHERE id IN (SELECT binding_id FROM django_ray_raytaskcohortclaim)"
             )
@@ -136,8 +151,8 @@ def _claim(case, **changes):
         "now": case.now,
     }
     arguments.update(changes)
-    with transaction.atomic():
-        return storage.claim_cohort_execution(case.owner, **arguments)
+    with transaction.atomic(), maintenance_admission_barrier() as barrier:
+        return storage.claim_cohort_execution(case.owner, admission_barrier=barrier, **arguments)
 
 
 def _mutate(case, record, function, **arguments):
@@ -719,6 +734,11 @@ def _fresh_draining_ray_arguments(case, arguments):
 
 
 def _resolve_ray_claim_and_queue_next_attempt(case, record):
+    """Model an independently verified cancellation followed by manual retry.
+
+    Application completion has its own Jobs cleanup-obligation tests; this
+    binding fixture needs an already terminal original execution.
+    """
     prepared = _mutate(case, record, storage.prepare_cohort_claim, request_digest=DIGEST)
     dispatched = _mutate(case, prepared, storage.mark_cohort_claim_dispatched)
     with transaction.atomic():
@@ -728,10 +748,10 @@ def _resolve_ray_claim_and_queue_next_attempt(case, record):
             expected_identity=dispatched.facts.identity,
             expected_revision=dispatched.revision,
             now=case.now,
-            kind=CohortResolutionKind.APPLICATION_COMPLETED,
+            kind=CohortResolutionKind.VERIFIED_CANCELLED,
             evidence_digest="sha256:" + "e" * 64,
         )
-        RayTaskExecution.objects.filter(pk=case.task.pk).update(state="FAILED")
+        RayTaskExecution.objects.filter(pk=case.task.pk).update(state="CANCELLED")
         RayTaskExecution.objects.filter(pk=case.task.pk).update(
             state="QUEUED", attempt_number=record.facts.identity.attempt_number + 1
         )

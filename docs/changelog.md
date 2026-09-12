@@ -68,9 +68,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep ACTIVE first-claim eligibility separate from fresh DRAINING observations for
   continuation filtering. A binding alone cannot permit a first claim on a draining
   target; continuation requires resolved prior claims on the same original target.
-- These helpers remain preparation: production qualification, claims, recovery and
-  cancellation integration are required before activating the guard. See
+- Compose the private protocol-3 worker path with qualification before bounded
+  claims, authenticated completion, completion-only Jobs recovery, and owned
+  asynchronous cancellation. A stop acknowledgment cannot resolve uncertainty or
+  authorize another generation. Ordinary workers remain on protocol 1 while
+  activation and deployed qualification are completed.
+- Retain a separate Jobs cleanup obligation when an authenticated result arrives
+  before its driver exits. Queued retries and retirement remain blocked until a
+  fresh inspection confirms that exact Job is terminal. A qualified successor can
+  recover cleanup without changing the original result, claim or request.
+- Preserve remote task timeout intent across manager replacement. An overdue task
+  remains held until an authentic completion or verified terminal cancellation
+  arrives; timeout cancellation records `FAILED` without automatic retry. A late
+  authentic result retains precedence.
+- Activation and final production qualification remain required. See
   [current-cohort guard preparation](compatibility.md#current-cohort-guard-preparation).
+
+### Maintenance controls
+
+- Add `django_ray_maintenance` with read-only status, revision-checked dry runs and
+  explicit apply operations for queue/protocol/target admission pauses, exact
+  worker retirement requests, and task-generation quarantine. Preserve authentic
+  completion and existing cleanup while admission is paused. Retirement requires
+  independently confirmed owned cleanup; a pause or empty database is not proof
+  of drain. See [maintenance controls](operators/maintenance.md).
 
 ### Database diagnostics
 

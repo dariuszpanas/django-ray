@@ -106,6 +106,23 @@ in this repository maps these environment variables into command-line options:
 | `130` | Interrupted (SIGINT) |
 | `143` | Terminated (SIGTERM) |
 
+## django_ray_maintenance
+
+Inspect admission policy without changing it:
+
+```bash
+python manage.py django_ray_maintenance --json
+```
+
+The command supports deployment-wide and exact queue, protocol, and immutable-target
+pause controls, exact worker retirement requests, and task-generation quarantine/release.
+Changes require `--dry-run` or `--apply`, the exact
+`--expected-revision`, `--actor`, `--reason`, and `--authorized` acknowledgment from
+a trusted operator shell. Pausing admission does not cancel in-flight work or prove
+that a deployment has drained. Entity selectors alone inspect their exact control history; the
+command does not certify final worker cleanup. See [Maintenance controls](../operators/maintenance.md)
+for the complete options, reviewed dry-run/apply sequence, and permission boundary.
+
 ## django_ray_protocol_status
 
 Inspect the durable execution-protocol rollout state without changing policy, leases,

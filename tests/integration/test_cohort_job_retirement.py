@@ -13,6 +13,7 @@ import pytest
 from django.db import DatabaseError, close_old_connections, connection, transaction
 
 from django_ray.models import (
+    RayCohortJobCleanup,
     RayTarget,
     RayTargetAttestationRevision,
     RayTargetPolicyRevision,
@@ -556,6 +557,8 @@ def test_missing_reservation_cannot_retire_a_current_challenge(case):
 def test_retirement_preserves_sibling_proof_and_held_original_execution(
     selected_database, ledger_case, monkeypatch
 ):
+    from django_ray.target import cohort_job_cleanup
+
     case = ledger_case
     arguments = _ray_arguments(case, RayRunnerFamily.RAY_JOB)
     record = _claim(case, **arguments)
@@ -614,7 +617,19 @@ def test_retirement_preserves_sibling_proof_and_held_original_execution(
     # Authentic late completion relies on immutable generation facts, not the
     # retired qualification receipt or its TTL. Keep the original hold audit.
     case.now += timedelta(seconds=1)
+    monkeypatch.setattr(cohort_job_cleanup, "_clock", lambda: case.now)
     with transaction.atomic():
+        # This ledger fixture has no retained request reference. Application
+        # completion must first retain its openly uninspectable cleanup duty;
+        # retiring the separate probe does not establish application cleanup.
+        current = RayTaskExecution.objects.select_for_update().get(pk=case.task.pk)
+        cohort_job_cleanup.record_cohort_job_cleanup_locked(
+            current,
+            record,
+            None,
+            completion_evidence_digest="sha256:" + "e" * 64,
+            now=case.now,
+        )
         resolved = claim_storage.resolve_cohort_claim(
             case.owner,
             record.claim_id,
@@ -628,6 +643,9 @@ def test_retirement_preserves_sibling_proof_and_held_original_execution(
     assert resolved.facts == record.facts
     retained = RayTaskCohortClaim.objects.get(pk=record.claim_id)
     assert retained.disposition == "RESOLVED" and retained.hold_reason == "transport_uncertain"
+    cleanup = RayCohortJobCleanup.objects.get(claim_id=record.claim_id)
+    assert cleanup.state == "OPEN" and cleanup.missing_expectation_reason == "missing_expectation"
+    assert cleanup.completion_digest == retained.resolution_digest
 
 
 @pytest.mark.postgresql

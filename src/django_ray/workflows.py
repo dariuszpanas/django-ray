@@ -816,9 +816,19 @@ class _RayExecutor(_Executor):
             workflow_run_id=workflow_identity.run_id,
             node_id=node_id,
         )
-        serialized = encode_nested_execution_request(
+        from django_ray.runtime.cohort_nested import cohort_leaf_controls
+        from django_ray.target.cohort_transport import encode_cohort_nested_execution_request
+
+        leaf_json, leaf_digest, outer_digest = cohort_leaf_controls(strict_context)
+        encoder = (
+            encode_cohort_nested_execution_request
+            if execution_protocol_version == 3
+            else encode_nested_execution_request
+        )
+        serialized = encoder(
             NestedExecutionRequest(
                 outer_identity=outer_identity,
+                cohort_leaf_contract_json=leaf_json,
                 execution_protocol_version=execution_protocol_version,
                 boundary_kind=boundary_kind,
                 boundary_identity=boundary_identity,
@@ -841,6 +851,14 @@ class _RayExecutor(_Executor):
             "expected_node_id": node_id,
             "expected_runtime_env_plan_digest": runtime_env_plan_digest,
             "expected_runtime_env_transport_digest": runtime_env_transport_digest,
+            **(
+                {
+                    "expected_cohort_leaf_digest": leaf_digest,
+                    "expected_outer_contract_digest": outer_digest,
+                }
+                if execution_protocol_version == 3
+                else {}
+            ),
         }
 
     def submit_step(

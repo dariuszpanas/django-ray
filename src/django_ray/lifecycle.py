@@ -881,6 +881,7 @@ def record_failure(
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
     supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    _allow_cancelling_completion: bool = False,
     _executor_django_ray_version: str | None | _ExecutorDjangoRayVersionUnset = (
         _EXECUTOR_DJANGO_RAY_VERSION_UNSET
     ),
@@ -888,6 +889,10 @@ def record_failure(
     """Persist a failure and optionally queue the next attempt atomically."""
     with transaction.atomic():
         filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
+        if _allow_cancelling_completion:
+            filters.pop("state")
+            filters["state__in"] = (TaskState.RUNNING, TaskState.CANCELLING)
+            filters["execution_protocol_version"] = 3
         if expected_ray_job_id is not None:
             filters["ray_job_id"] = expected_ray_job_id
         if expected_claimed_by_worker is not None:
@@ -902,6 +907,8 @@ def record_failure(
         if current is None:
             return False
         if not supported_protocols.supports(int(current.execution_protocol_version)):
+            return False
+        if retry and current.state == TaskState.CANCELLING:
             return False
         if retry:
             runtime_env_for_execution(current)
@@ -1061,12 +1068,17 @@ def succeed_task(
     expected_completion_data: str | None = None,
     require_completion_data_match: bool = False,
     supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    _allow_cancelling_completion: bool = False,
     _executor_django_ray_version: str | None | _ExecutorDjangoRayVersionUnset = (
         _EXECUTOR_DJANGO_RAY_VERSION_UNSET
     ),
 ) -> bool:
     """Persist a successful terminal transition with stale-write protection."""
     filters: dict[str, Any] = {"pk": execution.pk, "state": TaskState.RUNNING}
+    if _allow_cancelling_completion:
+        filters.pop("state")
+        filters["state__in"] = (TaskState.RUNNING, TaskState.CANCELLING)
+        filters["execution_protocol_version"] = 3
     if expected_ray_job_id is not None:
         filters["ray_job_id"] = expected_ray_job_id
     if expected_claimed_by_worker is not None:

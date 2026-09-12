@@ -31,7 +31,9 @@ from __future__ import annotations
 import builtins
 import json
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ImproperlyConfigured
@@ -49,6 +51,7 @@ from django_ray._result_tasks import (
 from django_ray.conf.defaults import QUEUE_TIMEOUT_SECONDS_MAX
 from django_ray.conf.settings import get_settings
 from django_ray.execution_protocol import (
+    COHORT_EXECUTION_PROTOCOL_VERSION,
     EXECUTION_METADATA_SCHEMA_VERSION,
     EXECUTION_PROTOCOL_VERSION,
 )
@@ -59,12 +62,15 @@ from django_ray.input_storage import (
     register_task_input,
 )
 from django_ray.logging import get_backend_logger
-from django_ray.models import RayTaskExecution, TaskInputPayload, TaskState
+from django_ray.maintenance import check_maintenance_admission, maintenance_admission_barrier
+from django_ray.models import RayTaskCohortIntent, RayTaskExecution, TaskInputPayload, TaskState
 from django_ray.redaction import redact_text
 from django_ray.runtime.runtime_env import (
     resolve_runtime_env_profile,
     runtime_env_for_storage,
 )
+from django_ray.target.cohort_intent import build_cohort_intent, prepare_cohort_declaration
+from django_ray.target.cohort_intent_storage import persist_cohort_intent
 
 if TYPE_CHECKING:
     from django.tasks.base import Task
@@ -104,12 +110,16 @@ _TASK_ID_UNIQUE_CONSTRAINT = "ray_task_id_unique"
 _SQLITE_TASK_ID_UNIQUE_ERROR = "UNIQUE constraint failed: django_ray_raytaskexecution.task_id"
 
 
-def _require_default_enqueue_database() -> str:
+def _require_default_enqueue_database(*, cohort: bool = False) -> str:
     """Validate the supported connection before preparing external task input."""
     try:
         supported = all(
             route(model) == DEFAULT_DB_ALIAS
-            for model in (RayTaskExecution, TaskInputPayload)
+            for model in (
+                (RayTaskExecution, TaskInputPayload, RayTaskCohortIntent)
+                if cohort
+                else (RayTaskExecution, TaskInputPayload)
+            )
             for route in (router.db_for_read, router.db_for_write)
         )
     except Exception:
@@ -231,6 +241,15 @@ class RayTaskBackend(BaseTaskBackend):
             raise ImproperlyConfigured(
                 "django-ray: TASKS backend OPTIONS['RAY_JOB_ONLY'] must be a boolean"
             )
+        # Preserve explicit backend options independently of a global fallback
+        # cached by the legacy public attributes above. Protocol-3 enqueue and
+        # manager admission resolve fallback from their current snapshot.
+        self._cohort_declaration_options = MappingProxyType(
+            {
+                **({"RAY_ADDRESS": options["RAY_ADDRESS"]} if "RAY_ADDRESS" in options else {}),
+                "RAY_JOB_ONLY": self.ray_job_only,
+            }
+        )
 
     def validate_task(self, task: Task) -> None:
         """Validate an application declaration before trusting its identity."""
@@ -259,7 +278,23 @@ class RayTaskBackend(BaseTaskBackend):
             TaskResult object with task status and metadata
         """
         _require_executable_task(task)
-        using = _require_default_enqueue_database()
+        protocol_version = EXECUTION_PROTOCOL_VERSION
+        cohort = protocol_version == COHORT_EXECUTION_PROTOCOL_VERSION
+        using = _require_default_enqueue_database(cohort=cohort)
+        current_settings = get_settings() if cohort else None
+        declaration = (
+            prepare_cohort_declaration(
+                self.alias,
+                options=self._cohort_declaration_options,
+                current_settings=current_settings,
+            )
+            if cohort
+            else None
+        )
+        if cohort:
+            check_maintenance_admission(
+                task.queue_name, protocol_version, operation="enqueue", preflight=True, using=using
+            )
         # The database is the authority for uniqueness. UUIDv4 keeps collisions
         # vanishingly rare, while the bounded retry below makes a collision a
         # recoverable allocation event instead of an ambiguous durable identity.
@@ -271,8 +306,21 @@ class RayTaskBackend(BaseTaskBackend):
         runtime_env = resolve_runtime_env_profile(
             self.runtime_env_profile,
             inline_spec=self.inline_runtime_env,
+            config=current_settings,
         )
-        stored_runtime_env = runtime_env_for_storage(runtime_env, task_id=task_id)
+        intent = (
+            build_cohort_intent(
+                declaration,
+                package_version=django_ray_version,
+                runtime_env_identity_digest=f"sha256:{runtime_env.digest}",
+            )
+            if declaration is not None
+            else None
+        )
+        storage_options = {"config": current_settings} if cohort else {}
+        stored_runtime_env = runtime_env_for_storage(
+            runtime_env, task_id=task_id, **storage_options
+        )
         prepared_input = prepare_task_input(list(args), kwargs)
 
         now = datetime.now(UTC)
@@ -282,7 +330,18 @@ class RayTaskBackend(BaseTaskBackend):
             if self.queue_timeout_seconds is not None
             else None
         )
-        with transaction.atomic(using=using):
+        with (
+            transaction.atomic(using=using),
+            maintenance_admission_barrier(using=using) if cohort else nullcontext() as barrier,
+        ):
+            if cohort:
+                check_maintenance_admission(
+                    task.queue_name,
+                    protocol_version,
+                    operation="enqueue",
+                    barrier=barrier,
+                    using=using,
+                )
             register_task_input(prepared_input, using=using)
             for allocation_attempt in range(1, _TASK_ID_ALLOCATION_ATTEMPTS + 1):
                 try:
@@ -294,7 +353,7 @@ class RayTaskBackend(BaseTaskBackend):
                             task_id=task_id,
                             callable_path=callable_path,
                             metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
-                            execution_protocol_version=EXECUTION_PROTOCOL_VERSION,
+                            execution_protocol_version=protocol_version,
                             created_with_django_ray_version=django_ray_version,
                             queue_name=task.queue_name,
                             priority=task.priority,
@@ -303,7 +362,11 @@ class RayTaskBackend(BaseTaskBackend):
                             kwargs_json=prepared_input.kwargs_json,
                             input_reference=prepared_input.input_reference,
                             run_after=task.run_after,
-                            ray_target_address=self.ray_target_address,
+                            ray_target_address=(
+                                declaration.ray_address
+                                if declaration is not None
+                                else self.ray_target_address
+                            ),
                             runtime_env_profile=stored_runtime_env.profile,
                             runtime_env_json=stored_runtime_env.serialized,
                             runtime_env_hash=stored_runtime_env.digest,
@@ -312,6 +375,10 @@ class RayTaskBackend(BaseTaskBackend):
                             queue_deadline_at=queue_deadline_at,
                             created_at=now,
                         )
+                        if intent is not None:
+                            persist_cohort_intent(
+                                execution.pk, intent, now=execution.created_at, using=using
+                            )
                 except IntegrityError as error:
                     if not _is_task_id_unique_violation(error):
                         raise
@@ -335,7 +402,9 @@ class RayTaskBackend(BaseTaskBackend):
                         },
                     )
                     task_id = str(uuid.uuid4())
-                    stored_runtime_env = runtime_env_for_storage(runtime_env, task_id=task_id)
+                    stored_runtime_env = runtime_env_for_storage(
+                        runtime_env, task_id=task_id, **storage_options
+                    )
                     continue
                 break
 

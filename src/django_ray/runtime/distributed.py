@@ -104,6 +104,8 @@ class _NestedDistributedOperation:
     runtime_env_plan_digest: str
     runtime_env_transport_digest: str
     encoder: _PreparedNestedDistributedRequest
+    cohort_leaf_digest: str | None = None
+    outer_contract_digest: str | None = None
     callable_cache: _NestedCallableBindingCache = field(default_factory=_NestedCallableBindingCache)
 
 
@@ -165,9 +167,17 @@ def _strict_nested_operation(
     runtime_env_plan_identity = cast(dict[str, Any], current.runtime_env_plan_identity)
     plan_digest, transport_digest = nested_runtime_env_digests(runtime_env_plan_identity)
     operation_id = uuid4().hex
+    from django_ray.execution_protocol import (
+        SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+        ExecutionProtocolRange,
+    )
+    from django_ray.runtime.cohort_nested import cohort_leaf_controls
+
+    leaf_json, leaf_digest, outer_digest = cohort_leaf_controls(current)
     encoder = _prepare_nested_distributed_request(
         NestedExecutionRequest(
             outer_identity=outer_identity,
+            cohort_leaf_contract_json=leaf_json,
             execution_protocol_version=execution_protocol_version,
             boundary_kind=boundary_kind,
             boundary_identity=NestedDistributedBoundaryIdentity(operation_id, 0),
@@ -176,7 +186,10 @@ def _strict_nested_operation(
             runtime_env_plan_identity=runtime_env_plan_identity,
             runtime_env_plan_digest=plan_digest,
             runtime_env_transport_digest=transport_digest,
-        )
+        ),
+        supported_protocols=ExecutionProtocolRange(3, 3)
+        if execution_protocol_version == 3
+        else SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     )
     return _NestedDistributedOperation(
         outer_identity=outer_identity,
@@ -187,6 +200,8 @@ def _strict_nested_operation(
         runtime_env_plan_digest=plan_digest,
         runtime_env_transport_digest=transport_digest,
         encoder=encoder,
+        cohort_leaf_digest=leaf_digest,
+        outer_contract_digest=outer_digest,
     )
 
 
@@ -194,14 +209,14 @@ def _nested_distributed_request(
     operation: _NestedDistributedOperation,
     pickled_func: bytes,
     item_index: int,
-) -> tuple[str, int, str, int, int, int, str, int, str, str]:
+) -> tuple[Any, ...]:
     """Bind one still-opaque callable to an exact distributed leaf identity."""
     serialized = operation.encoder.encode(
         item_index=item_index,
         callable_binding=operation.callable_cache.get(pickled_func),
     )
     identity = operation.outer_identity
-    return (
+    controls = (
         serialized,
         identity.task_execution_pk,
         identity.task_id,
@@ -212,6 +227,11 @@ def _nested_distributed_request(
         item_index,
         operation.runtime_env_plan_digest,
         operation.runtime_env_transport_digest,
+    )
+    return controls + (
+        (operation.cohort_leaf_digest, operation.outer_contract_digest)
+        if operation.execution_protocol_version == 3
+        else ()
     )
 
 
@@ -228,6 +248,8 @@ def _nested_distributed_leaf_execution(
     expected_item_index: int | None,
     expected_runtime_env_plan_digest: str | None,
     expected_runtime_env_transport_digest: str | None,
+    expected_cohort_leaf_digest: str | None = None,
+    expected_outer_contract_digest: str | None = None,
     *,
     boundary_kind: NestedExecutionBoundaryKind,
 ) -> Iterator[None]:
@@ -259,7 +281,6 @@ def _nested_distributed_leaf_execution(
         NestedExecutionRequestRejected,
         NestedExecutionRequestRejection,
         assert_nested_callable_binding,
-        decode_nested_execution_request,
         nested_callable_digest,
     )
 
@@ -279,7 +300,12 @@ def _nested_distributed_leaf_execution(
         item_index=cast(int, expected_item_index),
     )
     callable_binding = nested_callable_digest(pickled_func)
-    decoded = decode_nested_execution_request(
+    from django_ray.runtime.cohort_nested import (
+        decode_runtime_nested_request,
+        nested_cohort_context,
+    )
+
+    decoded = decode_runtime_nested_request(
         nested_request,
         expected_outer_identity=expected_outer_identity,
         expected_execution_protocol_version=expected_execution_protocol_version,
@@ -289,6 +315,8 @@ def _nested_distributed_leaf_execution(
         expected_callable_binding=callable_binding,
         expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
+        expected_cohort_leaf_digest=expected_cohort_leaf_digest,
+        expected_outer_contract_digest=expected_outer_contract_digest,
     )
     assert_nested_callable_binding(decoded, serialized_callable=pickled_func)
 
@@ -309,6 +337,7 @@ def _nested_distributed_leaf_execution(
             CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
         ),
         strict_execution_request=True,
+        **nested_cohort_context(decoded),
     ):
         yield
 
@@ -327,6 +356,8 @@ def _parallel_map_remote(
     expected_item_index: int | None = None,
     expected_runtime_env_plan_digest: str | None = None,
     expected_runtime_env_transport_digest: str | None = None,
+    expected_cohort_leaf_digest: str | None = None,
+    expected_outer_contract_digest: str | None = None,
 ) -> Any:
     """Execute one ``parallel_map`` item on a Ray worker."""
     from django_ray.execution_codec import NestedExecutionBoundaryKind
@@ -343,6 +374,8 @@ def _parallel_map_remote(
         expected_item_index,
         expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest,
+        expected_cohort_leaf_digest,
+        expected_outer_contract_digest,
         boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_MAP,
     ):
         import pickle
@@ -365,6 +398,8 @@ def _parallel_starmap_remote(
     expected_item_index: int | None = None,
     expected_runtime_env_plan_digest: str | None = None,
     expected_runtime_env_transport_digest: str | None = None,
+    expected_cohort_leaf_digest: str | None = None,
+    expected_outer_contract_digest: str | None = None,
 ) -> Any:
     """Execute one ``parallel_starmap`` item on a Ray worker."""
     from django_ray.execution_codec import NestedExecutionBoundaryKind
@@ -381,6 +416,8 @@ def _parallel_starmap_remote(
         expected_item_index,
         expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest,
+        expected_cohort_leaf_digest,
+        expected_outer_contract_digest,
         boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_STARMAP,
     ):
         import pickle
@@ -404,6 +441,8 @@ def _scatter_gather_remote(
     expected_item_index: int | None = None,
     expected_runtime_env_plan_digest: str | None = None,
     expected_runtime_env_transport_digest: str | None = None,
+    expected_cohort_leaf_digest: str | None = None,
+    expected_outer_contract_digest: str | None = None,
 ) -> Any:
     """Execute one ``scatter_gather`` item on a Ray worker."""
     from django_ray.execution_codec import NestedExecutionBoundaryKind
@@ -420,6 +459,8 @@ def _scatter_gather_remote(
         expected_item_index,
         expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest,
+        expected_cohort_leaf_digest,
+        expected_outer_contract_digest,
         boundary_kind=NestedExecutionBoundaryKind.DISTRIBUTED_SCATTER,
     ):
         import pickle

@@ -1363,6 +1363,177 @@ class TaskWorkerLease(models.Model):
         return f"Worker {worker_id[:8]}... on {self.hostname} ({status})"
 
 
+class RayMaintenanceAudit(models.Model):
+    """Immutable reviewed admission policy; each revision retains its exact scopes."""
+
+    revision = models.PositiveBigIntegerField(primary_key=True, editable=False)
+    previous_revision = models.PositiveBigIntegerField(editable=False)
+    pause_enqueues = models.BooleanField(editable=False)
+    pause_claims = models.BooleanField(editable=False)
+    scope_count = models.PositiveSmallIntegerField(editable=False)
+    scopes_json = models.TextField(editable=False)
+    scopes_digest = models.CharField(max_length=64, editable=False)
+    actor = models.CharField(max_length=128, editable=False)
+    reason = models.CharField(max_length=128, editable=False)
+    created_at = models.DateTimeField(editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(revision__gte=1, previous_revision=models.F("revision") - 1),
+                name="ray_maint_audit_revision",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(scope_count__lte=64), name="ray_maint_audit_scopes"
+            ),
+        ]
+
+
+class RayMaintenancePolicy(models.Model):
+    """Seeded fail-closed admission barrier, separate from execution ownership."""
+
+    singleton_key = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    schema_version = models.PositiveSmallIntegerField(default=1, editable=False)
+    revision = models.PositiveBigIntegerField(default=1, editable=False)
+    pause_enqueues = models.BooleanField(default=False, editable=False)
+    pause_claims = models.BooleanField(default=False, editable=False)
+    updated_at = models.DateTimeField(editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(singleton_key=1, schema_version=1, revision__gte=1),
+                name="ray_maint_policy_shape",
+            ),
+        ]
+
+
+class RayMaintenanceScope(models.Model):
+    """One exact union scope belonging to a reviewed immutable policy revision."""
+
+    audit = models.ForeignKey(RayMaintenanceAudit, on_delete=models.CASCADE, related_name="scopes")
+    position = models.PositiveSmallIntegerField(editable=False)
+    kind = models.CharField(max_length=8, editable=False)
+    queue_name = models.CharField(max_length=100, null=True, editable=False)
+    protocol_version = models.PositiveSmallIntegerField(null=True, editable=False)
+    target = models.ForeignKey(
+        "RayTarget", on_delete=models.PROTECT, null=True, related_name="maintenance_scopes"
+    )
+    pause_enqueues = models.BooleanField(editable=False)
+    pause_claims = models.BooleanField(editable=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("audit", "position"), name="ray_maint_scope_position"),
+            models.CheckConstraint(
+                condition=models.Q(position__gte=1, position__lte=64),
+                name="ray_maint_scope_bound",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        kind="queue",
+                        queue_name__isnull=False,
+                        protocol_version__isnull=True,
+                        target__isnull=True,
+                    )
+                    | models.Q(
+                        kind="protocol",
+                        queue_name__isnull=True,
+                        protocol_version__gte=1,
+                        protocol_version__lte=32767,
+                        target__isnull=True,
+                    )
+                    | models.Q(
+                        kind="target",
+                        queue_name__isnull=True,
+                        protocol_version__isnull=True,
+                        target__isnull=False,
+                        pause_enqueues=False,
+                        pause_claims=True,
+                    )
+                )
+                & (models.Q(pause_enqueues=True) | models.Q(pause_claims=True)),
+                name="ray_maint_scope_shape",
+            ),
+        ]
+
+
+class RayWorkerRetirement(models.Model):
+    """Append-only decisions for one exact manager incarnation, without a lease FK."""
+
+    worker_id = models.CharField(max_length=255, editable=False)
+    hostname = models.CharField(max_length=255, editable=False)
+    pid = models.PositiveIntegerField(editable=False)
+    started_at = models.DateTimeField(editable=False)
+    revision = models.PositiveSmallIntegerField(editable=False)
+    state = models.CharField(max_length=9, editable=False)
+    actor = models.CharField(max_length=128, editable=False)
+    reason = models.CharField(max_length=128, editable=False)
+    created_at = models.DateTimeField(editable=False)
+    cleanup_evidence_digest = models.CharField(max_length=71, null=True, editable=False)
+    cleanup_confirmed_at = models.DateTimeField(null=True, editable=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("worker_id", "hostname", "pid", "started_at", "revision"),
+                name="ray_retirement_incarnation_rev",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        revision=1,
+                        state="REQUESTED",
+                        cleanup_evidence_digest__isnull=True,
+                        cleanup_confirmed_at__isnull=True,
+                    )
+                    | models.Q(
+                        revision=2,
+                        state="RETIRED",
+                        cleanup_evidence_digest__isnull=False,
+                        cleanup_confirmed_at__isnull=False,
+                    )
+                ),
+                name="ray_retirement_shape",
+            ),
+        ]
+
+
+class RayTaskQuarantine(models.Model):
+    """Audited admission/retry decisions retaining identity after ordinary task purge."""
+
+    task_execution_pk = models.PositiveBigIntegerField(editable=False)
+    task_id = models.CharField(max_length=255, editable=False)
+    attempt_number = models.PositiveIntegerField(editable=False)
+    execution_generation = models.PositiveBigIntegerField(editable=False)
+    revision = models.PositiveBigIntegerField(editable=False)
+    state = models.CharField(max_length=11, editable=False)
+    actor = models.CharField(max_length=128, editable=False)
+    reason = models.CharField(max_length=128, editable=False)
+    created_at = models.DateTimeField(editable=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("task_execution_pk", "revision"), name="ray_quarantine_execution_rev"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    task_execution_pk__gte=1,
+                    attempt_number__gte=1,
+                    attempt_number__lte=_POSITIVE_INTEGER_MAX,
+                    revision__gte=1,
+                    state__in=("QUARANTINED", "RELEASED"),
+                ),
+                name="ray_quarantine_shape",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("task_execution_pk", "-revision"), name="ray_quarantine_latest")
+        ]
+
+
 class TaskExecutionProtocolPolicy(models.Model):
     """Singleton rollout policy for the durable execution protocol.
 
@@ -2242,6 +2413,119 @@ class RayTaskCohortClaim(models.Model):
                     disposition__in=("OPEN", "HELD", "RESOLVED"),
                 ),
                 name="ray_cclaim_counters_valid",
+            ),
+        ]
+
+
+class RayCohortJobCleanup(models.Model):
+    """Post-result driver cleanup retained independently from task disposition."""
+
+    claim = models.OneToOneField(
+        RayTaskCohortClaim,
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="job_cleanup",
+        editable=False,
+    )
+    execution = models.ForeignKey(
+        RayTaskExecution,
+        on_delete=models.CASCADE,
+        related_name="job_cleanups",
+        editable=False,
+    )
+    queue_name = models.CharField(max_length=100, editable=False)
+    claim_facts_digest = models.CharField(max_length=71, editable=False)
+    request_digest = models.CharField(max_length=71, editable=False)
+    contract_digest = models.CharField(max_length=71, editable=False)
+    completion_digest = models.CharField(max_length=71, editable=False)
+    expectation_json = models.TextField(null=True, editable=False)
+    expectation_digest = models.CharField(max_length=71, null=True, editable=False)
+    missing_expectation_reason = models.CharField(max_length=32, null=True, editable=False)
+    created_at = models.DateTimeField(editable=False)
+    updated_at = models.DateTimeField(editable=False)
+    owner_lease_id = models.CharField(max_length=255, editable=False)
+    owner_lease_hostname = models.CharField(max_length=255, editable=False)
+    owner_lease_pid = models.PositiveIntegerField(editable=False)
+    owner_lease_started_at = models.DateTimeField(editable=False)
+    revision = models.PositiveBigIntegerField(default=1, db_default=1, editable=False)
+    state = models.CharField(max_length=6, default="OPEN", db_default="OPEN", editable=False)
+    inspection_began_at = models.DateTimeField(null=True, editable=False)
+    closed_at = models.DateTimeField(null=True, editable=False)
+    terminal_status = models.CharField(max_length=9, null=True, editable=False)
+    native_job_id = models.CharField(max_length=8, null=True, editable=False)
+    observation_digest = models.CharField(max_length=71, null=True, editable=False)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=("execution", "state"), name="ray_jobcleanup_execution"),
+            models.Index(fields=("owner_lease_id", "state"), name="ray_jobcleanup_owner"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        expectation_json__isnull=False,
+                        expectation_digest__isnull=False,
+                        missing_expectation_reason__isnull=True,
+                    )
+                    | models.Q(
+                        expectation_json__isnull=True,
+                        expectation_digest__isnull=True,
+                        missing_expectation_reason="missing_expectation",
+                        missing_expectation_reason__isnull=False,
+                    )
+                ),
+                name="ray_jobcleanup_expectation",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        state="OPEN",
+                        inspection_began_at__isnull=True,
+                        closed_at__isnull=True,
+                        terminal_status__isnull=True,
+                        native_job_id__isnull=True,
+                        observation_digest__isnull=True,
+                    )
+                    | models.Q(
+                        state="CLOSED",
+                        inspection_began_at__isnull=False,
+                        closed_at__isnull=False,
+                        terminal_status__in=("SUCCEEDED", "FAILED", "STOPPED"),
+                        native_job_id__isnull=False,
+                        observation_digest__isnull=False,
+                    )
+                ),
+                name="ray_jobcleanup_disposition",
+            ),
+        ]
+
+
+class RayTaskCohortTimeout(models.Model):
+    """Immutable timeout request for one original claim, not a terminal result."""
+
+    claim = models.OneToOneField(
+        RayTaskCohortClaim,
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="timeout_intent",
+        editable=False,
+    )
+    requested_at = models.DateTimeField(editable=False)
+    started_at = models.DateTimeField(editable=False)
+    timeout_seconds = models.PositiveIntegerField(editable=False)
+    deadline_at = models.DateTimeField(editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(timeout_seconds__gte=1, timeout_seconds__lte=2147483647),
+                name="ray_cohort_timeout_seconds",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(requested_at__gt=models.F("deadline_at"))
+                & models.Q(deadline_at__gt=models.F("started_at")),
+                name="ray_cohort_timeout_chronology",
             ),
         ]
 

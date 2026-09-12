@@ -40,11 +40,28 @@ def require(condition):
         raise QualificationError("transaction-proof-mismatch")
 
 
+def case_nodeids(execution_protocol_version):
+    """Select exactly the original categories for one source-declared epoch."""
+    require(type(execution_protocol_version) is int and execution_protocol_version in (1, 3))
+    return tuple(
+        f"{TEST_PATH}::{name.replace('[', f'[{execution_protocol_version}-', 1)}" for name in CASES
+    )
+
+
 def validate_probe(value, *, expected_module):
     require(
         isinstance(value, dict)
-        and set(value) == {"module", "server_version", "cases", "socket_only", "server_stopped"}
+        and set(value)
+        == {
+            "module",
+            "execution_protocol_version",
+            "server_version",
+            "cases",
+            "socket_only",
+            "server_stopped",
+        }
     )
+    case_nodeids(value["execution_protocol_version"])
     require(value["socket_only"] is True and value["server_stopped"] is True)
     require(value["module"] == expected_module)
     require(type(value["server_version"]) is int and 170000 <= value["server_version"] < 180000)

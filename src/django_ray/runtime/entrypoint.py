@@ -120,6 +120,15 @@ def _serialize_completion(
         from django_ray import __version__
         from django_ray.execution_codec import ExecutionCompletion, encode_execution_completion
 
+        if execution_protocol_version == 3:
+            from django_ray.execution_codec import _encode_execution_completion_for_protocols
+            from django_ray.execution_protocol import ExecutionProtocolRange
+
+            def encode_execution_completion(value):
+                return _encode_execution_completion_for_protocols(
+                    value, ExecutionProtocolRange(3, 3)
+                )
+
         try:
             return encode_execution_completion(
                 ExecutionCompletion(
@@ -136,9 +145,10 @@ def _serialize_completion(
                 )
             )
         except (TypeError, ValueError):
+            if execution_protocol_version == 3:
+                raise
             # Protocol v1 deliberately retains the released JSON surface for
             # producer-emittable values outside the strict enriched schema.
-            pass
     return json.dumps(payload)
 
 
@@ -313,6 +323,9 @@ def execute_task(
     _completion_identity: ExecutionIdentity | None = None,
     _execution_protocol_version: int | None = None,
     _strict_execution_request: bool = False,
+    _cohort_contract_json: str | None = None,
+    _cohort_contract_digest: str | None = None,
+    _persist_completion: bool = True,
 ) -> str:
     """Execute a Django Task and return JSON result.
 
@@ -370,6 +383,8 @@ def execute_task(
                     else None
                 ),
                 strict_execution_request=_strict_execution_request,
+                cohort_contract_json=_cohort_contract_json,
+                cohort_contract_digest=_cohort_contract_digest,
             )
 
         with execution_context:
@@ -394,18 +409,24 @@ def execute_task(
         )
 
     except Exception as e:
+        if _execution_protocol_version == 3:
+            from django_ray.runtime.cohort_execution import find_cohort_guard_error
+
+            if find_cohort_guard_error(e) is not None:
+                raise
         result_json = _serialize_error(
             e,
             completion_identity=_completion_identity,
             execution_protocol_version=_execution_protocol_version,
         )
 
-    _persist_task_completion(
-        completion_task_execution_pk,
-        attempt_number,
-        execution_generation,
-        result_json,
-    )
+    if _persist_completion:
+        _persist_task_completion(
+            completion_task_execution_pk,
+            attempt_number,
+            execution_generation,
+            result_json,
+        )
     return result_json
 
 

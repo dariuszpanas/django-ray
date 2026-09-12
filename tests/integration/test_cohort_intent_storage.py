@@ -33,7 +33,7 @@ from django_ray.target.cohort_intent_storage import (
 
 pytestmark = pytest.mark.django_db(transaction=True)
 NOW = datetime(2026, 9, 12, 2, 0, tzinfo=UTC)
-LATEST = [("django_ray", "0030_cohort_claims")]
+LATEST = [("django_ray", "0034_cohort_timeouts")]
 INTENT = CohortIntent(
     "0.5.0",
     "default",

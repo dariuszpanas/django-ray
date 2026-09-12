@@ -264,6 +264,24 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
         if policy.legacy_worker_admission_enabled:
             LegacyWorkerAdmissionToken.objects.get_or_create(singleton_key=1)
 
+        # Transactional flush removes migration data. Reuse the exact seed
+        # function for isolated tests; production never repairs a missing or
+        # incoherent maintenance policy automatically.
+        from importlib import import_module
+        from types import SimpleNamespace
+
+        from django.apps import apps
+        from django.db import connections, transaction
+
+        from django_ray.models import RayMaintenanceAudit, RayMaintenancePolicy
+
+        if not RayMaintenancePolicy.objects.exists():
+            if RayMaintenanceAudit.objects.exists():
+                raise RuntimeError("Test maintenance seed has retained audit without policy")
+            seed = import_module("django_ray.migrations.0031_maintenance_admission")._seed
+            with transaction.atomic():
+                seed(apps, SimpleNamespace(connection=connections["default"]))
+
 
 @pytest.fixture(autouse=True)
 def _clear_django_ray_remote_caches():

@@ -236,7 +236,7 @@ and upgrade proof is still required before changing those defaults.
 A new producer intent records the package version, backend alias, selection policy,
 and a digest of the exact declared endpoint and current trust configuration. This
 finite declaration can be matched before a worker limits its queue query. The
-task's original logical RuntimeEnv observation is a separate immutable digest;
+task's original normalized RuntimeEnv JSON declaration has a separate immutable digest;
 task-specific environments do not create additional worker eligibility keys.
 Neither digest invents a cluster instance from an address or authenticates imported
 source. The intended activation validates intent before preparing inputs and stores
@@ -246,9 +246,10 @@ rows receive no inferred identity. This draft schema replaces the earlier unmerg
 schema-1 draft. A database that already applied that draft needs a fresh qualification
 database or its reviewed, empty-table reversal before reapplying it.
 
-The logical RuntimeEnv observation is retained for audit. Admission does not compare
-observations from different hosts, require reusable identities, or change existing
-RuntimeEnv integrity and submission-snapshot checks.
+The RuntimeEnv declaration digest is retained for audit. It does not scan filesystem
+contents or authenticate package/source bytes. Admission does not compare observations
+from different hosts, require reusable identities, or change existing RuntimeEnv
+integrity and submission-snapshot checks.
 
 Ordinary backends retain worker-selected synchronous, local Core, connected Core,
 and Jobs modes; `RAY_JOB_ONLY` continues to select Jobs only. The first verified

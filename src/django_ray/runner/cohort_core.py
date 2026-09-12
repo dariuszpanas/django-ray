@@ -440,15 +440,21 @@ class CoreCohortManagerAdapter:
         self.lifecycle.confirm_cleanup(ticket, confirm)
         self._prepared = self._ticket = None
 
-    def eligible_aliases(self):
-        """Return candidates only; the claim transaction must recheck authority."""
+    def qualified_aliases(self):
+        """Return fresh observations; selection decides first claim or continuation."""
         self._parent()
         if self._invalidated:
             return ()
         now = self._now()
         lease = self._lease(now)
-        return self.lifecycle.eligible_aliases(
+        return self.lifecycle.qualified_aliases(
             now=now,
             live_lease=self.lifecycle.lease,
             lease_expires_at=lease.last_heartbeat_at + get_lease_duration(),
+        )
+
+    def eligible_aliases(self):
+        """Return ACTIVE first-claim candidates subject to locked checks."""
+        return tuple(
+            item for item in self.qualified_aliases() if item.shared.desired_state == "active"
         )

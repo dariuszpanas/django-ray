@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 from xml.etree import ElementTree
 
@@ -16,7 +16,7 @@ import yaml
 
 from qualification.docker import scenario as wheel
 from qualification.docker.scenario import QualificationError
-from qualification.transactions import contract, probe, scenario
+from qualification.transactions import contract, plugin, probe, scenario
 
 
 def receipt():
@@ -36,6 +36,7 @@ def receipt():
         }
     return {
         "module": "/installed/module",
+        "execution_protocol_version": 1,
         "server_version": 170011,
         "cases": cases,
         "socket_only": True,
@@ -47,6 +48,7 @@ def receipt():
     "mutation",
     [
         "missing-case",
+        "wrong-protocol",
         "wrong-module",
         "wrong-postgres",
         "tcp",
@@ -67,6 +69,8 @@ def test_incomplete_or_inconsistent_receipts_cannot_emit_success(mutation):
     rolled_back = value["cases"][f"{contract.VISIBILITY}[False]"]
     if mutation == "missing-case":
         value["cases"].pop(contract.CASES[0])
+    elif mutation == "wrong-protocol":
+        value["execution_protocol_version"] = 2
     elif mutation == "wrong-module":
         value["module"] = "/editable/src/module"
     elif mutation == "wrong-postgres":
@@ -237,6 +241,8 @@ def invocation(tmp_path, monkeypatch):
         value["module"] = module
         if state["failure"] == "incomplete":
             value["cases"].pop(contract.CASES[0])
+        if state["failure"] == "missing-protocol":
+            value.pop("execution_protocol_version")
         payload = json.dumps(value).encode()
         if state["failure"] == "oversized":
             payload = b" " * (contract.MAX_PROBE_BYTES + 1)
@@ -248,7 +254,17 @@ def invocation(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "failure", [None, "timeout", "incomplete", "oversized", "exit", "early-exit", "tree-drift"]
+    "failure",
+    [
+        None,
+        "timeout",
+        "incomplete",
+        "missing-protocol",
+        "oversized",
+        "exit",
+        "early-exit",
+        "tree-drift",
+    ],
 )
 def test_scenario_reports_failure_and_removes_only_owned_fixtures(invocation, monkeypatch, failure):
     arguments, state = invocation
@@ -259,6 +275,8 @@ def test_scenario_reports_failure_and_removes_only_owned_fixtures(invocation, mo
     manifest = json.loads((arguments["evidence_root"] / "execution-manifest.json").read_bytes())
     assert manifest["outcome"] == ("passed" if failure is None else "failed")
     assert manifest["fixture_cleanup"] is True
+    if failure is None:
+        assert manifest["execution_protocol_version"] == 1
     if failure == "early-exit":
         assert manifest["failure"] == "transaction-probe-failed"
     assert state["fixtures"] and all(not path.exists() for path in state["fixtures"])
@@ -275,3 +293,99 @@ def test_existing_evidence_is_never_overwritten(invocation):
     with pytest.raises(wheel.QualificationError, match="evidence-root-not-empty"):
         scenario.execute(**arguments)
     assert existing.read_bytes() == b"original evidence" and not state["fixtures"]
+
+
+@pytest.mark.parametrize("protocol", [True, False, 0, 2, 4, "3", None])
+def test_case_selection_rejects_nonactive_or_malformed_epoch(protocol):
+    with pytest.raises(QualificationError, match="transaction-proof-mismatch"):
+        contract.case_nodeids(protocol)
+
+
+@pytest.mark.parametrize("protocol", [1, 3])
+@pytest.mark.parametrize("mutation", [None, "missing", "extra", "duplicate", "other-epoch"])
+def test_collection_guard_requires_each_exact_source_epoch_case(monkeypatch, protocol, mutation):
+    nodeids = list(contract.case_nodeids(protocol))
+    if mutation == "missing":
+        nodeids.pop()
+    elif mutation == "extra":
+        nodeids.append(
+            contract.TEST_PATH + "::test_cohort_intent_routes_fail_before_payload_publication"
+        )
+    elif mutation == "duplicate":
+        nodeids.append(nodeids[0])
+    elif mutation == "other-epoch":
+        nodeids[0] = contract.case_nodeids(3 if protocol == 1 else 1)[0]
+    monkeypatch.setattr(plugin, "_receipt", {"execution_protocol_version": protocol})
+    session = SimpleNamespace(items=[SimpleNamespace(nodeid=nodeid) for nodeid in nodeids])
+    if mutation is None:
+        plugin.pytest_collection_finish(session)
+    else:
+        with pytest.raises(pytest.UsageError, match="exact case set"):
+            plugin.pytest_collection_finish(session)
+
+
+@pytest.mark.parametrize("protocol", [1, 3])
+def test_receipt_keeps_stable_case_names_and_rejects_other_epoch_report(monkeypatch, protocol):
+    state = {"execution_protocol_version": protocol, "cases": {}}
+    monkeypatch.setattr(plugin, "_receipt", state)
+    report = SimpleNamespace(
+        nodeid=contract.case_nodeids(protocol)[0],
+        when="call",
+        outcome="passed",
+        user_properties=(),
+    )
+    plugin.pytest_runtest_logreport(report)
+    assert list(state["cases"]) == [contract.CASES[0]]
+    report.nodeid = contract.case_nodeids(3 if protocol == 1 else 1)[0]
+    with pytest.raises(pytest.UsageError, match="unexpected case"):
+        plugin.pytest_runtest_logreport(report)
+    assert len(state["cases"]) == 1
+
+
+def test_actual_source_collection_selects_sixteen_current_epoch_cases_without_database(tmp_path):
+    import django_ray
+    from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
+
+    root = Path(__file__).resolve().parents[2]
+    collection_receipt = tmp_path / "collection-only.json"
+    environment = {
+        **os.environ,
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTEST_ADDOPTS": "",
+        "DJANGO_RAY_TRANSACTION_MODULE": str(Path(django_ray.__file__).resolve()),
+        "DJANGO_RAY_TRANSACTION_RECEIPT": str(collection_receipt),
+    }
+    # --collect-only never sets up a fixture, starts PostgreSQL or invokes Ray.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "django",
+            "-p",
+            "qualification.transactions.plugin",
+            *contract.case_nodeids(EXECUTION_PROTOCOL_VERSION),
+            "-m",
+            "postgresql",
+            "--collect-only",
+            "-q",
+            "-o",
+            "addopts=",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    selected = sorted(
+        line for line in result.stdout.splitlines() if line.startswith(contract.TEST_PATH + "::")
+    )
+    assert selected == sorted(contract.case_nodeids(EXECUTION_PROTOCOL_VERSION))
+    collected = json.loads(collection_receipt.read_text())
+    assert collected["execution_protocol_version"] == EXECUTION_PROTOCOL_VERSION
+    assert collected["cases"] == {} and collected["server_version"] is None

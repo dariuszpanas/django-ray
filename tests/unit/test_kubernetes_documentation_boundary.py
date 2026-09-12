@@ -279,7 +279,7 @@ def test_dormant_task_target_binding_has_a_database_only_gate_boundary() -> None
     assert "tested task and policy cleanup ordering" in normalized_guide
 
 
-def test_dormant_task_target_binding_has_no_production_consumer() -> None:
+def test_task_target_binding_has_only_reviewed_cohort_consumers() -> None:
     production_root = ROOT / "src" / "django_ray"
     references = {
         path.relative_to(ROOT).as_posix()
@@ -292,6 +292,8 @@ def test_dormant_task_target_binding_has_no_production_consumer() -> None:
         "src/django_ray/migrations/0024_ray_target_routes.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
         "src/django_ray/migrations/0030_cohort_claims.py",
+        "src/django_ray/migrations/0031_maintenance_admission.py",
+        "src/django_ray/migrations/0033_cohort_job_cleanup.py",
         "src/django_ray/models.py",
         "src/django_ray/target/cohort_claim_storage.py",
     }
@@ -384,7 +386,7 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "no production producer can create, renew, or advertise" in normalized_guide
 
 
-def test_dormant_worker_target_capability_has_no_production_eligibility_consumer() -> None:
+def test_worker_target_capability_has_only_reviewed_cohort_consumers() -> None:
     production_root = ROOT / "src" / "django_ray"
     model_pattern = re.compile(r"\bRayWorkerTargetCapability\b")
     references = {
@@ -395,10 +397,13 @@ def test_dormant_worker_target_capability_has_no_production_eligibility_consumer
 
     assert references == {
         "src/django_ray/doctor.py",
+        "src/django_ray/maintenance.py",
         "src/django_ray/migrations/0025_ray_worker_target_capabilities.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
         "src/django_ray/migrations/0030_cohort_claims.py",
+        "src/django_ray/migrations/0032_maintenance_controls.py",
         "src/django_ray/models.py",
+        "src/django_ray/runner/cohort_claims.py",
         "src/django_ray/runner/cohort_core.py",
         "src/django_ray/runner/cohort_jobs.py",
         "src/django_ray/target/capabilities.py",
@@ -422,30 +427,40 @@ def test_dormant_worker_target_capability_has_no_production_eligibility_consumer
             expected.add("src/django_ray/target/cohort_publication.py")
         elif symbol == "withdraw_all_ray_worker_target_capabilities":
             expected.add("src/django_ray/runner/cohort_core.py")
+            expected.add("src/django_ray/management/commands/django_ray_worker.py")
         elif symbol == "withdraw_ray_worker_target_capability":
             expected.add("src/django_ray/runner/cohort_jobs.py")
         assert callers == expected
 
-    # Dormant binding/claim services are not yet called from worker lifecycle
-    # paths; changing that boundary requires the affected deployed scenarios.
-    claim_symbols = (
-        "claim_cohort_execution",
-        "adopt_cohort_claim",
-        "prepare_cohort_claim",
-        "mark_cohort_claim_dispatched",
-        "hold_cohort_claim",
-        "resolve_cohort_claim",
-    )
-    for symbol in claim_symbols:
+    # Current-cohort lifecycle callers are finite and reviewed separately from
+    # the retained protocol-2 routing ledger. This inventory is not runtime proof.
+    claim_callers = {
+        "claim_cohort_execution": {"src/django_ray/runner/cohort_claims.py"},
+        "adopt_cohort_claim": {"src/django_ray/runner/cohort_recovery.py"},
+        "prepare_cohort_claim": {"src/django_ray/runner/cohort_dispatch.py"},
+        "mark_cohort_claim_dispatched": {"src/django_ray/runner/cohort_dispatch.py"},
+        "hold_cohort_claim": {
+            "src/django_ray/management/commands/django_ray_worker.py",
+            "src/django_ray/runner/cohort_cancel_request.py",
+            "src/django_ray/runner/cohort_completion.py",
+            "src/django_ray/runner/cohort_dispatch.py",
+            "src/django_ray/runner/cohort_timeout.py",
+        },
+        "resolve_cohort_claim": {
+            "src/django_ray/runner/cohort_cancellation.py",
+            "src/django_ray/runner/cohort_completion.py",
+        },
+    }
+    for symbol, expected in claim_callers.items():
         callers = {
             path.relative_to(ROOT).as_posix()
             for path in production_root.rglob("*.py")
             if symbol in path.read_text(encoding="utf-8")
         }
-        assert callers == {"src/django_ray/target/cohort_claim_storage.py"}
+        assert callers == expected | {"src/django_ray/target/cohort_claim_storage.py"}
 
-    # The private publisher may write capability, but it has no production
-    # manager, enqueue, claim, recovery, or cancellation caller yet.
+    # Only the owned manager adapters invoke split publication; application
+    # execution, cancellation and recovery do not mint fresh qualification.
     publication_symbols = (
         "publish_core_cohort_probe",
         "publish_cohort_job_probe",
@@ -470,13 +485,19 @@ def test_dormant_worker_target_capability_has_no_production_eligibility_consumer
         for path in production_root.rglob("*.py")
         if "CoreCohortManagerAdapter" in path.read_text(encoding="utf-8")
     }
-    assert adapter_callers == {"src/django_ray/runner/cohort_core.py"}
+    assert adapter_callers == {
+        "src/django_ray/runner/cohort_core.py",
+        "src/django_ray/runner/cohort_worker.py",
+    }
     jobs_adapter_callers = {
         path.relative_to(ROOT).as_posix()
         for path in production_root.rglob("*.py")
         if "JobsCohortManagerAdapter" in path.read_text(encoding="utf-8")
     }
-    assert jobs_adapter_callers == {"src/django_ray/runner/cohort_jobs.py"}
+    assert jobs_adapter_callers == {
+        "src/django_ray/runner/cohort_jobs.py",
+        "src/django_ray/runner/cohort_worker.py",
+    }
 
 
 def test_protocol_v2_evidence_has_no_production_persistence_consumer() -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +55,41 @@ if TYPE_CHECKING:
 
 _CONTROL_REQUEST_TIMEOUT_SECONDS = 5.0
 _REQUEST_TIMEOUT_ATTRIBUTE = "_django_ray_request_timeout_seconds"
+
+
+@dataclass(frozen=True, slots=True)
+class _CohortRuntimeSnapshot:
+    pk: int
+    task_id: str
+    runtime_env_profile: str | None
+    runtime_env_hash: str
+    runtime_env_json: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _CohortSubmissionInput:
+    prepared: Any = field(repr=False)
+    runtime: _CohortRuntimeSnapshot = field(repr=False)
+    submission_id: str
+    jobs_endpoint: str
+    submitted_at: datetime
+    claimed_by_worker: str
+    configuration: dict[str, Any] = field(repr=False)
+
+    def handle(self):
+        return SubmissionHandle(self.submission_id, self.jobs_endpoint, self.submitted_at)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCohortSubmission:
+    source: _CohortSubmissionInput = field(repr=False)
+    stored_request: Any = field(repr=False)
+    metadata: dict[str, str] = field(repr=False)
+    snapshot_serialized: str = field(repr=False)
+    original_runtime: Any = field(repr=False)
+    original_plan_digest: str
+    entrypoint: str = field(repr=False)
+
 
 _STORAGE_PREPARATION_REJECTIONS = {
     "invalid_locator": RayJobRequestPreparationRejection.INVALID_REQUEST,
@@ -246,6 +283,191 @@ class RayJobRunner(BaseRunner):
             ray_address=ray_address,
             submitted_at=datetime.now(UTC),
         )
+
+    def cohort_submission_handle(self, task_execution, *, jobs_endpoint):
+        """Reserve one exact qualified HTTP endpoint, without address discovery."""
+        from django_ray.target.cohort_intent import _endpoint
+
+        endpoint = _endpoint(jobs_endpoint)
+        if not endpoint.startswith(("http://", "https://")):
+            raise ValueError("Cohort Jobs endpoint unavailable")
+        return SubmissionHandle(
+            ray_job_id=self.submission_id(task_execution),
+            ray_address=endpoint,
+            submitted_at=datetime.now(UTC),
+        )
+
+    def submit_cohort_task(self, task_execution, *, prepared, jobs_endpoint):
+        """Submit an independently prepared p3 request after its ledger fence.
+
+        The owner must retain the exact handle even when this raises. No status,
+        log or missing response is a verified application non-invocation.
+        """
+        source = self._capture_cohort_submission(
+            task_execution,
+            prepared=prepared,
+            handle=self.cohort_submission_handle(task_execution, jobs_endpoint=jobs_endpoint),
+        )
+        with self._prepare_cohort_submission(source) as staged:
+            self._attach_cohort_submission(staged, task_execution=task_execution)
+            return self._submit_prepared_cohort_submission(staged)
+
+    def _capture_cohort_submission(self, task_execution, *, prepared, handle):
+        """Copy every callback input on the parent; never retain an ORM instance."""
+        from django_ray.target.cohort_contract import CohortExecutionContract
+        from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+        request, contract = validate_prepared_cohort_execution(prepared, task=task_execution)
+        if (
+            type(contract) is not CohortExecutionContract
+            or request.compiled_graph_submission_transport != "ray-job"
+            or type(handle) is not SubmissionHandle
+        ):
+            raise ValueError("Invalid cohort Jobs transport")
+        expected = self.cohort_submission_handle(task_execution, jobs_endpoint=handle.ray_address)
+        if handle.ray_job_id != expected.ray_job_id:
+            raise ValueError("Invalid cohort Jobs handle")
+        return _CohortSubmissionInput(
+            prepared,
+            _CohortRuntimeSnapshot(
+                task_execution.pk,
+                task_execution.task_id,
+                task_execution.runtime_env_profile,
+                task_execution.runtime_env_hash,
+                task_execution.runtime_env_json,
+            ),
+            handle.ray_job_id,
+            expected.ray_address,
+            handle.submitted_at,
+            task_execution.claimed_by_worker,
+            deepcopy(get_settings()),
+        )
+
+    @contextmanager
+    def _prepare_cohort_submission(self, source):
+        """Own the local snapshot across request preparation, attach and submit.
+
+        No database operation occurs here. The staged caller keeps this context
+        in its single callback while the parent attaches the prepared request.
+        """
+        from typing import cast
+
+        from django_ray.execution_protocol import ExecutionProtocolRange
+        from django_ray.ray_job_protocol import _build_cohort_job_metadata
+        from django_ray.ray_job_request_storage import _prepare_ray_job_request
+        from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+        from django_ray.workflow.plans import WorkflowPlanMismatchError, runtime_env_plan_identity
+
+        request, _contract = validate_prepared_cohort_execution(source.prepared)
+        runtime = runtime_env_for_execution(
+            cast("RayTaskExecution", source.runtime), config=source.configuration
+        )
+        if (
+            request.runtime_env_hash != runtime.digest
+            or request.runtime_env_profile != runtime.profile
+        ):
+            raise ValueError("Cohort prepared RuntimeEnv changed")
+        trust = source.configuration.get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+        original_identity = runtime_env_plan_identity(runtime, trust_identity=trust)
+        if request.runtime_env_plan_identity != original_identity.as_transport_dict():
+            raise WorkflowPlanMismatchError(
+                "Cohort prepared RuntimeEnv plan differs from its current source"
+            )
+        with snapshot_local_runtime_env(runtime) as snapshot:
+            snapshot_identity = runtime_env_plan_identity(snapshot, trust_identity=trust)
+            if snapshot_identity.manifest["digest"] != original_identity.manifest["digest"]:
+                raise WorkflowPlanMismatchError(
+                    "Outer RuntimeEnv immutable snapshot differs from its effective plan"
+                )
+            stored = _prepare_ray_job_request(
+                source.prepared.request_json,
+                source.configuration,
+                supported_protocols=ExecutionProtocolRange(3, 3),
+            )
+            metadata = _build_cohort_job_metadata(
+                source.prepared, stored.reference, stored.encoded_locator
+            )
+            yield _PreparedCohortSubmission(
+                source,
+                stored,
+                metadata,
+                snapshot.serialized,
+                runtime,
+                original_identity.manifest["digest"],
+                "python -m django_ray.runtime.cohort_entrypoint --request-ref-b64 "
+                + stored.encoded_locator,
+            )
+
+    def _attach_cohort_submission(self, staged, *, task_execution, expected_claim=None):
+        """Parent-only exact row attachment; a PURGED row never triggers I/O."""
+        from django_ray.execution_protocol import ExecutionProtocolRange
+        from django_ray.ray_job_request_storage import _register_and_attach_ray_job_request
+        from django_ray.runner.cohort_job_submission import _outside_transaction
+        from django_ray.target.cohort_transport import validate_prepared_cohort_execution
+
+        _outside_transaction()
+        validate_prepared_cohort_execution(staged.source.prepared, task=task_execution)
+        if task_execution.claimed_by_worker != staged.source.claimed_by_worker:
+            raise ValueError("Cohort submission owner changed")
+        attached = _register_and_attach_ray_job_request(
+            staged.stored_request,
+            task_execution=task_execution,
+            submission_handle=staged.source.handle(),
+            supported_protocols=ExecutionProtocolRange(3, 3),
+            restore_purged=False,
+            **({"expected_cohort_claim": expected_claim} if expected_claim is not None else {}),
+        )
+        if attached != staged.stored_request.reference:
+            raise ValueError("Cohort request attachment changed")
+
+    def _submit_prepared_cohort_submission(self, staged, *, check_pending=None):
+        """Perform only the owned network operation, with no database access."""
+        from ray.runtime_env import RuntimeEnv
+
+        from django_ray.workflow.plans import WorkflowPlanMismatchError, runtime_env_plan_identity
+
+        def fresh():
+            if check_pending is not None:
+                check_pending()
+
+        fresh()
+        client = self._get_client(staged.source.jobs_endpoint)
+        spec = json.loads(staged.snapshot_serialized)
+        fresh()
+        client._upload_working_dir_if_needed(spec)
+        fresh()
+        client._upload_py_modules_if_needed(spec)
+        submitted = normalize_runtime_env(
+            RuntimeEnv(**spec).to_dict(), profile=staged.original_runtime.profile
+        )
+        metadata = dict(staged.metadata)
+        metadata["cohort_jobs_endpoint"] = staged.source.jobs_endpoint
+        metadata["cohort_submitted_runtime_env_digest"] = "sha256:" + submitted.digest
+        verified = runtime_env_plan_identity(
+            staged.original_runtime,
+            trust_identity=staged.source.configuration.get("WORKFLOW_PLAN_TRUST_IDENTITY", {}),
+        )
+        if verified.manifest["digest"] != staged.original_plan_digest:
+            raise WorkflowPlanMismatchError(
+                "Outer RuntimeEnv local content changed while it was being snapshotted"
+            )
+        fresh()
+        try:
+            returned = client.submit_job(
+                entrypoint=staged.entrypoint,
+                runtime_env=submitted.spec,
+                submission_id=staged.source.submission_id,
+                metadata=metadata,
+            )
+        except Exception as error:
+            raise RayJobSubmissionUncertainError(
+                staged.source.submission_id, "Cohort submission acknowledgement unavailable"
+            ) from error
+        if type(returned) is not str or returned != staged.source.submission_id:
+            raise RayJobSubmissionUncertainError(
+                staged.source.submission_id, "Cohort submission identity changed"
+            )
+        return staged.source.handle()
 
     def _reserve_public_submission(
         self,
