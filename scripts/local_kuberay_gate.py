@@ -7507,7 +7507,7 @@ def await_target_result(runner, submission):
 context = ray.get_runtime_context()
 runtime = RayRuntimeVersion(
     ray_major=2,
-    ray_minor=56,
+    ray_minor=58,
     ray_patch=0,
     python_implementation=platform.python_implementation().strip().lower(),
     python_major=sys.version_info.major,

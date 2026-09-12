@@ -106,7 +106,7 @@ Its existence or resource-free unit tests do not establish a passing live generi
 
 `core.yaml` is a native public Chainsaw Test. Its thirteen steps start disposable PostgreSQL 17,
 prepare the sample web application and locked recovery archives, and start one current core task
-manager with stock Ray 2.56.0 head/worker nodes. Two serial Jobs require authenticated API execution,
+manager with stock Ray 2.58.0 head/worker nodes. Two serial Jobs require authenticated API execution,
 exact durable task/attempt/current-manager ownership, authenticated encrypted RuntimeEnv snapshots
 and the remote decrypted canary. Between them Chainsaw foreground-deletes and recreates RayCluster.
 Both generic-node receipts require identical archives/runtime and disjoint node identities.

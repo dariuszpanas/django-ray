@@ -648,7 +648,7 @@ def _ray_cluster(
     metadata: dict[str, object] = {"name": RAY_CLUSTER_NAME, "namespace": namespace}
     if uid is not None:
         metadata["uid"] = uid
-    head_containers = [{"name": "ray-head", "image": "rayproject/ray:2.56.0-py312"}]
+    head_containers = [{"name": "ray-head", "image": "rayproject/ray:2.58.0-py312"}]
     if head_sidecar:
         head_containers.append({"name": "dashboard-importer", "image": "python:3.12-slim"})
     return {
@@ -656,7 +656,7 @@ def _ray_cluster(
         "kind": "RayCluster",
         "metadata": metadata,
         "spec": {
-            "rayVersion": "2.56.0",
+            "rayVersion": "2.58.0",
             "enableInTreeAutoscaling": False,
             "headGroupSpec": {
                 "serviceType": "NodePort",
@@ -675,7 +675,7 @@ def _ray_cluster(
                             "containers": [
                                 {
                                     "name": "ray-worker",
-                                    "image": "rayproject/ray:2.56.0-py312",
+                                    "image": "rayproject/ray:2.58.0-py312",
                                 }
                             ]
                         }
@@ -806,7 +806,7 @@ def _ray_pod(
     component: str,
     uid: str,
     *,
-    image: str = "rayproject/ray:2.56.0-py312",
+    image: str = "rayproject/ray:2.58.0-py312",
     head_sidecar: bool = False,
 ) -> dict[str, object]:
     container_name = "ray-head" if component == "head" else "ray-worker"
@@ -2369,10 +2369,10 @@ def test_ray_runtime_image_reference_requires_one_shared_named_ray_image() -> No
     rendered = cast(dict[str, Any], _ray_cluster())
     topology = normalize_ray_topology(rendered)
 
-    assert ray_runtime_image_reference(topology) == "rayproject/ray:2.56.0-py312"
+    assert ray_runtime_image_reference(topology) == "rayproject/ray:2.58.0-py312"
 
     rendered["spec"]["workerGroupSpecs"][0]["template"]["spec"]["containers"][0]["image"] = (
-        "rayproject/ray:2.56.0-py312-drift"
+        "rayproject/ray:2.58.0-py312-drift"
     )
     with pytest.raises(ValueError):
         ray_runtime_image_reference(normalize_ray_topology(rendered))
@@ -2383,9 +2383,9 @@ def test_ray_runtime_image_reference_requires_one_shared_named_ray_image() -> No
     (
         "rayproject/ray:latest",
         "rayproject/ray",
-        " rayproject/ray:2.56.0-py312",
-        "-rayproject/ray:2.56.0-py312",
-        "rayproject/ray:2.56.0-py312-\N{SNOWMAN}",
+        " rayproject/ray:2.58.0-py312",
+        "-rayproject/ray:2.58.0-py312",
+        "rayproject/ray:2.58.0-py312-\N{SNOWMAN}",
         "r" * (gate_module.MAX_RAY_IMAGE_REFERENCE_CHARACTERS + 1) + ":tag",
     ),
 )
@@ -4053,6 +4053,7 @@ def test_protocol_v2_private_target_probe_proves_exact_and_mismatch_paths(
     assert "runner._submit_target_execution(" in observed["script"]
     assert "runner._poll_target_execution_results(" in observed["script"]
     assert "probe_ray_target(" in observed["script"]
+    assert "ray_minor=58," in observed["script"]
     assert "build_ray_cluster_attestation(" in observed["script"]
     assert "RayTaskTargetExecutionEvidenceClaim(" in observed["script"]
     assert "ray_task_target_execution_evidence_digest(" in observed["script"]
@@ -6687,7 +6688,7 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
         "--entrypoint",
         "python",
         "--",
-        "rayproject/ray:2.56.0-py312",
+        "rayproject/ray:2.58.0-py312",
         "-I",
         "-S",
         "-B",
@@ -6703,7 +6704,7 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
     python_probes = [call for call in calls if call[0] == "run"]
     assert len(python_probes) == 3
     assert {call[call.index("--") + 1] for call in python_probes} == {
-        "rayproject/ray:2.56.0-py312",
+        "rayproject/ray:2.58.0-py312",
         gate.evidence.app_tag,
         gate.evidence.released_v040_image_tag,
     }

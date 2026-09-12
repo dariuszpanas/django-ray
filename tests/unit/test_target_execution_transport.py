@@ -88,7 +88,7 @@ def _install_current_target(
     caller = probe_module._RuntimeObservation(
         node_id=_NODE_ID,
         session_name=request.target_expectation.cluster_session,
-        ray_version="2.56.0",
+        ray_version="2.58.0",
         python_implementation=runtime.python_implementation,
         python_version=(
             runtime.python_major,
@@ -104,7 +104,7 @@ def _install_current_target(
         ),
     )
     monkeypatch.setattr(ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(ray, "__version__", "2.56.0")
+    monkeypatch.setattr(ray, "__version__", "2.58.0")
     monkeypatch.setattr(probe_module, "_current_caller_observation", lambda _ray: caller)
     monkeypatch.setattr(
         probe_module,

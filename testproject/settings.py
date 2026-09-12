@@ -383,7 +383,7 @@ DJANGO_RAY = {
         "ray-data": {
             "extends": "project",
             "runtime_env": {
-                "pip": ["ray[data]==2.56.0"],
+                "pip": ["ray[data]==2.58.0"],
                 "env_vars": {
                     "DJANGO_RAY_RUNTIME_ENV": "ray-data",
                     "DJANGO_RAY_DATA_INPUT_ROOT": RAY_DATA_INPUT_ROOT,

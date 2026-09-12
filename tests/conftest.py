@@ -226,7 +226,9 @@ def ray_cluster() -> Iterator[object]:
     try:
         yield ray
     finally:
-        ray.shutdown()
+        # Wait for this fixture's subprocesses before the next test starts.
+        # The admitting test runner supplies the enclosing execution deadline.
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.fixture(autouse=True)

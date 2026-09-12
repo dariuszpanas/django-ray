@@ -9,7 +9,7 @@ metadata:
     app: ray
     component: cluster
 spec:
-  rayVersion: "2.56.0"
+  rayVersion: "2.58.0"
   enableInTreeAutoscaling: false
 
   headGroupSpec:
@@ -28,7 +28,7 @@ spec:
       spec:
         containers:
           - name: ray-head
-            image: rayproject/ray:2.56.0-py312
+            image: rayproject/ray:2.58.0-py312
             imagePullPolicy: IfNotPresent
             envFrom:
               - configMapRef:
@@ -86,7 +86,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: rayproject/ray:2.56.0-py312
+              image: rayproject/ray:2.58.0-py312
               imagePullPolicy: IfNotPresent
               envFrom:
                 - configMapRef:

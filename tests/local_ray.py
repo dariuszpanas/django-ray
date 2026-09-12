@@ -37,5 +37,7 @@ def init_local_ray(
             resources=resources,
         )
     except Exception:
-        ray.shutdown()
+        # Do not let a failed startup overlap the next owned local runtime.
+        # The admitting test runner supplies the enclosing execution deadline.
+        ray.shutdown(wait_for_processes=True)
         raise

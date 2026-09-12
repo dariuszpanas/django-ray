@@ -432,7 +432,7 @@ spec:
           metadata:
             name: ray
           spec:
-            rayVersion: 2.56.0
+            rayVersion: 2.58.0
             enableInTreeAutoscaling: false
             headGroupSpec:
               serviceType: ClusterIP
@@ -460,7 +460,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-head
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m
@@ -546,7 +546,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-worker
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m
@@ -840,7 +840,7 @@ spec:
           metadata:
             name: ray
           spec:
-            rayVersion: 2.56.0
+            rayVersion: 2.58.0
             enableInTreeAutoscaling: false
             headGroupSpec:
               serviceType: ClusterIP
@@ -868,7 +868,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-head
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m
@@ -954,7 +954,7 @@ spec:
                       type: RuntimeDefault
                   containers:
                   - name: ray-worker
-                    image: rayproject/ray@sha256:22fb7f6670ee8ec3ff361dc24c515cbc7720e29ca2cc0bc1424496988bd42e53
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
                         cpu: 750m

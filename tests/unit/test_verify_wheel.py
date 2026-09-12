@@ -91,7 +91,7 @@ def test_wheel_layout_rejects_removed_private_modules(removed_module: str) -> No
         _verify_canonical_module_layout(EXPECTED_FILES | {removed_module})
 
 
-def _metadata(*, ray_requirement: str = "ray[default]>=2.56.0") -> bytes:
+def _metadata(*, ray_requirement: str = "ray[default]>=2.58.0") -> bytes:
     return (
         "Metadata-Version: 2.4\n"
         "Name: django-ray\n"
@@ -104,8 +104,8 @@ def _metadata(*, ray_requirement: str = "ray[default]>=2.56.0") -> bytes:
 def _write_distributions(
     dist_dir: Path,
     *,
-    wheel_requirement: str = "ray[default]>=2.56.0",
-    sdist_requirement: str = "ray[default]>=2.56.0",
+    wheel_requirement: str = "ray[default]>=2.58.0",
+    sdist_requirement: str = "ray[default]>=2.58.0",
 ) -> None:
     wheel = dist_dir / "django_ray-0.4.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
@@ -129,16 +129,18 @@ def test_distribution_archives_publish_the_ray_security_floor(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+@pytest.mark.parametrize("old_floor", ["2.53.0", "2.56.0", "2.57.0"])
 def test_distribution_archives_reject_a_pre_floor_ray_requirement(
     tmp_path: Path,
     artifact: str,
+    old_floor: str,
 ) -> None:
     requirements = {
-        "wheel_requirement": "ray[default]>=2.56.0",
-        "sdist_requirement": "ray[default]>=2.56.0",
+        "wheel_requirement": "ray[default]>=2.58.0",
+        "sdist_requirement": "ray[default]>=2.58.0",
     }
-    requirements[f"{artifact}_requirement"] = "ray[default]>=2.53.0"
+    requirements[f"{artifact}_requirement"] = f"ray[default]>={old_floor}"
     _write_distributions(tmp_path, **requirements)
 
-    with pytest.raises(RuntimeError, match=r"ray\[default\]>=2\.56\.0"):
+    with pytest.raises(RuntimeError, match=r"ray\[default\]>=2\.58\.0"):
         verify_distribution_archives(tmp_path, "0.4.0")

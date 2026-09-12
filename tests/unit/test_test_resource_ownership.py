@@ -84,7 +84,7 @@ def test_required_local_ray_startup_error_fails_the_fixture(monkeypatch) -> None
     monkeypatch.setattr(
         test_task_execution.ray,
         "shutdown",
-        lambda: shutdown_calls.append(True),
+        lambda *, wait_for_processes: shutdown_calls.append(wait_for_processes),
     )
 
     def fail_startup(**_kwargs: object) -> None:
