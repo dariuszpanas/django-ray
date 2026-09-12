@@ -1,0 +1,108 @@
+name: Upgrade Data Qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/upgrade-qualification.yml
+      - qualification/upgrade/**
+      - qualification/transactions/Dockerfile
+      - qualification/transactions/probe.py
+      - qualification/docker/scenario.py
+      - src/django_ray/migrations/**
+      - src/django_ray/backends.py
+      - src/django_ray/input_storage.py
+      - src/django_ray/result_storage.py
+      - pyproject.toml
+      - uv.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-data-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  data:
+    name: Upgrade Data Qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: upgrade-data-qualification
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Export exact released and candidate source archives
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          export UPGRADE_BASELINE_SOURCE="$RUNNER_TEMP/upgrade-released"
+          python -m qualification.upgrade.prepare "$UPGRADE_BASELINE_SOURCE"
+          sha256sum "$UPGRADE_BASELINE_SOURCE/source.tar" | cut -d ' ' -f 1 > "$RUNNER_TEMP/upgrade-baseline-sha256.txt"
+          source_dir="$RUNNER_TEMP/upgrade-candidate"
+          mkdir -m 755 "$source_dir"
+          git archive HEAD | tar -x -C "$source_dir"
+          export UPGRADE_EVIDENCE_DIR="$RUNNER_TEMP/upgrade-receipts"
+          mkdir -m 700 "$UPGRADE_EVIDENCE_DIR"
+          sudo chown 10001:10001 "$UPGRADE_EVIDENCE_DIR"
+          echo "UPGRADE_BASELINE_SOURCE=$UPGRADE_BASELINE_SOURCE" >> "$GITHUB_ENV"
+          echo "UPGRADE_EVIDENCE_DIR=$UPGRADE_EVIDENCE_DIR" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$source_dir/qualification/upgrade/data.yaml" >> "$GITHUB_ENV"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/upgrade-source.txt"
+
+      - name: Build the two locked installed-wheel environments
+        timeout-minutes: 12
+        run: |
+          docker compose config --quiet
+          docker compose build data
+          docker image inspect django-ray-upgrade-qualification:local --format '{{.Id}}' > "$RUNNER_TEMP/upgrade-image.txt"
+
+      - name: Rehearse SQLite and PostgreSQL preservation and independent restoration
+        run: |
+          set -o pipefail
+          timeout --signal=INT --kill-after=20s 900s \
+            docker compose run --no-deps --rm data 2>&1 |
+            tee "$RUNNER_TEMP/upgrade-execution.log"
+
+      - name: Remove owned test resources
+        if: always()
+        run: |
+          if [[ -n "$COMPOSE_FILE" ]]; then
+            docker compose down --timeout 20 --remove-orphans
+          fi
+          if [[ -n "$UPGRADE_EVIDENCE_DIR" && -d "$UPGRADE_EVIDENCE_DIR" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$UPGRADE_EVIDENCE_DIR"
+          fi
+          test -z "$(docker ps -aq --filter label=com.docker.compose.project=upgrade-data-qualification)"
+
+      - name: Match the runtime archive to the caller's exact Git export
+        run: |
+          python - "$RUNNER_TEMP/upgrade-baseline-sha256.txt" "$UPGRADE_EVIDENCE_DIR/execution-manifest.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          expected = Path(sys.argv[1]).read_text().strip()
+          manifest = json.loads(Path(sys.argv[2]).read_text())
+          assert manifest["baseline_archive_sha256"] == expected, "released archive differs from caller export"
+          PY
+
+      - name: Retain database-stage evidence and explicit remaining acceptance
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upgrade-data-qualification
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/upgrade-receipts/
+            ${{ runner.temp }}/upgrade-source.txt
+            ${{ runner.temp }}/upgrade-baseline-sha256.txt
+            ${{ runner.temp }}/upgrade-image.txt
+            ${{ runner.temp }}/upgrade-execution.log

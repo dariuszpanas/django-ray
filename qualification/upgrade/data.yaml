@@ -1,0 +1,40 @@
+# Public Compose v2 build contexts; only `data` executes the rehearsal.
+services:
+  tools:
+    build:
+      context: ../..
+      dockerfile: qualification/transactions/Dockerfile
+    entrypoint: ["true"]
+    network_mode: none
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+  data:
+    build:
+      context: ../..
+      dockerfile: qualification/upgrade/Dockerfile
+      additional_contexts:
+        tools: service:tools
+        released-source: ${UPGRADE_BASELINE_SOURCE:?Set the directory produced by qualification.upgrade.prepare}
+    image: django-ray-upgrade-qualification:${UPGRADE_IMAGE_TAG:-local}
+    command: [python, -m, qualification.upgrade.scenario]
+    user: "10001:10001"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1.0
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 128
+    stop_grace_period: 20s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m,mode=1777
+    volumes:
+      - type: bind
+        source: ../..
+        target: /workspace
+        read_only: true
+      - type: bind
+        source: ${UPGRADE_EVIDENCE_DIR:?Set an empty evidence directory writable by UID 10001}
+        target: /evidence
