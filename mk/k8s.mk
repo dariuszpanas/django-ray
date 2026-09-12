@@ -11,7 +11,7 @@
 
 KIND_CLUSTER_NAME ?= kind
 K8S_URL_SCHEME ?= http
-K8S_URL_HOST ?= localhost
+K8S_URL_HOST ?= 127.0.0.1
 K8S_WEB_PORT ?= 30080
 K8S_RAY_DASHBOARD_PORT ?= 30265
 K8S_GRAFANA_PORT ?= 30030
@@ -63,8 +63,8 @@ k8s-build:
 	docker build -f Dockerfile.ray -t django-ray-worker:latest .
 
 # Deploy to Kubernetes cluster (dev overlay)
-k8s-deploy: k8s-evaluation-warning k8s-build
-	kubectl apply -k k8s/overlays/dev
+k8s-deploy: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secret
+	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/dev
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
 	kubectl wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
@@ -76,8 +76,8 @@ k8s-deploy: k8s-evaluation-warning k8s-build
 	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with full resources (16+ CPUs, 32GB+ RAM)
-k8s-deploy-local: k8s-evaluation-warning k8s-build
-	kubectl apply -k k8s/overlays/local
+k8s-deploy-local: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secret
+	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/local
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
 	kubectl wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
@@ -89,8 +89,8 @@ k8s-deploy-local: k8s-evaluation-warning k8s-build
 	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with TLS enabled
-k8s-deploy-tls: k8s-evaluation-warning k8s-build k8s-create-tls-secret
-	kubectl apply -k k8s/overlays/dev-tls
+k8s-deploy-tls: k8s-evaluation-warning k8s-build k8s-create-tls-secret k8s-bootstrap-django-ray-secret
+	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/dev-tls
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
 	kubectl wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
@@ -164,8 +164,7 @@ k8s-deploy-kuberay-kind: k8s-evaluation-warning k8s-require-local-context k8s-pr
 	@echo ""
 	@echo "KubeRay deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls
-	@echo "  For Kong subdomain routing on Docker Desktop managed kind:"
-	@echo "    make k8s-deploy-kong-local"
+	@echo "  Open temporary loopback access with make k8s-forward-web K8S_CONTEXT=$(K8S_CONTEXT)."
 
 # Remove only package-owned workloads that are deliberately absent from the
 # co-resident profile. Retain the namespace, live Secret, and all PVCs.
@@ -178,11 +177,19 @@ k8s-delete-co-resident-superseded: k8s-evaluation-warning k8s-require-local-cont
 	kubectl --context "$(K8S_CONTEXT)" delete serviceaccount/prometheus role/prometheus-django-ray rolebinding/prometheus-django-ray -n django-ray --ignore-not-found --wait=true
 	kubectl --context "$(K8S_CONTEXT)" delete job/django-setup -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=180s
 
-# Create the local placeholder Secret only for a first install. An existing
-# Secret is never rendered or applied by the co-resident transition.
+# Generate credentials explicitly, without printing or applying them.
+.PHONY: k8s-prepare-secrets k8s-forward-web k8s-forward-ray k8s-forward-grafana k8s-forward-prometheus
+k8s-prepare-secrets:
+	python scripts/prepare_k8s_secrets.py --namespace "$(K8S_NAMESPACE)"
+
+# Preserve an existing complete set; never apply over a live Secret.
 k8s-bootstrap-django-ray-secret: k8s-evaluation-warning k8s-require-local-context
 	kubectl --context "$(K8S_CONTEXT)" apply -f k8s/base/namespace.yaml
-	@kubectl --context "$(K8S_CONTEXT)" get secret/django-ray-secret -n django-ray || kubectl --context "$(K8S_CONTEXT)" create -f k8s/base/secret.yaml
+	python scripts/prepare_k8s_secrets.py --namespace "$(K8S_NAMESPACE)" --provision-context "$(K8S_CONTEXT)"
+
+K8S_FORWARD_SECONDS ?= 900
+k8s-forward-web k8s-forward-ray k8s-forward-grafana k8s-forward-prometheus: k8s-require-local-context
+	python scripts/forward_k8s_service.py --context "$(K8S_CONTEXT)" --namespace "$(K8S_NAMESPACE)" --service $(patsubst k8s-forward-%,%,$@) --seconds "$(K8S_FORWARD_SECONDS)"
 
 # Larger application profiles must remove the bounded policy first. Kustomize
 # omission does not prune live ResourceQuota or LimitRange objects.
@@ -208,25 +215,17 @@ k8s-deploy-co-resident: k8s-evaluation-warning k8s-require-local-context k8s-pre
 	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=Ready pod -l app=ray,component=worker -n django-ray --timeout=240s
 	@echo "Co-resident KubeRay deployment complete: five steady pods, ClusterIP only."
 
-# Install Kong Gateway + Kong Ingress Controller for the local overlay
-k8s-install-kong-local: k8s-evaluation-warning k8s-require-local-context
-	helm repo add kong https://charts.konghq.com/ || true
-	helm repo update
-	helm upgrade --install $(HELM_CONTEXT_ARG) kong kong/ingress \
-		--namespace kong \
-		--create-namespace \
-		-f k8s/overlays/kong-local/kong-values.yaml
-	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/kong-controller -n kong --timeout=180s
-	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/kong-gateway -n kong --timeout=180s
+# Retired ingress installation entrypoint; keep a clear migration message.
+k8s-install-kong-local:
+	@echo "The sample no longer installs external Kong routes. Use k8s-forward-web/ray/grafana/prometheus."
+	@exit 1
 
-# Explicit cleanup for the conventional local Kong release and sample routes.
-# Verify ownership before invoking it; direct deployment never calls this target.
 k8s-uninstall-kong-local: k8s-evaluation-warning k8s-require-local-context
 	helm uninstall $(HELM_CONTEXT_ARG) kong --namespace kong --ignore-not-found --wait --timeout 180s
 	kubectl --context "$(K8S_CONTEXT)" delete ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true
 
-# Deploy KubeRay plus Kong host-based local routes
-k8s-deploy-kong-local: k8s-evaluation-warning k8s-require-local-context k8s-prepare-kuberay-kind k8s-bootstrap-django-ray-secret k8s-install-kong-local
+# Deploy the larger private KubeRay workload profile.
+k8s-deploy-kong-local: k8s-evaluation-warning k8s-require-local-context k8s-prepare-kuberay-kind k8s-bootstrap-django-ray-secret
 	$(MAKE) --no-print-directory k8s-delete-co-resident-policy K8S_CONTEXT="$(K8S_CONTEXT)"
 	$(MAKE) --no-print-directory k8s-delete-local-raycluster K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/kong-local
@@ -250,7 +249,7 @@ k8s-deploy-kong-local: k8s-evaluation-warning k8s-require-local-context k8s-prep
 	-kubectl --context "$(K8S_CONTEXT)" rollout status deployment/django-ray-worker-ml -n django-ray --timeout=180s
 	kubectl --context "$(K8S_CONTEXT)" rollout status deployment/django-ray-worker-ray-job -n django-ray --timeout=180s
 	@echo ""
-	@echo "Kong local deployment complete!"
+	@echo "Private larger-profile deployment complete; start explicit loopback forwarding."
 	@$(MAKE) --no-print-directory k8s-urls-kong
 
 # Delete KubeRay operator-based overlay resources
@@ -304,7 +303,7 @@ k8s-final-gate: k8s-evaluation-warning
 		--web-url "$(K8S_WEB_URL)" \
 		--prometheus-url "$(K8S_PROMETHEUS_URL)" $(K8S_FINAL_GATE_EXTRA_ARGS)
 
-# Print local service URLs. Override K8S_URL_HOST, K8S_URL_SCHEME, or ports for non-local clusters.
+# Print URLs for the explicitly started loopback port-forwards.
 k8s-urls:
 	@echo "=== Project URLs ==="
 	@echo Django Web:       $(K8S_WEB_URL)
@@ -314,23 +313,10 @@ k8s-urls:
 	@echo Grafana:          $(K8S_GRAFANA_URL)
 	@echo Prometheus:       $(K8S_PROMETHEUS_URL)
 	@echo ""
-	@echo Override examples:
-	@echo   make k8s-urls K8S_URL_HOST=my-load-balancer.example.com K8S_WEB_PORT=80 K8S_GRAFANA_PORT=3000 K8S_PROMETHEUS_PORT=9090
-	@echo   make k8s-urls K8S_WEB_URL=https://app.example.com K8S_RAY_DASHBOARD_URL=https://ray.example.com K8S_GRAFANA_URL=https://grafana.example.com K8S_PROMETHEUS_URL=https://prometheus.example.com
+	@echo "Start only required listeners with k8s-forward-web/ray/grafana/prometheus and an explicit K8S_CONTEXT."
 
-# Print Kong host-based local URLs. Override K8S_KONG_* variables for custom ingress hosts.
-k8s-urls-kong:
-	@echo "=== Project URLs (Kong) ==="
-	@echo Django Web:       $(K8S_KONG_WEB_URL)
-	@echo API Docs:         $(K8S_KONG_API_DOCS_URL)
-	@echo Django Admin:     $(K8S_KONG_ADMIN_URL)
-	@echo Grafana:          $(K8S_KONG_GRAFANA_URL)
-	@echo Prometheus:       $(K8S_KONG_PROMETHEUS_URL)
-	@echo Ray Dashboard:    $(K8S_KONG_RAY_DASHBOARD_URL)
-	@echo ""
-	@echo Override examples:
-	@echo   make k8s-urls-kong K8S_KONG_WEB_HOST=app.example.com K8S_KONG_GRAFANA_HOST=grafana.example.com K8S_KONG_PROMETHEUS_HOST=prometheus.example.com K8S_KONG_RAY_HOST=ray.example.com K8S_KONG_PORT=443 K8S_URL_SCHEME=https
-	@echo   make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOARD_URL=https://ray.example.com K8S_KONG_GRAFANA_URL=https://grafana.example.com K8S_KONG_PROMETHEUS_URL=https://prometheus.example.com
+# Historical alias: every local profile now uses the same private access path.
+k8s-urls-kong: k8s-urls
 
 # Complete reset - delete namespace and redeploy
 k8s-reset: k8s-evaluation-warning

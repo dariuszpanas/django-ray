@@ -16,7 +16,7 @@ k8s/
 │   ├── kustomization.yaml   # Main kustomization file
 │   ├── namespace.yaml       # Namespace definition
 │   ├── configmap.yaml       # Application config
-│   ├── secret.yaml          # Shared local/render-only Secret reference
+│   ├── secret.yaml          # Credential preparation pointer; no Secret resource
 │   ├── postgres.yaml        # PostgreSQL deployment
 │   ├── payload-storage.yaml # Evaluation-only shared rq2/input storage PVC
 │   ├── ray-cluster.yaml     # Ray head + workers
@@ -33,7 +33,7 @@ k8s/
     │   ├── kustomization.yaml
     │   └── ray-tls-secret.yaml
     ├── kuberay-kind/        # KubeRay operator overlay for local kind clusters
-    ├── kong-local/          # KubeRay + Kong local ingress overlay
+    ├── kong-local/          # Larger private KubeRay capacity profile
     └── local/               # Local development overlay
         └── kustomization.yaml
 ```
@@ -55,7 +55,7 @@ k8s/
 - kubectl configured to access your cluster
 - Docker (for building images)
 - GNU Make, if you use the `make ...` command shortcuts
-- Helm, for KubeRay or Kong operator installation targets
+- Helm, for KubeRay operator installation targets
 - kind, for `make k8s-deploy-kuberay-kind` image-loading targets
 
 ## Local Evaluation Quick Start
@@ -75,9 +75,15 @@ docker build -f Dockerfile.ray -t django-ray-worker:latest .
 
 ### 2. Deploy to Kubernetes
 
+Prepare [component-scoped local credentials](../docs/deployment/local-credentials.md) before
+deployment. Bootstrap is disabled unless explicitly requested; no tracked Secret is applied.
+
 ```bash
+python scripts/prepare_k8s_secrets.py --namespace django-ray
+make k8s-bootstrap-django-ray-secret K8S_CONTEXT=docker-desktop
+
 # Deploy using Kustomize (dev overlay)
-kubectl apply -k k8s/overlays/dev
+kubectl --context docker-desktop apply -k k8s/overlays/dev
 
 # Wait for deployments
 kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s
@@ -91,7 +97,7 @@ Or use the Makefile:
 
 ```bash
 make k8s-build    # Build images
-make k8s-deploy   # Deploy to cluster
+make k8s-deploy K8S_CONTEXT=docker-desktop   # Deploy to the explicit local cluster
 ```
 
 The evaluation base configures filesystem `INPUT_STORAGE_BACKEND` at
@@ -157,12 +163,12 @@ the isolated multi-session experiment tracked by issue #418. Its switch target
 requires an explicit `docker-desktop` or `kind-<name>` context and
 foreground-removes only the named sample workloads and routes that are absent
 from the profile. It retains the `django-ray` Namespace, the existing Secret
-values, and all three PVCs. A first install creates the checked-in local
-placeholder Secret; subsequent transitions never render it. The application
+values, and all three PVCs. A first install requires separately prepared random
+component Secrets; subsequent transitions preserve the complete set. The application
 ConfigMap remains profile-managed and is converged intentionally. A transition
 back to the direct full or Kong local profile first removes the co-resident
 application quota and LimitRange, which an ordinary Kustomize apply would
-otherwise retain. Those KubeRay profiles use the same bootstrap-only Secret
+otherwise retain. Those KubeRay profiles use the same separately provisioned Secret
 boundary and never render checked-in credentials over a live object.
 
 The direct `kuberay-kind` overlay is the laptop-oriented exploratory baseline. It
@@ -212,137 +218,44 @@ If your local kind cluster has a non-default name:
 make k8s-deploy-kuberay-kind K8S_CONTEXT=kind-my-kind KIND_CLUSTER_NAME=my-kind
 ```
 
-## Kong Ingress Controller Path
+## Larger private capacity profile
 
-To evaluate Kong as a candidate ingress, validate the ingress class locally with KubeRay plus Kong
-Ingress Controller.
-
-This path requires `helm`; the guarded target shares the KubeRay build,
-image-load, and operator prerequisites but applies only the `kong-local`
-workload render. It expects `kind` unless your environment provides an
-equivalent image-loading path. Use the target rather than a raw Kustomize apply
-so the bootstrap-only Secret, co-resident policy removal, and explicit context
-remain part of the transition.
+The historical `kong-local` name is retained for the larger web, database, and Ray resource
+profile. It no longer installs Kong or creates Ingress routes. All Services remain `ClusterIP`.
+Use the same explicit credential preparation and temporary loopback access as the direct profile.
+It retains two default task managers, dedicated sync/ML/Ray Job managers, four three-CPU Ray
+workers, the larger PostgreSQL budget, and the overload-oriented web probe configuration.
 
 ```bash
 make k8s-deploy-kong-local K8S_CONTEXT=docker-desktop
 ```
 
-This overlay:
-
-- switches `django-web-svc` from `NodePort` to `ClusterIP`
-- switches `grafana-svc`, `prometheus-svc`, and `ray-dashboard-svc` from `NodePort` to `ClusterIP`
-- sets `spec.ingressClassName: kong`
-- removes the old Traefik-specific ingress annotation
-- keeps the main Django app on the default root route
-- adds host-based Kong routes for Grafana, Prometheus, and the Ray dashboard
-- keeps two cluster-mode `django-ray-worker` replicas for `default,high-priority,low-priority`
-- adds a dedicated `django-ray-worker-sync` deployment for the `sync` queue
-- adds a dedicated `django-ray-worker-ml` deployment for the `ml` queue
-- keeps a dedicated `django-ray-worker-ray-job` deployment for the `ray-data` queue
-- keeps the main cluster-mode worker submission cap conservative for local stability:
-  - `DJANGO_RAY_CONCURRENCY=16` per worker pod in the Kong local overlay
-  - this is still below the earlier stress setting, but high enough to push the local stack harder now
-    that the web and database paths have been stabilized
-- overprovisions the local PostgreSQL pod for backlog testing:
-  - requests: `500m` CPU / `2Gi` memory
-  - limits: `2` CPU / `4Gi` memory
-  - tuned settings: `shared_buffers=1GB`, `effective_cache_size=3GB`, `work_mem=16MB`,
-    `maintenance_work_mem=256MB`, `wal_buffers=16MB`, `max_wal_size=2GB`
-- increases the local web and Ray capacity profile toward the older stress-test setup:
-  - `django-web` runs `4` replicas and uses `8` Gunicorn workers
-  - `4` fixed Ray worker pods advertise `3` CPUs each instead of `2`
-  - Ray head gets a larger memory budget for scheduling and dashboard stability
-- uses a split local web probe model aimed at overloaded containers:
-  - `startupProbe`: `GET /api/livez` to confirm Django/Gunicorn actually comes up
-  - `livenessProbe`: `exec kill -0 1` so kubelet does not restart a busy-but-alive Gunicorn master
-  - `readinessProbe`: `tcpSocket` on port `8000` so overloaded pods stay in service as long as Gunicorn is listening
-- adds container-focused Gunicorn hardening for the local web path:
-  - `/dev/shm` worker tmp dir
-  - request recycling via `max-requests` plus jitter
-  - longer timeouts for slow in-flight requests
-  - access logging disabled in the Kong local overlay to reduce stdout pressure under heavy load
-  - Gunicorn 25 control socket disabled by default for this image path because the runtime user cannot
-    create the default `gunicorn.ctl` socket in the read-only `/app` working directory
-- reduces DB pressure from observability endpoints:
-  - `/api/metrics`, `/api/executions`, and `/api/executions/stats` now aggregate task counts with grouped
-    queries instead of issuing one `COUNT(*)` query per state and per queue
-- spreads web pods across nodes with topology spreading and preferred anti-affinity to better exercise
-  local load-balancing behavior
-- sets `RAY_DASHBOARD_URL` to `http://ray.localhost:30080` so Django admin deep links match the Kong route
-- patches Ray's Grafana iframe host to `http://grafana.localhost:30080`
-- keeps Ray's Prometheus host on the in-cluster service URL (`http://prometheus-svc:9090`), which is what the Ray dashboard backend queries
-
-If you apply the Kong overlay onto an already-running `RayCluster`, recycle the Ray head pod once and
-restart the Django workers so the dashboard and cluster-mode workers reconnect cleanly:
-
-```bash
-kubectl delete pod -l app=ray,component=head -n django-ray
-kubectl wait --for=condition=Ready pod -l app=ray,component=head -n django-ray --timeout=240s
-kubectl rollout restart deployment/django-ray-worker -n django-ray
-kubectl rollout restart deployment/django-ray-worker-sync -n django-ray
-kubectl rollout restart deployment/django-ray-worker-ml -n django-ray
-kubectl rollout restart deployment/django-ray-worker-ray-job -n django-ray
-```
-
-Notes:
-
-- On Docker Desktop's managed kind cluster, `cloud-provider-kind` can publish the Kong proxy
-  `LoadBalancer` on host ports `30080/30443`, so the local entrypoint becomes `http://localhost:30080`.
-- On a plain kind cluster, host-reachable ingress still requires extra networking setup such as
-  `extraPortMappings` or `cloud-provider-kind`.
-- Mixed load profiles only reflect real queue throughput if the matching workers are deployed. The
-  Kong local overlay covers `default`, `high-priority`, `low-priority`, `sync`, `ml`, and
-  `ray-data`, but an independently designed deployment still needs queue-specific worker planning.
-- `sync` tasks are not supposed to run through Ray. They need a worker started with `--sync --queue=sync`,
-  which is why the Kong local overlay deploys a separate `django-ray-worker-sync`.
-- Because Docker Desktop managed-kind reports duplicated per-node capacity, the practical local ceiling comes
-  more from the Ray/Kubernetes limits in this overlay than from summed node allocatable values.
+Before switching an older installation, remove only its package-owned legacy ingress routes after
+reviewing ownership; Kustomize omission does not prune them. Existing controller releases may be
+shared with other workloads and are not automatically uninstalled.
 
 ### 3. Access the Application
 
-Print the URLs for the default NodePort-oriented manifests:
+Start only the needed bounded loopback forwards, each in a separate terminal:
 
 ```bash
-make k8s-urls
+make k8s-forward-web K8S_CONTEXT=docker-desktop
+make k8s-forward-ray K8S_CONTEXT=docker-desktop
+make k8s-forward-grafana K8S_CONTEXT=docker-desktop
+make k8s-forward-prometheus K8S_CONTEXT=docker-desktop
 ```
 
-With the default NodePort-oriented manifests, these are the intended service ports:
+| Service | Loopback URL | Authentication |
+|---|---|---|
+| Django Web/API | http://127.0.0.1:30080 | Operator API token or Django session |
+| Ray Dashboard | http://127.0.0.1:30265 | Ray token |
+| Grafana | http://127.0.0.1:30030 | Generated administrator account |
+| Prometheus | http://127.0.0.1:30090 | Loopback administrative access |
 
-| Service | URL | Description |
-|---------|-----|-------------|
-| Django Web/API | http://localhost:30080 | Application and REST API |
-| Swagger UI | http://localhost:30080/api/docs | API documentation |
-| Django Admin | http://localhost:30080/admin/ | Admin interface |
-| Ray Dashboard | http://localhost:30265 | Ray cluster monitoring |
-
-With the Kong local overlay on Docker Desktop's managed kind cluster, use these URLs instead:
-
-```bash
-make k8s-urls-kong
-```
-
-| Service | URL | Description |
-|---------|-----|-------------|
-| Django Web/API | http://localhost:30080 | Application and REST API through Kong |
-| Swagger UI | http://localhost:30080/api/docs | API documentation |
-| Django Admin | http://localhost:30080/admin/ | Admin interface |
-| Grafana | http://grafana.localhost:30080 | Grafana through Kong |
-| Prometheus | http://prometheus.localhost:30080 | Prometheus through Kong |
-| Ray Dashboard | http://ray.localhost:30080 | Ray dashboard through Kong |
-
-Notes:
-
-- On Docker Desktop's managed kind cluster, the direct `NodePort` services from the base/KubeRay
-  manifests are not published to the host in this setup. The Kong local overlay is the intended
-  host-access path.
-- For non-local clusters, override the printed host, scheme, ports, or full URLs. `K8S_URL_HOST`
-  changes every default NodePort host. Full URL variables such as `K8S_WEB_URL`,
-  `K8S_GRAFANA_URL`, and `K8S_PROMETHEUS_URL` are per-service overrides.
-- `*.localhost` hostnames work in modern browsers and also resolved correctly in this environment.
-- Kong Manager is not host-exposed in the stable local overlay. The local browser-access path is the
-  Kong proxy on `30080`, not a separate Kong Manager UI.
-
+Forwards bind only `127.0.0.1` and expire after 900 seconds by default; choose 1–3600 seconds with
+`K8S_FORWARD_SECONDS`. No helper forwards GCS or Ray Client. See
+[local credentials](../docs/deployment/local-credentials.md) for scoped delivery, rotation, bootstrap,
+and migration. `make k8s-urls` prints the corresponding URLs without opening listeners.
 ### 4. View Logs
 
 ```bash
@@ -393,11 +306,9 @@ production topology must address at least:
 4. **TLS, ingress, and network policy**, including certificate rotation and workload-to-workload
    authorization.
 5. **Managed PostgreSQL and durable object/storage services**, with backup and restore tests.
-6. **Externally managed, component-scoped secrets** instead of `django-ray-secret`, which combines
-   signing, API, database/bootstrap, and sample user credentials. Both the static Ray containers and
-   generic upstream KubeRay head and worker pods import every value through `envFrom`; Prometheus
-   mounts the operator token separately. This evaluation-only credential blast radius is a sample
-   hazard, not a production endorsement.
+6. **Externally managed, component-scoped secrets** with managed rotation. The sample now separates
+   operator, metrics, bootstrap, Grafana, database, and Ray tokens, but execution nodes still share
+   application database and Django signing authority. This remains an evaluation trust boundary.
 7. **Workload-derived resource policy**, quotas, autoscaling, placement, disruption budgets, and
    tenant isolation.
 8. **Backups, observability, alerting, audit access, and operational ownership** with explicit
@@ -538,8 +449,10 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DJANGO_DEPLOYMENT_MODE` | production in base, demo in local overlays | Exercises fail-closed Django settings checks; it does not certify the Kubernetes topology |
-| `DJANGO_SECRET_KEY` | placeholder in base Secret | Random value of at least 50 characters in production |
-| `DJANGO_API_TOKEN` | placeholder in base Secret | Bearer token for non-health API routes; at least 32 characters in production |
+| `DJANGO_SECRET_KEY` | generated separately | Random value of at least 50 characters in production |
+| `DJANGO_API_TOKEN` | generated separately; web only | Operator bearer token; at least 32 characters in production |
+| `DJANGO_METRICS_TOKEN` | generated separately; web and Prometheus only | Authorizes only the metrics scrape |
+| `DJANGO_API_ENABLED` | false on non-web processes | Disables API authorization outside the web process |
 | `DJANGO_DEBUG` | False | Debug mode; production rejects True |
 | `DJANGO_ALLOWED_HOSTS` | `django-ray.example.com` | Explicit comma-separated hosts; production mode rejects `*`. Keep web probe `Host` headers aligned in an independently designed deployment. |
 | `DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE` | `plaintext` | Format for new durable RuntimeEnv snapshots; the local KubeRay overlay selects `encrypted` only on Django application containers |
@@ -571,7 +484,7 @@ For more details, see the [Ray TLS documentation](https://docs.ray.io/en/latest/
 
 The base keeps `DJANGO_DEPLOYMENT_MODE=production` only to exercise fail-closed testproject settings;
 that value does not make its static Ray Deployments, mutable images, bundled services, sample
-identity paths, or shared Secret production-ready. The `dev`, `local`, `dev-tls`, `kuberay-kind`,
+identity paths, or runtime credential boundary production-ready. The `dev`, `local`, `dev-tls`, `kuberay-kind`,
 and `kong-local` overlays switch to `demo` for trusted local use. Only `/api/livez`, `/api/readyz`,
 and `/api/health` are public; send `Authorization: Bearer $DJANGO_API_TOKEN` for all other local
 sample API requests, including metrics and workflow/log observability.

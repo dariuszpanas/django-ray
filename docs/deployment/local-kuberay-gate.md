@@ -190,8 +190,8 @@ Ray workers for its heavier backlog/capacity role.
   generic Ray head and workers mount it read-only.
 - The KubeRay CRD and operator already installed. The gate deliberately does not install or mutate
   cluster-wide operators.
-- The local access path already exposed, either through the direct NodePorts or the documented Kong
-  local routes.
+- Time-bounded loopback forwards to Django and Prometheus already running. See
+  [local access and credentials](local-credentials.md); the overlay exposes no NodePort or Ingress.
 - A `django-ray-secret` in `django-ray`. During preflight, the gate reads `DJANGO_API_TOKEN` through a
   sensitive-output-suppressed command path and accepts only 32-512 characters from the Bearer
   `token68` alphabet (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`, `+`, and `/`) with at most two
@@ -200,8 +200,11 @@ Ray workers for its heavier backlog/capacity role.
   padding are rejected. The gate immediately registers the token,
   Kubernetes base64 value, and their JSON-, repr-, and URL-escaped forms with the output redactor. It
   treats percent-escape hex case as equivalent, never prints the token, and never places it in a
-  subprocess argument. The rendered placeholder Secret is intentionally excluded from apply so an
-  existing conforming local token is preserved.
+  subprocess argument. All eight component Secrets must already exist; no Secret is rendered or
+  applied. The gate captures and later compares every complete Secret data mapping, including Ray,
+  database, signing, bootstrap, Grafana, demo, and metrics credentials. It submits the bounded
+  complex-workflow demo using `DJANGO_DEMO_TOKEN`; reads and lifecycle calls retain the operator
+  token. The local KubeRay web profile explicitly enables demos; production remains disabled.
 - Static bearer/basic-auth, auth-provider, private-key, and sensitive exec argument/environment
   values embedded in the private kubeconfig snapshot are registered with the same redactor before
   the first snapshot-backed Kubernetes command. The snapshot command itself suppresses captured
@@ -233,12 +236,12 @@ uv run make k8s-final-gate-preflight `
   K8S_RAY_RESTART=required
 ```
 
-The gate renders and owns the `kuberay-kind` overlay, so its HTTP acceptance boundary is the
-direct NodePort pair: Django at `http://localhost:30080` and Prometheus at
-`http://localhost:30090`. Keep those defaults unless the same services are already exposed through
-equivalent reviewed local routes. In particular, `http://prometheus.localhost:30080` belongs to the
-optional, independently deployed `kong-local` overlay. Without that Prometheus ingress, port `30080`
-routes to Django and the Prometheus `/api/v1/targets` request returns HTTP 404.
+The gate renders and owns the `kuberay-kind` overlay. Its HTTP acceptance boundary is the
+loopback-forward pair: Django at `http://127.0.0.1:30080` and Prometheus at
+`http://127.0.0.1:30090`. Run `make k8s-forward-web` and `make k8s-forward-prometheus` with the
+explicit context in separate terminals. Allow enough time using `K8S_FORWARD_SECONDS` (at most
+3600); a forward that expires or loses its backing pod must be restarted explicitly before rerunning
+the affected gate. Forwarding grants no resource admission and bypasses no API authentication.
 
 For a plain Kind cluster, the context encodes the cluster name. The optional override must match it:
 
@@ -338,7 +341,16 @@ The gate performs these bounded layers:
    unexpected-container resources remain immediate failures rather than retryable rollout state.
 7. Strictly rechecks that converged application topology without polling and verifies the full named
     init/regular container image and runtime image-ID set. This prevents a terminating or old-image
-    pod from being omitted from final evidence. Before any probe, authenticated task, or rq2
+    pod from being omitted from final evidence. The `authentication` layer runs fresh, read-only
+    processes in the existing authorized default manager and the verified Ray head's Grafana
+    importer. Ray Dashboard/Jobs must return their exact missing-token `401` and invalid-token `403`
+    responses, and accept the configured token. Raw Ray Client/GCS RPCs require token-specific
+    `UNAUTHENTICATED` responses and successful authorized reads; explicit metadata avoids cached
+    credentials and GCS wrong-cluster errors cannot count as token denial. Grafana search must
+    reject anonymous access and a bad password, while its user endpoint must identify the configured
+    administrator. No connection error, timeout, redirect, or incomplete receipt passes. Only complete
+    receipts set `ray_auth_boundary_verified` and `grafana_auth_boundary_verified`.
+    Before authenticated task or rq2
     submission, a separate `protocol-handoff-recovery` layer removes only an exact interrupted
     released-manager Deployment/lease or reserved protocol fixture, restores the current Ray Job
     manager replica, and rejects missing ownership, foreign residue, an orphan live lease, or
@@ -577,7 +589,7 @@ The runtime block records:
   plan, null legacy progress and detail revisions, zero retained detail rows, and no advertised
   admin action;
 - probe path/Host, web restart count, and Prometheus pool counts;
-- the preservation statement. The full base64 `django-ray-secret.data` mapping is digested privately
+- the preservation statement. The full base64 data mapping of every component Secret is digested privately
   during preflight and compared again immediately before evidence; neither digest nor Secret value is
   emitted.
 
@@ -649,7 +661,7 @@ final-gate evidence.
 ## Failure diagnostics and recovery
 
 Failures are labeled by layer: `preflight`, `images`, `apply`, `setup`, `workloads`, `ray`, `rollouts`,
-`app-convergence`, `image-identity`, `protocol-handoff-recovery`, `runtime-env`, `probes`,
+`app-convergence`, `image-identity`, `authentication`, `protocol-handoff-recovery`, `runtime-env`, `probes`,
 `api-smoke`, `ray-job-request-reference`, `protocol-handoff`, `runtime-env-encryption`,
 `workflow-progress`, `workflow-admin`, `prometheus`, or
 `final-identity`. After a Kubernetes mutation,
@@ -669,7 +681,7 @@ use `k8s-reset`, delete the namespace, delete PostgreSQL, delete a PVC, prune Do
 local images. The gate itself never performs those actions. It only:
 
 - applies namespace-confined prerequisites first and defers application/Ray workloads until setup;
-- preserves the existing `Secret/django-ray-secret` rather than applying its checked-in placeholder;
+- preserves all eight existing component Secrets without rendering or applying credentials;
 - rolls the namespaced Prometheus Deployment so target checks use the applied configuration;
 - deletes/recreates `Job/django-setup` with bounded waits;
 - optionally deletes individually verified `RayCluster/ray` head/worker pod names with a bounded
