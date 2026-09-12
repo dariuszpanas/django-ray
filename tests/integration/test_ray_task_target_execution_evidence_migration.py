@@ -45,7 +45,7 @@ from django_ray.target.execution_evidence import (
 
 MIGRATE_FROM = [("django_ray", "0025_ray_worker_target_capabilities")]
 MIGRATE_TO = [("django_ray", "0026_ray_task_target_execution_evidence")]
-LATEST = MIGRATE_TO
+LATEST = [("django_ray", "0030_cohort_claims")]
 
 _DIGEST_A = f"sha256:{'a' * 64}"
 _DIGEST_B = f"sha256:{'b' * 64}"
@@ -75,6 +75,7 @@ def _create_lineage(
     execution_protocol_version: int = 2,
     capability_precedes_lease: bool = False,
     identity_text: str | None = None,
+    binding_model: type[RayTaskTargetBinding] = RayTaskTargetBinding,
 ) -> _Lineage:
     now = timezone.now().astimezone(UTC).replace(microsecond=123456)
     observed_at = now - timedelta(seconds=20)
@@ -158,13 +159,13 @@ def _create_lineage(
         target_policy=policy,
         created_at=observed_at,
     )
-    binding = RayTaskTargetBinding.objects.create(
-        execution=execution,
-        target_policy=policy,
+    binding = binding_model.objects.create(
+        execution_id=execution.pk,
+        target_policy_id=policy.pk,
         created_at=observed_at,
     )
     selection = RayTaskTargetRouteSelection.objects.create(
-        binding=binding,
+        binding_id=binding.pk,
         route_revision=route_revision,
         created_at=observed_at,
     )
@@ -792,7 +793,10 @@ def test_migration_is_additive_and_reverse_refuses_retained_evidence() -> None:
         ).objects.exists()
         assert old_execution.objects.filter(pk=legacy.pk).exists()
 
-        lineage = _create_lineage(suffix="reverse")
+        lineage = _create_lineage(
+            suffix="reverse",
+            binding_model=new_apps.get_model("django_ray", "RayTaskTargetBinding"),
+        )
         evidence = _create_evidence(lineage)
         with pytest.raises(RuntimeError, match="both tables to be empty"):
             MigrationExecutor(connection).migrate(MIGRATE_FROM)

@@ -91,6 +91,4 @@ def test_summary_fields_are_additive_nullable_and_reversible() -> None:
             == legacy_progress
         )
     finally:
-        MigrationExecutor(connection).migrate(
-            [("django_ray", "0026_ray_task_target_execution_evidence")]
-        )
+        MigrationExecutor(connection).migrate([("django_ray", "0030_cohort_claims")])

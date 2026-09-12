@@ -31,6 +31,7 @@ from django_ray.target.attestation import (
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,
 )
+from django_ray.target.cohort_intent import COHORT_INTENT_SCHEMA_VERSION, CohortSelectionPolicy
 
 _SHA256_HEX_VALIDATOR = RegexValidator(
     regex=r"^[0-9a-f]{64}$",
@@ -81,6 +82,10 @@ RAY_TASK_TARGET_ROUTE_SELECTION_SCHEMA_VERSION = 1
 RAY_TASK_TARGET_EXECUTION_EVIDENCE_SCHEMA_VERSION = 1
 RAY_WORKER_TARGET_CAPABILITY_SCHEMA_VERSION = 1
 RAY_JOB_WORKER_TARGET_CAPABILITY_LIMIT = 64
+RAY_TARGET_PROBE_CHALLENGE_SCHEMA_VERSION = 1
+RAY_TARGET_PROBE_CHALLENGE_MAX_TTL_SECONDS = 600
+RAY_TARGET_PROBE_JOB_REQUEST_MAX_BYTES = 8 * 1024
+RAY_TARGET_PROBE_JOB_RECEIPT_MAX_BYTES = RAY_CLUSTER_ATTESTATION_MAX_BYTES + 16 * 1024
 
 
 class TaskState(models.TextChoices):
@@ -1860,6 +1865,231 @@ class RayWorkerTargetCapability(models.Model):
         return f"lease {self.lease_id} target {self.target_id} revision {self.revision}"
 
 
+class RayTargetProbeChallenge(models.Model):
+    """One pending or consumed discovery challenge for an exact lease/config slot.
+
+    This private, ephemeral record is not target eligibility or attestation.
+    Replacement rotates the nonce digest under CAS; consumption is one-shot.
+    Lease shutdown or incarnation replacement discards these records.
+    """
+
+    lease = models.ForeignKey(
+        TaskWorkerLease, on_delete=models.CASCADE, related_name="ray_target_probe_challenges"
+    )
+    lease_hostname = models.CharField(max_length=255, editable=False)
+    lease_pid = models.PositiveIntegerField(editable=False)
+    lease_started_at = models.DateTimeField(editable=False)
+    expected_target_policy = models.ForeignKey(
+        RayTargetPolicyRevision,
+        on_delete=models.PROTECT,
+        related_name="probe_challenges",
+        editable=False,
+        null=True,
+    )
+    runner_family = models.CharField(
+        max_length=16,
+        choices=[(family.value, family.value) for family in RayRunnerFamily],
+        editable=False,
+    )
+    configuration_digest = models.CharField(
+        max_length=71, validators=[_TAGGED_SHA256_HEX_VALIDATOR], editable=False
+    )
+    nonce_digest = models.CharField(
+        max_length=64, unique=True, validators=[_SHA256_HEX_VALIDATOR], editable=False
+    )
+    schema_version = models.PositiveSmallIntegerField(
+        default=RAY_TARGET_PROBE_CHALLENGE_SCHEMA_VERSION,
+        db_default=RAY_TARGET_PROBE_CHALLENGE_SCHEMA_VERSION,
+        editable=False,
+    )
+    revision = models.PositiveBigIntegerField(editable=False)
+    issued_at = models.DateTimeField(editable=False)
+    expires_at = models.DateTimeField(editable=False)
+    consumed_at = models.DateTimeField(null=True, editable=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("lease", "configuration_digest"), name="ray_tprobe_lease_config_uniq"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(schema_version=RAY_TARGET_PROBE_CHALLENGE_SCHEMA_VERSION),
+                name="ray_tprobe_schema_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    runner_family__in=tuple(family.value for family in RayRunnerFamily)
+                ),
+                name="ray_tprobe_family_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    revision__gte=1, revision__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER
+                ),
+                name="ray_tprobe_revision_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(lease_pid__gte=1, lease_pid__lte=_POSITIVE_INTEGER_MAX),
+                name="ray_tprobe_pid_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    issued_at__gte=models.F("lease_started_at"),
+                    expires_at__gt=models.F("issued_at"),
+                    expires_at__lte=models.F("issued_at")
+                    + timedelta(seconds=RAY_TARGET_PROBE_CHALLENGE_MAX_TTL_SECONDS),
+                ),
+                name="ray_tprobe_time_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(consumed_at__isnull=True)
+                | models.Q(
+                    consumed_at__gte=models.F("issued_at"),
+                    consumed_at__lt=models.F("expires_at"),
+                ),
+                name="ray_tprobe_consumed_valid",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"lease {self.lease_id} probe {self.pk} revision {self.revision}"
+
+
+class RayTargetProbeJobReceipt(models.Model):
+    """Ephemeral immutable Jobs reservation with one optional verifier receipt.
+
+    The manager reserves the exact request before submission. A receipt records
+    an observation only; it neither consumes the manager-only challenge nonce
+    nor advertises target capability. Challenge replacement removes this row.
+    """
+
+    challenge = models.OneToOneField(
+        RayTargetProbeChallenge,
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="job_receipt",
+        editable=False,
+    )
+    challenge_revision = models.PositiveBigIntegerField(editable=False)
+    request_json = models.TextField(
+        editable=False, validators=[MaxLengthValidator(RAY_TARGET_PROBE_JOB_REQUEST_MAX_BYTES)]
+    )
+    request_digest = models.CharField(
+        max_length=71, editable=False, validators=[_TAGGED_SHA256_HEX_VALIDATOR]
+    )
+    ray_address = models.CharField(max_length=2048, editable=False)
+    submission_id = models.CharField(max_length=88, editable=False)
+    entrypoint_digest = models.CharField(
+        max_length=71, editable=False, validators=[_TAGGED_SHA256_HEX_VALIDATOR]
+    )
+    submitted_runtime_env_digest = models.CharField(
+        max_length=71, editable=False, validators=[_TAGGED_SHA256_HEX_VALIDATOR]
+    )
+    reserved_at = models.DateTimeField(editable=False)
+    receipt_json = models.TextField(
+        null=True,
+        editable=False,
+        validators=[MaxLengthValidator(RAY_TARGET_PROBE_JOB_RECEIPT_MAX_BYTES)],
+    )
+    receipt_digest = models.CharField(
+        max_length=71, null=True, editable=False, validators=[_TAGGED_SHA256_HEX_VALIDATOR]
+    )
+    received_at = models.DateTimeField(null=True, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    challenge_revision__gte=1,
+                    challenge_revision__lte=RAY_TARGET_ATTESTATION_MAX_COUNTER,
+                ),
+                name="ray_tprobe_job_revision_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    receipt_json__isnull=True,
+                    receipt_digest__isnull=True,
+                    received_at__isnull=True,
+                )
+                | models.Q(
+                    receipt_json__isnull=False,
+                    receipt_digest__isnull=False,
+                    received_at__isnull=False,
+                    received_at__gte=models.F("reserved_at"),
+                ),
+                name="ray_tprobe_job_receipt_valid",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"probe {self.challenge_id} Jobs reservation revision {self.challenge_revision}"
+
+
+class RayTaskCohortIntent(models.Model):
+    """Immutable producer declaration for one protocol-3 execution.
+
+    Finite admission configuration is indexed separately from the task's
+    original logical RuntimeEnv observation. Neither selects a runner or proves
+    that an address identifies a verified cluster. There is no backfill or
+    active producer until the complete cohort execution path is enabled.
+    """
+
+    execution = models.OneToOneField(
+        RayTaskExecution,
+        on_delete=models.PROTECT,
+        related_name="cohort_intent",
+        primary_key=True,
+        editable=False,
+    )
+    schema_version = models.PositiveSmallIntegerField(
+        default=COHORT_INTENT_SCHEMA_VERSION,
+        db_default=COHORT_INTENT_SCHEMA_VERSION,
+        editable=False,
+    )
+    package_version = models.CharField(max_length=128, editable=False)
+    backend_alias = models.CharField(max_length=128, editable=False)
+    configuration_digest = models.CharField(
+        max_length=71, validators=[_TAGGED_SHA256_HEX_VALIDATOR], editable=False
+    )
+    runtime_env_identity_digest = models.CharField(
+        max_length=71, validators=[_TAGGED_SHA256_HEX_VALIDATOR], editable=False
+    )
+    selection_policy = models.CharField(
+        max_length=16,
+        choices=[(policy.value, policy.value) for policy in CohortSelectionPolicy],
+        editable=False,
+    )
+    created_at = models.DateTimeField(editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(schema_version=COHORT_INTENT_SCHEMA_VERSION),
+                name="ray_cintent_schema_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    selection_policy__in=tuple(p.value for p in CohortSelectionPolicy)
+                ),
+                name="ray_cintent_selection_valid",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=(
+                    "configuration_digest",
+                    "package_version",
+                    "backend_alias",
+                    "selection_policy",
+                ),
+                name="ray_cintent_claim_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"execution {self.execution_id} cohort intent"
+
+
 class RayTaskTargetBinding(models.Model):
     """Dormant immutable target expectation selected for one task.
 
@@ -1878,6 +2108,7 @@ class RayTaskTargetBinding(models.Model):
     target_policy = models.ForeignKey(
         RayTargetPolicyRevision,
         on_delete=models.PROTECT,
+        null=True,
         related_name="task_target_bindings",
         editable=False,
         help_text="Immutable Ray target policy revision selected for this task",
@@ -1888,16 +2119,53 @@ class RayTaskTargetBinding(models.Model):
         editable=False,
         validators=[
             MinValueValidator(RAY_TASK_TARGET_BINDING_SCHEMA_VERSION),
-            MaxValueValidator(RAY_TASK_TARGET_BINDING_SCHEMA_VERSION),
+            MaxValueValidator(2),
         ],
         help_text="Schema version for this dormant task target binding",
     )
     created_at = models.DateTimeField(default=timezone.now, editable=False)
+    runner_family = models.CharField(max_length=16, null=True, editable=False)
+    package_version = models.CharField(max_length=128, null=True, editable=False)
+    sync_python_implementation = models.CharField(max_length=64, null=True, editable=False)
+    sync_python_major = models.PositiveBigIntegerField(null=True, editable=False)
+    sync_python_minor = models.PositiveBigIntegerField(null=True, editable=False)
+    sync_python_patch = models.PositiveBigIntegerField(null=True, editable=False)
 
     class Meta:
         constraints = [
             models.CheckConstraint(
-                condition=models.Q(schema_version=RAY_TASK_TARGET_BINDING_SCHEMA_VERSION),
+                condition=(
+                    models.Q(
+                        schema_version=1,
+                        target_policy__isnull=False,
+                        runner_family__isnull=True,
+                        package_version__isnull=True,
+                        sync_python_implementation__isnull=True,
+                        sync_python_major__isnull=True,
+                        sync_python_minor__isnull=True,
+                        sync_python_patch__isnull=True,
+                    )
+                    | models.Q(
+                        schema_version=2,
+                        runner_family="sync",
+                        target_policy__isnull=True,
+                        package_version__isnull=False,
+                        sync_python_implementation__isnull=False,
+                        sync_python_major__gte=1,
+                        sync_python_minor__gte=0,
+                        sync_python_patch__gte=0,
+                    )
+                    | models.Q(
+                        schema_version=2,
+                        runner_family__in=("ray_core", "ray_job"),
+                        target_policy__isnull=False,
+                        package_version__isnull=False,
+                        sync_python_implementation__isnull=True,
+                        sync_python_major__isnull=True,
+                        sync_python_minor__isnull=True,
+                        sync_python_patch__isnull=True,
+                    )
+                ),
                 name="ray_tbinding_schema_valid",
             )
         ]
@@ -1906,6 +2174,76 @@ class RayTaskTargetBinding(models.Model):
 
     def __str__(self) -> str:
         return f"execution {self.execution_id} target policy {self.target_policy_id}"
+
+
+class RayTaskCohortClaim(models.Model):
+    """Protocol-3 immutable facts with separately fenced mutable disposition.
+
+    Lease and capability facts are snapshots, so owner adoption and ordinary
+    lease cleanup cannot rewrite or remove original claim provenance. This
+    private ledger has no production claim or lifecycle caller yet.
+    """
+
+    binding = models.ForeignKey(
+        RayTaskTargetBinding,
+        on_delete=models.PROTECT,
+        related_name="cohort_claims",
+        editable=False,
+    )
+    attempt_number = models.PositiveIntegerField(editable=False)
+    execution_generation = models.PositiveBigIntegerField(editable=False)
+    facts_json = models.TextField(editable=False)
+    facts_digest = models.CharField(max_length=71, editable=False)
+    owner_lease_id = models.CharField(max_length=255, editable=False)
+    owner_lease_hostname = models.CharField(max_length=255, editable=False)
+    owner_lease_pid = models.PositiveIntegerField(editable=False)
+    owner_lease_started_at = models.DateTimeField(editable=False)
+    target_policy = models.ForeignKey(
+        RayTargetPolicyRevision,
+        on_delete=models.PROTECT,
+        null=True,
+        related_name="cohort_claims",
+        editable=False,
+    )
+    claim_attestation = models.ForeignKey(
+        RayTargetAttestationRevision,
+        on_delete=models.PROTECT,
+        null=True,
+        related_name="cohort_claims",
+        editable=False,
+    )
+    claimed_at = models.DateTimeField(editable=False)
+    disposition = models.CharField(max_length=8, default="OPEN", db_default="OPEN")
+    revision = models.PositiveBigIntegerField(default=1, db_default=1)
+    prepared_request_digest = models.CharField(max_length=71, null=True, editable=False)
+    prepared_at = models.DateTimeField(null=True, editable=False)
+    dispatched_at = models.DateTimeField(null=True, editable=False)
+    hold_reason = models.CharField(max_length=32, null=True, editable=False)
+    hold_boundary = models.CharField(max_length=8, null=True, editable=False)
+    hold_application_invoked = models.BooleanField(null=True, editable=False)
+    hold_evidence_digest = models.CharField(max_length=71, null=True, editable=False)
+    held_at = models.DateTimeField(null=True, editable=False)
+    resolution_kind = models.CharField(max_length=32, null=True, editable=False)
+    resolution_digest = models.CharField(max_length=71, null=True, editable=False)
+    resolved_at = models.DateTimeField(null=True, editable=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("binding", "attempt_number", "execution_generation"),
+                name="ray_cclaim_generation_uniq",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    attempt_number__gte=1,
+                    attempt_number__lte=_POSITIVE_INTEGER_MAX,
+                    execution_generation__gte=1,
+                    revision__gte=1,
+                    disposition__in=("OPEN", "HELD", "RESOLVED"),
+                ),
+                name="ray_cclaim_counters_valid",
+            ),
+        ]
 
 
 class RayTargetRoute(models.Model):

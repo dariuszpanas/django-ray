@@ -29,11 +29,28 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/management/commands/django_ray_protocol_status.py" in EXPECTED_FILES
     assert "django_ray/runner/ray_job.py" in EXPECTED_FILES
     assert "django_ray/runtime/entrypoint.py" in EXPECTED_FILES
+    assert "django_ray/runtime/cohort_job.py" in EXPECTED_FILES
+    assert "django_ray/runtime/cohort_job_entrypoint.py" in EXPECTED_FILES
+    assert "django_ray/runtime_env_transport.py" in EXPECTED_FILES
 
     assert EXPECTED_TARGET_MODULE_FILES == {
         "django_ray/target/__init__.py",
         "django_ray/target/attestation.py",
         "django_ray/target/capabilities.py",
+        "django_ray/target/cohort_claim.py",
+        "django_ray/target/cohort_claim_storage.py",
+        "django_ray/target/cohort_contract.py",
+        "django_ray/target/cohort_intent.py",
+        "django_ray/target/cohort_intent_storage.py",
+        "django_ray/target/cohort_job_control.py",
+        "django_ray/target/cohort_job_http.py",
+        "django_ray/target/cohort_job_receipt.py",
+        "django_ray/target/cohort_job_receipt_storage.py",
+        "django_ray/target/cohort_probe.py",
+        "django_ray/target/cohort_probe_challenges.py",
+        "django_ray/target/cohort_publication.py",
+        "django_ray/target/cohort_runtime.py",
+        "django_ray/target/cohort_transport.py",
         "django_ray/target/coordination.py",
         "django_ray/target/execution_codec.py",
         "django_ray/target/execution_evidence.py",
@@ -70,10 +87,33 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/migrations/0024_ray_target_routes.py" in EXPECTED_FILES
     assert "django_ray/migrations/0025_ray_worker_target_capabilities.py" in EXPECTED_FILES
     assert "django_ray/migrations/0026_ray_task_target_execution_evidence.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0027_ray_target_probe_challenges.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0028_ray_task_cohort_intent.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0029_cohort_job_receipts.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0030_cohort_claims.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0026_ray_task_target_execution_evidence",
+        "0030_cohort_claims",
     )
+
+
+def test_source_package_matches_installed_wheel_layout_contract() -> None:
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    files = {
+        path.relative_to(source_root).as_posix()
+        for path in (source_root / "django_ray").rglob("*.py")
+    }
+    _verify_canonical_module_layout(files)
+    assert {path for path in EXPECTED_FILES if path.endswith(".py")} <= files
+
+
+def test_source_migration_graph_matches_installed_wheel_leaf_without_database() -> None:
+    from django.db.migrations.loader import MigrationLoader
+
+    # Loading from disk with no connection catches new leaves and divergent
+    # branches without creating a database or running a migration on the host.
+    graph = MigrationLoader(None).graph
+    assert set(graph.leaf_nodes("django_ray")) == {EXPECTED_MIGRATION_LEAF}
 
 
 @pytest.mark.parametrize(

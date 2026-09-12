@@ -291,7 +291,9 @@ def test_dormant_task_target_binding_has_no_production_consumer() -> None:
         "src/django_ray/migrations/0023_ray_task_target_binding.py",
         "src/django_ray/migrations/0024_ray_target_routes.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
+        "src/django_ray/migrations/0030_cohort_claims.py",
         "src/django_ray/models.py",
+        "src/django_ray/target/cohort_claim_storage.py",
     }
 
 
@@ -361,7 +363,8 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "Row presence alone is never claim authority" in row
     assert "Policy and attestation revisions remain the audit history" in row
     assert "future generations or attempts must archive their own observed tuple" in row
-    assert "Ray Job capability APIs remain unsupported" in row
+    assert "Standalone Ray Job capability APIs remain unsupported" in row
+    assert "current-cohort publisher uses its own authenticated pre-Django proof channel" in row
     assert "supported Admin inactive-lease cleanup" in row
     assert "KubeRay remains not applicable because no production producer can create" in row
     assert "production activation requires every affected scenario gate" in row
@@ -382,17 +385,21 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
 
 def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
     production_root = ROOT / "src" / "django_ray"
+    model_pattern = re.compile(r"\bRayWorkerTargetCapability\b")
     references = {
         path.relative_to(ROOT).as_posix()
         for path in production_root.rglob("*.py")
-        if "RayWorkerTargetCapability" in path.read_text(encoding="utf-8")
+        if model_pattern.search(path.read_text(encoding="utf-8"))
     }
 
     assert references == {
         "src/django_ray/migrations/0025_ray_worker_target_capabilities.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
+        "src/django_ray/migrations/0030_cohort_claims.py",
         "src/django_ray/models.py",
         "src/django_ray/target/capabilities.py",
+        "src/django_ray/target/cohort_claim_storage.py",
+        "src/django_ray/target/cohort_publication.py",
     }
 
     coordinator_symbols = (
@@ -406,7 +413,39 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
             for path in production_root.rglob("*.py")
             if symbol in path.read_text(encoding="utf-8")
         }
-        assert callers == {"src/django_ray/target/capabilities.py"}
+        expected = {"src/django_ray/target/capabilities.py"}
+        if symbol == "advertise_ray_worker_target_capability":
+            expected.add("src/django_ray/target/cohort_publication.py")
+        assert callers == expected
+
+    # Dormant binding/claim services are not yet called from worker lifecycle
+    # paths; changing that boundary requires the affected deployed scenarios.
+    claim_symbols = (
+        "claim_cohort_execution",
+        "adopt_cohort_claim",
+        "prepare_cohort_claim",
+        "mark_cohort_claim_dispatched",
+        "hold_cohort_claim",
+        "resolve_cohort_claim",
+    )
+    for symbol in claim_symbols:
+        callers = {
+            path.relative_to(ROOT).as_posix()
+            for path in production_root.rglob("*.py")
+            if symbol in path.read_text(encoding="utf-8")
+        }
+        assert callers == {"src/django_ray/target/cohort_claim_storage.py"}
+
+    # The private publisher may write capability, but it has no production
+    # manager, enqueue, claim, recovery, or cancellation caller yet.
+    publication_symbols = ("publish_core_cohort_probe", "publish_cohort_job_probe")
+    for symbol in publication_symbols:
+        callers = {
+            path.relative_to(ROOT).as_posix()
+            for path in production_root.rglob("*.py")
+            if symbol in path.read_text(encoding="utf-8")
+        }
+        assert callers == {"src/django_ray/target/cohort_publication.py"}
 
 
 def test_protocol_v2_evidence_has_no_production_persistence_consumer() -> None:

@@ -19,6 +19,7 @@ from io import StringIO
 from typing import Any, cast
 
 from django_ray.execution_protocol import (
+    COHORT_EXECUTION_PROTOCOL_VERSION,
     LEGACY_EXECUTION_PROTOCOL_VERSION,
     SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     ExecutionProtocolRange,
@@ -235,6 +236,7 @@ class ExecutionRequest:
     runtime_env_hash: str
     runtime_env_plan_identity: dict[str, Any]
     compiled_graph_submission_transport: str | None
+    cohort_contract_json: str | None = None
 
 
 class NestedExecutionBoundaryKind(StrEnum):
@@ -284,6 +286,7 @@ class NestedExecutionRequest:
     runtime_env_plan_digest: str
     runtime_env_transport_digest: str
     output_preview_callable_path: str | None = None
+    cohort_leaf_contract_json: str | None = None
 
 
 class ExecutionRequestRejection(StrEnum):
@@ -1390,7 +1393,12 @@ def _decode_versioned_execution_request(
     expected_identity: ExecutionIdentity | None,
     expected_execution_protocol_version: int | None,
 ) -> ExecutionRequest:
-    if not isinstance(value, dict) or set(value) != _REQUEST_KEYS:
+    expected_keys = _REQUEST_KEYS
+    if isinstance(value, dict) and value.get("execution_protocol_version") == (
+        COHORT_EXECUTION_PROTOCOL_VERSION
+    ):
+        expected_keys = expected_keys | {"cohort_contract_json"}
+    if not isinstance(value, dict) or set(value) != expected_keys:
         _reject_request(
             ExecutionRequestRejection.INVALID_VERSIONED,
             attempted_versioned=True,
@@ -1450,6 +1458,13 @@ def _decode_versioned_execution_request(
 
     try:
         body = _normalize_request_body(value)
+        if protocol == COHORT_EXECUTION_PROTOCOL_VERSION:
+            from django_ray.target.cohort_contract import decode_cohort_execution_contract
+
+            decode_cohort_execution_contract(
+                value["cohort_contract_json"], expected_identity=identity
+            )
+            body["cohort_contract_json"] = value["cohort_contract_json"]
         canonical = _bounded_json_dumps(
             value,
             sort_keys=True,
@@ -1507,6 +1522,13 @@ def decode_execution_request(
 
 def encode_execution_request(request: ExecutionRequest) -> str:
     """Encode one exact canonical versioned-v1 execution request."""
+    return _encode_execution_request_for_protocols(request, SUPPORTED_EXECUTION_PROTOCOL_RANGE)
+
+
+def _encode_execution_request_for_protocols(
+    request: ExecutionRequest, supported_protocols: ExecutionProtocolRange
+) -> str:
+    """Private codec seam; it does not expand ordinary producer capability."""
     try:
         if not isinstance(request, ExecutionRequest):
             raise ValueError
@@ -1514,7 +1536,7 @@ def encode_execution_request(request: ExecutionRequest) -> str:
         if (
             not _valid_identity_shape(identity)
             or type(request.execution_protocol_version) is not int
-            or not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(request.execution_protocol_version)
+            or not supported_protocols.supports(request.execution_protocol_version)
         ):
             raise ValueError
         value = {
@@ -1535,6 +1557,10 @@ def encode_execution_request(request: ExecutionRequest) -> str:
             "runtime_env_plan_identity": request.runtime_env_plan_identity,
             "compiled_graph_submission_transport": (request.compiled_graph_submission_transport),
         }
+        if request.execution_protocol_version == COHORT_EXECUTION_PROTOCOL_VERSION:
+            value["cohort_contract_json"] = request.cohort_contract_json
+        elif request.cohort_contract_json is not None:
+            raise ValueError
         _normalize_request_body(value)
         _validate_json_tree(
             value,
@@ -1557,7 +1583,7 @@ def encode_execution_request(request: ExecutionRequest) -> str:
             sort_keys=True,
             max_bytes=EXECUTION_REQUEST_MAX_BYTES,
         )
-        decode_execution_request(canonical)
+        decode_execution_request(canonical, supported_protocols=supported_protocols)
     except _ResourceLimitError:
         raise ExecutionRequestEncodeError(ExecutionRequestRejection.RESOURCE_LIMIT) from None
     except ExecutionRequestDecodeError as error:
@@ -1751,12 +1777,12 @@ def _normalize_nested_runtime_env(
         sort_keys=False,
         max_bytes=NESTED_EXECUTION_REQUEST_RUNTIME_ENV_IDENTITY_MAX_BYTES,
     )
-    from django_ray.workflow.plans import runtime_env_plan_identity_from_transport
+    from django_ray.runtime_env_transport import validate_runtime_env_transport
 
-    normalized = runtime_env_plan_identity_from_transport(
+    normalized = validate_runtime_env_transport(
         identity,
         require_trust_match=False,
-    ).as_transport_dict()
+    )
     if (
         type(plan_digest) is not str
         or _SHA256_IDENTITY.fullmatch(plan_digest) is None
@@ -1917,7 +1943,12 @@ def _decode_versioned_nested_execution_request(
     expected_runtime_env_plan_digest: str | None,
     expected_runtime_env_transport_digest: str | None,
 ) -> NestedExecutionRequest:
-    if not isinstance(value, dict) or set(value) != _NESTED_REQUEST_KEYS:
+    expected_keys = _NESTED_REQUEST_KEYS
+    if isinstance(value, dict) and value.get("execution_protocol_version") == (
+        COHORT_EXECUTION_PROTOCOL_VERSION
+    ):
+        expected_keys = expected_keys | {"cohort_leaf_contract_json"}
+    if not isinstance(value, dict) or set(value) != expected_keys:
         _reject_nested_request(
             NestedExecutionRequestRejection.INVALID_VERSIONED,
             attempted_versioned=True,
@@ -2123,6 +2154,23 @@ def _decode_versioned_nested_execution_request(
             NestedExecutionRequestRejection.INVALID_VERSIONED,
             attempted_versioned=True,
         )
+    cohort_leaf_contract_json = None
+    if protocol == COHORT_EXECUTION_PROTOCOL_VERSION:
+        from django_ray.target.cohort_contract import (
+            CohortContractError,
+            decode_cohort_leaf_contract,
+        )
+
+        try:
+            decode_cohort_leaf_contract(
+                value["cohort_leaf_contract_json"], expected_identity=outer_identity
+            )
+        except CohortContractError:
+            _reject_nested_request(
+                NestedExecutionRequestRejection.INVALID_VERSIONED,
+                attempted_versioned=True,
+            )
+        cohort_leaf_contract_json = value["cohort_leaf_contract_json"]
     return NestedExecutionRequest(
         outer_identity=outer_identity,
         execution_protocol_version=protocol,
@@ -2134,6 +2182,7 @@ def _decode_versioned_nested_execution_request(
         runtime_env_plan_identity=runtime_env_identity,
         runtime_env_plan_digest=value["runtime_env_plan_digest"],
         runtime_env_transport_digest=value["runtime_env_transport_digest"],
+        cohort_leaf_contract_json=cohort_leaf_contract_json,
     )
 
 
@@ -2181,13 +2230,20 @@ def decode_nested_execution_request(
 
 def encode_nested_execution_request(request: NestedExecutionRequest) -> str:
     """Encode one exact canonical strict nested execution request."""
+    return _encode_nested_request_for_protocols(request, SUPPORTED_EXECUTION_PROTOCOL_RANGE)
+
+
+def _encode_nested_request_for_protocols(
+    request: NestedExecutionRequest, supported_protocols: ExecutionProtocolRange
+) -> str:
+    """Private cohort codec seam; ordinary nested producers remain unchanged."""
     try:
         if not isinstance(request, NestedExecutionRequest):
             raise ValueError
         if (
             not _valid_identity_shape(request.outer_identity)
             or type(request.execution_protocol_version) is not int
-            or not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(request.execution_protocol_version)
+            or not supported_protocols.supports(request.execution_protocol_version)
             or type(request.boundary_kind) is not NestedExecutionBoundaryKind
             or type(request.callable_binding_kind) is not NestedCallableBindingKind
         ):
@@ -2228,6 +2284,10 @@ def encode_nested_execution_request(request: NestedExecutionRequest) -> str:
             "runtime_env_plan_digest": request.runtime_env_plan_digest,
             "runtime_env_transport_digest": request.runtime_env_transport_digest,
         }
+        if request.execution_protocol_version == COHORT_EXECUTION_PROTOCOL_VERSION:
+            value["cohort_leaf_contract_json"] = request.cohort_leaf_contract_json
+        elif request.cohort_leaf_contract_json is not None:
+            raise ValueError
         detached = _bounded_json_dumps(
             value,
             sort_keys=False,
@@ -2241,7 +2301,7 @@ def encode_nested_execution_request(request: NestedExecutionRequest) -> str:
             sort_keys=True,
             max_bytes=NESTED_EXECUTION_REQUEST_MAX_BYTES,
         )
-        decode_nested_execution_request(canonical)
+        decode_nested_execution_request(canonical, supported_protocols=supported_protocols)
     except (
         NestedExecutionRequestRejected,
         _InvalidJsonTreeError,

@@ -22,6 +22,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Compiled Graph remains disabled, and its historical cleanup evidence is not promoted
   by this dependency update.
 
+### Current-cohort guard preparation
+
+- Reserve protocol 3 for the coordinated Beta guard while ordinary producers and
+  workers continue using protocol 1. Private Core and Jobs probes check the exact
+  package, Ray/Python tuple, session and schedulable membership before publishing
+  proof under a fresh, exact manager lease and a single-use challenge.
+- Add a fixed Jobs probe entry point with an immutable submission reservation,
+  independent Jobs-record checks and a pending driver receipt. The manager must
+  corroborate successful completion before publishing capability; transport digests
+  and package versions do not authenticate arbitrary RuntimeEnv source or setup hooks.
+- Allow private manager bootstrap to enable a newly created, verified target
+  automatically while preserving existing drains. Activation appends a policy that
+  needs fresh proof before claims; it never promotes the earlier draining proof.
+  A verified session and runner family determine the target key, so changing an
+  alias or configuration cannot bypass its drain. The schema-2 Jobs discovery
+  carrier replaces the unmerged schema-1 draft without rewriting pending evidence.
+- Keep finite backend eligibility separate from the task's original logical
+  RuntimeEnv observation in immutable schema-2 producer intent. This does not alter
+  existing RuntimeEnv integrity checks. The earlier unmerged schema-1 intent draft
+  is replaced; previously applied draft databases need the documented empty-table
+  maintenance path or a fresh qualification database.
+- Prepare immutable first-runner bindings and a per-generation claim ledger with
+  exact owner-incarnation checks. Held uncertainty retains its original evidence
+  and cannot expire into automatic replay. Sync records its package/Python tuple
+  without inventing Ray identity; old lease deletion does not erase claim history.
+- Retain each Jobs configuration's endpoint qualification separately from shared
+  cluster proof in private schema-2 claims. Publication can reuse a newer compatible
+  cluster observation while preserving the original Job receipt and its independent
+  expiry. Another alias's proof cannot renew an expired endpoint qualification.
+  Previously applied draft claim databases need the documented empty-table reversal
+  or a fresh qualification database; retained evidence is not rewritten.
+- These helpers remain preparation: production qualification, claims, recovery and
+  cancellation integration are required before activating the guard. See
+  [current-cohort guard preparation](compatibility.md#current-cohort-guard-preparation).
+
 ### Bounded distributed preparation
 
 - Map/starmap construct strict requests inside their submission window and reuse

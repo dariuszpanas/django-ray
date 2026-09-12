@@ -603,7 +603,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0026_ray_task_target_execution_evidence` before starting upgraded workers:
+`0030_cohort_claims` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -619,6 +619,16 @@ capability row as capacity. Migration `0026` adds unseeded, immutable per-genera
 and an optional create-once outcome without a production writer or reader. Existing exact-lease
 deletion may only fail-closed cascade-withdraw an otherwise unreachable capability row; none of
 these migrations alone authorizes claims, activates routing, or enables protocol-2 writes.
+
+Migrations `0027` through `0030` prepare the separate current-cohort contract:
+single-use probe challenges, immutable producer intent, reserved Jobs probe receipts,
+and per-generation claim records. Schema-2 bindings distinguish Sync from Core and
+Jobs; Sync records its exact package and Python tuple without a Ray target. A claim
+retains its original evidence independently from ephemeral worker capability rows.
+Its mutable disposition and current owner are revision-fenced, with unknown outcomes
+held for authenticated resolution instead of expiring into automatic replay. These
+private services have no production worker or lifecycle consumer yet. See
+[current-cohort guard preparation](compatibility.md#current-cohort-guard-preparation).
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:

@@ -1219,3 +1219,122 @@ def test_connection_open_failures_are_mapped_without_details(
         assert poison not in str(error.value)
 
     assert not RayTarget.objects.exists()
+
+
+@pytest.mark.parametrize("runner_family", [RayRunnerFamily.RAY_CORE, RayRunnerFamily.RAY_JOB])
+def test_locked_registration_and_attestation_keep_original_first_discovery(runner_family) -> None:
+    expectation = _expectation(runner_family=runner_family)
+    proof = _attestation(expectation)
+    with transaction.atomic():
+        with CaptureQueriesContext(connection) as queries:
+            registration = coordination._register_ray_target_locked(expectation, now=NOW)
+            replay = coordination._register_ray_target_locked(expectation, now=NOW)
+            record = coordination._record_ray_target_attestation_locked(
+                expectation.target_key,
+                proof,
+                expected_policy_revision=1,
+                expected_attestation_revision=0,
+                now=NOW,
+            )
+        assert not any(
+            query["sql"].lstrip().upper().startswith(("BEGIN", "SAVEPOINT"))
+            for query in queries.captured_queries
+        )
+    target = RayTarget.objects.get(pk=expectation.target_key)
+    policy = RayTargetPolicyRevision.objects.get(target=target)
+    retained = RayTargetAttestationRevision.objects.get(policy=policy)
+    assert registration.changed and not replay.changed
+    assert registration.desired_state is RayTargetDesiredState.DRAINING
+    assert policy.revision == 1 and policy.desired_state == "draining"
+    assert target.created_at == policy.created_at == record.recorded_at == NOW
+    assert retained.observed_at < policy.created_at
+    assert retained.attestation_json == encode_ray_cluster_attestation(proof)
+    if runner_family is RayRunnerFamily.RAY_JOB:
+        with pytest.raises(RayJobTargetPersistenceUnsupportedError):
+            record_ray_target_attestation(
+                expectation.target_key,
+                proof,
+                expected_policy_revision=1,
+                expected_attestation_revision=1,
+                now=NOW,
+            )
+
+
+def test_locked_coordination_requires_a_caller_transaction() -> None:
+    expectation = _expectation(runner_family=RayRunnerFamily.RAY_JOB)
+    for operation in (
+        lambda: coordination._register_ray_target_locked(expectation, now=NOW),
+        lambda: coordination._record_ray_target_attestation_locked(
+            expectation.target_key,
+            _attestation(expectation),
+            expected_policy_revision=1,
+            expected_attestation_revision=0,
+            now=NOW,
+        ),
+    ):
+        with pytest.raises(
+            coordination.RayTargetCoordinationError, match="caller-owned transaction"
+        ):
+            operation()
+    assert not RayTarget.objects.exists()
+    assert not RayTargetAttestationRevision.objects.exists()
+
+
+def test_locked_jobs_attestation_retains_policy_proof_cas_and_chronology_guards() -> None:
+    expectation = _expectation(runner_family=RayRunnerFamily.RAY_JOB)
+    proof = _attestation(expectation)
+    with transaction.atomic():
+        coordination._register_ray_target_locked(expectation, now=NOW)
+        coordination._record_ray_target_attestation_locked(
+            expectation.target_key,
+            proof,
+            expected_policy_revision=1,
+            expected_attestation_revision=0,
+            now=NOW,
+        )
+    cases = (
+        (RayTargetPolicyRevisionConflictError, proof, 2, 1, NOW),
+        (RayTargetAttestationRevisionConflictError, proof, 1, 0, NOW),
+        (
+            RayTargetAttestationRejectedError,
+            _attestation(replace(expectation, policy_revision=2)),
+            1,
+            1,
+            NOW,
+        ),
+        (RayTargetAttestationRejectedError, proof, 1, 1, proof.expires_at),
+        (RayTargetAttestationRegressionError, proof, 1, 1, NOW - timedelta(microseconds=1)),
+        (
+            RayTargetAttestationRegressionError,
+            _attestation(
+                expectation,
+                observed_at=NOW - timedelta(seconds=2),
+                expires_at=NOW + timedelta(seconds=58),
+            ),
+            1,
+            1,
+            NOW,
+        ),
+    )
+    for error_type, candidate, policy_revision, attestation_revision, now in cases:
+        with transaction.atomic(), pytest.raises(error_type):
+            coordination._record_ray_target_attestation_locked(
+                expectation.target_key,
+                candidate,
+                expected_policy_revision=policy_revision,
+                expected_attestation_revision=attestation_revision,
+                now=now,
+            )
+    assert RayTargetAttestationRevision.objects.count() == 1
+    assert RayTargetPolicyRevision.objects.get().desired_state == "draining"
+
+
+def test_locked_registration_validates_initial_policy_and_timestamp_before_writing() -> None:
+    with transaction.atomic():
+        for expectation, now in (
+            (_expectation(policy_revision=2), NOW),
+            (_expectation(), NOW.replace(tzinfo=None)),
+        ):
+            with pytest.raises(InvalidRayTargetArgumentError):
+                coordination._register_ray_target_locked(expectation, now=now)
+    assert not RayTarget.objects.exists()

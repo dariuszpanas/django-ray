@@ -404,6 +404,11 @@
       "django_settings_modules": ["tests.postgres_settings"],
       "selection": {
         "paths": [
+          "tests/integration/test_cohort_probe_challenges.py",
+          "tests/integration/test_cohort_intent_storage.py",
+          "tests/integration/test_cohort_claim_storage.py",
+          "tests/integration/test_cohort_job_receipts.py",
+          "tests/integration/test_cohort_publication.py",
           "tests/integration/test_execution_protocol_schema_migration.py",
           "tests/integration/test_protocol_coordination.py",
           "tests/integration/test_protocol_status.py",

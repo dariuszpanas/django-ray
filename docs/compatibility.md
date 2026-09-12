@@ -224,6 +224,172 @@ requires an immutable deployment/image digest plus explicit shared-memory and Ra
 object-store profiles.
 See [Compiled Graph Compatibility](compiled-graph-compatibility.md).
 
+## Current-cohort guard preparation
+
+The private `target/cohort_*` modules prepare the coordinated Beta guard. They do
+not activate target-aware enqueue, claim, retry, recovery, or cancellation.
+Protocol 3 is reserved for this contract; the ordinary producer and worker still
+use protocol 1. Protocol 2 remains dormant. The release's complete compatibility
+and upgrade proof is still required before changing those defaults.
+
+A new producer intent records the package version, backend alias, selection policy,
+and a digest of the exact declared endpoint and current trust configuration. This
+finite declaration can be matched before a worker limits its queue query. The
+task's original logical RuntimeEnv observation is a separate immutable digest;
+task-specific environments do not create additional worker eligibility keys.
+Neither digest invents a cluster instance from an address or authenticates imported
+source. The intended activation validates intent before preparing inputs and stores
+it with the new execution in one transaction. Migration `0028` adds an immutable,
+deliberately unseeded relation for schema-2 protocol-3 intent; historical protocol-1
+rows receive no inferred identity. This draft schema replaces the earlier unmerged
+schema-1 draft. A database that already applied that draft needs a fresh qualification
+database or its reviewed, empty-table reversal before reapplying it.
+
+The logical RuntimeEnv observation is retained for audit. Admission does not compare
+observations from different hosts, require reusable identities, or change existing
+RuntimeEnv integrity and submission-snapshot checks.
+
+Ordinary backends retain worker-selected synchronous, local Core, connected Core,
+and Jobs modes; `RAY_JOB_ONLY` continues to select Jobs only. The first verified
+claim must bind the actual selected mode and runtime. Subsequent generations must
+retain that binding. A replacement Ray session, including a new local Ray session
+after worker restart, cannot silently inherit already-bound work. Synchronous
+execution needs its own package/Python binding, without a fabricated Ray session.
+Those claim and synchronous bindings are integration work, not current behavior.
+
+Migration `0030` prepares those bindings and a separate per-generation claim ledger.
+It preserves the meaning of schema-1 protocol-2 bindings. Schema-2 protocol-3 bindings
+record the first actual runner and package; only Sync records a local Python tuple
+without Ray fields. Claim facts retain the exact task, attempt, generation, intent,
+RuntimeEnv snapshot, original manager incarnation and verified Ray proof when relevant.
+The claim's current owner is separate from those immutable facts, so deleting an old
+lease does not erase provenance or let a reused worker ID inherit ownership.
+
+Private, caller-transaction services record request preparation, dispatch, held
+uncertainty and authenticated resolution with compare-and-set revisions. Held work
+has no automatic expiry or replay path. A valid late completion can resolve its exact
+generation without a fresh target probe; proof freshness controls new admission,
+not the lifetime of an execution. Resolution digests record independently verified
+evidence and do not authenticate a caller or prove that application work had no effects.
+Reverse `0030` only in a stopped-writer maintenance window after exporting or auditing
+and deliberately removing every claim and schema-2 binding. No historical claims are
+backfilled, and production claims and lifecycle transitions remain unchanged.
+Claim facts use schema 2 to retain each Jobs configuration's own qualification.
+The earlier unmerged schema-1 claim draft is rejected. A database that already
+applied draft `0030` needs a fresh qualification database or its reviewed empty
+reversal before reapplication; no claim facts or digests are rewritten automatically.
+
+The first Core or Jobs probe can discover an observed session only after checking
+the trusted manager/driver tuple against every schedulable node. Refresh probes
+require an already-bound session and policy. First discovery derives its target key
+from the verified runner family and session using a fixed, versioned rule, then
+constructs the original attestation with that key. Endpoint, alias, configuration,
+package and runtime changes cannot create a second identity for the same session
+and bypass its drain. Core and Jobs retain separate target policies, so a target
+drain applies to its runner family. The private adapter is reviewed for exact
+Ray **2.58.0**; a later Ray release passing the dependency floor does not qualify
+its private observation APIs. Package version and Python implementation plus
+`major.minor.patch` must match exactly. Ambient Ray mismatch bypasses cannot alter
+the comparison. The helper uses the existing bounded collector and never starts
+or reconnects Ray on its caller's behalf.
+
+Migration `0027` stores one pending challenge per exact lease incarnation and
+configuration digest, bounded to one Core endpoint or 64 Jobs endpoints. First
+discovery does not require a pre-existing target policy; a refresh may bind one.
+The random challenge is stored only as a digest, rotates on explicit replacement,
+and can be consumed once before its deadline. Issuance defaults to 300 seconds
+and is capped at 600 seconds. Issued or consumed challenges are not capability.
+An integrated Jobs manager must keep heartbeating while a probe is pending and
+stop its exact probe job at the deadline. The private publisher commits a positive
+observation, worker capability, and consumption of the exact pending challenge in
+one authoritative transaction. It obtains Core observations or inspects Jobs
+receipts itself outside database locks, then checks the live lease, nonce,
+challenge, policy, revisions, and observation deadline again under locks. A
+replaced challenge cannot publish its old result.
+
+First discovery creates a draining policy at revision 1. A manager bootstrap option
+can append active revision 2 in that same transaction, only when this publication
+actually created the target. Existing targets retain their current desired state,
+including explicit drains. The returned activation policy identifies a revision
+awaiting a fresh probe; the revision-1 proof and capability are not relabeled and
+do not authorize claims against revision 2. After a lost bootstrap response, a
+manager must read the retained current policy and issue a new challenge for it.
+The private publication path supports Core and Jobs, with one Core target or up to
+64 Jobs targets per lease and no family mixing. Existing standalone target APIs
+remain Core-only. Production workers do not yet call this bootstrap path.
+
+Migration `0029` adds an immutable Jobs submission reservation and a one-time
+driver receipt for that exact pending challenge revision. The reservation binds
+the nonce-free request, actual Jobs endpoint, deterministic owned submission ID,
+entrypoint, and submitted RuntimeEnv. The driver receipt records the actual native
+Ray Job ID, package version, and complete node observation. Reservation, receipt,
+and read services check the live lease and challenge again after acquiring locks;
+neither a pending receipt nor a consumed challenge grants execution eligibility.
+Replacing a challenge or deleting its lease removes the old reservation. Reversing
+`0029` requires serialized empty receipt storage before reversing its parents.
+The Jobs request uses schema 2 and a new digest domain: first discovery carries
+no target key or session, while refresh carries its exact retained identity.
+Receipt validation and publication independently derive and check the discovery
+key. The earlier unmerged schema-1 request draft is rejected, including inside
+retained launch or receipt envelopes. The amended draft `0029` database guard
+requires a fresh qualification database or reviewed empty-table reversal before
+reapplication; no pending evidence is rewritten or deleted automatically.
+
+The private manager inspector fetches the reserved Job directly from its pinned
+authenticated endpoint outside database transactions. It corroborates the exact
+request controls, successful Job status, native driver ID, and unexpired receipt.
+The HTTP reader caps the response at 128 KiB and applies connection/read timeouts
+with a progressive-read budget. It refuses redirects, compression, and chunked
+responses. An external manager deadline is still required for blocking OS DNS.
+Job metadata and native IDs alone are not independent authentication.
+
+The fixed private Jobs entry point accepts a canonical, bounded, nonce-free launch
+request. The manager reserves its exact command, endpoint, submitted RuntimeEnv
+digest, and explicit Django settings module before submission. The driver checks
+the actual running Jobs record, collects observations with its own fresh Ray
+connection, shuts that connection down, and corroborates the actual native driver
+ID before importing Django. Only then does it initialize the pinned settings and
+write a pending receipt through the default database. The manager separately
+requires a successful Job and corroborates the stored receipt before publication.
+Package versions and transport digests do not attest imported source bytes or
+protect interpreter, installation, or setup hooks that execute before the entry
+point. A qualified probe profile remains a prerequisite; ordinary RuntimeEnv
+semantics are unchanged. The manager still owns external deadlines and exact Job
+cleanup. These private helpers have no production manager lifecycle or worker
+activation yet, and a published capability alone does not enable protocol-3 claims.
+Each successful private Jobs publication returns its own endpoint qualification,
+separate from the current shared target proof. If a slower Job observed the same
+membership before a newer compatible shared proof, publication can use that fresh
+shared proof without appending or relabeling the older observation. Its caller
+still supplies current revisions, and the original endpoint proof keeps its own
+expiry. A stale observation of different membership cannot replace newer state.
+
+Private Jobs claims snapshot the original configuration, endpoint, exact Job and
+receipt identities, control-environment digests, observation and consumption times.
+They validate the consumed challenge revision and immutable receipt under the
+claim locks, then recheck the endpoint, challenge and shared-proof expiries before
+admission. Later receipt replacement does not erase an existing claim's audit
+history or prevent independently authenticated completion. Core and Sync claims
+do not invent Jobs qualification.
+
+Production manager integration must retain a configuration's qualification only
+from a successful authenticated publisher return. A consumed challenge alone
+cannot reconstruct that positive state: challenge consumption is also available
+without publication. After restart or an ambiguous response, obtain fresh
+qualification. Manager cache invalidation and reconciliation with the current
+shared capability remain integration work; one alias's fresh proof cannot renew
+another alias's expired endpoint verification.
+
+The reserved transport binds the complete outer request separately from its
+cohort claim. Nested work carries a compact claim and independently derived
+digest, including the original membership digest. Point checks compare the actual
+package, Ray/Python tuple, session, and current schedulable node set before Django
+setup or application entry. An attestation's admission TTL is checked at claim
+time; it does not become a deadline for RuntimeEnv setup or a long workflow.
+Unknown observations and mismatches do not establish that earlier application
+work or sibling leaves had no effects. They require fenced disposition and cannot
+be converted into ordinary automatic retry.
+
 ## Dependency Policy
 
 `pyproject.toml` uses lower bounds so applications can resolve compatible updates
