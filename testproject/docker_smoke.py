@@ -119,9 +119,9 @@ _WORKFLOW_GRAPH_FORBIDDEN_FIELDS = frozenset(
     }
 )
 _WORKFLOW_SHOWCASE_CALLABLE = "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"
-_WORKFLOW_SHOWCASE_VALIDATION_NODE_ID = "0.1.g0.1.m0"
+_WORKFLOW_SHOWCASE_VALIDATION_NODE_ID = "0.1.g0.1"
 _WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID = "0.1.g1.0.g1"
-_WORKFLOW_SHOWCASE_RESERVATION_NODE_ID = "0.5.m0"
+_WORKFLOW_SHOWCASE_RESERVATION_NODE_ID = "0.5"
 _WORKFLOW_SHOWCASE_PRIVATE_PREVIEW_FIELDS = frozenset(
     {
         "_fail_workflow_showcase_fixture",
@@ -1026,10 +1026,11 @@ def _workflow_admin_graph_evidence(
 
     preview_contract = "not-applicable"
     if callable_path == _WORKFLOW_SHOWCASE_CALLABLE:
+        # Bounded maps expose aggregate nodes, not per-item preview nodes.
         expected_validation = {
             "schema_version": 1,
-            "availability": "AVAILABLE",
-            "value": {"item_id": 0, "valid": True},
+            "availability": "NOT_REQUESTED",
+            "value": None,
         }
         expected_projector_failure = {
             "schema_version": 1,
@@ -1038,10 +1039,8 @@ def _workflow_admin_graph_evidence(
         }
         expected_reservation = {
             "schema_version": 1,
-            "availability": "AVAILABLE" if execution_state == "SUCCEEDED" else "UNAVAILABLE",
-            "value": (
-                {"item_id": 0, "reserved_units": 1} if execution_state == "SUCCEEDED" else None
-            ),
+            "availability": "NOT_REQUESTED" if execution_state == "SUCCEEDED" else "UNAVAILABLE",
+            "value": None,
         }
         if (
             graph_by_id.get(_WORKFLOW_SHOWCASE_VALIDATION_NODE_ID, {}).get("output_preview")

@@ -27,13 +27,23 @@ spec:
       initContainers:
         - name: wait-for-postgres
           image: busybox:1.36
-          command: ["sh", "-c", "until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;"]
+          command:
+            - sh
+            - -c
+            - until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;
         - name: wait-for-ray-jobs
           image: busybox:1.36
-          command: ["sh", "-c", "until nc -z ray-head-svc 8265; do echo waiting for ray jobs; sleep 2; done;"]
+          command:
+            - sh
+            - -c
+            - until nc -z ray-head-svc 8265; do echo waiting for ray jobs; sleep 2; done;
         - name: wait-for-runtime-env
           image: busybox:1.36
-          command: ["sh", "-c", "until test -f /runtime-env/django-ray-source.zip; do echo waiting for runtime env; sleep 2; done;"]
+          command:
+            - sh
+            - -c
+            - until test -f /runtime-env/django-ray-source.zip; do echo waiting for runtime env; sleep
+              2; done;
           volumeMounts:
             - name: runtime-env
               mountPath: /runtime-env
@@ -42,24 +52,25 @@ spec:
         - name: django-ray-worker
           image: django-ray:latest
           imagePullPolicy: IfNotPresent
-          command: ["python", "testproject/manage.py", "django_ray_worker"]
+          command:
+            - python
+            - testproject/manage.py
+            - django_ray_worker
           args:
-            - "--queue"
-            - "ray-data"
-            - "--concurrency"
-            - "1"
+            - --queue
+            - ray-data
+            - --concurrency
+            - '1'
           envFrom:
             - configMapRef:
                 name: django-ray-config
-            - secretRef:
-                name: django-ray-secret
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: 256Mi
+              cpu: 100m
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: 512Mi
+              cpu: 500m
           volumeMounts:
             - name: runtime-env
               mountPath: /runtime-env
@@ -71,7 +82,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+                - test -d /proc/1 && grep -q python /proc/1/cmdline
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
@@ -81,11 +92,36 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - "test -d /proc/1 && grep -q python /proc/1/cmdline"
+                - test -d /proc/1 && grep -q python /proc/1/cmdline
             initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 3
+          env:
+            - name: DJANGO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-runtime
+                  key: DJANGO_SECRET_KEY
+            - name: DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-runtime
+                  key: DATABASE_USER
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-runtime
+                  key: DATABASE_PASSWORD
+            - name: RAY_AUTH_MODE
+              value: token
+            - name: RAY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-auth
+                  key: RAY_AUTH_TOKEN
+            - name: DJANGO_API_ENABLED
+              value: 'false'
       volumes:
         - name: runtime-env
           persistentVolumeClaim:

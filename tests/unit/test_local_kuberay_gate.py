@@ -12,6 +12,7 @@ import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from urllib.parse import quote, quote_plus, urlencode
 from urllib.request import ProxyHandler
@@ -20,6 +21,7 @@ import pytest
 import yaml
 
 from scripts import local_kuberay_gate as gate_module
+from scripts.local_kuberay_auth import GRAFANA_AUTH_RECEIPT_KEYS, RAY_AUTH_RECEIPT_KEYS
 from scripts.local_kuberay_gate import (
     APP_DEPLOYMENTS,
     DOCKER_CONTEXT_ALLOWLISTS,
@@ -648,7 +650,7 @@ def _ray_cluster(
     metadata: dict[str, object] = {"name": RAY_CLUSTER_NAME, "namespace": namespace}
     if uid is not None:
         metadata["uid"] = uid
-    head_containers = [{"name": "ray-head", "image": "rayproject/ray:2.56.0-py312"}]
+    head_containers = [{"name": "ray-head", "image": "rayproject/ray:2.58.0-py312"}]
     if head_sidecar:
         head_containers.append({"name": "dashboard-importer", "image": "python:3.12-slim"})
     return {
@@ -656,10 +658,10 @@ def _ray_cluster(
         "kind": "RayCluster",
         "metadata": metadata,
         "spec": {
-            "rayVersion": "2.56.0",
+            "rayVersion": "2.58.0",
             "enableInTreeAutoscaling": False,
             "headGroupSpec": {
-                "serviceType": "NodePort",
+                "serviceType": "ClusterIP",
                 "rayStartParams": {"num-cpus": "1"},
                 "template": {"spec": {"containers": head_containers}},
             },
@@ -675,7 +677,7 @@ def _ray_cluster(
                             "containers": [
                                 {
                                     "name": "ray-worker",
-                                    "image": "rayproject/ray:2.56.0-py312",
+                                    "image": "rayproject/ray:2.58.0-py312",
                                 }
                             ]
                         }
@@ -806,7 +808,7 @@ def _ray_pod(
     component: str,
     uid: str,
     *,
-    image: str = "rayproject/ray:2.56.0-py312",
+    image: str = "rayproject/ray:2.58.0-py312",
     head_sidecar: bool = False,
 ) -> dict[str, object]:
     container_name = "ray-head" if component == "head" else "ray-worker"
@@ -846,6 +848,15 @@ def _ray_pod(
                 "image": image,
                 "command": ["/bin/bash", "-c", "--"],
                 "args": [_wait_gcs_ready_script()],
+                "env": [
+                    {"name": "RAY_AUTH_MODE", "value": "token"},
+                    {
+                        "name": "RAY_AUTH_TOKEN",
+                        "valueFrom": {
+                            "secretKeyRef": {"name": "django-ray-auth", "key": "RAY_AUTH_TOKEN"}
+                        },
+                    },
+                ],
             }
         ]
         status["initContainerStatuses"] = [
@@ -1675,8 +1686,10 @@ def test_private_json_parsers_drop_raw_payload_from_exception_graph(
         assert error.__context__ is None
 
 
+@pytest.mark.parametrize("ray_authorized", [False, True])
 def test_sensitive_django_shell_accepts_one_json_object_among_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
+    ray_authorized: bool,
 ) -> None:
     gate = LocalKubeRayGate(_config())
     observed: dict[str, str] = {}
@@ -1687,6 +1700,9 @@ def test_sensitive_django_shell_accepts_one_json_object_among_diagnostics(
     monkeypatch.setattr(gate_module, "uuid4", lambda: FakeUUID())
 
     def kubectl(*args: str, **kwargs: object) -> CommandResult:
+        expected_container = "django-ray-worker" if ray_authorized else "django-web"
+        assert args[:4] == ("exec", f"deployment/{expected_container}", "-c", expected_container)
+        assert kwargs["sensitive_output"] is True
         observed["script"] = args[-1]
         return CommandResult(
             "SIGTERM handler is not set because this is not the main thread.\n"
@@ -1699,10 +1715,85 @@ def test_sensitive_django_shell_accepts_one_json_object_among_diagnostics(
 
     monkeypatch.setattr(gate, "_kubectl", kubectl)
 
-    assert gate._sensitive_django_shell("print('private')", field_name="private shell") == {
-        "complete": True
-    }
+    assert gate._sensitive_django_shell(
+        "print('private')", field_name="private shell", ray_authorized=ray_authorized
+    ) == {"complete": True}
     assert observed["script"].endswith(f"print('django_ray_private_json_complete_v1_{'a' * 32}')\n")
+
+
+@pytest.mark.parametrize("invalid_surface", [None, "ray", "grafana"])
+def test_authentication_gate_uses_existing_credential_owners_and_requires_complete_receipts(
+    monkeypatch: pytest.MonkeyPatch, invalid_surface: str | None
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate._ray_cluster_uid = "verified-cluster"
+    calls: list[tuple[str, str]] = []
+    identity_checks: list[bool] = []
+    monkeypatch.setattr(gate, "_verify_ray_identity", lambda: identity_checks.append(True))
+    head = {"metadata": {"name": "verified-ray-head"}}
+    monkeypatch.setattr(gate, "_ray_pods", lambda **kwargs: ("verified-cluster", [head]))
+    monkeypatch.setattr(gate, "_rendered_ray_pod_contract", lambda pod: ("head", None))
+
+    def probe(script: str, *, resource: str, container: str) -> Mapping[str, Any]:
+        compile(script, "<authentication-probe>", "exec")
+        calls.append((resource, container))
+        surface = "ray" if container == "django-ray-worker" else "grafana"
+        keys = RAY_AUTH_RECEIPT_KEYS if surface == "ray" else GRAFANA_AUTH_RECEIPT_KEYS
+        receipt: dict[str, object] = {"schema_version": 1, **dict.fromkeys(keys, True)}
+        if surface == invalid_surface:
+            receipt.pop(sorted(keys)[0])
+        return receipt
+
+    monkeypatch.setattr(gate, "_authentication_probe", probe)
+    if invalid_surface is None:
+        gate._verify_authentication()
+    else:
+        with pytest.raises(ValueError, match="every required boundary"):
+            gate._verify_authentication()
+    assert calls[0] == ("deployment/django-ray-worker", "django-ray-worker")
+    assert gate.evidence.ray_auth_boundary_verified is (invalid_surface != "ray")
+    assert gate.evidence.grafana_auth_boundary_verified is (invalid_surface is None)
+    if invalid_surface != "ray":
+        assert calls[1] == ("pod/verified-ray-head", "dashboard-importer")
+    assert len(identity_checks) == (2 if invalid_surface is None else 1)
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_authentication_probe_is_fresh_bounded_private_and_requires_completion(
+    monkeypatch: pytest.MonkeyPatch, complete: bool
+) -> None:
+    gate = LocalKubeRayGate(_config())
+
+    def kubectl(*args: str, **kwargs: Any) -> CommandResult:
+        assert args[:7] == (
+            "exec",
+            "deployment/django-ray-worker",
+            "-c",
+            "django-ray-worker",
+            "--",
+            "python",
+            "-c",
+        )
+        assert kwargs == {"sensitive_output": True, "timeout": max(90, gate.config.command_timeout)}
+        marker = re.search(r"print\('([^']+)'\)\n$", args[-1])
+        assert marker is not None
+        payload = '{"schema_version":1}\n'
+        if complete:
+            payload += marker.group(1) + "\n"
+        return CommandResult(payload, "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+    if complete:
+        assert gate._authentication_probe(
+            "print('{}')", resource="deployment/django-ray-worker", container="django-ray-worker"
+        ) == {"schema_version": 1}
+    else:
+        with pytest.raises(ValueError, match="valid private JSON"):
+            gate._authentication_probe(
+                "print('{}')",
+                resource="deployment/django-ray-worker",
+                container="django-ray-worker",
+            )
 
 
 def test_sensitive_django_shell_rejects_ambiguous_json_object_lines(
@@ -2369,10 +2460,10 @@ def test_ray_runtime_image_reference_requires_one_shared_named_ray_image() -> No
     rendered = cast(dict[str, Any], _ray_cluster())
     topology = normalize_ray_topology(rendered)
 
-    assert ray_runtime_image_reference(topology) == "rayproject/ray:2.56.0-py312"
+    assert ray_runtime_image_reference(topology) == "rayproject/ray:2.58.0-py312"
 
     rendered["spec"]["workerGroupSpecs"][0]["template"]["spec"]["containers"][0]["image"] = (
-        "rayproject/ray:2.56.0-py312-drift"
+        "rayproject/ray:2.58.0-py312-drift"
     )
     with pytest.raises(ValueError):
         ray_runtime_image_reference(normalize_ray_topology(rendered))
@@ -2383,9 +2474,9 @@ def test_ray_runtime_image_reference_requires_one_shared_named_ray_image() -> No
     (
         "rayproject/ray:latest",
         "rayproject/ray",
-        " rayproject/ray:2.56.0-py312",
-        "-rayproject/ray:2.56.0-py312",
-        "rayproject/ray:2.56.0-py312-\N{SNOWMAN}",
+        " rayproject/ray:2.58.0-py312",
+        "-rayproject/ray:2.58.0-py312",
+        "rayproject/ray:2.58.0-py312-\N{SNOWMAN}",
         "r" * (gate_module.MAX_RAY_IMAGE_REFERENCE_CHARACTERS + 1) + ":tag",
     ),
 )
@@ -2768,12 +2859,25 @@ def test_released_v040_manager_manifest_is_ephemeral_exact_and_protocol_honest()
     ]
     assert container["envFrom"] == [
         {"configMapRef": {"name": "django-ray-config"}},
-        {"secretRef": {"name": "django-ray-secret"}},
     ]
-    assert {entry["name"]: entry["value"] for entry in container["env"]} == {
+    assert {entry["name"]: entry["value"] for entry in container["env"] if "value" in entry} == {
         "RAY_ADDRESS": "ray://ray-head-svc:10001",
+        "RAY_AUTH_MODE": "token",
+        "DJANGO_API_ENABLED": "false",
         **gate_module.RUNTIME_ENV_ENCRYPTION_ENV,
     }
+    references = {
+        entry["name"]: entry["valueFrom"]["secretKeyRef"]
+        for entry in container["env"]
+        if "valueFrom" in entry
+    }
+    assert set(references) == {
+        "DJANGO_SECRET_KEY",
+        "DATABASE_USER",
+        "DATABASE_PASSWORD",
+        "RAY_AUTH_TOKEN",
+    }
+    assert references["RAY_AUTH_TOKEN"]["name"] == "django-ray-auth"
     assert container["readinessProbe"]["successThreshold"] == 1
     assert container["livenessProbe"]["successThreshold"] == 1
     serialized = json.dumps(manifest, sort_keys=True)
@@ -3190,7 +3294,9 @@ def test_released_v040_reserved_lease_observer_is_prefix_bounded(
     payload = {"count": 1, "rows": [_released_v040_recovery_lease()]}
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<released-v040-reserved-leases>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -3370,7 +3476,9 @@ def test_protocol_cohort_observer_reads_real_legacy_and_explicit_leases(
         "legacy_worker_ids": ["released-v040-worker"],
     }
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-cohort-observation>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -3383,6 +3491,68 @@ def test_protocol_cohort_observer_reads_real_legacy_and_explicit_leases(
     assert "build_protocol_status" in observed["script"]
     assert "capability_schema_version=0" in observed["script"]
     assert "last_heartbeat_at__gte=cutoff" in observed["script"]
+
+
+@pytest.mark.parametrize("job_state", [None, "RUNNING", "FAILED"])
+def test_protocol_handoff_observer_waits_for_reserved_job_visibility(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], job_state: str | None
+) -> None:
+    from django_ray.models import RayTaskExecution
+    from django_ray.runner import ray_job
+
+    row = SimpleNamespace(
+        ray_job_id="reserved-job",
+        ray_address="http://ray-head:8265",
+        state="RUNNING",
+        attempt_number=1,
+        execution_generation=1,
+        claimed_by_worker="released-worker",
+        ray_job_request_reference=None,
+    )
+    jobs = (
+        []
+        if job_state is None
+        else [
+            SimpleNamespace(
+                submission_id=row.ray_job_id,
+                status=job_state,
+                entrypoint="python -m django_ray.runtime.entrypoint --payload-b64 opaque",
+            )
+        ]
+    )
+    monkeypatch.setattr(RayTaskExecution.objects, "get", lambda **_kwargs: row)
+    monkeypatch.setattr(
+        ray_job,
+        "_address_pinned_job_client",
+        lambda _address: SimpleNamespace(list_jobs=lambda: jobs),
+    )
+    gate = LocalKubeRayGate(_config())
+
+    def observe(script: str, **_kwargs: object) -> Mapping[str, Any]:
+        exec(compile(script, "<handoff-observer>", "exec"), {})
+        return json.loads(capsys.readouterr().out)
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", observe)
+    result = gate._observe_protocol_handoff_task(TASK_ID)
+    assert result["ready"] is (job_state is not None)
+    if job_state is not None:
+        assert result["state"] == job_state
+        assert result["submission_count"] == 1
+        assert result["released_carrier"] is True
+    if job_state == "FAILED":
+        with pytest.raises(ValueError, match="unexpected state FAILED"):
+            gate._wait_for_protocol_handoff_task(TASK_ID, accepted_states=frozenset({"RUNNING"}))
+
+
+def test_protocol_handoff_wait_rejects_failure_before_job_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    monkeypatch.setattr(
+        gate, "_observe_protocol_handoff_task", lambda _task_id: {"ready": False, "state": "FAILED"}
+    )
+    with pytest.raises(ValueError, match="handoff task reached unexpected state FAILED"):
+        gate._wait_for_protocol_handoff_task(TASK_ID, accepted_states=frozenset({"RUNNING"}))
 
 
 def test_protocol_handoff_wait_requires_a_replacement_worker_without_resubmission(
@@ -3475,7 +3645,9 @@ def test_protocol_v1_survival_enqueue_is_deferred_on_the_live_ray_data_queue(
     observed: dict[str, str] = {}
     marker_uuid = gate_module.UUID("22222222-2222-4222-8222-222222222222")
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v1-survival-enqueue>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -3532,7 +3704,9 @@ def test_protocol_v1_survival_release_is_exactly_one_unchanged_row(
     }
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v1-survival-release>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -3584,7 +3758,9 @@ def test_protocol_v1_survival_failure_cleanup_deletes_only_an_unclaimed_queued_r
     gate._protocol_v1_survival_fixture = fixture
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v1-survival-cleanup>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -3629,7 +3805,9 @@ def test_protocol_v2_fixture_is_seeded_only_on_the_live_ray_data_queue(
     }
     generated_ids = iter((gate_module.UUID(TASK_ID), poison_uuid))
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v2-fixture>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -3698,7 +3876,9 @@ def test_protocol_v2_startup_recovery_terminalizes_before_reopen_and_delete(
     }
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v2-startup-recovery>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -3737,7 +3917,9 @@ def test_protocol_v2_startup_recovery_accepts_a_terminal_staged_hard_kill(
     }
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v2-terminal-stage-recovery>", "exec")
         observed["script"] = script
         return recovered
@@ -3967,7 +4149,9 @@ def test_protocol_v2_direct_probe_rejects_before_input_or_application_import(
     }
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v2-direct-rejection>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -4005,7 +4189,7 @@ def test_protocol_v2_direct_probe_rejects_any_durable_row_change(
     monkeypatch.setattr(
         gate,
         "_sensitive_django_shell",
-        lambda _script, *, field_name: _protocol_v2_rejection_payload(),
+        lambda _script, *, field_name, ray_authorized: _protocol_v2_rejection_payload(),
     )
     monkeypatch.setattr(
         gate,
@@ -4032,7 +4216,9 @@ def test_protocol_v2_private_target_probe_proves_exact_and_mismatch_paths(
     }
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v2-private-target-execution>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -4053,6 +4239,7 @@ def test_protocol_v2_private_target_probe_proves_exact_and_mismatch_paths(
     assert "runner._submit_target_execution(" in observed["script"]
     assert "runner._poll_target_execution_results(" in observed["script"]
     assert "probe_ray_target(" in observed["script"]
+    assert "ray_minor=58," in observed["script"]
     assert "build_ray_cluster_attestation(" in observed["script"]
     assert "RayTaskTargetExecutionEvidenceClaim(" in observed["script"]
     assert "ray_task_target_execution_evidence_digest(" in observed["script"]
@@ -4091,7 +4278,7 @@ def test_protocol_v2_private_target_probe_rejects_any_durable_row_change(
     monkeypatch.setattr(
         gate,
         "_sensitive_django_shell",
-        lambda _script, *, field_name: _protocol_v2_target_execution_payload(),
+        lambda _script, *, field_name, ray_authorized: _protocol_v2_target_execution_payload(),
     )
     monkeypatch.setattr(
         gate,
@@ -4135,7 +4322,9 @@ def test_protocol_v2_cleanup_deletes_only_the_fixture_and_reopens_admission(
     }
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v2-cleanup>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -4219,7 +4408,9 @@ def test_protocol_v2_uncertain_cleanup_cannot_delete_a_task_id_collision(
     }
     observed: dict[str, str] = {}
 
-    def sensitive_shell(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def sensitive_shell(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, "<protocol-v2-collision-cleanup>", "exec")
         observed["script"] = script
         observed["field_name"] = field_name
@@ -4859,7 +5050,9 @@ def test_live_rq2_in_pod_inspectors_are_valid_python(
     gate = LocalKubeRayGate(_config())
     observed_fields: list[str] = []
 
-    def compile_private_script(script: str, *, field_name: str) -> Mapping[str, Any]:
+    def compile_private_script(
+        script: str, *, field_name: str, ray_authorized: bool = False
+    ) -> Mapping[str, Any]:
         compile(script, f"<{field_name}>", "exec")
         observed_fields.append(field_name)
         return {
@@ -5927,7 +6120,9 @@ def test_effective_kuberay_worker_contract_accepts_the_injected_wait_gcs_init() 
     assert [container.name for container in identity.containers] == ["ray-worker"]
 
 
-@pytest.mark.parametrize("mutation", ["extra", "substituted", "script"])
+@pytest.mark.parametrize(
+    "mutation", ["extra", "substituted", "script", "missing-auth", "wrong-auth"]
+)
 def test_effective_kuberay_worker_contract_rejects_extra_or_substituted_init(
     mutation: str,
 ) -> None:
@@ -5959,6 +6154,10 @@ def test_effective_kuberay_worker_contract_rejects_extra_or_substituted_init(
     elif mutation == "substituted":
         init_containers[0]["name"] = "substituted-init"
         init_statuses[0]["name"] = "substituted-init"
+    elif mutation == "missing-auth":
+        init_containers[0].pop("env")
+    elif mutation == "wrong-auth":
+        init_containers[0]["env"][1]["valueFrom"]["secretKeyRef"]["name"] = "foreign-secret"
     else:
         init_containers[0]["args"] = ["ray health-check --address attacker.invalid:6379"]
 
@@ -6536,7 +6735,7 @@ def test_ambient_context_changes_cannot_redirect_pinned_commands(
         gate._kubectl("get", "pods")
 
 
-def test_released_v040_image_build_uses_only_the_pinned_archive_and_labels(
+def test_released_v040_image_build_preserves_source_and_aligns_ray(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -6545,7 +6744,9 @@ def test_released_v040_image_build_uses_only_the_pinned_archive_and_labels(
     released_context.mkdir()
     dockerfile = released_context / "Dockerfile"
     dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    (released_context / "Dockerfile.dockerignore").write_text("*\n!src/\n", encoding="utf-8")
     gate.released_v040_source_context = released_context
+    gate.rendered_ray_topology = normalize_ray_topology(cast(dict[str, Any], _ray_cluster()))
     gate.evidence.released_v040_image_tag = "django-ray-released-v040:test-source"
     gate._ray_image_python_version = "3.12.12"
     calls: list[tuple[str, ...]] = []
@@ -6596,9 +6797,13 @@ def test_released_v040_image_build_uses_only_the_pinned_archive_and_labels(
         "--label",
         f"org.opencontainers.image.source-tree={gate_module.RELEASED_V040_SOURCE_TREE}",
         "--file",
-        str(dockerfile),
+        str(tmp_path / "released-v040-handoff.Dockerfile"),
         str(released_context),
     )
+    assert dockerfile.read_text(encoding="utf-8") == "FROM scratch\n"
+    handoff_dockerfile = (tmp_path / "released-v040-handoff.Dockerfile").read_text(encoding="utf-8")
+    assert "--no-cache-dir --no-deps ray==2.58.0 && python -m pip check" in handoff_dockerfile
+    assert (tmp_path / "released-v040-handoff.Dockerfile.dockerignore").read_text() == "*\n!src/\n"
     assert inspect_call == ("image", "inspect", gate.evidence.released_v040_image_tag)
     assert verify_call == (
         "run",
@@ -6629,6 +6834,8 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
     released_context = tmp_path / "released-v040-source"
     current_context.mkdir()
     released_context.mkdir()
+    (released_context / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (released_context / "Dockerfile.dockerignore").write_text("*\n!src/\n", encoding="utf-8")
     gate.source_context = current_context
     gate.released_v040_source_context = released_context
     gate.rendered_ray_topology = normalize_ray_topology(cast(dict[str, Any], _ray_cluster()))
@@ -6687,7 +6894,7 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
         "--entrypoint",
         "python",
         "--",
-        "rayproject/ray:2.56.0-py312",
+        "rayproject/ray:2.58.0-py312",
         "-I",
         "-S",
         "-B",
@@ -6703,7 +6910,7 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
     python_probes = [call for call in calls if call[0] == "run"]
     assert len(python_probes) == 3
     assert {call[call.index("--") + 1] for call in python_probes} == {
-        "rayproject/ray:2.56.0-py312",
+        "rayproject/ray:2.58.0-py312",
         gate.evidence.app_tag,
         gate.evidence.released_v040_image_tag,
     }
@@ -6711,12 +6918,12 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
     builds = [call for call in calls if call[0] == "build"]
     assert len(builds) == 3
     application_builds = [
-        call for call in builds if Path(call[call.index("--file") + 1]).name == "Dockerfile"
+        call for call in builds if Path(call[call.index("--file") + 1]).name != "Dockerfile.ray"
     ]
     assert len(application_builds) == 2
     assert {Path(call[call.index("--file") + 1]) for call in application_builds} == {
         current_context / "Dockerfile",
-        released_context / "Dockerfile",
+        released_context.parent / "released-v040-handoff.Dockerfile",
     }
     for call in application_builds:
         assert call.count("--build-arg") == 1
@@ -6750,6 +6957,8 @@ def test_kind_load_uses_only_the_pinned_docker_endpoint_and_sanitized_provider(
     )
     gate.source_context = tmp_path
     gate.released_v040_source_context = tmp_path
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.dockerignore").write_text("*\n!src/\n", encoding="utf-8")
     gate._docker_host = "unix:///var/run/docker.sock"
     gate.evidence.commit = COMMIT
     gate.evidence.source_tree = SOURCE_TREE
@@ -7137,6 +7346,54 @@ def test_secret_preservation_rejects_any_data_change(
     assert gate.evidence.django_ray_secret_preserved is False
 
 
+def test_component_secrets_are_redacted_and_preserved_as_complete_mappings(monkeypatch) -> None:
+    gate = LocalKubeRayGate(_config())
+    operator_data = {"DJANGO_API_TOKEN": base64.b64encode(TOKEN68.encode()).decode()}
+    component_data = {
+        name: {
+            "COMPONENT_TOKEN": base64.b64encode(
+                f"random-{name}-credential-value-1234567890".encode()
+            ).decode()
+        }
+        for name in gate_module.COMPONENT_SECRET_NAMES
+    }
+    monkeypatch.setattr(gate, "_secret_data", lambda: operator_data)
+    monkeypatch.setattr(gate, "_component_secret_data", lambda name: component_data[name])
+    gate._secret_token()
+    gate._capture_component_secrets()
+    gate._verify_preserved_secret()
+    assert set(gate._component_secret_digests) == set(gate_module.COMPONENT_SECRET_NAMES)
+    for data in component_data.values():
+        encoded = data["COMPONENT_TOKEN"]
+        value = base64.b64decode(encoded).decode()
+        assert value not in gate.redactor.clean(value)
+        assert encoded not in gate.redactor.clean(encoded)
+    component_data["django-ray-auth"]["UNEXPECTED_NEW_KEY"] = base64.b64encode(b"changed").decode()
+    with pytest.raises(ValueError, match="component Secret data changed"):
+        gate._verify_preserved_secret()
+
+
+@pytest.mark.parametrize("encoded", [None, "invalid base64", base64.b64encode(b"short").decode()])
+def test_demo_enqueue_rejects_missing_or_invalid_separate_credentials(monkeypatch, encoded) -> None:
+    gate = LocalKubeRayGate(_config())
+    monkeypatch.setattr(gate, "_secret_token", lambda: TOKEN68)
+    monkeypatch.setattr(gate, "_component_secret_data", lambda name: {"DJANGO_DEMO_TOKEN": encoded})
+    with pytest.raises(ValueError, match="demo Secret"):
+        gate._workflow_enqueue_headers(gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH)
+
+
+def test_demo_enqueue_refuses_the_operator_credential(monkeypatch) -> None:
+    gate = LocalKubeRayGate(_config())
+    monkeypatch.setattr(gate, "_secret_token", lambda: TOKEN68)
+    monkeypatch.setattr(
+        gate,
+        "_component_secret_data",
+        lambda name: {"DJANGO_DEMO_TOKEN": base64.b64encode(TOKEN68.encode()).decode()},
+    )
+    with pytest.raises(ValueError, match="must be distinct"):
+        gate._workflow_enqueue_headers(gate_module.COMPLEX_WORKFLOW_ENQUEUE_PATH)
+
+
 @pytest.mark.parametrize(
     "token",
     [
@@ -7178,7 +7435,7 @@ def test_secret_token_accepts_strict_token68_values(
         "A" * 31 + "\\",
         "A" * 16 + "=" + "A" * 16,
         "A" * 32 + "===",
-        "A" * 32 + "€",
+        "A" * 32 + "â‚¬",
         "A" * 512 + "=",
         "A" * 511 + "==",
         "A" * 513,
@@ -7352,11 +7609,14 @@ def test_preflight_registers_secret_before_any_mutation_or_diagnostics(
         "_secret_token",
         lambda: events.append("secret-registered") or "local-token",
     )
+    monkeypatch.setattr(
+        gate, "_capture_component_secrets", lambda: events.append("components-registered")
+    )
 
     with pytest.raises(ValueError, match="legacy cluster-scoped"):
         gate._preflight()
 
-    assert events == ["secret-registered"]
+    assert events == ["secret-registered", "components-registered"]
     assert gate.mutated is False
     assert len(runner.sensitive_commands) == 1
     assert "config" in runner.sensitive_commands[0]
@@ -8367,6 +8627,14 @@ def test_complex_workflow_gate_requires_terminal_consistent_schema_v3_api(
     responses = _complex_workflow_gate_responses()
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(gate, "_secret_token", lambda: token)
+    demo_token = "distinct-demo-token-that-is-not-an-operator-123456"
+    monkeypatch.setattr(
+        gate,
+        "_component_secret_data",
+        lambda name: {
+            "DJANGO_DEMO_TOKEN": base64.b64encode(demo_token.encode()).decode(),
+        },
+    )
 
     def request(
         path: str,
@@ -8374,7 +8642,8 @@ def test_complex_workflow_gate_requires_terminal_consistent_schema_v3_api(
         method: str,
         headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
-        assert headers == {"Authorization": f"Bearer {token}"}
+        expected_token = demo_token if method == "POST" else token
+        assert headers == {"Authorization": f"Bearer {expected_token}"}
         calls.append((path, method))
         return 200, json.dumps(responses[path]).encode()
 
@@ -8613,7 +8882,7 @@ def test_terminal_only_workflow_gate_rejects_detail_or_inconsistent_summary(
 def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
     page_query = f"?limit={gate_module.WORKFLOW_SHOWCASE_PAGE_LIMIT}"
     node_ids = sorted(set().union(*gate_module.WORKFLOW_SHOWCASE_NODE_LAYERS))
-    edges = [
+    all_edges = [
         {"source": source, "target": target}
         for source, target in sorted(gate_module.WORKFLOW_SHOWCASE_EDGES)
     ]
@@ -8627,6 +8896,12 @@ def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
         state: str,
         node_states: dict[str, str],
     ) -> dict[str, dict[str, Any]]:
+        node_ids = sorted(node_states)
+        edges = [
+            edge
+            for edge in all_edges
+            if edge["source"] in node_states and edge["target"] in node_states
+        ]
         run_identity = {
             "schema_version": 1,
             "run_id": run_id,
@@ -8670,8 +8945,8 @@ def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
         details_by_node = {detail["node_id"]: detail for detail in node_details}
         details_by_node[gate_module.WORKFLOW_SHOWCASE_VALIDATION_NODE_ID]["output_preview"] = {
             "schema_version": 1,
-            "availability": "AVAILABLE",
-            "value": {"item_id": 0, "valid": True},
+            "availability": "NOT_REQUESTED",
+            "value": None,
         }
         details_by_node[gate_module.WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID][
             "output_preview"
@@ -8682,8 +8957,13 @@ def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
         }
         details_by_node[gate_module.WORKFLOW_SHOWCASE_FAILURE_NODE_ID]["output_preview"] = {
             "schema_version": 1,
-            "availability": "AVAILABLE" if state == "SUCCEEDED" else "UNAVAILABLE",
-            "value": ({"item_id": 0, "reserved_units": 1} if state == "SUCCEEDED" else None),
+            "availability": "NOT_REQUESTED" if state == "SUCCEEDED" else "UNAVAILABLE",
+            "value": None,
+        }
+        details_by_node[gate_module.WORKFLOW_SHOWCASE_INPUT_PREVIEW_NODE_ID]["output_preview"] = {
+            "schema_version": 1,
+            "availability": "AVAILABLE",
+            "value": {"collection_size": 1},
         }
         state_counts = {
             node_state: sum(value == node_state for value in node_states.values())
@@ -8786,10 +9066,8 @@ def _workflow_showcase_gate_responses() -> dict[str, dict[str, Any]]:
         return responses
 
     success_states = dict.fromkeys(node_ids, "SUCCEEDED")
-    failure_states = dict.fromkeys(node_ids, "SUCCEEDED")
+    failure_states = dict.fromkeys(gate_module.WORKFLOW_SHOWCASE_FAILURE_NODE_IDS, "SUCCEEDED")
     failure_states[gate_module.WORKFLOW_SHOWCASE_FAILURE_NODE_ID] = "FAILED"
-    for node_id in gate_module.WORKFLOW_SHOWCASE_FAILURE_DESCENDANTS:
-        failure_states[node_id] = "PENDING"
 
     responses = run_responses(
         enqueue_path=gate_module.WORKFLOW_SHOWCASE_ENQUEUE_PATH,
@@ -8840,7 +9118,7 @@ def test_workflow_showcase_gate_requires_layered_success_and_isolated_failure(
     assert len(set().union(*gate_module.WORKFLOW_SHOWCASE_NODE_LAYERS)) == 21
     assert len(gate_module.WORKFLOW_SHOWCASE_EDGES) == 28
     assert len(gate_module.WORKFLOW_SHOWCASE_NODE_LAYERS) == 12
-    assert len(indexed_paths) == 42
+    assert len(indexed_paths) == 37
     assert gate.evidence.workflow_showcase_task_id == WORKFLOW_SHOWCASE_TASK_ID
     assert gate.evidence.workflow_showcase_task_state == "SUCCEEDED"
     assert gate.evidence.workflow_showcase_attempt_number == 1
@@ -8852,11 +9130,11 @@ def test_workflow_showcase_gate_requires_layered_success_and_isolated_failure(
     assert gate.evidence.workflow_showcase_failure_task_state == "FAILED"
     assert gate.evidence.workflow_showcase_failure_attempt_number == 1
     assert gate.evidence.workflow_showcase_failure_failed_nodes == 1
-    assert gate.evidence.workflow_showcase_failure_pending_descendants == 5
+    assert gate.evidence.workflow_showcase_failure_pending_descendants == 0
     assert gate.evidence.workflow_showcase_failure_running_nodes == 0
     assert gate.evidence.workflow_showcase_failure_succeeded_nodes == 15
     assert gate.evidence.workflow_showcase_failure_path_nodes == 16
-    assert gate.evidence.workflow_showcase_failure_detail_links == 21
+    assert gate.evidence.workflow_showcase_failure_detail_links == 16
 
 
 def test_workflow_progress_layer_includes_compatibility_and_showcase_runs(
@@ -8895,7 +9173,7 @@ def test_workflow_progress_layer_includes_compatibility_and_showcase_runs(
         "failed_error",
         "failed_retry_attempt",
         "wrong_failed_root",
-        "descendant_not_pending",
+        "undiscovered_descendant",
         "required_prerequisite_not_succeeded",
         "forged_enqueue_kwargs",
     ],
@@ -8941,11 +9219,11 @@ def test_workflow_showcase_gate_rejects_incomplete_or_misleading_graph_evidence(
         by_node = {item["node_id"]: item for item in details}
         by_node[gate_module.WORKFLOW_SHOWCASE_FAILURE_NODE_ID]["state"] = "SUCCEEDED"
         by_node["0.3.g1.0.g0"]["state"] = "FAILED"
-    elif failure == "descendant_not_pending":
+    elif failure == "undiscovered_descendant":
         details = responses[failed_details_path]["items"]
-        by_node = {item["node_id"]: item for item in details}
         descendant = sorted(gate_module.WORKFLOW_SHOWCASE_FAILURE_DESCENDANTS)[0]
-        by_node[descendant]["state"] = "RUNNING"
+        details.append({"node_id": descendant, "state": "RUNNING"})
+        responses[failed_details_path]["returned_count"] += 1
     elif failure == "required_prerequisite_not_succeeded":
         details = responses[failed_details_path]["items"]
         by_node = {item["node_id"]: item for item in details}
@@ -9435,11 +9713,11 @@ def _seed_workflow_admin_evidence(gate: LocalKubeRayGate) -> None:
     gate.evidence.workflow_showcase_failure_task_state = "FAILED"
     gate.evidence.workflow_showcase_failure_attempt_number = 1
     gate.evidence.workflow_showcase_failure_failed_nodes = 1
-    gate.evidence.workflow_showcase_failure_pending_descendants = 5
+    gate.evidence.workflow_showcase_failure_pending_descendants = 0
     gate.evidence.workflow_showcase_failure_running_nodes = 0
     gate.evidence.workflow_showcase_failure_succeeded_nodes = 15
     gate.evidence.workflow_showcase_failure_path_nodes = 16
-    gate.evidence.workflow_showcase_failure_detail_links = 21
+    gate.evidence.workflow_showcase_failure_detail_links = 16
     gate.evidence.workflow_recovery_task_id = WORKFLOW_RECOVERY_TASK_ID
     gate.evidence.workflow_recovery_task_state = "SUCCEEDED"
     gate.evidence.workflow_recovery_attempt_number = 3
@@ -9513,7 +9791,7 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     topology_nodes=21,
                     topology_edges=28,
                     succeeded_nodes=21,
-                    available_previews=20,
+                    available_previews=18,
                     failed_previews=1,
                     preview_contract="showcase-succeeded-verified",
                 )
@@ -9547,7 +9825,7 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     failure_path_nodes=8,
                     failure_origins=1,
                     incoming_failure_edges=3,
-                    available_previews=6,
+                    available_previews=5,
                     failed_previews=1,
                     unavailable_previews=8,
                 )
@@ -9558,7 +9836,7 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                     topology_nodes=21,
                     topology_edges=28,
                     succeeded_nodes=21,
-                    available_previews=19,
+                    available_previews=18,
                     failed_previews=1,
                     unavailable_previews=0,
                 )
@@ -9566,18 +9844,18 @@ def test_workflow_admin_gate_executes_same_task_inside_django_web(
                 payload = _workflow_admin_smoke_evidence(
                     task_id=FAILED_WORKFLOW_SHOWCASE_TASK_ID,
                     task_state="FAILED",
-                    topology_nodes=21,
-                    topology_edges=28,
-                    pending_nodes=5,
+                    topology_nodes=16,
+                    topology_edges=21,
+                    pending_nodes=0,
                     running_nodes=0,
                     succeeded_nodes=15,
                     failed_nodes=1,
                     failure_path_nodes=16,
                     failure_origins=1,
                     incoming_failure_edges=1,
-                    available_previews=14,
+                    available_previews=13,
                     failed_previews=1,
-                    unavailable_previews=6,
+                    unavailable_previews=1,
                     preview_contract="showcase-failed-verified",
                 )
         return CommandResult(json.dumps(payload), "", 0)
@@ -9699,7 +9977,7 @@ def test_workflow_admin_gate_rejects_inexact_showcase_failure_projection(
                 topology_nodes=21,
                 topology_edges=28,
                 succeeded_nodes=21,
-                available_previews=20,
+                available_previews=18,
                 failed_previews=1,
                 preview_contract="showcase-succeeded-verified",
             )
@@ -9707,17 +9985,17 @@ def test_workflow_admin_gate_rejects_inexact_showcase_failure_projection(
             payload = _workflow_admin_smoke_evidence(
                 task_id=FAILED_WORKFLOW_SHOWCASE_TASK_ID,
                 task_state="FAILED",
-                topology_nodes=21,
-                topology_edges=28,
-                pending_nodes=5,
+                topology_nodes=16,
+                topology_edges=21,
+                pending_nodes=0,
                 succeeded_nodes=15,
                 failed_nodes=1,
                 failure_path_nodes=16,
                 failure_origins=1,
                 incoming_failure_edges=1,
-                available_previews=14,
+                available_previews=13,
                 failed_previews=1,
-                unavailable_previews=6,
+                unavailable_previews=1,
                 preview_contract="showcase-failed-verified",
             )
             payload[field_name] = value
@@ -10234,8 +10512,8 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "UID/container/image identity-set SHA-256" in guide
     assert "sanitized environments" in guide
     assert "rechecked before and after Prometheus" in guide
-    assert "direct NodePort pair" in guide
-    assert "`http://localhost:30090`" in guide
+    assert "loopback-forward pair" in guide
+    assert "`http://127.0.0.1:30090`" in guide
     assert "K8S_PROMETHEUS_URL=http://prometheus.localhost:30080" not in guide
     assert "Each emitted line is at most 72 characters" in guide
     assert "key_part_001" in guide
@@ -10247,7 +10525,7 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "exact canonical locator digest" in normalized
     assert "with no selector in an init container, shared ConfigMap, setup Job, or Ray pod" in guide
     assert "task IDs, hashes, key IDs, nonces, ciphertext, or envelopes" in guide
-    assert "full base64 `django-ray-secret.data` mapping" in guide
+    assert "full base64 data mapping of every component Secret" in guide
     encryption_row = next(
         line for line in guide.splitlines() if line.startswith("| RuntimeEnv snapshot storage")
     )
@@ -10292,8 +10570,8 @@ def test_make_gate_wrapper_expands_on_the_host_shell(target: str) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "python -m scripts.local_kuberay_gate" in result.stdout
-    assert '--web-url "http://localhost:30080"' in result.stdout
-    assert '--prometheus-url "http://localhost:30090"' in result.stdout
+    assert '--web-url "http://127.0.0.1:30080"' in result.stdout
+    assert '--prometheus-url "http://127.0.0.1:30090"' in result.stdout
     assert "if [ -z" not in result.stdout
 
 
@@ -10336,6 +10614,7 @@ def _stub_successful_gate_layers(
         "_restart_task_managers",
         "_wait_for_application_topology",
         "_verify_deployed_images",
+        "_verify_authentication",
         "_recover_protocol_handoff_residue",
         "_verify_generic_ray_nodes",
         "_verify_probes",
@@ -10642,6 +10921,7 @@ def test_final_evidence_identity_failure_is_labeled_once_without_traceback(
         "_restart_task_managers",
         "_wait_for_application_topology",
         "_verify_deployed_images",
+        "_verify_authentication",
         "_recover_protocol_handoff_residue",
         "_verify_generic_ray_nodes",
         "_verify_probes",

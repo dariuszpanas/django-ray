@@ -157,6 +157,8 @@
           "tests/unit/test_kuberay_compiled_graph_pilot.py",
           "tests/unit/test_kuberay_resource_profiles.py",
           "tests/unit/test_kubernetes_web_probes.py",
+          "tests/unit/test_kubernetes_secret_policy.py",
+          "tests/unit/test_local_kuberay_auth.py",
           "tests/unit/test_local_kuberay_gate.py"
         ]
       }
@@ -352,6 +354,8 @@
       "selection": {
         "paths": [
           "tests/integration/test_api.py",
+          "tests/integration/test_sample_admission.py",
+          "tests/unit/test_sample_workload_limits.py",
           "tests/integration/test_testproject_admin_theme.py",
           "tests/integration/test_workflow_progress_api.py",
           "tests/unit/test_sample_security.py",
@@ -410,6 +414,7 @@
           "tests/integration/test_postgresql_coordination.py",
           "tests/integration/test_postgresql_metrics.py",
           "tests/integration/test_transactional_enqueue.py",
+          "tests/integration/test_sample_admission.py",
           "tests/integration/test_postgresql_polling.py",
           "tests/integration/test_postgresql_workflow_progress_reads.py",
           "tests/integration/test_postgresql_workflow_progress_storage.py",
@@ -457,6 +462,8 @@
       "selection": {
         "paths": [
           "tests/integration/test_api.py",
+          "tests/integration/test_sample_admission.py",
+          "tests/unit/test_sample_workload_limits.py",
           "tests/integration/test_testproject_admin_theme.py",
           "tests/integration/test_workflow_progress_api.py",
           "tests/unit/test_sample_security.py",

@@ -17,17 +17,17 @@ Compiled Graph, see the [Ray Ecosystem Support and Install Matrix](ray-ecosystem
 ## Supported Ray Data boundary
 
 Install the Ray Data extra at the exact Ray version used by the cluster. The bundled
-profile and blocking probe pin Ray 2.56.0:
+profile and blocking probe pin Ray 2.58.0:
 
 ```console
-uv add "ray[data]==2.56.0"
+uv add "ray[data]==2.58.0"
 ```
 
-django-ray 0.4 requires Ray 2.56 or newer, and this recipe must use that same or a
-newer reviewed cluster version. Ray 2.56 is the first release that contains both the
-[Parquet deserialization fix](https://github.com/ray-project/ray/security/advisories/GHSA-mw35-8rx3-xf9r)
-and the
-[WebDataset deserialization fix](https://github.com/advisories/GHSA-hhrp-gw25-jr43).
+django-ray 0.5 requires Ray 2.58 or newer, and this recipe must use that same or a
+newer reviewed cluster version. Ray 2.58 extends earlier Data security fixes to
+[nested Parquet object types and Lance reads](https://github.com/ray-project/ray/pull/64881).
+The bundled recipe reads JSON and writes scalar Parquet; copying it does not establish
+the safety of arbitrary data formats or application-supplied deserializers.
 Build the pinned dependency into the Ray image or one reviewed RuntimeEnv shared by the
 Ray Job driver and every Ray worker. A missing Ray Data or PyArrow dependency fails
 before the recipe reserves an attempt directory.
@@ -228,11 +228,11 @@ durably resubmits a second, distinct Ray Job, which succeeds:
 ```console
 uv run --isolated --no-project --python 3.12 \
   --with-editable ".[sample]" \
-  --with "ray[data]==2.56.0" \
+  --with "ray[data]==2.58.0" \
   python scripts/ray_data_golden_path_probe.py
 ```
 
-The isolated command supplies `ray[data]==2.56.0` as a prebuilt disposable node
+The isolated command supplies `ray[data]==2.58.0` as a prebuilt disposable node
 environment. The probe records an empty task RuntimeEnv pip overlay instead of asking
 Ray to create a redundant nested virtualenv; this also works with pip-less uv Python
 installations on Windows. Before importing Ray, the probe disables Ray's automatic
@@ -262,7 +262,7 @@ The authoritative application states remain the archived Django attempts: first
 `FAILED`, then `SUCCEEDED`. The probe rejects adoption of the first orphaned artifact,
 validates repeated read-only adoption of the successful artifact without rewriting its
 manifest, checks attempt fences and namespace isolation, verifies exact Parquet rows
-and bounded metadata, and rejects tampered output. Blocking CI runs the same Ray 2.56
+and bounded metadata, and rejects tampered output. Blocking CI runs the same Ray 2.58
 probe on the supported-minimum Python 3.12 and newest Python 3.14 endpoints. This is
 real routed local Ray evidence, not multi-node shared-storage proof. An adopter must
 separately prove its mounts, permissions, pinned image, and failure behavior on the

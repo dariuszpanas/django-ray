@@ -123,9 +123,10 @@ def test_make_targets_pin_and_bound_operator_before_co_resident_apply() -> None:
         "apply -k k8s/overlays/co-resident"
     )
     assert "status.availableWorkerReplicas}'=1" in deploy
-    assert "get secret/django-ray-secret" in bootstrap
-    assert "create -f k8s/base/secret.yaml" in bootstrap
-    assert "apply -f k8s/base/secret.yaml" not in bootstrap
+    assert "python scripts/prepare_k8s_secrets.py" in bootstrap
+    assert '--namespace "$(K8S_NAMESPACE)"' in bootstrap
+    assert '--provision-context "$(K8S_CONTEXT)"' in bootstrap
+    assert "k8s/base/secret.yaml" not in bootstrap
     assert reverse.index("k8s-delete-co-resident-policy") < reverse.index(
         "k8s/overlays/kuberay-kind"
     )

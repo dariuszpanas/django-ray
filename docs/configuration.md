@@ -495,6 +495,10 @@ DJANGO_RAY = {
 
 ### Production
 
+For 0.5.0, prefer direct Core/GCS or explicit HTTP(S) Jobs configuration when
+avoiding Client startup failures. The `ray://` example below remains subject to
+the unresolved [Ray Client limitation](compatibility.md#ray-client-startup-limitation).
+
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head-svc:10001",

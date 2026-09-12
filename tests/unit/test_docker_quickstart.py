@@ -1386,15 +1386,18 @@ def test_failed_admin_graph_accepts_unfinished_downstream_nodes() -> None:
     assert evidence["graph_failed_nodes"] == 2
 
 
+@pytest.mark.parametrize("preview_regression", [None, "validation_leaf", "reservation_leaf"])
 @pytest.mark.parametrize("execution_state", ["SUCCEEDED", "FAILED"])
 def test_showcase_admin_graph_requires_exact_safe_preview_contract(
     execution_state: str,
+    preview_regression: str | None,
 ) -> None:
     node_ids = (
         docker_smoke._WORKFLOW_SHOWCASE_VALIDATION_NODE_ID,
         docker_smoke._WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID,
         docker_smoke._WORKFLOW_SHOWCASE_RESERVATION_NODE_ID,
     )
+    assert node_ids == ("0.1.g0.1", "0.1.g1.0.g1", "0.5")
     reservation_state = "SUCCEEDED" if execution_state == "SUCCEEDED" else "FAILED"
     states = {
         node_ids[0]: "SUCCEEDED",
@@ -1404,8 +1407,8 @@ def test_showcase_admin_graph_requires_exact_safe_preview_contract(
     previews = {
         node_ids[0]: {
             "schema_version": 1,
-            "availability": "AVAILABLE",
-            "value": {"item_id": 0, "valid": True},
+            "availability": "NOT_REQUESTED",
+            "value": None,
         },
         node_ids[1]: {
             "schema_version": 1,
@@ -1414,10 +1417,8 @@ def test_showcase_admin_graph_requires_exact_safe_preview_contract(
         },
         node_ids[2]: {
             "schema_version": 1,
-            "availability": "AVAILABLE" if execution_state == "SUCCEEDED" else "UNAVAILABLE",
-            "value": (
-                {"item_id": 0, "reserved_units": 1} if execution_state == "SUCCEEDED" else None
-            ),
+            "availability": "NOT_REQUESTED" if execution_state == "SUCCEEDED" else "UNAVAILABLE",
+            "value": None,
         },
     }
     edges = [
@@ -1452,6 +1453,24 @@ def test_showcase_admin_graph_requires_exact_safe_preview_contract(
     topology_nodes = [{"node_id": node_id} for node_id in node_ids]
     node_details = [{"node_id": node_id, "state": states[node_id]} for node_id in node_ids]
 
+    if preview_regression is not None:
+        index = 0 if preview_regression == "validation_leaf" else 2
+        graph["nodes"][index]["output_preview"] = {
+            "schema_version": 1,
+            "availability": "AVAILABLE",
+            "value": {"item_id": 0},
+        }
+        with pytest.raises(docker_smoke.DockerSmokeError, match="showcase output previews"):
+            docker_smoke._workflow_admin_graph_evidence(
+                graph,
+                execution_state=execution_state,
+                callable_path=docker_smoke._WORKFLOW_SHOWCASE_CALLABLE,
+                topology_nodes=topology_nodes,
+                topology_edges=edges,
+                node_details=node_details,
+            )
+        return
+
     evidence = docker_smoke._workflow_admin_graph_evidence(
         graph,
         execution_state=execution_state,
@@ -1462,7 +1481,7 @@ def test_showcase_admin_graph_requires_exact_safe_preview_contract(
     )
 
     assert evidence["graph_preview_contract"] == (f"showcase-{execution_state.lower()}-verified")
-    assert evidence["graph_available_previews"] == (2 if execution_state == "SUCCEEDED" else 1)
+    assert evidence["graph_available_previews"] == 0
     assert evidence["graph_failed_previews"] == 1
     assert evidence["graph_unavailable_previews"] == (0 if execution_state == "SUCCEEDED" else 1)
 

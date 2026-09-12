@@ -13,7 +13,7 @@ GUIDE = DOCS / "ray-ecosystem.md"
 
 MATRIX_HEADERS = (
     "Component",
-    "Install and django-ray 0.4 status",
+    "Install and django-ray 0.5 status",
 )
 EXPECTED_MATRIX = {
     "Ray Core": ("ray[default]", "First-class django-ray execution path"),
@@ -21,7 +21,7 @@ EXPECTED_MATRIX = {
     "Ray Jobs": ("ray[default]", "First-class django-ray execution path"),
     "Dashboard and State APIs": ("ray[default]", "Live diagnostics only"),
     "Ray Workflows": ("removed upstream", "Unrelated to django-ray workflows"),
-    "Ray Data": ("ray[data]==2.56.0", "Shipped application-owned Ray Job recipe"),
+    "Ray Data": ("ray[data]==2.58.0", "Shipped application-owned Ray Job recipe"),
     "Ray Train": ("ray[train]", "application-owned workload; untested"),
     "Ray Tune": ("ray[tune]", "application-owned workload; untested"),
     "RLlib": ("ray[rllib]", "application-owned workload; untested"),
@@ -74,7 +74,7 @@ def test_ray_ecosystem_matrix_matches_package_install_boundary() -> None:
     dependencies = pyproject["project"]["dependencies"]
     optional_dependencies = pyproject["project"]["optional-dependencies"]
 
-    assert "ray[default]>=2.56.0" in dependencies
+    assert "ray[default]>=2.58.0" in dependencies
     assert all(
         not requirement.lower().startswith("ray[")
         for requirements in optional_dependencies.values()

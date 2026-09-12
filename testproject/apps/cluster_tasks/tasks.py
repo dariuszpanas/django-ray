@@ -61,6 +61,7 @@ from testproject.apps.cluster_tasks.workflows import (
     validate_order_fulfillment_showcase_inputs,
     workflow_showcase_fixture_error_message,
 )
+from testproject.workload_limits import bounded_sample_task
 
 RAY_DATA_AFTER_MANIFEST_FAILURE_FIXTURE = "after-manifest-attempt-1"
 RAY_DATA_AFTER_MANIFEST_FAILURE_MESSAGE = (
@@ -160,6 +161,7 @@ def _process_single_item(item: Any) -> dict[str, Any]:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def workflow_fanout_benchmark(
     num_items: int = 8,
     seconds_per_item: float = 0.25,
@@ -174,6 +176,7 @@ def workflow_fanout_benchmark(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def complex_workflow_benchmark(
     fast_items: int = 8,
     slow_items: int = 4,
@@ -220,6 +223,7 @@ def complex_workflow_benchmark(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def order_fulfillment_showcase_task(
     item_count: int = 3,
     work_seconds: float = 0.05,
@@ -253,6 +257,7 @@ def order_fulfillment_showcase_task(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def order_fulfillment_recovery_showcase_task(
     item_count: int = 3,
     work_seconds: float = 0.05,
@@ -301,12 +306,14 @@ def order_fulfillment_recovery_showcase_task(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def runtime_env_probe(package: str | None = None) -> dict[str, Any]:
     """Inspect the selected outer task RuntimeEnv."""
     return inspect_runtime_environment(package)
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def runtime_env_benchmark(
     profile: str = "thin",
     repeats: int = 2,
@@ -376,6 +383,7 @@ def ray_data_batch_score(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def process_chunk(data: list[Any], chunk_id: int = 0) -> dict[str, Any]:
     """Process a chunk of data using distributed computing.
 
@@ -392,7 +400,7 @@ def process_chunk(data: list[Any], chunk_id: int = 0) -> dict[str, Any]:
     start = time.time()
 
     # This actually distributes work across the Ray cluster!
-    processed = parallel_map(_process_single_item, data)
+    processed = parallel_map(_process_single_item, data, max_concurrency=4)
 
     elapsed = time.time() - start
 
@@ -409,6 +417,7 @@ def process_chunk(data: list[Any], chunk_id: int = 0) -> dict[str, Any]:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def aggregate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate results from multiple chunks.
 
@@ -452,6 +461,7 @@ def _search_single_source(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def distributed_search(
     pattern: str,
     data_sources: list[str],
@@ -476,7 +486,7 @@ def distributed_search(
     search_args = [(source, pattern, case_sensitive) for source in data_sources]
 
     # This distributes the search across the entire Ray cluster!
-    all_results = parallel_starmap(_search_single_source, search_args)
+    all_results = parallel_starmap(_search_single_source, search_args, max_concurrency=4)
 
     # Filter out None results
     results = [r for r in all_results if r is not None]
@@ -522,6 +532,7 @@ def _cpu_intensive_work(item_id: int, duration_seconds: float) -> dict[str, Any]
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def distributed_cpu_benchmark(
     num_items: int = 10,
     seconds_per_item: float = 2.0,
@@ -544,7 +555,7 @@ def distributed_cpu_benchmark(
     work_items = [(i, seconds_per_item) for i in range(num_items)]
 
     # Execute in parallel across cluster
-    results = parallel_starmap(_cpu_intensive_work, work_items)
+    results = parallel_starmap(_cpu_intensive_work, work_items, max_concurrency=4)
 
     elapsed = time.time() - start
     sequential_estimate = num_items * seconds_per_item
@@ -585,6 +596,7 @@ def _fetch_single_url(url: str, timeout_seconds: int = 30) -> dict[str, Any]:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def batch_http_requests(
     urls: list[str],
     timeout_seconds: int = 30,
@@ -604,7 +616,9 @@ def batch_http_requests(
     start = time.time()
 
     # Fetch all URLs in parallel across the cluster
-    results = parallel_map(_fetch_single_url, urls, timeout_seconds=timeout_seconds)
+    results = parallel_map(
+        _fetch_single_url, urls, max_concurrency=4, timeout_seconds=timeout_seconds
+    )
 
     elapsed = time.time() - start
 
@@ -626,6 +640,7 @@ def batch_http_requests(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def etl_transform(
     records: list[dict[str, Any]],
     transformations: list[str],
@@ -668,6 +683,7 @@ def etl_transform(
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def long_running_job(
     duration_seconds: int = 60,
     checkpoint_interval: int = 10,

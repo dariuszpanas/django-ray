@@ -1,14 +1,11 @@
-# Kustomize render base for evaluation and maintainer validation only.
-# Do not apply it directly or treat it as a production deployment template.
+# Local evaluation and maintainer validation only; credentials are provisioned separately.
+# Do not treat this render reference as a production deployment template.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 namespace: django-ray
-
 resources:
   - namespace.yaml
   - configmap.yaml
-  - secret.yaml
   - postgres.yaml
   - runtime-env-storage.yaml
   - payload-storage.yaml
@@ -17,11 +14,9 @@ resources:
   - django-ray-worker.yaml
   - django-setup-job.yaml
   - monitoring.yaml
-
 commonLabels:
   app.kubernetes.io/name: django-ray
   app.kubernetes.io/part-of: django-ray
-
 images:
   - name: django-ray
     newName: django-ray
@@ -29,4 +24,3 @@ images:
   - name: django-ray-worker
     newName: django-ray-worker
     newTag: latest
-

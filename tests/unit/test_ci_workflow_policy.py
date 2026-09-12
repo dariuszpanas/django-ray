@@ -402,7 +402,7 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     )
 
     assert '"pyasn1==0.6.4"' in minimum_install["run"]
-    assert '"ray[default]==2.56.0"' in minimum_install["run"]
+    assert '"ray[default]==2.58.0"' in minimum_install["run"]
     assert '"django==6.0.8"' in minimum_install["run"]
     assert '"sqlparse==0.6.0"' in minimum_install["run"]
     assert '"pip-audit==2.10.1"' in minimum_install["run"]
@@ -584,12 +584,12 @@ def test_ray_data_golden_path_runs_real_optional_dependency_endpoints() -> None:
                 {
                     "profile": "supported-min-python",
                     "python-version": "3.12",
-                    "ray-version": "2.56.0",
+                    "ray-version": "2.58.0",
                 },
                 {
                     "profile": "newest-python",
                     "python-version": "3.14",
-                    "ray-version": "2.56.0",
+                    "ray-version": "2.58.0",
                 },
             ]
         },

@@ -2,14 +2,14 @@
 
 The probe observes one bounded interval.  It does not activate a target, grant
 worker capability, or make a claim about cluster membership after the second
-snapshot.  Ray 2.56.0 resource-state counters advance during ordinary
-heartbeats, so they are retained as non-regressing before/after diagnostics;
+snapshot.  Ray 2.58.0 resource-state counters advance when resource state is
+read, so they are retained as non-regressing before/after diagnostics;
 they are not membership epochs.
 
 Remote code is produced by a local factory and serialized by value.  Generic
 Ray nodes therefore need Ray itself, but do not need ``django_ray`` installed.
 All private Ray access is confined to that remote bootstrap and occurs only
-after an exact Ray 2.56.0 version check.
+after an exact Ray 2.58.0 version check.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
         TargetExecutionResult,
     )
 
-RAY_TARGET_PROBE_RAY_VERSION = "2.56.0"
+RAY_TARGET_PROBE_RAY_VERSION = "2.58.0"
 RAY_TARGET_PROBE_DEFAULT_TIMEOUT_SECONDS = 30.0
 RAY_TARGET_PROBE_MAX_TIMEOUT_SECONDS = 120.0
 RAY_TARGET_PROBE_DEFAULT_MAX_NODES = 64
@@ -426,7 +426,7 @@ def _current_resource_state_snapshot(
     timeout_seconds: float,
     max_nodes: int,
 ) -> _ResourceStateSnapshot:
-    """Read one bounded schedulable-node set through the pinned Ray 2.56 API."""
+    """Read one bounded schedulable-node set through the pinned Ray 2.58 API."""
     timeout_seconds, max_nodes = _validate_probe_limits(
         timeout_seconds=timeout_seconds,
         max_nodes=max_nodes,
@@ -515,7 +515,7 @@ def _current_resource_state_snapshot(
 
 def _make_cluster_probe_coordinator() -> Callable[[float, int, int], dict[str, object]]:
     """Return stdlib-plus-Ray remote code serialized by value, not module name."""
-    supported_ray_version = "2.56.0"
+    supported_ray_version = "2.58.0"
     max_timeout_seconds = 120.0
     max_nodes_bound = 256
     expected_max_bytes = 4 * 1024 * 1024
@@ -1093,7 +1093,7 @@ def verify_ray_target_execution(
         _reject(RayTargetProbeFailure.SESSION_MISMATCH)
     observed_runtime = RayRuntimeVersion(
         ray_major=2,
-        ray_minor=56,
+        ray_minor=58,
         ray_patch=0,
         python_implementation=caller.python_implementation,
         python_major=caller.python_version[0],
@@ -1192,7 +1192,7 @@ def probe_ray_target(
     )
     observed_runtime = RayRuntimeVersion(
         ray_major=2,
-        ray_minor=56,
+        ray_minor=58,
         ray_patch=0,
         python_implementation=raw.caller.python_implementation,
         python_major=raw.caller.python_version[0],

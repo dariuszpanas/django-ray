@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,21 @@ class _ShowcaseGraphExecutor(_Executor):
 
     nodes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
+    suppressed: bool = False
+
+    @contextmanager
+    def suppress_progress(self):
+        self.suppressed = True
+        try:
+            yield
+        finally:
+            self.suppressed = False
+
+    def map_started(self, node_id, label, dependencies, *, max_concurrency, max_items):
+        assert max_concurrency == 4
+        assert max_items == 100
+        self.nodes[node_id] = dependencies
+        self.labels[node_id] = label
 
     def submit_step(
         self,
@@ -41,8 +57,9 @@ class _ShowcaseGraphExecutor(_Executor):
         node_id: str,
         dependencies: tuple[str, ...],
     ) -> Any:
-        self.nodes[node_id] = dependencies
-        self.labels[node_id] = signature.callable_path.rsplit(".", 1)[-1]
+        if not self.suppressed:
+            self.nodes[node_id] = dependencies
+            self.labels[node_id] = signature.callable_path.rsplit(".", 1)[-1]
         module_path, callable_name = signature.callable_path.rsplit(".", 1)
         callable_obj = getattr(importlib.import_module(module_path), callable_name)
         return callable_obj(
@@ -286,7 +303,7 @@ def test_order_fulfillment_showcase_failure_reaches_selected_leaf_locally() -> N
     ("item_count", "expected_nodes", "expected_edges", "layer_widths"),
     [
         (1, 21, 28, [1, 4, 2, 1, 4, 1, 1, 1, 1, 1, 3, 1]),
-        (3, 25, 36, [1, 4, 4, 1, 4, 1, 1, 1, 3, 1, 3, 1]),
+        (3, 21, 28, [1, 4, 2, 1, 4, 1, 1, 1, 1, 1, 3, 1]),
     ],
 )
 def test_order_fulfillment_showcase_has_stable_repeated_split_join_topology(
@@ -318,8 +335,8 @@ def test_order_fulfillment_showcase_has_stable_repeated_split_join_topology(
         sum(layer == layer_index for layer in layers.values()) for layer_index in range(12)
     ] == layer_widths
 
-    validation_nodes = tuple(f"0.1.g0.1.m{index}" for index in range(item_count))
-    reservation_nodes = tuple(f"0.5.m{index}" for index in range(item_count))
+    validation_nodes = ("0.1.g0.1",)
+    reservation_nodes = ("0.5",)
     assert executor.nodes["0.2"] == (
         *validation_nodes,
         "0.1.g1.1",
@@ -330,7 +347,7 @@ def test_order_fulfillment_showcase_has_stable_repeated_split_join_topology(
     assert executor.nodes["0.6"] == reservation_nodes
     assert executor.nodes["0.8"] == ("0.7.g0", "0.7.g1", "0.7.g2")
     assert executor.labels["0.4"] == "attach_commercial_context_to_reservations"
-    assert executor.labels["0.5.m0"] == "reserve_inventory"
+    assert executor.labels["0.5"] == "map:reserve_inventory"
     assert executor.labels["0.6"] == "join_fulfillment_decision"
     assert executor.labels["0.8"] == "finalize_order_fulfillment"
 
@@ -352,8 +369,8 @@ def test_order_fulfillment_showcase_has_stable_repeated_split_join_topology(
         "0.3.g1.0.g1.1",
         "0.3.g1.1",
     }
-    assert commercial_nodes <= ancestors("0.5.m0")
-    assert {node_id for node_id in executor.nodes if "0.5.m0" in ancestors(node_id)} == {
+    assert commercial_nodes <= ancestors("0.5")
+    assert {node_id for node_id in executor.nodes if "0.5" in ancestors(node_id)} == {
         "0.6",
         "0.7.g0",
         "0.7.g1",

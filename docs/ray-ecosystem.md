@@ -1,6 +1,6 @@
 # Ray ecosystem support
 
-django-ray 0.4 requires `ray[default]>=2.56.0`. That base dependency supports
+django-ray 0.5 requires `ray[default]>=2.58.0`. That base dependency supports
 django-ray's Ray Core, Ray Client, Ray Jobs, Dashboard, and State API paths. It does
 not turn every optional Ray library into a tested django-ray integration.
 
@@ -15,6 +15,27 @@ This page is the adoption contract for those boundaries. It adds no django-ray
 pass-through extras, component adapters, models, migrations, or public APIs. Install
 optional Ray components in the application-owned image or RuntimeEnv that executes
 them, using the same Ray version as the cluster.
+
+## Ray 2.58 changes and limits
+
+The 0.5 baseline includes upstream repeated-cancellation safeguards, child-process
+cleanup, and graceful-shutdown owner handling. These support the existing Core and
+Jobs paths; they do not replace durable completion receipts, cancellation deadlines,
+or proof that remote work has stopped. See the [security floor](compatibility.md#supported-versions).
+
+New streaming-generator backpressure can support future paged map inputs, but bounded
+pages, bytes, cancellation, ordering and retry still need an application contract.
+Use the streaming API for that investigation; the older dynamic-generator API is
+deprecated. Ray 2.58 also fixes a
+[backpressure deadlock](https://github.com/ray-project/ray/pull/64896) in that path.
+
+Moving task events out of GCS is disabled by default in
+[Ray 2.58's configuration](https://github.com/ray-project/ray/blob/ray-2.58.0/src/ray/common/ray_config_def.h).
+Enabling it is a separate observability experiment, and its in-memory records are not
+durable workflow checkpoints. Embedded RocksDB GCS storage likewise does not preserve
+application side effects or make workflow retries resume from completed nodes.
+Experimental Sandbox and optional Serve/Train/LLM additions require their own
+application, dependency and deployment review. None is enabled by the package upgrade.
 
 ## Choose the smallest supported path
 
@@ -35,20 +56,20 @@ them, using the same Ray version as the cluster.
 **Base import** describes the verified `ray[default]` environment, not a promise that a
 namespace which happens to import has all dependencies required for real work.
 
-| Component | Install and django-ray 0.4 status |
+| Component | Install and django-ray 0.5 status |
 |---|---|
-| **Ray Core** | **Install:** `ray[default]`; base import **yes**.<br>**0.4 status:** First-class django-ray execution path. |
-| **Ray Client** | **Install:** `ray[default]`; base import **yes**.<br>**0.4 status:** Cluster Core transport with a connection-owned lifetime. |
-| **Ray Jobs** | **Install:** `ray[default]`; base import **yes**.<br>**0.4 status:** First-class django-ray execution path. |
-| **Dashboard and State APIs** | **Install:** `ray[default]`; base import **yes**.<br>**0.4 status:** Live diagnostics only. |
-| **Ray Workflows** | **Install:** no supported install; **removed upstream**.<br>**0.4 status:** Unrelated to django-ray workflows. |
-| **Ray Data** | **Install:** the bundled recipe pins `ray[data]==2.56.0`; base does not guarantee a usable path.<br>**0.4 status:** Shipped application-owned Ray Job recipe with bounded Linux evidence. |
-| **Ray Train** | **Install:** matching `ray[train]` plus a framework; base does not guarantee a usable path.<br>**0.4 status:** Documented application-owned workload; untested. |
-| **Ray Tune** | **Install:** matching `ray[tune]` plus trainable/search dependencies; base does not guarantee a usable path.<br>**0.4 status:** Documented application-owned workload; untested. |
-| **RLlib** | **Install:** matching `ray[rllib]` plus framework/environment dependencies; base does not guarantee a usable path.<br>**0.4 status:** Documented application-owned workload; untested. |
-| **Ray Serve** | **Install:** matching `ray[serve]` in the serving environment; base does not guarantee a usable path.<br>**0.4 status:** Separate application/platform-owned service. See the [Django gateway recipe](ray-serve-gateway.md). |
-| **Ray Serve LLM** | **Install:** matching `ray[serve,llm]` plus engine/model dependencies; base does not guarantee a usable path.<br>**0.4 status:** Deferred, evidence-gated service. |
-| **Compiled Graph** | **Install:** base `ray.dag` imports; native canaries use matching `ray[cgraph]`.<br>**0.4 status:** Experimental groundwork; no enabled strategy. |
+| **Ray Core** | **Install:** `ray[default]`; base import **yes**.<br>**0.5 status:** First-class django-ray execution path. |
+| **Ray Client** | **Install:** `ray[default]`; base import **yes**.<br>**0.5 status:** Cluster Core transport with a connection-owned lifetime. |
+| **Ray Jobs** | **Install:** `ray[default]`; base import **yes**.<br>**0.5 status:** First-class django-ray execution path. |
+| **Dashboard and State APIs** | **Install:** `ray[default]`; base import **yes**.<br>**0.5 status:** Live diagnostics only. |
+| **Ray Workflows** | **Install:** no supported install; **removed upstream**.<br>**0.5 status:** Unrelated to django-ray workflows. |
+| **Ray Data** | **Install:** the bundled recipe pins `ray[data]==2.58.0`; base does not guarantee a usable path.<br>**0.5 status:** Shipped application-owned Ray Job recipe with bounded Linux evidence. |
+| **Ray Train** | **Install:** matching `ray[train]` plus a framework; base does not guarantee a usable path.<br>**0.5 status:** Documented application-owned workload; untested. |
+| **Ray Tune** | **Install:** matching `ray[tune]` plus trainable/search dependencies; base does not guarantee a usable path.<br>**0.5 status:** Documented application-owned workload; untested. |
+| **RLlib** | **Install:** matching `ray[rllib]` plus framework/environment dependencies; base does not guarantee a usable path.<br>**0.5 status:** Documented application-owned workload; untested. |
+| **Ray Serve** | **Install:** matching `ray[serve]` in the serving environment; base does not guarantee a usable path.<br>**0.5 status:** Separate application/platform-owned service. See the [Django gateway recipe](ray-serve-gateway.md). |
+| **Ray Serve LLM** | **Install:** matching `ray[serve,llm]` plus engine/model dependencies; base does not guarantee a usable path.<br>**0.5 status:** Deferred, evidence-gated service. |
+| **Compiled Graph** | **Install:** base `ray.dag` imports; native canaries use matching `ray[cgraph]`.<br>**0.5 status:** Experimental groundwork; no enabled strategy. |
 
 Ray supports combining extras, for example `ray[default,data]`. Lock the complete
 workload dependency set and keep the Ray version aligned across the task manager, Ray

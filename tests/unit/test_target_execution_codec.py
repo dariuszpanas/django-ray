@@ -68,7 +68,7 @@ _DIGEST = "sha256:" + "a" * 64
 def _runtime(**changes: object) -> RayRuntimeVersion:
     values: dict[str, object] = {
         "ray_major": 2,
-        "ray_minor": 56,
+        "ray_minor": 58,
         "ray_patch": 0,
         "python_implementation": "cpython",
         "python_major": 3,

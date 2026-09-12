@@ -1,10 +1,2 @@
-ingressController:
-  ingressClass: kong
-
-gateway:
-  proxy:
-    type: LoadBalancer
-    http:
-      servicePort: 30080
-    tls:
-      servicePort: 30443
+# Retired local ingress reference. No sample target installs a Kong gateway.
+# The larger kong-local workload profile uses ClusterIP and loopback port-forwards.
