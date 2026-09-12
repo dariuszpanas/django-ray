@@ -43,6 +43,7 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
         "django_ray/target/cohort_intent.py",
         "django_ray/target/cohort_intent_storage.py",
         "django_ray/target/cohort_job_control.py",
+        "django_ray/target/cohort_job_retirement.py",
         "django_ray/target/cohort_job_http.py",
         "django_ray/target/cohort_job_receipt.py",
         "django_ray/target/cohort_job_receipt_storage.py",

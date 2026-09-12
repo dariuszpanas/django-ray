@@ -124,6 +124,8 @@ test-postgres:
 		tests/integration/test_cohort_job_receipts.py \
 		tests/integration/test_cohort_publication.py \
 		tests/integration/test_cohort_core.py \
+		tests/integration/test_cohort_jobs.py \
+		tests/integration/test_cohort_job_retirement.py \
 		tests/integration/test_ray_target_coordination.py \
 		tests/integration/test_ray_target_routing_coordination.py \
 		tests/integration/test_ray_worker_target_capabilities.py \

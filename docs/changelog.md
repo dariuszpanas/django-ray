@@ -57,7 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit cleanup ownership. Core observations are separated from database publication;
   Jobs control uses an owned Linux helper and binds the configured control profile to
   the submitted mapping after upload. These adapters remain private and unactivated;
-  Jobs `ray://` discovery and production worker integration still need completion.
+  production worker integration and final qualification still need completion.
+- Compose private Jobs qualification through one retained parent operation, with
+  exact reservation before submission, independent receipt inspection, and explicit
+  cleanup after ambiguous outcomes. Client address discovery uses a separate owned
+  native driver whose termination must be independently observed before Jobs work.
+  Retiring a cleaned probe permits fresh session discovery for an unchanged declaration
+  while preserving task history and existing drains. Configuration replacement requires
+  cleanup and a fresh manager incarnation in this private adapter.
+- Keep ACTIVE first-claim eligibility separate from fresh DRAINING observations for
+  continuation filtering. A binding alone cannot permit a first claim on a draining
+  target; continuation requires resolved prior claims on the same original target.
 - These helpers remain preparation: production qualification, claims, recovery and
   cancellation integration are required before activating the guard. See
   [current-cohort guard preparation](compatibility.md#current-cohort-guard-preparation).

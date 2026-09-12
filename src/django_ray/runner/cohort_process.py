@@ -37,7 +37,7 @@ _STAT_MAX_BYTES = 4096
 _GRACE_SECONDS = 2.0
 _JSON_MAX_NODES = 8192
 _JSON_MAX_DEPTH = 32
-_COMMANDS = frozenset({"prepare", "submit", "inspect", "stop"})
+_COMMANDS = frozenset({"prepare", "submit", "inspect", "stop", "discover-client", "inspect-driver"})
 
 
 class CohortProcessReason(StrEnum):

@@ -91,7 +91,9 @@ def assert_reason(reason, operation, *args, **kwargs):
     assert "private-" not in str(caught.value)
 
 
-@pytest.mark.parametrize("command", ["prepare", "submit", "inspect", "stop"])
+@pytest.mark.parametrize(
+    "command", ["prepare", "submit", "inspect", "stop", "discover-client", "inspect-driver"]
+)
 def test_request_round_trip(command):
     payload = {
         "command": command,

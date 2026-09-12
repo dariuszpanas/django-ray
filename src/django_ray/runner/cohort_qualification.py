@@ -380,6 +380,22 @@ class CohortQualificationLifecycle:
         self._connection = current
         self._core = None
 
+    def withdraw_job_alias(self, alias: str):
+        """Withdraw cached authority before preparation can rotate its DB slot.
+
+        The parent retains the old reservation and exact cleanup ownership.
+        This removes no database capability and confirms no remote cleanup.
+        An already-running operation must enter its separate cleanup path.
+        """
+        self._owner_only()
+        _text(alias)
+        if self.runner_family is not RayRunnerFamily.RAY_JOB or alias not in self._aliases:
+            _reject(CohortQualificationReason.INVALID)
+        if self._operation is not None and self._operation.ticket.alias == alias:
+            _reject(CohortQualificationReason.BUSY)
+        self._jobs.pop(alias, None)
+        self._prune_shared()
+
     def _begin(self, *, alias, epoch, issued_at, expires_at, timeout_seconds, now):
         current = self._clock()
         self._wall(now)
@@ -824,6 +840,29 @@ class CohortQualificationLifecycle:
         live_lease: CohortProbeJobLease,
         lease_expires_at: datetime,
     ) -> tuple[EligibleCohortAlias, ...]:
+        """ACTIVE candidates for first claims, still subject to locked checks."""
+        return tuple(
+            item
+            for item in self.qualified_aliases(
+                now=now, live_lease=live_lease, lease_expires_at=lease_expires_at
+            )
+            if item.shared.desired_state == "active"
+        )
+
+    def qualified_aliases(
+        self,
+        *,
+        now: datetime,
+        live_lease: CohortProbeJobLease,
+        lease_expires_at: datetime,
+    ) -> tuple[EligibleCohortAlias, ...]:
+        """Fresh owned observations for task-specific continuation filtering.
+
+        DRAINING observations never authorize a first claim. A continuation
+        query must prove resolved prior claim history and the original target
+        before LIMIT, then use the existing authoritative claim transaction.
+        Neither a binding alone nor this cached view establishes that history.
+        """
         self._clock()
         self._wall(now)
         if self._operation is not None:
@@ -883,7 +922,10 @@ class CohortQualificationLifecycle:
                 or not shared.attestation.observed_at <= now < shared.attestation.expires_at
             ):
                 continue
-            if shared.desired_state != "active" or shared.activation_policy_id is not None:
+            if (
+                shared.desired_state not in {"active", "draining"}
+                or shared.activation_policy_id is not None
+            ):
                 continue
             candidates.append(EligibleCohortAlias(configuration, shared, q, launch))
         return tuple(candidates)

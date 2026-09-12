@@ -41,6 +41,7 @@ def test_core_has_one_connection_identity_and_separate_current_alias_declaration
     assert tuple(item.alias for item in first.aliases) == ("first", "second")
     assert first.aliases[0].declaration_digest != first.aliases[1].declaration_digest
     assert first.control_runtime_env_json is first.django_settings_module is None
+    assert first.job_addresses == ()
     assert all(
         item.control_profile_digest == first.core_configuration_digest for item in first.aliases
     )
@@ -49,6 +50,25 @@ def test_core_has_one_connection_identity_and_separate_current_alias_declaration
     assert changed.core_configuration_digest == first.core_configuration_digest
     assert changed.aliases[0].declaration_digest != first.aliases[0].declaration_digest
     assert changed.aliases[1] == first.aliases[1]
+
+
+def test_jobs_retains_only_selected_addresses_from_the_same_declaration_snapshot():
+    selected = inputs(jobs=True)
+    selected["tasks"]["second"]["OPTIONS"].pop("RAY_ADDRESS")
+    selected["manager_settings"]["RAY_ADDRESS"] = "ray://manager:10001"
+    plan = configuration.prepare_cohort_worker_configuration(**selected)
+    assert plan.job_addresses == (
+        ("first", "http://first:8265"),
+        ("second", "ray://manager:10001"),
+    )
+    selected["tasks"]["first"]["OPTIONS"]["RAY_ADDRESS"] = "http://changed:8265"
+    changed = configuration.prepare_cohort_worker_configuration(**selected)
+    assert plan.job_addresses[0] == ("first", "http://first:8265")
+    assert changed.job_addresses[0] == ("first", "http://changed:8265")
+    assert changed.aliases[0].declaration_digest != plan.aliases[0].declaration_digest
+    assert changed.aliases[1] == plan.aliases[1]
+    assert "http://first:8265" not in repr(plan)
+    assert "ray://manager:10001" not in repr(plan)
 
 
 def test_core_task_environment_changes_do_not_become_eligibility_keys():

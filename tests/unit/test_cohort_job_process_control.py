@@ -620,6 +620,13 @@ def test_transport_exceptions_never_echo_secret_diagnostics(sdk):
     assert sdk.closed_sessions == 1
 
 
+@pytest.mark.parametrize("command", ["discover-client", "inspect-driver"])
+def test_client_commands_require_complete_fixed_requests_before_remote_work(sdk, command):
+    with pytest.raises(control.CohortJobProcessControlError):
+        execute(command, {"callable": "untrusted.module.function", "nonce": "private-value"})
+    assert sdk.initializations == sdk.requests == []
+
+
 def test_import_has_no_django_or_ray_import_in_fresh_process():
     code = """
 import builtins

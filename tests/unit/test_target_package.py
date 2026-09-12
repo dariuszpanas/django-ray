@@ -29,6 +29,7 @@ TARGET_MODULES = {
     "cohort_job_http.py",
     "cohort_job_receipt.py",
     "cohort_job_receipt_storage.py",
+    "cohort_job_retirement.py",
     "cohort_probe.py",
     "cohort_probe_challenges.py",
     "cohort_publication.py",

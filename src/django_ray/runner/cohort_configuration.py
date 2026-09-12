@@ -51,6 +51,7 @@ class PreparedCohortWorkerConfiguration:
     control_profile_digest: str
     control_runtime_env_json: str | None = field(repr=False)
     django_settings_module: str | None = field(repr=False)
+    job_addresses: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
 
 def _names(values: object, *, maximum: int, allow_sets: bool = False) -> tuple[str, ...]:
@@ -175,6 +176,7 @@ def prepare_cohort_worker_configuration(
             profile_digest = cohort_probe_submitted_runtime_env_digest(resolved.spec)
             control_json = resolved.serialized
         current = []
+        addresses = []
         for alias in aliases:
             backend = tasks[alias]
             options = backend.get("OPTIONS", {})
@@ -204,8 +206,15 @@ def prepare_cohort_worker_configuration(
                     profile_digest,
                 )
             )
+            if runner_family is RayRunnerFamily.RAY_JOB:
+                addresses.append((alias, _endpoint(declaration.ray_address)))
         return PreparedCohortWorkerConfiguration(
-            tuple(current), core_digest, profile_digest, control_json, django_settings_module
+            tuple(current),
+            core_digest,
+            profile_digest,
+            control_json,
+            django_settings_module,
+            tuple(addresses),
         )
     except (
         CohortIntentError,

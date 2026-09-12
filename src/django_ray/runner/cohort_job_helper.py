@@ -24,7 +24,8 @@ def _execute(payload: object) -> dict:
         type(payload) is not dict
         or payload.keys() != {"command", "arguments"}
         or type(payload["command"]) is not str
-        or payload["command"] not in {"prepare", "submit", "inspect", "stop"}
+        or payload["command"]
+        not in {"prepare", "submit", "inspect", "stop", "discover-client", "inspect-driver"}
         or type(payload["arguments"]) is not dict
     ):
         raise ValueError("Invalid private Jobs operation")

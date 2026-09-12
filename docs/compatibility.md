@@ -392,17 +392,41 @@ a blocked native call; late or failed observations retain the operation slot unt
 local calls finish and independent remote cleanup is confirmed. A completed thread
 alone is not cleanup proof. Unsupported thread-local multi-client contexts are refused.
 
-Jobs control is being composed through one owned Linux exec helper with bounded,
+Private Jobs control uses one owned Linux exec helper with bounded,
 private JSON IPC and separate termination and reaping stages. The helper cannot publish
 database eligibility, receive the manager's consumption nonce, or choose an arbitrary
 Python callable from request data. The parent retains the exact reserved submission
 and checks its current operation before publishing. Helper exit is not remote cleanup
-or permission to retry an ambiguous submission. Its current private address resolver
-supports explicit HTTP(S), GCS and `auto`; `ray://` discovery remains an activation
-blocker because Ray's existing resolver initializes a Client connection. The ordinary
-Jobs runner retains its existing address behavior. These adapters are not yet called
-by production workers; complete producer, claim, recovery, cancellation and native
-qualification evidence is still required before enabling protocol 3.
+or permission to retry an ambiguous submission. HTTP(S), GCS and `auto` use the
+fixed preparation path. A `ray://` declaration first creates an isolated Client driver,
+corroborates its native identity and dashboard endpoint, disconnects, and independently
+observes that same driver as dead. Disconnect alone is insufficient, and a lost discovery
+response keeps the operation quarantined. Native driver IDs never enter the Jobs stop
+endpoint. The ordinary Jobs runner retains its existing address behavior. These adapters
+are not yet called by production workers; complete producer, claim, recovery, cancellation
+and native qualification evidence is still required before enabling protocol 3.
+
+The private Jobs parent binds one immutable prepared configuration to its exact lease
+incarnation. Its selected addresses come from the same declaration snapshot as its
+admission digests. Configuration replacement requires invalidation, confirmed cleanup
+and a fresh manager incarnation. At most 64 alias records retain their nonce, reservation
+and cleanup ownership even after failure. Only an independently inspected result from
+the current helper can reach atomic publication; rereading the database cannot restore
+positive qualification.
+
+An unchanged declaration may discover a new session after the parent independently
+confirms cleanup of its exact old probe Job. A private CAS service then retires only
+that ephemeral challenge/receipt pair and issues a fresh challenge identity and nonce.
+It preserves bindings, claims, target policy and sibling capabilities. The ordinary
+same-configuration replacement restriction remains intact. Probe terminal confirmation
+is not a report that ordinary tasks or the cluster are drained.
+
+`eligible_aliases()` remains ACTIVE-only for first claims. A separate private
+`qualified_aliases()` view exposes fresh DRAINING observations for task-specific
+continuation filtering. Before applying the task limit, that query must prove prior
+resolved claim history and the original same-target binding, then revalidate under
+the authoritative claim locks. Merely having a binding, or an OPEN or HELD claim,
+cannot authorize another generation.
 
 The reserved transport binds the complete outer request separately from its
 cohort claim. Nested work carries a compact claim and independently derived

@@ -463,14 +463,35 @@ def stop(arguments: dict) -> dict:
     return {"terminal": after.status in terminal}
 
 
+def discover_client(arguments: dict) -> dict:
+    from django_ray.runner.cohort_client_discovery import discover_client_jobs_endpoint
+
+    return discover_client_jobs_endpoint(arguments)
+
+
+def inspect_driver(arguments: dict) -> dict:
+    from django_ray.runner.cohort_client_discovery import inspect_client_driver
+
+    return inspect_client_driver(arguments)
+
+
 def execute_cohort_job_control(command: str, payload: dict) -> dict:
     """Dispatch one bounded command; process supervision belongs to the parent."""
-    functions = {"prepare": prepare, "submit": submit, "inspect": inspect, "stop": stop}
+    functions = {
+        "prepare": prepare,
+        "submit": submit,
+        "inspect": inspect,
+        "stop": stop,
+        "discover-client": discover_client,
+        "inspect-driver": inspect_driver,
+    }
     failures = {
         "prepare": CohortJobProcessControlReason.PREPARATION_FAILED,
         "submit": CohortJobProcessControlReason.SUBMISSION_UNCONFIRMED,
         "inspect": CohortJobProcessControlReason.INSPECTION_FAILED,
         "stop": CohortJobProcessControlReason.CLEANUP_UNCONFIRMED,
+        "discover-client": CohortJobProcessControlReason.PREPARATION_FAILED,
+        "inspect-driver": CohortJobProcessControlReason.CLEANUP_UNCONFIRMED,
     }
     if type(command) is not str or command not in functions:
         _reject(CohortJobProcessControlReason.INVALID)

@@ -380,7 +380,16 @@ def test_p3_cannot_be_claimed_without_ledger(case):
 
 
 def _ray_arguments(
-    case, family, *, active=True, endpoint_ttl=25, challenge_ttl=60, native_job_id="01000000"
+    case,
+    family,
+    *,
+    active=True,
+    endpoint_ttl=25,
+    challenge_ttl=60,
+    native_job_id="01000000",
+    target_key="claim-target",
+    cluster_session="session_claim",
+    observed_at=NOW,
 ):
     from django_ray.models import RayTarget, RayTargetPolicyRevision, RayWorkerTargetCapability
     from django_ray.target import capabilities, coordination
@@ -389,23 +398,25 @@ def _ray_arguments(
     from tests.integration.test_ray_worker_target_capabilities import _attestation
 
     runtime = RayRuntimeVersion(2, 58, 0, "cpython", 3, 12, 14)
-    expectation = RayTargetExpectation("claim-target", family, "session_claim", 1, runtime)
+    expectation = RayTargetExpectation(target_key, family, cluster_session, 1, runtime)
     with transaction.atomic():
         capabilities._locked_exact_lease(case.owner, using="default", vendor=connection.vendor)
-        coordination._register_ray_target_locked(expectation, now=NOW)
+        coordination._register_ray_target_locked(expectation, now=observed_at)
         if active:
             _activate_new_target_locked(
-                RayTarget.objects.get(pk="claim-target"), expectation, now=NOW, using="default"
+                RayTarget.objects.get(pk=target_key), expectation, now=observed_at, using="default"
             )
             expectation = replace(expectation, policy_revision=2)
         coordination._record_ray_target_attestation_locked(
             expectation.target_key,
             _attestation(
-                expectation, observed_at=NOW, expires_at=NOW + timedelta(seconds=endpoint_ttl)
+                expectation,
+                observed_at=observed_at,
+                expires_at=observed_at + timedelta(seconds=endpoint_ttl),
             ),
             expected_policy_revision=expectation.policy_revision,
             expected_attestation_revision=0,
-            now=NOW,
+            now=observed_at,
         )
         capabilities._advertise_ray_worker_target_capability_locked(
             case.owner,
@@ -415,7 +426,7 @@ def _ray_arguments(
             expected_policy_revision=expectation.policy_revision,
             expected_attestation_revision=1,
             expected_capability_revision=0,
-            now=NOW,
+            now=observed_at,
         )
     policy = RayTargetPolicyRevision.objects.get(
         target_id=expectation.target_key, revision=expectation.policy_revision
@@ -436,12 +447,23 @@ def _ray_arguments(
                 cap,
                 challenge_ttl=challenge_ttl,
                 native_job_id=native_job_id,
+                probe_started=observed_at,
             )
         )
     return arguments
 
 
-def _published_job_qualification(case, expectation, policy, cap, *, challenge_ttl, native_job_id):
+def _published_job_qualification(
+    case,
+    expectation,
+    policy,
+    cap,
+    *,
+    challenge_ttl,
+    native_job_id,
+    probe_started=NOW,
+    issued=None,
+):
     """Use the actual publisher/inspector seam with a fake typed HTTP reply."""
     from ray.dashboard.modules.job.common import JobStatus
     from ray.dashboard.modules.job.pydantic_models import JobDetails, JobType
@@ -473,15 +495,16 @@ def _published_job_qualification(case, expectation, policy, cap, *, challenge_tt
         case.monkeypatch.setattr(module, "_now", lambda: case.now)
     for module in (cohort_publication, cohort_runtime):
         case.monkeypatch.setattr(module, "_local_runtime", lambda _ray: ("0.5.0", runtime))
-    case.now = NOW
-    issued = issue_ray_target_probe_challenge(
-        case.owner,
-        case.intent.configuration_digest,
-        runner_family=RayRunnerFamily.RAY_JOB,
-        now=case.now,
-        expected_target_policy_id=policy.pk,
-        ttl_seconds=challenge_ttl,
-    )
+    case.now = probe_started
+    if issued is None:
+        issued = issue_ray_target_probe_challenge(
+            case.owner,
+            case.intent.configuration_digest,
+            runner_family=RayRunnerFamily.RAY_JOB,
+            now=case.now,
+            expected_target_policy_id=policy.pk,
+            ttl_seconds=challenge_ttl,
+        )
     slot = issued.receipt
     request = CohortProbeJobRequest(
         slot.challenge_id,
@@ -526,9 +549,9 @@ def _published_job_qualification(case, expectation, policy, cap, *, challenge_tt
         native_job_id,
         "0.5.0",
         original,
-        NOW + timedelta(microseconds=100000),
+        probe_started + timedelta(microseconds=100000),
     )
-    case.now = NOW + timedelta(microseconds=200000)
+    case.now = probe_started + timedelta(microseconds=200000)
     cohort_job_receipt_storage.write_cohort_job_receipt(receipt)
     assert JobDetails is not None
     details = JobDetails(
@@ -548,7 +571,7 @@ def _published_job_qualification(case, expectation, policy, cap, *, challenge_tt
         return details
 
     case.monkeypatch.setattr(cohort_job_http, "fetch_reserved_cohort_job_details", fetch)
-    case.now = NOW + timedelta(microseconds=300000)
+    case.now = probe_started + timedelta(microseconds=300000)
     published = cohort_publication.publish_cohort_job_probe(
         case.owner,
         launch,
@@ -556,7 +579,7 @@ def _published_job_qualification(case, expectation, policy, cap, *, challenge_tt
         expected_attestation_revision=cap.attestation.revision,
         expected_capability_revision=cap.revision,
     )
-    case.now = NOW + timedelta(seconds=1)
+    case.now = probe_started + timedelta(seconds=1)
     case.job_issued, case.job_request, case.job_receipt, case.job_publication = (
         issued,
         request,
@@ -588,23 +611,235 @@ def test_ray_claim_reuses_actual_policy_attestation_and_capability(case, family)
     assert retained.claim_attestation_id is not None
 
 
+@pytest.mark.usefixtures("ledger_database")
+@pytest.mark.parametrize("family", ["ray_core", "ray_job"])
 @pytest.mark.parametrize("preexisting_binding", [False, True])
-def test_first_claim_never_uses_a_drained_target(case, preexisting_binding):
+def test_first_claim_never_uses_a_drained_target(case, preexisting_binding, family):
     from django_ray.target.attestation import RayRunnerFamily
 
-    arguments = _ray_arguments(case, RayRunnerFamily.RAY_CORE, active=False)
+    arguments = _ray_arguments(case, RayRunnerFamily(family), active=False)
     if preexisting_binding:
         RayTaskTargetBinding.objects.create(
             execution=case.task,
             schema_version=2,
-            runner_family="ray_core",
+            runner_family=family,
             package_version="0.5.0",
             target_policy_id=arguments["binding_spec"].target_policy_id,
             created_at=NOW,
         )
+    with pytest.raises(storage.CohortClaimStorageError) as caught:
+        _claim(case, **arguments)
+    assert caught.value.reason is storage.CohortClaimStorageReason.PROOF_UNAVAILABLE
+    assert not RayTaskCohortClaim.objects.exists()
+    case.task.refresh_from_db()
+    assert (case.task.state, case.task.execution_generation) == ("QUEUED", 0)
+    assert RayTaskTargetBinding.objects.count() == int(preexisting_binding)
+
+
+def _fresh_draining_ray_arguments(case, arguments):
+    """Append a real policy/proof and renew this exact lease's qualification."""
+    from django_ray.models import RayTargetPolicyRevision, RayWorkerTargetCapability
+    from django_ray.target import capabilities, coordination
+    from django_ray.target.attestation import (
+        decode_ray_target_expectation,
+        encode_ray_target_expectation,
+        ray_target_expectation_digest,
+    )
+    from django_ray.target.cohort_probe_challenges import replace_ray_target_probe_challenge
+    from tests.integration.test_ray_worker_target_capabilities import _attestation
+
+    cap = RayWorkerTargetCapability.objects.get(pk=arguments["capability_id"])
+    expectation = replace(
+        decode_ray_target_expectation(cap.target_policy.expectation_json),
+        policy_revision=cap.target_policy.revision + 1,
+    )
+    case.now += timedelta(seconds=2)
+    with transaction.atomic():
+        capabilities._locked_exact_lease(case.owner, using="default", vendor=connection.vendor)
+        capabilities._locked_capability_target(
+            target_key=expectation.target_key, using="default", vendor=connection.vendor
+        )
+        policy = RayTargetPolicyRevision.objects.create(
+            target_id=expectation.target_key,
+            revision=expectation.policy_revision,
+            desired_state="draining",
+            expectation_schema_version=1,
+            expectation_json=encode_ray_target_expectation(expectation),
+            expectation_digest=ray_target_expectation_digest(expectation),
+            created_at=case.now,
+        )
+        coordination._record_ray_target_attestation_locked(
+            expectation.target_key,
+            _attestation(
+                expectation,
+                observed_at=case.now,
+                expires_at=case.now + timedelta(seconds=25),
+            ),
+            expected_policy_revision=expectation.policy_revision,
+            expected_attestation_revision=0,
+            now=case.now,
+        )
+        renewed = capabilities._advertise_ray_worker_target_capability_locked(
+            case.owner,
+            expectation.target_key,
+            expectation.runtime,
+            manager_runner_family=expectation.runner_family,
+            expected_policy_revision=expectation.policy_revision,
+            expected_attestation_revision=1,
+            expected_capability_revision=cap.revision,
+            now=case.now,
+        )
+    refreshed = dict(arguments, capability_revision=renewed.revision)
+    if expectation.runner_family.value == "ray_job":
+        old = arguments["job_qualification"]
+        issued = replace_ray_target_probe_challenge(
+            case.owner,
+            old.challenge_id,
+            expected_configuration_digest=old.configuration_digest,
+            configuration_digest=old.configuration_digest,
+            expected_revision=old.consumed_challenge_revision,
+            expected_nonce=case.job_issued.nonce,
+            expected_target_policy_id=policy.pk,
+            now=case.now,
+        )
+        cap.refresh_from_db()
+        refreshed.update(
+            _published_job_qualification(
+                case,
+                expectation,
+                policy,
+                cap,
+                challenge_ttl=60,
+                native_job_id="02000000",
+                probe_started=case.now,
+                issued=issued,
+            )
+        )
+    return refreshed, policy
+
+
+def _resolve_ray_claim_and_queue_next_attempt(case, record):
+    prepared = _mutate(case, record, storage.prepare_cohort_claim, request_digest=DIGEST)
+    dispatched = _mutate(case, prepared, storage.mark_cohort_claim_dispatched)
+    with transaction.atomic():
+        resolved = storage.resolve_cohort_claim(
+            case.owner,
+            dispatched.claim_id,
+            expected_identity=dispatched.facts.identity,
+            expected_revision=dispatched.revision,
+            now=case.now,
+            kind=CohortResolutionKind.APPLICATION_COMPLETED,
+            evidence_digest="sha256:" + "e" * 64,
+        )
+        RayTaskExecution.objects.filter(pk=case.task.pk).update(state="FAILED")
+        RayTaskExecution.objects.filter(pk=case.task.pk).update(
+            state="QUEUED", attempt_number=record.facts.identity.attempt_number + 1
+        )
+    case.task.refresh_from_db()
+    return resolved
+
+
+@pytest.mark.usefixtures("ledger_database")
+@pytest.mark.parametrize("family", ["ray_core", "ray_job"])
+def test_resolved_ray_generation_can_continue_on_fresh_draining_same_target(case, family):
+    from django_ray.models import RayWorkerTargetCapability
+    from django_ray.target.attestation import RayRunnerFamily
+
+    original_arguments = _ray_arguments(case, RayRunnerFamily(family))
+    first = _claim(case, **original_arguments)
+    original_binding = RayTaskTargetBinding.objects.values().get(execution=case.task)
+    first_facts = RayTaskCohortClaim.objects.get(pk=first.claim_id).facts_json
+    resolved = _resolve_ray_claim_and_queue_next_attempt(case, first)
+    assert resolved.disposition == "RESOLVED"
+    assert (case.task.attempt_number, case.task.execution_generation) == (2, 1)
+    arguments, draining = _fresh_draining_ray_arguments(case, original_arguments)
+
+    # The old ACTIVE proof is no longer claim authority after policy advancement.
+    with pytest.raises(storage.CohortClaimStorageError):
+        _claim(case, **original_arguments)
+    assert RayTaskCohortClaim.objects.count() == 1
+    second = _claim(case, **arguments)
+    cap = RayWorkerTargetCapability.objects.get(pk=arguments["capability_id"])
+    assert draining.desired_state == "draining" and draining.revision == 3
+    assert second.facts.binding == first.facts.binding
+    assert second.facts.binding.target_policy_id != draining.pk
+    assert second.facts.target_policy_id == cap.target_policy_id == draining.pk
+    assert (
+        second.facts.claim_attestation_id == cap.attestation_id != first.facts.claim_attestation_id
+    )
+    assert (second.facts.identity.attempt_number, second.facts.identity.execution_generation) == (
+        2,
+        2,
+    )
+    assert RayTaskTargetBinding.objects.values().get(execution=case.task) == original_binding
+    assert RayTaskCohortClaim.objects.get(pk=first.claim_id).facts_json == first_facts
+    assert RayTaskCohortClaim.objects.get(pk=first.claim_id).disposition == "RESOLVED"
+    assert RayTaskCohortClaim.objects.count() == 2
+    if family == "ray_job":
+        assert second.facts.job_qualification == arguments["job_qualification"]
+        assert second.facts.job_qualification != first.facts.job_qualification
+
+
+@pytest.mark.usefixtures("ledger_database")
+@pytest.mark.parametrize("family", ["ray_core", "ray_job"])
+@pytest.mark.parametrize("disposition", ["OPEN", "HELD"])
+def test_unresolved_ray_generation_cannot_advance_despite_fresh_draining_proof(
+    case, family, disposition
+):
+    from django_ray.target.attestation import RayRunnerFamily
+
+    arguments = _ray_arguments(case, RayRunnerFamily(family))
+    first = _claim(case, **arguments)
+    if disposition == "HELD":
+        first = _hold(case, first)
+    case.task.refresh_from_db()
+    before = RayTaskExecution.objects.values().get(pk=case.task.pk)
+    arguments, _policy = _fresh_draining_ray_arguments(case, arguments)
+    with pytest.raises(DatabaseError), transaction.atomic():
+        RayTaskExecution.objects.filter(pk=case.task.pk).update(state="QUEUED", attempt_number=2)
     with pytest.raises(storage.CohortClaimStorageError):
         _claim(case, **arguments)
-    assert not RayTaskCohortClaim.objects.exists()
+    assert RayTaskExecution.objects.values().get(pk=case.task.pk) == before
+    assert RayTaskCohortClaim.objects.count() == 1
+    retained = RayTaskCohortClaim.objects.get(pk=first.claim_id)
+    assert retained.disposition == disposition and retained.facts_digest == first.facts_digest
+
+
+@pytest.mark.usefixtures("ledger_database")
+@pytest.mark.parametrize("family", ["ray_core", "ray_job"])
+def test_new_verified_ray_session_cannot_replace_original_execution_binding(case, family):
+    from django_ray.models import RayTargetProbeChallenge, RayWorkerTargetCapability
+    from django_ray.target.attestation import RayRunnerFamily
+
+    arguments = _ray_arguments(case, RayRunnerFamily(family))
+    first = _claim(case, **arguments)
+    _resolve_ray_claim_and_queue_next_attempt(case, first)
+    binding = RayTaskTargetBinding.objects.values().get(execution=case.task)
+    # Ephemeral qualification may disappear; the durable execution binding must not.
+    RayWorkerTargetCapability.objects.filter(lease=case.lease).delete()
+    RayTargetProbeChallenge.objects.filter(lease=case.lease).delete()
+    case.now += timedelta(seconds=2)
+    replacement = _ray_arguments(
+        case,
+        RayRunnerFamily(family),
+        target_key="replacement-target",
+        cluster_session="session_replacement",
+        observed_at=case.now,
+        native_job_id="02000000",
+    )
+    with pytest.raises(storage.CohortClaimStorageError) as crossed:
+        _claim(case, **replacement)
+    assert crossed.value.reason is storage.CohortClaimStorageReason.BINDING_CHANGED
+    with pytest.raises(storage.CohortClaimStorageError):
+        _claim(case, **dict(replacement, binding_spec=first.facts.binding))
+    assert RayTaskTargetBinding.objects.values().get(execution=case.task) == binding
+    assert RayTaskCohortClaim.objects.count() == 1
+    case.task.refresh_from_db()
+    assert (case.task.state, case.task.attempt_number, case.task.execution_generation) == (
+        "QUEUED",
+        2,
+        1,
+    )
 
 
 def test_capability_expiry_after_final_lock_refuses_claim(case, monkeypatch):

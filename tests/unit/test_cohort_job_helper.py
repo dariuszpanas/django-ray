@@ -35,7 +35,9 @@ def transport(monkeypatch, tmp_path):
     return state
 
 
-@pytest.mark.parametrize("command", ["prepare", "submit", "inspect", "stop"])
+@pytest.mark.parametrize(
+    "command", ["prepare", "submit", "inspect", "stop", "discover-client", "inspect-driver"]
+)
 def test_fixed_command_executes_once_and_returns_bound_response(transport, capsys, command):
     transport.payload["command"] = command
     assert helper.main([transport.directory]) == 0

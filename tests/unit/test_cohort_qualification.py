@@ -410,17 +410,82 @@ def test_alias_only_edit_preserves_core_connection_proof_and_jobs_only_affinity(
     assert candidates(value, clock) == ()
 
 
+@pytest.mark.parametrize("family", list(RayRunnerFamily))
 @pytest.mark.parametrize("state,activation", [("draining", None), ("retired", None), ("active", 2)])
-def test_activation_requires_fresh_active_proof(state, activation):
-    value, clock = controller()
-    proof = attestation()
-    value.begin_core(core_input(), observe=lambda: proof, timeout_seconds=5, now=NOW)
-    observed = poll(value, clock)
-    published = core_publication(
-        proof, shared=shared(proof, desired_state=state, activation_policy_id=activation)
-    )
-    value.publish_core(observed, lambda _proof: published, now=NOW)
+def test_activation_requires_fresh_active_proof(state, activation, family):
+    value, clock = controller(family)
+    proof = attestation(family)
+    if family is RayRunnerFamily.RAY_CORE:
+        value.begin_core(core_input(), observe=lambda: proof, timeout_seconds=5, now=NOW)
+        observed = poll(value, clock)
+        published = core_publication(
+            proof, shared=shared(proof, desired_state=state, activation_policy_id=activation)
+        )
+        value.publish_core(observed, lambda _proof: published, now=NOW)
+    else:
+        packet = launch()
+        ticket = value.begin_job(
+            "default", packet, source_control_profile_digest=DIGEST, timeout_seconds=5, now=NOW
+        )
+        published = job_publication(packet, proof)
+        published = replace(
+            published,
+            shared=replace(published.shared, desired_state=state, activation_policy_id=activation),
+        )
+        value.publish_job(ticket, lambda: published, now=NOW)
     assert candidates(value, clock) == ()
+    observations = value.qualified_aliases(
+        now=clock.wall(), live_lease=LEASE, lease_expires_at=NOW + timedelta(seconds=60)
+    )
+    assert len(observations) == (1 if state == "draining" and activation is None else 0)
+    clock.elapsed = 31
+    assert (
+        value.qualified_aliases(
+            now=clock.wall(), live_lease=LEASE, lease_expires_at=NOW + timedelta(seconds=60)
+        )
+        == ()
+    )
+
+
+def test_job_withdrawal_before_preparation_preserves_sibling_qualification():
+    value, clock = controller(RayRunnerFamily.RAY_JOB)
+    a, b = alias("a"), alias("b", declaration_digest=OTHER)
+    value.configure_aliases([a, b])
+    job_success(value, clock, configuration=a)
+    job_success(value, clock, configuration=b, packet=launch(b, challenge=2))
+    value.withdraw_job_alias("a")
+    assert [item.configuration.alias for item in candidates(value, clock)] == ["b"]
+    assert value.outstanding is None
+    value.configure_aliases([a, b])
+    assert [item.configuration.alias for item in candidates(value, clock)] == ["b"]
+    job_success(value, clock, configuration=a, packet=launch(a, challenge=3))
+    assert {item.configuration.alias for item in candidates(value, clock)} == {"a", "b"}
+
+
+@pytest.mark.parametrize("name", ["missing", [], None])
+def test_job_withdrawal_rejects_invalid_alias(name):
+    value, _clock = controller(RayRunnerFamily.RAY_JOB)
+    with pytest.raises(CohortQualificationError, match="invalid"):
+        value.withdraw_job_alias(name)
+
+
+def test_job_withdrawal_cannot_discard_an_outstanding_operation():
+    value, clock = controller(RayRunnerFamily.RAY_JOB)
+    ticket = value.begin_job(
+        "default", launch(), source_control_profile_digest=DIGEST, timeout_seconds=5, now=NOW
+    )
+    with pytest.raises(CohortQualificationError, match="busy"):
+        value.withdraw_job_alias("default")
+    assert value.outstanding is ticket
+    assert candidates(value, clock) == ()
+
+
+def test_job_withdrawal_cannot_modify_core_qualification():
+    value, clock = controller()
+    core_success(value, clock)
+    with pytest.raises(CohortQualificationError, match="invalid"):
+        value.withdraw_job_alias("default")
+    assert len(candidates(value, clock)) == 1
 
 
 def test_newer_shared_b_capability_preserves_a_original_proof_and_expiry():

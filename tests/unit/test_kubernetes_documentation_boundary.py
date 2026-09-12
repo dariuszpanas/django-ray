@@ -400,6 +400,7 @@ def test_dormant_worker_target_capability_has_no_production_eligibility_consumer
         "src/django_ray/migrations/0030_cohort_claims.py",
         "src/django_ray/models.py",
         "src/django_ray/runner/cohort_core.py",
+        "src/django_ray/runner/cohort_jobs.py",
         "src/django_ray/target/capabilities.py",
         "src/django_ray/target/cohort_claim_storage.py",
         "src/django_ray/target/cohort_publication.py",
@@ -421,6 +422,8 @@ def test_dormant_worker_target_capability_has_no_production_eligibility_consumer
             expected.add("src/django_ray/target/cohort_publication.py")
         elif symbol == "withdraw_all_ray_worker_target_capabilities":
             expected.add("src/django_ray/runner/cohort_core.py")
+        elif symbol == "withdraw_ray_worker_target_capability":
+            expected.add("src/django_ray/runner/cohort_jobs.py")
         assert callers == expected
 
     # Dormant binding/claim services are not yet called from worker lifecycle
@@ -458,6 +461,8 @@ def test_dormant_worker_target_capability_has_no_production_eligibility_consumer
         expected = {"src/django_ray/target/cohort_publication.py"}
         if symbol == "publish_prepared_core_cohort_probe":
             expected.add("src/django_ray/runner/cohort_core.py")
+        elif symbol == "publish_prepared_cohort_job_probe":
+            expected.add("src/django_ray/runner/cohort_jobs.py")
         assert callers == expected
 
     adapter_callers = {
@@ -466,6 +471,12 @@ def test_dormant_worker_target_capability_has_no_production_eligibility_consumer
         if "CoreCohortManagerAdapter" in path.read_text(encoding="utf-8")
     }
     assert adapter_callers == {"src/django_ray/runner/cohort_core.py"}
+    jobs_adapter_callers = {
+        path.relative_to(ROOT).as_posix()
+        for path in production_root.rglob("*.py")
+        if "JobsCohortManagerAdapter" in path.read_text(encoding="utf-8")
+    }
+    assert jobs_adapter_callers == {"src/django_ray/runner/cohort_jobs.py"}
 
 
 def test_protocol_v2_evidence_has_no_production_persistence_consumer() -> None:
