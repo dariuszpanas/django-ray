@@ -28,6 +28,10 @@ def test_source_bundle_is_content_deterministic(tmp_path: Path) -> None:
     workflow.parent.mkdir(parents=True)
     remote.write_text("VALUE = 1\n", encoding="utf-8")
     workflow.write_text("VALUE = 2\n", encoding="utf-8")
+    local_credentials = base / ".local" / "k8s" / "sample" / "secrets.json"
+    local_credentials.parent.mkdir(parents=True)
+    local_credentials.write_text('{"canary": "private-local-credential-canary"}', encoding="utf-8")
+    local_credentials.with_suffix(".py").write_text("PRIVATE_CANARY = True\n", encoding="utf-8")
     first = tmp_path / "first.zip"
     second = tmp_path / "second.zip"
 
@@ -40,6 +44,7 @@ def test_source_bundle_is_content_deterministic(tmp_path: Path) -> None:
         names = set(archive.namelist())
     assert "src/django_ray/runtime/remote.py" in names
     assert "testproject/apps/cluster_tasks/workflows.py" in names
+    assert not any(".local" in name or "secrets" in name for name in names)
     assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
 
 

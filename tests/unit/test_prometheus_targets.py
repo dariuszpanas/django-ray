@@ -40,7 +40,7 @@ def test_bundled_prometheus_scrapes_ray_and_authenticated_application_metrics() 
     assert jobs["django-ray"]["metrics_path"] == "/api/metrics"
     assert jobs["django-ray"]["authorization"] == {
         "type": "Bearer",
-        "credentials_file": "/etc/prometheus-secrets/DJANGO_API_TOKEN",
+        "credentials_file": "/etc/prometheus-secrets/DJANGO_METRICS_TOKEN",
     }
     assert jobs["ray-head"]["metrics_path"] == "/metrics"
     assert jobs["ray-workers"]["kubernetes_sd_configs"]

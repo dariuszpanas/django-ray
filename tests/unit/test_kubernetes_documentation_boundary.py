@@ -81,7 +81,10 @@ def _make_mutator_targets() -> set[tuple[Path, str]]:
         content = _read(path)
         for target in _make_target_names(content):
             section = _make_target_section(content, target)
-            if any(marker in section for marker in MAKE_MUTATION_MARKERS):
+            if any(marker in section for marker in MAKE_MUTATION_MARKERS) or re.search(
+                r"\bkubectl\b[^\n]*(?:\bapply\b|\bcreate\b|\bdelete\b|\bscale\b|\brollout\s+restart\b)",
+                section,
+            ):
                 targets.add((path, target))
     return targets
 
@@ -108,7 +111,7 @@ def test_every_make_kubernetes_mutator_warns_before_its_recipe() -> None:
     mutators = _make_mutator_targets()
     assert (Path("mk/tls.mk"), "k8s-create-tls-secret") in mutators
     assert (Path("mk/k8s.mk"), "k8s-install-kuberay") in mutators
-    assert (Path("mk/k8s.mk"), "k8s-install-kong-local") in mutators
+    assert (Path("mk/k8s.mk"), "k8s-install-kong-local") not in mutators
     assert (Path("mk/k8s.mk"), "k8s-final-gate") in mutators
 
     for path, target in sorted(mutators):
@@ -147,7 +150,7 @@ def test_docs_keep_the_sample_hazards_and_production_checklist_explicit() -> Non
         "mutable `latest`",
         "sample superuser",
         "operator-token",
-        "shared `django-ray-secret`",
+        "component-scoped credentials",
     ):
         assert hazard in guide
 
@@ -175,17 +178,12 @@ def test_docs_keep_the_sample_hazards_and_production_checklist_explicit() -> Non
     assert "not deployment certification" in local_gate
 
     shared_secret = _read(Path("k8s/base/secret.yaml")).lower()
-    assert "render reference for evaluation and local validation only" in shared_secret
-    assert "component-scoped credentials" in shared_secret
-
-    assert (
-        "generic upstream kuberay head and worker pods import every value through `envfrom`"
-        in normalized_guide
-    )
-    assert "evaluation-only credential blast radius" in normalized_guide
+    assert "no secret resource is rendered" in shared_secret
+    assert "component-scoped credentials" in normalized_guide
     ray_profile = _read(Path("k8s/overlays/kuberay-kind/ray-cluster-kuberay.yaml")).lower()
     assert ray_profile.count("image: rayproject/ray:") == 2
-    assert ray_profile.count("name: django-ray-secret") == 2
+    assert "name: django-ray-secret" not in ray_profile
+    assert ray_profile.count("name: ray_auth_token") == 2
 
     testproject_apps = _read(Path("testproject/apps/__init__.py")).lower()
     assert "remote ray cluster integration example" in testproject_apps
