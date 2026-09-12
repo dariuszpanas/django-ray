@@ -50,6 +50,7 @@ from django_ray.target.cohort_claim import (
 )
 from django_ray.target.cohort_contract import _package_version
 from django_ray.target.cohort_job_control import (
+    CohortJobReservationSnapshot,
     InspectedCohortJobReceipt,
     _outside_transactions,
     cohort_probe_entrypoint_digest,
@@ -104,8 +105,9 @@ class CohortPublicationError(RuntimeError):
 class CoreCohortProbePlan:
     """Trusted manager configuration and an independently issued challenge.
 
-    The manager must derive the challenge configuration digest from its exact
-    endpoint/backend, package, runtime and RuntimeEnv configuration. This plan
+    The manager derives one challenge digest from its process-selected Core
+    connection and control settings, independently of its backend-alias allowlist.
+    The expected package/runtime tuple remains explicitly bound below. This plan
     is neither a serialized carrier nor authentication of an arbitrary caller.
     The caller owns its existing Core connection; no connection is created here.
     First discovery requires a null target key and session; publication derives
@@ -166,6 +168,40 @@ class _ProbePlan:
             self.policy_revision,
             self.runtime,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CoreCohortProbePreparation:
+    """Manager-owned authentication context for a supervised local observation.
+
+    Retain this object only in the creating manager. It is not a wire format or
+    proof that an arbitrary supplied attestation came from that manager's Ray
+    connection. The supervisor owns observation provenance, the connection epoch
+    and the external acceptance deadline; only its current result may publish.
+    """
+
+    identity: WorkerLeaseIdentity
+    plan: _ProbePlan
+    began: datetime
+    nonce: str = field(repr=False)
+    using: str = DEFAULT_DB_ALIAS
+
+
+@dataclass(frozen=True, slots=True)
+class JobsCohortProbePreparation:
+    """Parent-only authority paired with one detached reservation snapshot.
+
+    Send only ``snapshot`` to the owned inspection helper. The manager nonce and
+    this preparation remain local. Publication must accept the successful result
+    of that exact helper operation, not a reconstructed consumed database row.
+    """
+
+    identity: WorkerLeaseIdentity
+    plan: _ProbePlan
+    began: datetime
+    nonce: str = field(repr=False)
+    snapshot: CohortJobReservationSnapshot = field(repr=False)
+    using: str = DEFAULT_DB_ALIAS
 
 
 def _reject(reason: CohortPublicationReason) -> Never:
@@ -492,6 +528,115 @@ def _publish_verified(
         )
 
 
+def prepare_core_cohort_probe(
+    identity: WorkerLeaseIdentity,
+    plan: CoreCohortProbePlan,
+    *,
+    nonce: str,
+    using: str = DEFAULT_DB_ALIAS,
+) -> CoreCohortProbePreparation:
+    """Authenticate the exact live challenge before scheduling observation."""
+    try:
+        if type(plan) is not CoreCohortProbePlan:
+            _reject(CohortPublicationReason.INVALID_ARGUMENT)
+        current = _ProbePlan(
+            plan.challenge,
+            plan.target_key,
+            plan.expected_package_version,
+            plan.expected_runtime,
+            plan.expected_cluster_session,
+            plan.policy_revision,
+        )
+        if current.challenge.runner_family is not RayRunnerFamily.RAY_CORE:
+            _reject(CohortPublicationReason.INVALID_ARGUMENT)
+        identity, began = _authenticate_before_probe(identity, current, nonce, using=using)
+        return CoreCohortProbePreparation(identity, current, began, nonce, using)
+    except CohortPublicationError:
+        raise
+    except DatabaseError:
+        _reject(CohortPublicationReason.PERSISTENCE_REFUSED)
+    except Exception:
+        _reject(CohortPublicationReason.PROBE_FAILED)
+
+
+def observe_prepared_core_cohort_probe(
+    prepared: CoreCohortProbePreparation, *, owned_cleanup: bool = True
+) -> RayClusterAttestation:
+    """Observe the creating manager's connection without database access.
+
+    A background caller must inherit the same supported Ray connection context.
+    Its supervisor keeps the slot until every local call has exited; timeout or
+    cancellation does not itself confirm remote cleanup or authorize reconnect.
+    """
+    try:
+        if type(prepared) is not CoreCohortProbePreparation or type(owned_cleanup) is not bool:
+            _reject(CohortPublicationReason.INVALID_ARGUMENT)
+        current = prepared.plan
+        began = _fresh_time(prepared.began)
+        if began >= current.challenge.expires_at:
+            _reject(CohortPublicationReason.EXPIRED)
+        options = {"owned_cleanup": True} if owned_cleanup else {}
+        return observe_current_cohort_target(
+            target_key=current.target_key,
+            runner_family=RayRunnerFamily.RAY_CORE,
+            expected_django_ray_version=current.package_version,
+            expected_runtime=current.runtime,
+            expected_cluster_session=current.cluster_session,
+            policy_revision=current.policy_revision,
+            timeout_seconds=min(30.0, (current.challenge.expires_at - began).total_seconds()),
+            max_nodes=64,
+            **options,
+        )
+    except CohortPublicationError:
+        raise
+    except Exception:
+        _reject(CohortPublicationReason.PROBE_FAILED)
+
+
+def publish_prepared_core_cohort_probe(
+    prepared: CoreCohortProbePreparation,
+    proof: RayClusterAttestation,
+    *,
+    expected_attestation_revision: int = 0,
+    expected_capability_revision: int = 0,
+    activate_new_target: bool = False,
+) -> CohortProbePublication:
+    """Publish only the supervisor's accepted observation on the manager thread.
+
+    Revalidate current database authority and local package/runtime. These checks
+    do not establish observation provenance or a current connection epoch: the
+    owning supervisor must reject stale, foreign and post-deadline tickets before
+    calling this function. No Ray network call or remote cleanup runs here.
+    """
+    try:
+        if (
+            type(prepared) is not CoreCohortProbePreparation
+            or type(activate_new_target) is not bool
+        ):
+            _reject(CohortPublicationReason.INVALID_ARGUMENT)
+        _outside_transactions()
+        _validate_plan(prepared.plan)
+        _actual_runtime(prepared.plan)
+        return _publish_verified(
+            prepared.identity,
+            prepared.plan,
+            prepared.nonce,
+            proof,
+            observed_after=prepared.began,
+            expected_attestation_revision=expected_attestation_revision,
+            expected_capability_revision=expected_capability_revision,
+            inspected=None,
+            activate_new_target=activate_new_target,
+            using=prepared.using,
+        )
+    except CohortPublicationError:
+        raise
+    except DatabaseError:
+        _reject(CohortPublicationReason.PERSISTENCE_REFUSED)
+    except Exception:
+        _reject(CohortPublicationReason.PROBE_FAILED)
+
+
 def publish_core_cohort_probe(
     identity: WorkerLeaseIdentity,
     plan: CoreCohortProbePlan,
@@ -504,44 +649,18 @@ def publish_core_cohort_probe(
 ) -> CohortProbePublication:
     """Observe the caller's existing Core connection and atomically publish."""
     try:
-        if type(plan) is not CoreCohortProbePlan:
-            _reject(CohortPublicationReason.INVALID_ARGUMENT)
         if type(activate_new_target) is not bool:
             _reject(CohortPublicationReason.INVALID_ARGUMENT)
         capabilities._revision(expected_attestation_revision, allow_zero=True)
         capabilities._revision(expected_capability_revision, allow_zero=True)
-        current = _ProbePlan(
-            plan.challenge,
-            plan.target_key,
-            plan.expected_package_version,
-            plan.expected_runtime,
-            plan.expected_cluster_session,
-            plan.policy_revision,
-        )
-        if current.challenge.runner_family is not RayRunnerFamily.RAY_CORE:
-            _reject(CohortPublicationReason.INVALID_ARGUMENT)
-        identity, began = _authenticate_before_probe(identity, current, nonce, using=using)
-        proof = observe_current_cohort_target(
-            target_key=current.target_key,
-            runner_family=RayRunnerFamily.RAY_CORE,
-            expected_django_ray_version=current.package_version,
-            expected_runtime=current.runtime,
-            expected_cluster_session=current.cluster_session,
-            policy_revision=current.policy_revision,
-            timeout_seconds=min(30.0, (current.challenge.expires_at - began).total_seconds()),
-            max_nodes=64,
-        )
-        return _publish_verified(
-            identity,
-            current,
-            nonce,
+        prepared = prepare_core_cohort_probe(identity, plan, nonce=nonce, using=using)
+        proof = observe_prepared_core_cohort_probe(prepared, owned_cleanup=False)
+        return publish_prepared_core_cohort_probe(
+            prepared,
             proof,
-            observed_after=began,
             expected_attestation_revision=expected_attestation_revision,
             expected_capability_revision=expected_capability_revision,
-            inspected=None,
             activate_new_target=activate_new_target,
-            using=using,
         )
     except CohortPublicationError:
         raise
@@ -551,17 +670,14 @@ def publish_core_cohort_probe(
         _reject(CohortPublicationReason.PROBE_FAILED)
 
 
-def publish_cohort_job_probe(
+def prepare_cohort_job_probe(
     identity: WorkerLeaseIdentity,
     launch: CohortProbeJobLaunch,
     *,
     nonce: str,
-    expected_attestation_revision: int = 0,
-    expected_capability_revision: int = 0,
-    activate_new_target: bool = False,
     using: str = DEFAULT_DB_ALIAS,
-) -> CohortProbePublication | None:
-    """Inspect one independently expected reservation, then publish atomically."""
+) -> JobsCohortProbePreparation | None:
+    """Authenticate in the parent and detach its exact pending receipt, if any."""
     try:
         from django_ray.runtime.cohort_job_entrypoint import (
             decode_probe_job_launch,
@@ -569,10 +685,6 @@ def publish_cohort_job_probe(
             probe_job_launch_entrypoint,
         )
 
-        if type(activate_new_target) is not bool:
-            _reject(CohortPublicationReason.INVALID_ARGUMENT)
-        capabilities._revision(expected_attestation_revision, allow_zero=True)
-        capabilities._revision(expected_capability_revision, allow_zero=True)
         launch = decode_probe_job_launch(encode_probe_job_launch(launch))
         request = launch.request
         if request.lease != CohortProbeJobLease(
@@ -597,7 +709,7 @@ def publish_cohort_job_probe(
             request.policy_revision,
             request,
         )
-        identity, _began = _authenticate_before_probe(identity, plan, nonce, using=using)
+        identity, began = _authenticate_before_probe(identity, plan, nonce, using=using)
         snapshot = read_cohort_job_reservation(
             identity, request, jobs_endpoint=launch.jobs_endpoint, using=using
         )
@@ -609,20 +721,94 @@ def publish_cohort_job_probe(
             or snapshot.submitted_runtime_env_digest != launch.submitted_runtime_env_digest
         ):
             _reject(CohortPublicationReason.RECEIPT_CHANGED)
-        inspected = inspect_reserved_cohort_job(snapshot)
-        if inspected is None:
-            return None
+        return JobsCohortProbePreparation(identity, plan, began, nonce, snapshot, using)
+    except CohortPublicationError:
+        raise
+    except DatabaseError:
+        _reject(CohortPublicationReason.PERSISTENCE_REFUSED)
+    except Exception:
+        _reject(CohortPublicationReason.PROBE_FAILED)
+
+
+def publish_prepared_cohort_job_probe(
+    prepared: JobsCohortProbePreparation,
+    inspected: InspectedCohortJobReceipt,
+    *,
+    expected_attestation_revision: int = 0,
+    expected_capability_revision: int = 0,
+    activate_new_target: bool = False,
+) -> CohortProbePublication:
+    """Atomically publish only the current owned helper's accepted inspection.
+
+    No HTTP or cleanup runs here. The manager must fence the helper's operation,
+    configuration epoch and external deadline before this call. Dataclass fields
+    and the stored receipt alone do not authenticate a successful endpoint query.
+    The original reservation, challenge, nonce, lease and all freshness windows
+    are revalidated under the existing publication transaction.
+    """
+    try:
+        if (
+            type(prepared) is not JobsCohortProbePreparation
+            or type(inspected) is not InspectedCohortJobReceipt
+            or type(activate_new_target) is not bool
+        ):
+            _reject(CohortPublicationReason.INVALID_ARGUMENT)
+        _outside_transactions()
+        _validate_plan(prepared.plan)
+        _actual_runtime(prepared.plan)
+        if inspected.reservation != prepared.snapshot:
+            _reject(CohortPublicationReason.RECEIPT_CHANGED)
+        now = _fresh_time(prepared.began)
+        if not prepared.began <= capabilities._now(inspected.inspected_at) <= now:
+            _reject(CohortPublicationReason.CLOCK_REGRESSION)
         return _publish_verified(
-            identity,
-            plan,
-            nonce,
+            prepared.identity,
+            prepared.plan,
+            prepared.nonce,
             inspected.receipt.attestation,
-            observed_after=plan.challenge.issued_at,
+            observed_after=prepared.plan.challenge.issued_at,
             expected_attestation_revision=expected_attestation_revision,
             expected_capability_revision=expected_capability_revision,
             inspected=inspected,
             activate_new_target=activate_new_target,
-            using=using,
+            using=prepared.using,
+        )
+    except CohortPublicationError:
+        raise
+    except DatabaseError:
+        _reject(CohortPublicationReason.PERSISTENCE_REFUSED)
+    except Exception:
+        _reject(CohortPublicationReason.PROBE_FAILED)
+
+
+def publish_cohort_job_probe(
+    identity: WorkerLeaseIdentity,
+    launch: CohortProbeJobLaunch,
+    *,
+    nonce: str,
+    expected_attestation_revision: int = 0,
+    expected_capability_revision: int = 0,
+    activate_new_target: bool = False,
+    using: str = DEFAULT_DB_ALIAS,
+) -> CohortProbePublication | None:
+    """Inspect one independently expected reservation, then publish atomically."""
+    try:
+        if type(activate_new_target) is not bool:
+            _reject(CohortPublicationReason.INVALID_ARGUMENT)
+        capabilities._revision(expected_attestation_revision, allow_zero=True)
+        capabilities._revision(expected_capability_revision, allow_zero=True)
+        prepared = prepare_cohort_job_probe(identity, launch, nonce=nonce, using=using)
+        if prepared is None:
+            return None
+        inspected = inspect_reserved_cohort_job(prepared.snapshot)
+        if inspected is None:
+            return None
+        return publish_prepared_cohort_job_probe(
+            prepared,
+            inspected,
+            expected_attestation_revision=expected_attestation_revision,
+            expected_capability_revision=expected_capability_revision,
+            activate_new_target=activate_new_target,
         )
     except CohortPublicationError:
         raise

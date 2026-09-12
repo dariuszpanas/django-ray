@@ -53,9 +53,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expiry. Another alias's proof cannot renew an expired endpoint qualification.
   Previously applied draft claim databases need the documented empty-table reversal
   or a fresh qualification database; retained evidence is not rewritten.
+- Prepare a manager lifecycle with bounded alias state, observation deadlines and
+  explicit cleanup ownership. Core observations are separated from database publication;
+  Jobs control uses an owned Linux helper and binds the configured control profile to
+  the submitted mapping after upload. These adapters remain private and unactivated;
+  Jobs `ray://` discovery and production worker integration still need completion.
 - These helpers remain preparation: production qualification, claims, recovery and
   cancellation integration are required before activating the guard. See
   [current-cohort guard preparation](compatibility.md#current-cohort-guard-preparation).
+
+### Database diagnostics
+
+- Add `django_ray_doctor` with bounded text and versioned JSON views of connectivity,
+  migrations, protocol rollout, recorded target/probe metadata, and held or orphaned
+  claims. The report uses one read-only snapshot and exposes blockers without reading
+  task payloads or contacting Ray. It keeps readiness, drain, upgrade and rollback
+  explicitly unverified; emitting a report does not certify those operations. See
+  the [command reference](reference/cli.md#django_ray_doctor).
 
 ### Bounded distributed preparation
 

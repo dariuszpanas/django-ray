@@ -199,10 +199,170 @@ def _no_publication():
     assert not RayTargetProbeChallenge.objects.filter(consumed_at__isnull=False).exists()
 
 
+def test_prepared_core_observation_has_no_database_access_and_parent_publishes(
+    core_case, clock, monkeypatch
+):
+    prepared = publication.prepare_core_cohort_probe(
+        core_case.identity, core_case.plan, nonce=core_case.issued.nonce
+    )
+    assert core_case.issued.nonce not in repr(prepared)
+    assert clock.observation_calls == 0
+    _no_publication()
+    original = publication.observe_current_cohort_target
+
+    def observe(**kwargs):
+        assert kwargs["owned_cleanup"] is True
+        return original(**kwargs)
+
+    def forbid_database(*_args, **_kwargs):
+        pytest.fail("The supervised observation must perform no database I/O")
+
+    monkeypatch.setattr(publication, "observe_current_cohort_target", observe)
+    with connection.execute_wrapper(forbid_database):
+        proof = publication.observe_prepared_core_cohort_probe(prepared)
+    _no_publication()
+
+    def no_more_observation(**_kwargs):
+        pytest.fail("The parent must publish the accepted observation without another Ray call")
+
+    monkeypatch.setattr(publication, "observe_current_cohort_target", no_more_observation)
+    result = publication.publish_prepared_core_cohort_probe(
+        prepared, proof, activate_new_target=True
+    )
+    assert clock.observation_calls == 1
+    assert result.activation_policy_id is not None
+    assert RayTargetPolicyRevision.objects.get(pk=result.target_policy_id).revision == 1
+    assert RayTargetPolicyRevision.objects.get(pk=result.activation_policy_id).revision == 2
+    assert RayWorkerTargetCapability.objects.get().target_policy_id == result.target_policy_id
+
+
+@pytest.mark.parametrize("changed", ["challenge", "local_runtime", "expired_proof"])
+def test_parent_core_publication_rechecks_authority_after_observation(
+    core_case, clock, monkeypatch, changed
+):
+    prepared = publication.prepare_core_cohort_probe(
+        core_case.identity, core_case.plan, nonce=core_case.issued.nonce
+    )
+    proof = publication.observe_prepared_core_cohort_probe(prepared)
+    if changed == "challenge":
+        challenge = core_case.issued.receipt
+        replace_ray_target_probe_challenge(
+            core_case.identity,
+            challenge.challenge_id,
+            expected_configuration_digest=challenge.configuration_digest,
+            configuration_digest=challenge.configuration_digest,
+            expected_revision=challenge.revision,
+            expected_nonce=core_case.issued.nonce,
+            now=clock.now,
+        )
+    elif changed == "local_runtime":
+        monkeypatch.setattr(publication, "_local_runtime", lambda _ray: ("0.6.0", RUNTIME))
+    else:
+        clock.now = proof.expires_at
+    with pytest.raises(publication.CohortPublicationError):
+        publication.publish_prepared_core_cohort_probe(prepared, proof, activate_new_target=True)
+    _no_publication()
+
+
+def test_queued_core_observation_refuses_expired_challenge_before_ray(core_case, clock):
+    prepared = publication.prepare_core_cohort_probe(
+        core_case.identity, core_case.plan, nonce=core_case.issued.nonce
+    )
+    clock.now = core_case.issued.receipt.expires_at
+    with pytest.raises(publication.CohortPublicationError) as error:
+        publication.observe_prepared_core_cohort_probe(prepared)
+    assert error.value.reason is publication.CohortPublicationReason.EXPIRED
+    assert clock.observation_calls == 0
+    _no_publication()
+
+
 @pytest.fixture(params=["sqlite", pytest.param("postgresql", marks=pytest.mark.postgresql)])
 def publication_database(request):
     if connection.vendor != request.param:
         pytest.skip(f"Requires {request.param}")
+
+
+def test_prepared_jobs_inspection_has_no_database_access_and_parent_publishes(
+    job_case, clock, monkeypatch, publication_database
+):
+    prepared = publication.prepare_cohort_job_probe(
+        job_case.identity, job_case.launch, nonce=job_case.issued.nonce
+    )
+    assert prepared is not None
+    assert job_case.issued.nonce not in repr(prepared)
+    assert not clock.queries
+    _no_publication()
+
+    def forbid_database(*_args, **_kwargs):
+        pytest.fail("The owned detached inspection must perform no database I/O")
+
+    def forbid_preflight():
+        pytest.fail("The detached inspector must not touch Django connections")
+
+    monkeypatch.setattr(cohort_job_control, "_outside_transactions", forbid_preflight)
+    with connection.execute_wrapper(forbid_database):
+        inspected = cohort_job_control.inspect_detached_cohort_job(prepared.snapshot)
+    assert inspected is not None
+    _no_publication()
+
+    def forbid_http(*_args, **_kwargs):
+        pytest.fail("The parent must publish the accepted inspection without HTTP")
+
+    monkeypatch.setattr(cohort_job_http, "fetch_reserved_cohort_job_details", forbid_http)
+    result = publication.publish_prepared_cohort_job_probe(
+        prepared, inspected, activate_new_target=True
+    )
+    assert len(clock.queries) == 1
+    assert result.activation_policy_id is not None
+    assert result.job_qualification is not None
+    assert result.job_qualification.request_digest == prepared.snapshot.request_digest
+    assert RayTargetPolicyRevision.objects.get(pk=result.target_policy_id).revision == 1
+    assert RayTargetPolicyRevision.objects.get(pk=result.activation_policy_id).revision == 2
+
+
+@pytest.mark.parametrize(
+    "changed", ["challenge", "runtime", "expired", "snapshot", "past", "future", "replay"]
+)
+def test_parent_jobs_publication_refuses_stale_or_mismatched_inspection(
+    job_case, clock, monkeypatch, changed, publication_database
+):
+    prepared = publication.prepare_cohort_job_probe(
+        job_case.identity, job_case.launch, nonce=job_case.issued.nonce
+    )
+    assert prepared is not None
+    inspected = cohort_job_control.inspect_detached_cohort_job(prepared.snapshot)
+    assert inspected is not None
+    if changed == "challenge":
+        challenge = job_case.issued.receipt
+        replace_ray_target_probe_challenge(
+            job_case.identity,
+            challenge.challenge_id,
+            expected_configuration_digest=challenge.configuration_digest,
+            configuration_digest=challenge.configuration_digest,
+            expected_revision=challenge.revision,
+            expected_nonce=job_case.issued.nonce,
+            now=clock.now,
+        )
+    elif changed == "runtime":
+        monkeypatch.setattr(publication, "_local_runtime", lambda _ray: ("0.6.0", RUNTIME))
+    elif changed == "expired":
+        clock.now = inspected.receipt.attestation.expires_at
+    elif changed == "snapshot":
+        inspected = replace(
+            inspected, reservation=replace(inspected.reservation, jobs_endpoint="http://other:8265")
+        )
+    elif changed == "past":
+        inspected = replace(inspected, inspected_at=prepared.began - timedelta(seconds=1))
+    elif changed == "future":
+        inspected = replace(inspected, inspected_at=clock.now + timedelta(seconds=1))
+    else:
+        publication.publish_prepared_cohort_job_probe(prepared, inspected)
+    with pytest.raises(publication.CohortPublicationError):
+        publication.publish_prepared_cohort_job_probe(prepared, inspected)
+    if changed == "replay":
+        assert RayTarget.objects.count() == RayTargetAttestationRevision.objects.count() == 1
+    else:
+        _no_publication()
 
 
 def _shared_job_proof(case, clock, *, observed_seconds=2, node="1", expires_seconds=40):

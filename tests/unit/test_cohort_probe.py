@@ -93,6 +93,7 @@ def cluster(monkeypatch):
         coordinator_calls=0,
         packet=interval(),
         max_nodes=None,
+        owned_cleanup=None,
     )
 
     def initialized():
@@ -102,10 +103,11 @@ def cluster(monkeypatch):
     def no_init(*args, **kwargs):
         pytest.fail("The cohort probe must not initialize Ray")
 
-    def run_coordinator(_ray, *, deadline, max_nodes):
+    def run_coordinator(_ray, *, deadline, max_nodes, owned_cleanup=False):
         assert _ray is ray
         state.coordinator_calls += 1
         state.max_nodes = max_nodes
+        state.owned_cleanup = owned_cleanup
         # Keep the actual collector and remote-envelope validation in this path.
         return probe._decode_remote_interval(state.packet, max_nodes=max_nodes)
 
@@ -124,6 +126,23 @@ def assert_failure(error, reason):
     assert error.value.classification is reason
     assert str(error.value) == f"Ray target probe failed: {reason.value}"
     assert error.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize("owned_cleanup", [False, True])
+def test_supervised_cleanup_policy_reaches_the_actual_collector(cluster, owned_cleanup):
+    _ray, state = cluster
+    proof = observe_current_cohort_target(**arguments(owned_cleanup=owned_cleanup))
+    assert proof.expectation.cluster_session == SESSION
+    assert state.owned_cleanup is owned_cleanup
+
+
+@pytest.mark.parametrize("owned_cleanup", [None, 1, "true"])
+def test_supervised_cleanup_policy_refuses_invalid_values_before_ray(cluster, owned_cleanup):
+    _ray, state = cluster
+    with pytest.raises(probe.RayTargetProbeError) as error:
+        observe_current_cohort_target(**arguments(owned_cleanup=owned_cleanup))
+    assert_failure(error, probe.RayTargetProbeFailure.INVALID_CONFIGURATION)
+    assert state.connection_calls == 0
 
 
 def test_session_key_derivation_has_a_fixed_versioned_vector_and_family_scope():

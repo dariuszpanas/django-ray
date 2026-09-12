@@ -59,6 +59,7 @@ def observe_current_cohort_target(
     ttl_seconds: int = 30,
     timeout_seconds: float = probe.RAY_TARGET_PROBE_DEFAULT_TIMEOUT_SECONDS,
     max_nodes: int = probe.RAY_TARGET_PROBE_DEFAULT_MAX_NODES,
+    owned_cleanup: bool = False,
 ) -> RayClusterAttestation:
     """Observe every schedulable node before a current-cohort target can qualify.
 
@@ -69,10 +70,15 @@ def observe_current_cohort_target(
     First discovery requires a null key/session and revision one; only the
     validated observation determines its final key. Refreshes require both
     the exact retained key and session and never relabel an existing proof.
+    A supervised manager observation slot sets ``owned_cleanup`` so cancellation
+    cannot outlive the slot in a detached local thread. That caller owns the
+    external deadline and must independently confirm remote cleanup on failure.
     """
     try:
-        if type(runner_family) is not RayRunnerFamily or type(expected_runtime) is not (
-            RayRuntimeVersion
+        if (
+            type(runner_family) is not RayRunnerFamily
+            or type(expected_runtime) is not RayRuntimeVersion
+            or type(owned_cleanup) is not bool
         ):
             raise ValueError
         if expected_cluster_session is None:
@@ -111,8 +117,9 @@ def observe_current_cohort_target(
         raise probe.RayTargetProbeError(probe.RayTargetProbeFailure.RUNTIME_MISMATCH) from None
 
     try:
+        options = {"owned_cleanup": True} if owned_cleanup else {}
         raw = probe._collect_raw_cluster_observation(
-            timeout_seconds=timeout_seconds, max_nodes=max_nodes
+            timeout_seconds=timeout_seconds, max_nodes=max_nodes, **options
         )
     except probe.RayTargetProbeError as error:
         raise probe.RayTargetProbeError(error.classification) from None

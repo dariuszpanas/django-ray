@@ -1090,6 +1090,88 @@ def test_outer_happy_path_decodes_without_real_ray() -> None:
     assert interval.coordinator.node_id == NODE_A
 
 
+@pytest.mark.parametrize("failure", ["timeout", "get", "wait", "failed-envelope", "malformed"])
+def test_owned_cleanup_stays_on_observer_thread_without_a_detached_cancel(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    fake_ray = _FakeOuterRay(
+        ready=failure != "timeout",
+        get_error=RuntimeError("private get error") if failure == "get" else None,
+    )
+    caller = probe.threading.get_ident()
+    cancelled_by = []
+    original_cancel = fake_ray.cancel
+
+    def cancel(ref: object, *, force: bool, recursive: bool) -> None:
+        cancelled_by.append(probe.threading.get_ident())
+        original_cancel(ref, force=force, recursive=recursive)
+
+    def no_thread(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Owned probe cleanup must not escape into a child thread")
+
+    fake_ray.cancel = cancel
+    if failure in {"failed-envelope", "malformed"}:
+        result = (
+            {"ok": False, "classification": "node_probe_unavailable"}
+            if failure == "failed-envelope"
+            else {"ok": True, "private": "malformed result"}
+        )
+        fake_ray.get = lambda *_args, **_kwargs: result
+    if failure == "wait":
+        fake_ray.wait = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("private wait error")
+        )
+    monkeypatch.setattr(probe.threading, "Thread", no_thread)
+    assert probe._CANCEL_THREAD_SLOT.acquire(blocking=False)
+    try:
+        with pytest.raises(probe.RayTargetProbeError) as error:
+            probe._run_cluster_coordinator(
+                fake_ray, deadline=time.monotonic() + 1, max_nodes=1, owned_cleanup=True
+            )
+    finally:
+        probe._CANCEL_THREAD_SLOT.release()
+    expected = (
+        probe.RayTargetProbeFailure.NODE_PROBE_TIMEOUT
+        if failure == "timeout"
+        else probe.RayTargetProbeFailure.NODE_PROBE_UNAVAILABLE
+    )
+    _assert_probe_failure(error, expected)
+    assert fake_ray.cancelled == [(fake_ray.ref, True, True)]
+    assert cancelled_by == [caller]
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_owned_cleanup_attempts_every_ref_and_preserves_primary_failure(expired: bool) -> None:
+    refs = (object(), object())
+    cancelled = []
+    waited = []
+
+    def cancel(ref: object, **options: object) -> None:
+        cancelled.append((ref, options))
+        raise RuntimeError("private cancellation failure")
+
+    def wait(selected: list[object], **options: object) -> None:
+        waited.append((selected, options))
+        raise RuntimeError("private wait failure")
+
+    ray = SimpleNamespace(cancel=cancel, wait=wait)
+    deadline = time.monotonic() + (-1 if expired else 1)
+    probe._cancel_refs_owned(ray, (), deadline=deadline)
+    probe._cancel_refs_owned(ray, refs, deadline=deadline)
+    assert cancelled == [(ref, {"force": True, "recursive": True}) for ref in refs]
+    assert len(waited) == (0 if expired else 1)
+    if waited:
+        assert waited[0][0] == list(refs)
+        assert waited[0][1]["fetch_local"] is False
+
+
+@pytest.mark.parametrize("owned_cleanup", [None, 1, "true"])
+def test_owned_cleanup_policy_requires_an_exact_boolean(owned_cleanup: object) -> None:
+    with pytest.raises(probe.RayTargetProbeError) as error:
+        probe._collect_raw_cluster_observation(owned_cleanup=owned_cleanup)
+    _assert_probe_failure(error, probe.RayTargetProbeFailure.INVALID_CONFIGURATION)
+
+
 def test_outer_submission_failure_is_fixed_and_redacted() -> None:
     class BrokenRay(_FakeOuterRay):
         def remote(self, **_options: object) -> Any:

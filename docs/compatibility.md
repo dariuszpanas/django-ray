@@ -139,8 +139,9 @@ latest unexpired proof may support an `active` policy or preserve capacity for a
 work while its policy is `draining`; draining never permits a new route or enqueue. Ray Job
 capability APIs remain unsupported until an authenticated pre-Django proof channel exists.
 No production lease creation, heartbeat, reconnect, enqueue, claim, adoption, lifecycle,
-status, runner, or transport path creates, renews, reads, or treats a capability row as
-capacity. Existing exact-lease deletion, including supported Admin inactive-lease cleanup,
+status, runner, or transport path creates, renews, or treats a capability row as
+capacity. The read-only doctor may aggregate scalar metadata without granting eligibility.
+Existing exact-lease deletion, including supported Admin inactive-lease cleanup,
 may only fail-closed cascade-withdraw an otherwise unreachable row. Row presence alone is
 never authority: every future consumer must revalidate the exact live lease, current policy,
 same latest verified attestation, and proof expiry under its ownership locks.
@@ -376,9 +377,32 @@ Production manager integration must retain a configuration's qualification only
 from a successful authenticated publisher return. A consumed challenge alone
 cannot reconstruct that positive state: challenge consumption is also available
 without publication. After restart or an ambiguous response, obtain fresh
-qualification. Manager cache invalidation and reconciliation with the current
-shared capability remain integration work; one alias's fresh proof cannot renew
-another alias's expired endpoint verification.
+qualification. The private manager lifecycle keeps bounded current alias and shared
+target state, rejects changed configuration epochs, and retains each Jobs alias's
+independent receipt expiry when another alias supplies newer compatible cluster proof.
+Refreshing a Jobs slot immediately withdraws that alias's old qualification. The source
+control-profile digest is bound separately from the submitted mapping after upload;
+task-specific RuntimeEnv changes do not replace the trusted manager profile. Existing
+queue spelling, including Unicode and spaces, remains significant.
+
+The private Core path separates parent-side database authentication/publication from
+the observation on its existing connection. One owned observation thread performs its
+local cancellation calls synchronously. Its external acceptance deadline cannot kill
+a blocked native call; late or failed observations retain the operation slot until
+local calls finish and independent remote cleanup is confirmed. A completed thread
+alone is not cleanup proof. Unsupported thread-local multi-client contexts are refused.
+
+Jobs control is being composed through one owned Linux exec helper with bounded,
+private JSON IPC and separate termination and reaping stages. The helper cannot publish
+database eligibility, receive the manager's consumption nonce, or choose an arbitrary
+Python callable from request data. The parent retains the exact reserved submission
+and checks its current operation before publishing. Helper exit is not remote cleanup
+or permission to retry an ambiguous submission. Its current private address resolver
+supports explicit HTTP(S), GCS and `auto`; `ray://` discovery remains an activation
+blocker because Ray's existing resolver initializes a Client connection. The ordinary
+Jobs runner retains its existing address behavior. These adapters are not yet called
+by production workers; complete producer, claim, recovery, cancellation and native
+qualification evidence is still required before enabling protocol 3.
 
 The reserved transport binds the complete outer request separately from its
 cohort claim. Nested work carries a compact claim and independently derived

@@ -176,6 +176,21 @@ def inspect_reserved_cohort_job(
     derives driver-to-submission association from its mutable job metadata.
     """
     _outside_transactions()
+    return inspect_detached_cohort_job(snapshot)
+
+
+def inspect_detached_cohort_job(
+    snapshot: CohortJobReservationSnapshot,
+) -> InspectedCohortJobReceipt | None:
+    """Inspect in an independently supervised process without database access.
+
+    The owner authenticates and detaches this reservation before dispatch, then
+    accepts only its own current helper response before atomic publication. This
+    function cannot establish that process provenance or grant claim authority.
+    Its caller owns the external deadline and exact remote Job cleanup. Ordinary
+    synchronous callers use ``inspect_reserved_cohort_job`` for the transaction
+    preflight as well. No manager consumption nonce crosses this boundary.
+    """
     request = _validate_snapshot(snapshot)
     began = _now()
     if not request.issued_at <= began < request.expires_at:

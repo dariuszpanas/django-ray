@@ -140,6 +140,42 @@ a particular queue or has a working Ray target. The database also cannot prove t
 capability-unaware producer or reader processes have retired. Treat those fixed
 limitations as operator evidence still required outside this report.
 
+## django_ray_doctor
+
+Inspect database connectivity, migrations, protocol rollout state, and recorded
+current-cohort metadata in one read-only observation:
+
+```bash
+python manage.py django_ray_doctor
+python manage.py django_ray_doctor --database=default --json
+```
+
+The options are `--database=ALIAS` (default `default`) and `--json`. JSON uses the
+independent `django-ray.doctor` schema at version 1 and embeds the existing protocol
+report without changing that report's schema. Both formats are capped at 65,536 UTF-8
+bytes, including the final newline. Repeated groups are deterministic, limited to 64,
+and include omitted totals.
+
+The command observes migration inventory before querying current application tables.
+Missing or unknown applied migrations stop that part of the observation. With the
+current schema, it reports current target-policy states, recorded proof windows,
+capabilities and probe receipts, exact-owner lease freshness, and queued, running,
+cancelling, held and orphaned claim totals. Stored timestamps and digests are metadata;
+the command does not contact Ray or independently validate a canonical proof. A lease
+dated in the future is not treated as heartbeat-live.
+
+Read `blockers` and `unverified` even when the command exits successfully: exit code 0
+means it emitted a report. The report always leaves remote readiness, runtime-qualified
+queue serviceability, remote cleanup, drain, upgrade and rollback unverified. It cannot
+verify artifact or encryption-key availability, storage pressure, process retirement,
+or a backup/restore rehearsal. It does not pause, drain, retire or quarantine work.
+
+The observation reads scalar metadata and aggregates without decoding task payloads,
+proof or receipt bodies, importing task callables, or reading external storage. Raw
+endpoints, sessions, worker identities and consumption nonces are excluded from output.
+PostgreSQL uses a repeatable-read, read-only transaction; SQLite uses one read snapshot.
+Callers cannot embed the service in an existing transaction.
+
 ## django_ray_benchmark_polling
 
 Compare fixed and adaptive claim polling against the configured PostgreSQL database:

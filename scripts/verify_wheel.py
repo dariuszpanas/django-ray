@@ -59,6 +59,7 @@ EXPECTED_WORKFLOW_MODULE_FILES = {
 EXPECTED_FILES = {
     "django_ray/__init__.py",
     "django_ray/admin.py",
+    "django_ray/doctor.py",
     "django_ray/execution_codec.py",
     "django_ray/execution_protocol.py",
     "django_ray/ray_job_protocol.py",
@@ -101,8 +102,15 @@ EXPECTED_FILES = {
     "django_ray/migrations/0029_cohort_job_receipts.py",
     "django_ray/migrations/0030_cohort_claims.py",
     "django_ray/management/commands/django_ray_worker.py",
+    "django_ray/management/commands/django_ray_doctor.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/runner/ray_core.py",
+    "django_ray/runner/cohort_qualification.py",
+    "django_ray/runner/cohort_configuration.py",
+    "django_ray/runner/cohort_core.py",
+    "django_ray/runner/cohort_job_control.py",
+    "django_ray/runner/cohort_job_helper.py",
+    "django_ray/runner/cohort_process.py",
     "django_ray/runner/ray_job.py",
     "django_ray/runtime/entrypoint.py",
     "django_ray/runtime/remote.py",
@@ -338,6 +346,7 @@ def verify_installed_wheel(expected_version: str) -> None:
             raise RuntimeError(f"{model.__name__} did not retain standard admin compatibility")
 
     expected_commands = {
+        "django_ray_doctor",
         "django_ray_protocol_status",
         "django_ray_worker",
     }
@@ -375,6 +384,15 @@ def verify_installed_wheel(expected_version: str) -> None:
         or protocol_status.get("schema_version") != 1
     ):
         raise RuntimeError("django_ray_protocol_status did not emit its versioned JSON schema")
+
+    doctor_output = io.StringIO()
+    call_command("django_ray_doctor", "--json", stdout=doctor_output)
+    encoded_doctor = doctor_output.getvalue()
+    if len(encoded_doctor.encode("utf-8")) > 65_536:
+        raise RuntimeError("django_ray_doctor exceeded its output budget")
+    doctor = json.loads(encoded_doctor)
+    if doctor.get("schema") != "django-ray.doctor" or doctor.get("schema_version") != 1:
+        raise RuntimeError("django_ray_doctor did not emit its versioned JSON schema")
 
 
 def main() -> int:

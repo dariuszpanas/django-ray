@@ -614,8 +614,9 @@ Migration `0022` adds only dormant target intent and verified-attestation histor
 migration `0023` adds only an unseeded execution-to-target-policy relationship; and
 migration `0024` adds backend-alias route history plus a separate, unseeded binding-to-route
 selection record. Migration `0025` adds an unseeded current worker/target capability row and
-private compare-and-set coordinator. No production path creates, renews, reads, or treats a
-capability row as capacity. Migration `0026` adds unseeded, immutable per-generation claim evidence
+private compare-and-set coordinator. No production path creates, renews, or treats a
+capability row as capacity; the read-only doctor aggregates scalar metadata only.
+Migration `0026` adds unseeded, immutable per-generation claim evidence
 and an optional create-once outcome without a production writer or reader. Existing exact-lease
 deletion may only fail-closed cascade-withdraw an otherwise unreachable capability row; none of
 these migrations alone authorizes claims, activates routing, or enables protocol-2 writes.
@@ -1166,8 +1167,9 @@ fresh lease, canonical proof, and latest `active` or `draining` policy. `drainin
 needed so already-pinned work can retain compatible capacity; it never makes that target eligible
 for a new route or enqueue. Ray Job capability APIs remain unsupported pending their authenticated
 pre-Django proof channel. No production lease creation, heartbeat, reconnect, enqueue, claim,
-adoption, reconciliation, cancellation, status, runner, or transport path creates, renews, reads,
-or treats a capability row as capacity. Existing exact-lease deletion, including supported Admin
+adoption, reconciliation, cancellation, status, runner, or transport path creates, renews,
+or treats a capability row as capacity. The read-only doctor aggregates scalar metadata
+without granting eligibility. Existing exact-lease deletion, including supported Admin
 inactive-lease cleanup, may only fail-closed cascade-withdraw an otherwise unreachable row; it
 does not advertise or consume capacity.
 

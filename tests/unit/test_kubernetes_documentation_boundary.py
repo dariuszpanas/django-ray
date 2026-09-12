@@ -355,7 +355,8 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "KubeRay not applicable" in row
     assert "mandatory SQLite and PostgreSQL capability migration/coordination evidence" in row
     assert "private compare-and-set coordinator" in row
-    assert "no production path creates, renews, reads, or treats capability rows as capacity" in row
+    assert "no production path creates, renews, or treats capability rows as capacity" in row
+    assert "read-only diagnostics may aggregate scalar metadata" in row
     assert "exact-lease deletion may only fail-closed cascade-withdraw" in row
     assert "CAS renewal, lease-cascade withdrawal" in row
     assert "latest `active` or `draining` Ray Core policy" in row
@@ -383,7 +384,7 @@ def test_dormant_worker_target_capability_has_a_database_only_gate_boundary() ->
     assert "no production producer can create, renew, or advertise" in normalized_guide
 
 
-def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
+def test_dormant_worker_target_capability_has_no_production_eligibility_consumer() -> None:
     production_root = ROOT / "src" / "django_ray"
     model_pattern = re.compile(r"\bRayWorkerTargetCapability\b")
     references = {
@@ -393,10 +394,12 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
     }
 
     assert references == {
+        "src/django_ray/doctor.py",
         "src/django_ray/migrations/0025_ray_worker_target_capabilities.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
         "src/django_ray/migrations/0030_cohort_claims.py",
         "src/django_ray/models.py",
+        "src/django_ray/runner/cohort_core.py",
         "src/django_ray/target/capabilities.py",
         "src/django_ray/target/cohort_claim_storage.py",
         "src/django_ray/target/cohort_publication.py",
@@ -416,6 +419,8 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
         expected = {"src/django_ray/target/capabilities.py"}
         if symbol == "advertise_ray_worker_target_capability":
             expected.add("src/django_ray/target/cohort_publication.py")
+        elif symbol == "withdraw_all_ray_worker_target_capabilities":
+            expected.add("src/django_ray/runner/cohort_core.py")
         assert callers == expected
 
     # Dormant binding/claim services are not yet called from worker lifecycle
@@ -438,14 +443,29 @@ def test_dormant_worker_target_capability_has_no_production_consumer() -> None:
 
     # The private publisher may write capability, but it has no production
     # manager, enqueue, claim, recovery, or cancellation caller yet.
-    publication_symbols = ("publish_core_cohort_probe", "publish_cohort_job_probe")
+    publication_symbols = (
+        "publish_core_cohort_probe",
+        "publish_cohort_job_probe",
+        "publish_prepared_core_cohort_probe",
+        "publish_prepared_cohort_job_probe",
+    )
     for symbol in publication_symbols:
         callers = {
             path.relative_to(ROOT).as_posix()
             for path in production_root.rglob("*.py")
             if symbol in path.read_text(encoding="utf-8")
         }
-        assert callers == {"src/django_ray/target/cohort_publication.py"}
+        expected = {"src/django_ray/target/cohort_publication.py"}
+        if symbol == "publish_prepared_core_cohort_probe":
+            expected.add("src/django_ray/runner/cohort_core.py")
+        assert callers == expected
+
+    adapter_callers = {
+        path.relative_to(ROOT).as_posix()
+        for path in production_root.rglob("*.py")
+        if "CoreCohortManagerAdapter" in path.read_text(encoding="utf-8")
+    }
+    assert adapter_callers == {"src/django_ray/runner/cohort_core.py"}
 
 
 def test_protocol_v2_evidence_has_no_production_persistence_consumer() -> None:
