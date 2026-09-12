@@ -245,6 +245,18 @@ and supply the independently observed identifiers; these checks do not fence an
 external administrator. A later restore point needs a fresh creation and new OID.
 Host sequencing and native creation/retirement proof remain unimplemented.
 
+`runtime_observer` collects a completed observer through read-only Kubernetes
+calls. It verifies the expected Job UID, owner reference, rendered pod settings,
+image digest, zero restarts and successful exit before accepting one bounded
+JSON result. It re-reads the pod, Job and namespace after log collection;
+replacement or ambiguous pods are refused. Timestamp checks retain Kubernetes'
+whole-second precision. The fixed-executable Linux transport applies a 20-second
+deadline per call, live output limits and owned process cleanup without exposing
+provider diagnostics. The host must supply the admitted kubeconfig and the
+identities observed during resource creation. Caller-supplied snapshots alone
+do not authenticate events, and collection does not interpret an upgrade phase
+or grant resource admission. The serial lifecycle runner is still required.
+
 Still required: Linux backup/restore execution with exact scratch ownership,
 scratch retirement/recreation sequencing and the source-owned host orchestrator, real phase
 observations, old-writer and Ray retirement, manager-loss recovery without
