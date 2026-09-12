@@ -74,7 +74,25 @@ def test_real_artifact_commands_bind_copy_and_restore_without_database_setup(env
     assert (environment / "inputs" / "payload.bin").read_bytes() == b"newer primary input"
 
 
-@pytest.mark.parametrize("action", ["backup-database", "restore-database", "create-scratch"])
+def test_database_observer_forwards_only_run_binding_without_django_setup(
+    environment, monkeypatch, capsys
+):
+    from qualification.upgrade import runtime_database
+
+    observed = []
+    monkeypatch.setattr(
+        runtime_database,
+        "observe_database",
+        lambda **kwargs: observed.append(kwargs) or {"complete_upgrade_gate": False},
+    )
+    assert steps.main(steps.store_cli_args("observe-database", arguments("observe-database"))) == 0
+    assert observed == [{"run_digest": RUN}]
+    assert json.loads(capsys.readouterr().out)["complete_upgrade_gate"] is False
+
+
+@pytest.mark.parametrize(
+    "action", ["backup-database", "restore-database", "create-scratch", "retire-scratch"]
+)
 def test_database_commands_forward_only_fixed_observed_identifiers(
     environment, monkeypatch, capsys, action
 ):
@@ -90,6 +108,7 @@ def test_database_commands_forward_only_fixed_observed_identifiers(
         "backup-database": runtime_database,
         "restore-database": runtime_restore,
         "create-scratch": runtime_scratch,
+        "retire-scratch": runtime_scratch,
     }[action]
     monkeypatch.setattr(module, action.replace("-", "_"), helper)
     assert steps.main(steps.store_cli_args(action, arguments(action))) == 0
@@ -102,8 +121,10 @@ def test_database_commands_forward_only_fixed_observed_identifiers(
     }
     if action == "restore-database":
         expected.update(expected_dump_sha256=DUMP, expected_scratch_database_oid=16385)
-    if action == "create-scratch":
+    if action in {"create-scratch", "retire-scratch"}:
         del expected["expected_artifacts_sha256"]
+    if action == "retire-scratch":
+        expected["expected_scratch_database_oid"] = 16385
     assert observed == [("final", expected)]
 
 

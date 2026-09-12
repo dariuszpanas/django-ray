@@ -138,7 +138,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 runtime \
     && useradd --uid 1000 --gid runtime --no-log-init --create-home runtime
-RUN for client in psql pg_dump pg_restore createdb; do \
+RUN for client in psql pg_dump pg_restore createdb dropdb; do \
         /usr/lib/postgresql/17/bin/"$client" --version || exit 1; \
     done
 ENV PATH=/opt/runtime/venv/bin:$PATH PYTHONPATH=/opt/qualifier \

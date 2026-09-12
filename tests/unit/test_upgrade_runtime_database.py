@@ -81,6 +81,49 @@ def backup(store, **changes):
     return database.backup_database(**arguments)
 
 
+def test_observe_database_reads_identity_without_mutating_artifact_store(store):
+    before = {
+        path.relative_to(store.root): path.read_bytes()
+        for path in store.root.rglob("*")
+        if path.is_file()
+    }
+    result = database.observe_database(run_digest=RUN)
+    assert result == {
+        "schema": 1,
+        "run_digest": RUN,
+        "postgresql": IDENTITY,
+        "complete_upgrade_gate": False,
+    }
+    assert len(store.calls) == 2
+    assert all(command[0].endswith("/psql") for command, _ in store.calls)
+    assert all("read_only=on" in options["environment"]["PGOPTIONS"] for _, options in store.calls)
+    assert before == {
+        path.relative_to(store.root): path.read_bytes()
+        for path in store.root.rglob("*")
+        if path.is_file()
+    }
+    assert all(not options["directory"].exists() for _, options in store.calls)
+
+
+def test_observe_database_refuses_identity_change_without_provider_details(store, monkeypatch):
+    identities = iter([IDENTITY, IDENTITY | {"primary_database_oid": OID + 1}])
+    monkeypatch.setattr(database, "_identity", lambda *_: next(identities))
+    with pytest.raises(
+        database.DatabaseBackupError, match="^upgrade-database-observation-refused$"
+    ):
+        database.observe_database(run_digest=RUN)
+
+
+@pytest.mark.parametrize("failure", ["non-linux", "invalid-run", "wrong-binding"])
+def test_observe_database_refuses_before_clients(store, monkeypatch, failure):
+    if failure == "non-linux":
+        monkeypatch.setattr(database.platform, "system", lambda: "Windows")
+    run = "bad" if failure == "invalid-run" else "b" * 64 if failure == "wrong-binding" else RUN
+    with pytest.raises(database.DatabaseBackupError):
+        database.observe_database(run_digest=run)
+    assert not store.calls
+
+
 @pytest.mark.parametrize("point", ["blocked", "final"])
 def test_fixed_dump_receipt_requires_two_identity_reads_and_complete_artifact_copy(store, point):
     if point == "final":

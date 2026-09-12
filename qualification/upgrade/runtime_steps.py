@@ -49,6 +49,14 @@ class RuntimeStoreArguments:
 
 
 STORE_ACTIONS = {
+    "observe-database": {"run_digest"},
+    "retire-scratch": {
+        "run_digest",
+        "point",
+        "system_identifier",
+        "primary_database_oid",
+        "scratch_database_oid",
+    },
     "create-scratch": {"run_digest", "point", "system_identifier", "primary_database_oid"},
     "bind-store": {"run_digest"},
     "backup-artifacts": {"run_digest", "point"},
@@ -116,6 +124,10 @@ def _store_action(action: str, arguments: RuntimeStoreArguments) -> dict:
 
     if action == "bind-store":
         return runtime_artifacts.bind_artifact_store(arguments.run_digest)
+    if action == "observe-database":
+        from qualification.upgrade.runtime_database import observe_database
+
+        return observe_database(run_digest=arguments.run_digest)
     if action == "backup-artifacts":
         return runtime_artifacts.backup_artifacts(arguments.point, run_digest=arguments.run_digest)
     if action == "restore-artifacts":
@@ -130,6 +142,16 @@ def _store_action(action: str, arguments: RuntimeStoreArguments) -> dict:
         "expected_system_identifier": arguments.system_identifier,
         "expected_primary_database_oid": arguments.primary_database_oid,
     }
+    if action == "retire-scratch":
+        from qualification.upgrade.runtime_scratch import retire_scratch
+
+        return retire_scratch(
+            arguments.point,
+            run_digest=arguments.run_digest,
+            expected_system_identifier=arguments.system_identifier,
+            expected_primary_database_oid=arguments.primary_database_oid,
+            expected_scratch_database_oid=arguments.scratch_database_oid,
+        )
     if action == "create-scratch":
         from qualification.upgrade.runtime_scratch import create_scratch
 

@@ -207,7 +207,8 @@ and sequencing before calling the helper. A successful restore still needs the
 fresh released-history reader; mock client tests are not native SQL evidence.
 
 The fixed `runtime_steps` commands are `bind-store`, `backup-artifacts`,
-`restore-artifacts`, `backup-database`, `restore-database`, and `create-scratch`.
+`restore-artifacts`, `backup-database`, `restore-database`, `create-scratch`,
+`retire-scratch`, and `observe-database`.
 Each accepts only
 its exact `RuntimeStoreArguments` fields: a run digest, a fixed restore point,
 the relevant artifact/dump digests, and observed PostgreSQL identifiers where
@@ -219,17 +220,33 @@ helper internally selects only the validated scratch target. They never run
 Django setup or a manager. Subsequent scratch readers use the separate restored
 subPath selection described above.
 
+`observe-database` reads the primary PostgreSQL system identifier, database OID,
+and server version twice through read-only connections. It requires the bound
+artifact run but writes no receipt or database state. The host must attribute
+the observer to its owned server before using these values for later commands;
+the returned identifiers alone do not authenticate resource ownership.
+
 `create-scratch` corroborates the primary PostgreSQL identity, refuses an
 existing scratch database, and reserves the attempt before calling the fixed
 PostgreSQL 17 `createdb` client. It uses `template0`, then checks the new OID,
 owner, empty schema, and absence of other sessions before publishing its receipt.
 An interrupted or failed attempt cannot be retried or adopted automatically.
 The host still has to own the server and serialize observers; these checks do
-not fence an external administrator. Scratch reset/drop and host sequencing
-remain unimplemented. No native creation has been executed by the local tests.
+not fence an external administrator. No native creation has been executed by
+the local tests.
+
+`retire-scratch` requires that restore point's successful creation receipt,
+the same primary and scratch identities, current scratch ownership, and absence
+of other sessions. It reserves the attempt before a bounded `dropdb` call,
+without force or missing-database suppression, and verifies primary preservation
+and scratch absence before recording completion. An uncertain drop stays reserved
+and cannot be retried or adopted automatically. The host must serialize observers
+and supply the independently observed identifiers; these checks do not fence an
+external administrator. A later restore point needs a fresh creation and new OID.
+Host sequencing and native creation/retirement proof remain unimplemented.
 
 Still required: Linux backup/restore execution with exact scratch ownership,
-scratch reset and the source-owned host orchestrator, real phase
+scratch retirement/recreation sequencing and the source-owned host orchestrator, real phase
 observations, old-writer and Ray retirement, manager-loss recovery without
 resubmission, current Core/Jobs
 completion, rendered historical reads, rollback refusal and data-loss evidence,

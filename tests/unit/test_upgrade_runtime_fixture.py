@@ -22,7 +22,7 @@ def test_database_clients_use_debian_versioned_binary_directory():
 
     assert POSTGRES_BIN.as_posix() == "/usr/lib/postgresql/17/bin"
     recipe = DOCKERFILE.read_text(encoding="utf-8")
-    assert "for client in psql pg_dump pg_restore createdb; do" in recipe
+    assert "for client in psql pg_dump pg_restore createdb dropdb; do" in recipe
     assert '/usr/lib/postgresql/17/bin/"$client" --version || exit 1;' in recipe
 
 

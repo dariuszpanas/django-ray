@@ -3,7 +3,8 @@
 The host owns the namespace, PostgreSQL instance, and observer sequencing.
 This helper corroborates identities; it cannot authenticate that ownership or
 fence an external administrator. An uncertain creation stays reserved. There is
-no adoption, drop, reset, or automatic retry of an existing database.
+no adoption or automatic retry of an existing database. Retirement requires the
+successful creation receipt and the same observed database incarnation.
 """
 
 from __future__ import annotations
@@ -143,3 +144,130 @@ def create_scratch(
         return receipt
     except Exception:
         raise ScratchCreationError("upgrade-scratch-creation-refused") from None
+
+
+class ScratchRetirementError(ValueError):
+    """An owned scratch retirement was refused or has an uncertain outcome."""
+
+
+def retire_scratch(
+    point: str,
+    *,
+    run_digest: str,
+    expected_system_identifier: str,
+    expected_primary_database_oid: int,
+    expected_scratch_database_oid: int,
+) -> dict:
+    """Drop only a previously created scratch incarnation, without force/retry.
+
+    The admitted host must serialize all observers and own the PostgreSQL
+    instance. Identity checks cannot fence an external database administrator.
+    A failed attempt remains reserved even if the drop may have succeeded.
+    """
+    try:
+        _require(platform.system() == "Linux")
+        steps.store_cli_args(
+            "retire-scratch",
+            steps.RuntimeStoreArguments(
+                run_digest=run_digest,
+                point=point,
+                system_identifier=expected_system_identifier,
+                primary_database_oid=expected_primary_database_oid,
+                scratch_database_oid=expected_scratch_database_oid,
+            ),
+        )
+        root = artifacts._bound_root(run_digest)
+        primary = database._connection()
+        _require(
+            all(
+                re.fullmatch(r"[a-z][a-z0-9_]{0,62}", name) is not None
+                for name in (primary.database, primary.scratch, primary.user)
+            )
+            and primary.database != primary.scratch
+            and primary.scratch not in {"postgres", "template0", "template1"}
+        )
+        control = root / ".upgrade-control"
+        reservation_path = control / (point + "-scratch-retire-reserved.json")
+        completion_path = control / (point + "-scratch-retired.json")
+        _require(not reservation_path.exists() and not completion_path.exists())
+        created = steps._read(control / (point + "-scratch-created.json"))
+        scratch = replace(primary, database=primary.scratch)
+        with tempfile.TemporaryDirectory(prefix="upgrade-scratch-retire-", dir="/tmp") as raw:
+            directory = Path(raw)
+            primary_dir, scratch_dir = directory / "primary", directory / "scratch"
+            primary_dir.mkdir(mode=0o700)
+            scratch_dir.mkdir(mode=0o700)
+            primary_env = database._client_environment(primary, primary_dir)
+            scratch_env = database._client_environment(scratch, scratch_dir)
+            identity = database._identity(primary, primary_dir, primary_env)
+            _require(
+                identity["system_identifier"] == expected_system_identifier
+                and identity["primary_database_oid"] == expected_primary_database_oid
+            )
+            reservation = {
+                "schema": 1,
+                "run_digest": run_digest,
+                "restore_point": point,
+                "postgresql": identity,
+                "scratch_database": scratch.database,
+            }
+            _require(
+                created
+                == reservation
+                | {
+                    "scratch_database_oid": expected_scratch_database_oid,
+                    "empty_scratch_observed": True,
+                    "complete_upgrade_gate": False,
+                }
+            )
+            _require(
+                database._identity(scratch, scratch_dir, scratch_env)
+                == identity | {"primary_database_oid": expected_scratch_database_oid}
+            )
+            _require(
+                restore._query(scratch, scratch_dir, scratch_env, restore._NO_OTHER_SESSIONS_SQL)
+                == b"t\n"
+            )
+            owner_sql = (
+                "SELECT datdba=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user) "
+                "FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()"
+            )
+            _require(restore._query(scratch, scratch_dir, scratch_env, owner_sql) == b"t\n")
+            _require(database._identity(primary, primary_dir, primary_env) == identity)
+            _require(
+                database._identity(scratch, scratch_dir, scratch_env)
+                == identity | {"primary_database_oid": expected_scratch_database_oid}
+            )
+            reservation |= {"scratch_database_oid": expected_scratch_database_oid}
+            steps._write_once(reservation_path, reservation)
+            database._run_client(
+                (
+                    str(database.POSTGRES_BIN / "dropdb"),
+                    "--host=" + primary.host,
+                    "--port=" + primary.port,
+                    "--username=" + primary.user,
+                    "--maintenance-db=" + primary.database,
+                    "--no-password",
+                    "--",
+                    scratch.database,
+                ),
+                directory=primary_dir,
+                environment=primary_env
+                | {
+                    "PGOPTIONS": "-c default_transaction_read_only=off -c statement_timeout=30000 -c lock_timeout=5000"
+                },
+                timeout=60,
+                maximum=database.MAX_DIAGNOSTIC_BYTES,
+            )
+            _require(database._identity(primary, primary_dir, primary_env) == identity)
+            absent_sql = (
+                "SELECT NOT EXISTS (SELECT FROM pg_catalog.pg_database WHERE datname='"
+                + primary.scratch
+                + "')"
+            )
+            _require(restore._query(primary, primary_dir, primary_env, absent_sql) == b"t\n")
+        receipt = reservation | {"scratch_absent_observed": True, "complete_upgrade_gate": False}
+        steps._write_once(completion_path, receipt)
+        return receipt
+    except Exception:
+        raise ScratchRetirementError("upgrade-scratch-retirement-refused") from None

@@ -280,6 +280,32 @@ def _artifact_backup(point: str, run_digest: str, expected_digest: str) -> tuple
     return backup, expected
 
 
+def observe_database(*, run_digest: str) -> dict:
+    """Read primary identity for an admitted host without setup or mutation.
+
+    The host must attribute this observer to its owned PostgreSQL service.
+    Reading a system identifier does not independently prove that ownership.
+    """
+    try:
+        _require(platform.system() == "Linux")
+        steps.store_cli_args("observe-database", steps.RuntimeStoreArguments(run_digest=run_digest))
+        artifacts._bound_root(run_digest)
+        connection = _connection()
+        with tempfile.TemporaryDirectory(prefix="upgrade-database-observe-", dir="/tmp") as raw:
+            directory = Path(raw)
+            environment = _client_environment(connection, directory)
+            identity = _identity(connection, directory, environment)
+            _require(_identity(connection, directory, environment) == identity)
+        return {
+            "schema": 1,
+            "run_digest": run_digest,
+            "postgresql": identity,
+            "complete_upgrade_gate": False,
+        }
+    except Exception:
+        raise DatabaseBackupError("upgrade-database-observation-refused") from None
+
+
 def _dump_identity(path: Path) -> tuple[int, str]:
     before = path.lstat()
     _require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1)
