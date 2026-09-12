@@ -1,36 +1,24 @@
-# Development overlay with TLS enabled
-# Evaluation-only local overlay. Do not apply it to a production cluster.
-# Use: kubectl apply -k k8s/overlays/dev-tls
+# Local evaluation only; credentials are prepared separately.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 namespace: django-ray
-
 resources:
   - ../../base
-  - ray-tls-secret.yaml
-
-# Patch Ray head for TLS
 patches:
-  # This overlay is a local development example. A production topology must
-  # provide scoped external secrets and be designed separately from this base.
   - target:
       kind: ConfigMap
       name: django-ray-config
     patch: |
       - op: replace
         path: /data/DJANGO_DEPLOYMENT_MODE
-        value: "demo"
-
+        value: demo
   - target:
       kind: ConfigMap
       name: django-ray-config
     patch: |
       - op: replace
         path: /data/DJANGO_ALLOWED_HOSTS
-        value: "localhost,127.0.0.1,django-ray.localhost"
-
-  # Kubelet connects to the pod IP but sends this stable, allowed Host header.
+        value: localhost,127.0.0.1,django-ray.localhost
   - target:
       kind: Deployment
       name: django-web
@@ -41,8 +29,6 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/livenessProbe/httpGet/httpHeaders/0/value
         value: django-ray.localhost
-
-  # Ray Head TLS configuration
   - target:
       kind: Deployment
       name: ray-head
@@ -51,22 +37,22 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_USE_TLS
-          value: "1"
+          value: '1'
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_SERVER_CERT
-          value: "/etc/ray/tls/tls.crt"
+          value: /etc/ray/tls/tls.crt
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_SERVER_KEY
-          value: "/etc/ray/tls/tls.key"
+          value: /etc/ray/tls/tls.key
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_CA_CERT
-          value: "/etc/ray/tls/ca.crt"
+          value: /etc/ray/tls/ca.crt
       - op: add
         path: /spec/template/spec/containers/0/volumeMounts/-
         value:
@@ -79,8 +65,6 @@ patches:
           name: ray-tls
           secret:
             secretName: ray-tls-certs
-
-  # Ray Worker TLS configuration
   - target:
       kind: Deployment
       name: ray-worker
@@ -89,22 +73,22 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_USE_TLS
-          value: "1"
+          value: '1'
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_SERVER_CERT
-          value: "/etc/ray/tls/tls.crt"
+          value: /etc/ray/tls/tls.crt
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_SERVER_KEY
-          value: "/etc/ray/tls/tls.key"
+          value: /etc/ray/tls/tls.key
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_CA_CERT
-          value: "/etc/ray/tls/ca.crt"
+          value: /etc/ray/tls/ca.crt
       - op: add
         path: /spec/template/spec/containers/0/volumeMounts/-
         value:
@@ -117,8 +101,6 @@ patches:
           name: ray-tls
           secret:
             secretName: ray-tls-certs
-
-  # Django-Ray Worker TLS configuration
   - target:
       kind: Deployment
       name: django-ray-worker
@@ -127,22 +109,22 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_USE_TLS
-          value: "1"
+          value: '1'
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_SERVER_CERT
-          value: "/etc/ray/tls/tls.crt"
+          value: /etc/ray/tls/tls.crt
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_SERVER_KEY
-          value: "/etc/ray/tls/tls.key"
+          value: /etc/ray/tls/tls.key
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: RAY_TLS_CA_CERT
-          value: "/etc/ray/tls/ca.crt"
+          value: /etc/ray/tls/ca.crt
       - op: add
         path: /spec/template/spec/containers/0/volumeMounts/-
         value:
@@ -155,10 +137,8 @@ patches:
           name: ray-tls
           secret:
             secretName: ray-tls-certs
-
 images:
   - name: django-ray
     newTag: dev
   - name: django-ray-worker
     newTag: dev
-

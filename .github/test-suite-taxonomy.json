@@ -157,6 +157,8 @@
           "tests/unit/test_kuberay_compiled_graph_pilot.py",
           "tests/unit/test_kuberay_resource_profiles.py",
           "tests/unit/test_kubernetes_web_probes.py",
+          "tests/unit/test_kubernetes_secret_policy.py",
+          "tests/unit/test_local_kuberay_auth.py",
           "tests/unit/test_local_kuberay_gate.py"
         ]
       }

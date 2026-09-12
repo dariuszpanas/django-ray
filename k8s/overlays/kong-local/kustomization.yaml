@@ -1,62 +1,45 @@
-# Evaluation-only KubeRay and Kong profile for trusted local clusters.
-# Do not apply it to a production cluster.
+# Local evaluation only; credentials are prepared separately.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 resources:
   - ../kuberay-kind
-  - dashboard-ingresses.yaml
-
 patches:
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/type
         value: ClusterIP
-      - op: remove
-        path: /spec/ports/0/nodePort
     target:
       kind: Service
       name: django-web-svc
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/type
         value: ClusterIP
-      - op: remove
-        path: /spec/ports/0/nodePort
     target:
       kind: Service
       name: grafana-svc
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/type
         value: ClusterIP
-      - op: remove
-        path: /spec/ports/0/nodePort
     target:
       kind: Service
       name: prometheus-svc
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/type
         value: ClusterIP
-      - op: remove
-        path: /spec/ports/0/nodePort
     target:
       kind: Service
       name: ray-dashboard-svc
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /data/RAY_DASHBOARD_URL
-        value: "http://ray.localhost:30080"
+        value: http://127.0.0.1:30265
     target:
       kind: ConfigMap
       name: django-ray-config
-
-  - patch: |-
+  - patch: |
       - op: add
         path: /spec/template/spec/containers/0/args
         value:
@@ -76,16 +59,15 @@ patches:
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
-            memory: "2Gi"
-            cpu: "500m"
+            memory: 2Gi
+            cpu: 500m
           limits:
-            memory: "4Gi"
-            cpu: "2"
+            memory: 4Gi
+            cpu: '2'
     target:
       kind: Deployment
       name: postgres
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/replicas
         value: 4
@@ -100,34 +82,66 @@ patches:
         path: /spec/template/spec/containers/0/env
         value:
           - name: GUNICORN_WORKERS
-            value: "8"
+            value: '8'
           - name: GUNICORN_THREADS
-            value: "2"
+            value: '2'
           - name: GUNICORN_TIMEOUT
-            value: "120"
+            value: '120'
           - name: GUNICORN_GRACEFUL_TIMEOUT
-            value: "30"
+            value: '30'
           - name: GUNICORN_KEEPALIVE
-            value: "5"
+            value: '5'
           - name: GUNICORN_MAX_REQUESTS
-            value: "1000"
+            value: '1000'
           - name: GUNICORN_MAX_REQUESTS_JITTER
-            value: "100"
+            value: '100'
           - name: GUNICORN_WORKER_TMP_DIR
-            value: "/dev/shm"
+            value: /dev/shm
           - name: GUNICORN_ACCESS_LOGFILE
-            value: "off"
+            value: 'off'
           - name: GUNICORN_CONTROL_SOCKET_DISABLE
-            value: "true"
+            value: 'true'
+          - name: DJANGO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DJANGO_SECRET_KEY
+          - name: DATABASE_USER
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_USER
+          - name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_PASSWORD
+          - name: DJANGO_API_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-secret
+                key: DJANGO_API_TOKEN
+          - name: DJANGO_METRICS_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-metrics
+                key: DJANGO_METRICS_TOKEN
+          - name: DJANGO_DEMO_WORKLOADS_ENABLED
+            value: 'true'
+          - name: DJANGO_DEMO_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-demo
+                key: DJANGO_DEMO_TOKEN
       - op: replace
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: 512Mi
+            cpu: 500m
           limits:
-            memory: "2Gi"
-            cpu: "2"
+            memory: 2Gi
+            cpu: '2'
       - op: replace
         path: /spec/template/spec/containers/0/livenessProbe
         value:
@@ -186,8 +200,7 @@ patches:
     target:
       kind: Deployment
       name: django-web
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/replicas
         value: 2
@@ -195,46 +208,57 @@ patches:
         path: /spec/template/spec/containers/0/env
         value:
           - name: RAY_ADDRESS
-            value: "ray://ray-head-svc:10001"
+            value: ray://ray-head-svc:10001
           - name: DJANGO_RAY_QUEUE
-            value: "default,high-priority,low-priority"
+            value: default,high-priority,low-priority
           - name: DJANGO_RAY_CONCURRENCY
-            value: "16"
+            value: '16'
+          - name: DJANGO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DJANGO_SECRET_KEY
+          - name: DATABASE_USER
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_USER
+          - name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_PASSWORD
+          - name: RAY_AUTH_MODE
+            value: token
+          - name: RAY_AUTH_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-auth
+                key: RAY_AUTH_TOKEN
+          - name: DJANGO_API_ENABLED
+            value: 'false'
     target:
       kind: Deployment
       name: django-ray-worker
-
-  - patch: |-
-      - op: remove
-        path: /metadata/annotations/kubernetes.io~1ingress.class
-      - op: add
-        path: /spec/ingressClassName
-        value: kong
-      - op: remove
-        path: /spec/rules/0/host
-    target:
-      kind: Ingress
-      name: django-ray-ingress
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/headGroupSpec/serviceType
         value: ClusterIP
       - op: replace
         path: /spec/headGroupSpec/rayStartParams/num-cpus
-        value: "0"
+        value: '0'
       - op: replace
         path: /spec/headGroupSpec/template/spec/containers/0/resources
         value:
           requests:
-            memory: "3Gi"
-            cpu: "1"
+            memory: 3Gi
+            cpu: '1'
           limits:
-            memory: "6Gi"
-            cpu: "2"
+            memory: 6Gi
+            cpu: '2'
       - op: replace
         path: /spec/headGroupSpec/template/spec/containers/0/env/4/value
-        value: http://grafana.localhost:30080
+        value: http://127.0.0.1:30030
       - op: replace
         path: /spec/workerGroupSpecs/0/replicas
         value: 4
@@ -246,16 +270,16 @@ patches:
         value: 4
       - op: replace
         path: /spec/workerGroupSpecs/0/rayStartParams/num-cpus
-        value: "3"
+        value: '3'
       - op: replace
         path: /spec/workerGroupSpecs/0/template/spec/containers/0/resources
         value:
           requests:
-            memory: "2Gi"
-            cpu: "1500m"
+            memory: 2Gi
+            cpu: 1500m
           limits:
-            memory: "4Gi"
-            cpu: "3"
+            memory: 4Gi
+            cpu: '3'
     target:
       kind: RayCluster
       name: ray

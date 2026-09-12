@@ -30,9 +30,15 @@ docker build -f Dockerfile.ray -t django-ray-worker:latest .
 
 ### 2. Deploy
 
+Prepare [component-scoped credentials and optional bootstrap](local-credentials.md) first. The
+tracked manifests contain no reusable credentials and never overwrite a live Secret.
+
 ```bash
+python scripts/prepare_k8s_secrets.py --namespace django-ray
+make k8s-bootstrap-django-ray-secret K8S_CONTEXT=docker-desktop
+
 # Deploy using Kustomize
-kubectl apply -k k8s/overlays/dev
+kubectl --context docker-desktop apply -k k8s/overlays/dev
 
 # Wait for pods
 kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s
@@ -43,13 +49,14 @@ kubectl wait --for=condition=available deployment/django-ray-worker -n django-ra
 
 ### 3. Access
 
-Print the URLs for the active local access path:
+Start a temporary loopback forward in a separate terminal, then print the local URLs:
 
 ```bash
+make k8s-forward-web K8S_CONTEXT=docker-desktop
 make k8s-urls
 ```
 
-With the default NodePort-oriented manifests, use:
+Every sample Service is `ClusterIP`. The matching bounded forwards expose:
 
 | Service | URL | Description |
 |---------|-----|-------------|
@@ -63,8 +70,7 @@ The Django Web URL opens the bundled testproject landing page:
 ![django-ray testproject landing page](../assets/images/testproject-landing.png)
 
 The `dev`, `local`, `dev-tls`, `co-resident`, `kuberay-kind`, and `kong-local` overlays are
-local-demo examples. Their health probes are public when an overlay supplies an external route,
-but all other API routes require the bearer token
+local-demo examples. Their health probes are unauthenticated, but other API routes require a bearer token
 from `DJANGO_API_TOKEN`:
 
 ```bash
@@ -76,26 +82,10 @@ curl -H "Authorization: Bearer $DJANGO_API_TOKEN" \
 
 The landing page never receives `DJANGO_API_TOKEN` from Django. To use **Run test task**,
 **Metrics**, **Executions**, and authenticated statistics refreshes, retrieve the local demo token
-from the Kubernetes Secret and paste it into **Browser API access**.
-
-On PowerShell:
-
-```powershell
-$encodedApiToken = kubectl get secret django-ray-secret -n django-ray -o jsonpath='{.data.DJANGO_API_TOKEN}'
-$apiToken = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedApiToken))
-$apiToken
-```
-
-On a POSIX shell:
-
-```bash
-kubectl get secret django-ray-secret -n django-ray \
-  -o jsonpath='{.data.DJANGO_API_TOKEN}' | base64 --decode
-printf '\n'
-```
-
-These commands intentionally print the credential, so run them only in a trusted terminal. The
-dashboard clears the password field after submission and retains the token only in the loaded
+from the ignored `.local/k8s/django-ray/secrets.json` file using a private local editor and paste
+it into **Browser API access**. Do not print it into terminal logs or copy it into shared evidence.
+For an existing deployment, use its operator-managed credential source; preparing a new file does
+not rotate live credentials. The dashboard clears the password field after submission and retains the token only in the loaded
 page's memory after the statistics API verifies it. Reloading starts a new page without the token;
 selecting **Forget token** or receiving a 401 for the current credential clears it immediately. The
 token is never put in rendered HTML, browser storage, cookies, or URLs. Missing tokens produce a
@@ -122,15 +112,14 @@ The sample remains intentionally unsuitable for production even after replacing 
 - application and static Ray Deployments use mutable `latest` image tags for local iteration;
 - the base manages Ray through static Deployments, while the tracked KubeRay overlays are also
   local capacity and integration profiles;
-- the setup Job includes sample superuser creation and the dashboard uses one sample operator-token
+- the setup Job offers opt-in sample superuser creation and the dashboard uses one sample operator-token
   path rather than an application identity model;
-- web, task-manager, setup, PostgreSQL, and both the static and generic KubeRay Ray containers
-  receive the shared `django-ray-secret` through `envFrom`; Prometheus also mounts the operator
-  token from it, combining credentials with different trust scopes across the sample; and
-- local NodePorts, ingress, volumes, resource settings, and lifecycle operations are validation
+- component-scoped credentials reduce accidental delivery, but Ray execution still shares the
+  application's database and Django signing authority in this evaluation topology; and
+- local volumes, resource settings, and lifecycle operations are validation
   conveniences rather than a reviewed availability, isolation, or recovery design.
 
-Do not deploy the checked-in shared Secret outside this local boundary. Production environments
+There is no checked-in Secret to deploy. Production environments
 must deliver externally managed, component-scoped credentials and service identities only to the
 processes that need them.
 
@@ -142,34 +131,13 @@ overlays instead send `Host: django-ray.localhost`. The Kong local overlay delib
 readiness probe and process liveness probe for its overload-testing profile, while its HTTP startup
 probe sends the same local host header.
 
-When using the Kong local overlay on Docker Desktop's managed kind cluster, use:
-
-```bash
-make k8s-urls-kong
-```
-
-| Service | URL | Description |
-|---------|-----|-------------|
-| Django Web | http://localhost:30080 | Application through Kong |
-| API Docs | http://localhost:30080/api/docs | Swagger UI |
-| Admin | http://localhost:30080/admin/ | Django Admin |
-| Grafana | http://grafana.localhost:30080 | Grafana through Kong |
-| Prometheus | http://prometheus.localhost:30080 | Prometheus through Kong |
-| Ray Dashboard | http://ray.localhost:30080 | Ray monitoring through Kong |
-
-The sample app reads `RAY_DASHBOARD_URL` from the deployment config, so Django admin deep links
-track the active local access model instead of assuming the old dashboard NodePort.
-
-For non-local clusters, override the printed host, scheme, or ports instead of relying on
-the Docker Desktop defaults. `K8S_URL_HOST` changes the host for every default NodePort
-URL, while `K8S_WEB_URL`, `K8S_RAY_DASHBOARD_URL`, `K8S_GRAFANA_URL`, and
-`K8S_PROMETHEUS_URL` are per-service full URL overrides:
-
-```bash
-make k8s-urls K8S_URL_HOST=my-load-balancer.example.com K8S_WEB_PORT=80 K8S_GRAFANA_PORT=3000 K8S_PROMETHEUS_PORT=9090
-make k8s-urls K8S_WEB_URL=https://app.example.com K8S_RAY_DASHBOARD_URL=https://ray.example.com K8S_GRAFANA_URL=https://grafana.example.com K8S_PROMETHEUS_URL=https://prometheus.example.com
-make k8s-urls-kong K8S_KONG_WEB_URL=https://app.example.com K8S_KONG_RAY_DASHBOARD_URL=https://ray.example.com K8S_KONG_GRAFANA_URL=https://grafana.example.com K8S_KONG_PROMETHEUS_URL=https://prometheus.example.com
-```
+All overlays use the same loopback access path. The historically named `kong-local` overlay keeps
+its larger capacity profile but no longer creates Kong or external ingress routes. Use
+`k8s-forward-ray`, `k8s-forward-grafana`, and `k8s-forward-prometheus` with an explicit context for
+the other services. Each forward binds `127.0.0.1` and expires after 900 seconds by default.
+Grafana requires its generated account; Ray requires its Ray token. The dedicated Django metrics
+token used by Prometheus authorizes only `/api/metrics`. See [local credentials](local-credentials.md)
+for setup, existing-account behavior, migration, rotation, and credential delivery boundaries.
 
 ## KubeRay Operator (Kind Recommended)
 
@@ -261,8 +229,8 @@ operator, the Kong controller/gateway, and Kubernetes/Docker overhead:
 # superseded sample workloads and routes. The context is mandatory.
 make k8s-deploy-co-resident K8S_CONTEXT=docker-desktop
 
-# Optional temporary access. Stop the command to remove the listener.
-kubectl port-forward -n django-ray service/django-web-svc 8000:80
+# Optional temporary loopback access.
+make k8s-forward-web K8S_CONTEXT=docker-desktop
 
 # Build app images, load them into kind, install/upgrade KubeRay, deploy overlay
 make k8s-deploy-kuberay-kind K8S_CONTEXT=docker-desktop
@@ -273,8 +241,8 @@ the bounded `kuberay-system` quota before the Helm upgrade, deletes only the
 named full-profile Deployments, Services, routes, monitoring configuration, and
 completed setup Job, and then applies the five-pod render. It requires an
 explicit `docker-desktop` or `kind-<name>` context and passes that context to
-every cluster command. On first install it creates the checked-in local
-placeholder Secret; later transitions detect and preserve the live Secret
+every cluster command. On first install it requires separately prepared random
+component Secrets; later transitions detect and preserve the complete live Secret set
 instead of rendering credentials. The profile-managed application ConfigMap is
 converged deliberately. The target never deletes the `django-ray` Namespace or
 any PVC.
@@ -285,15 +253,13 @@ gate described in the trigger matrix. Before applying the direct full profile,
 the guarded gate and `k8s-deploy-kuberay-kind` explicitly remove the
 co-resident application ResourceQuota and LimitRange that Kustomize omission
 cannot prune. The Kong local target does the same before applying its larger
-profile. All three preserve the existing Secret rather than rendering the
-checked-in placeholders.
+profile. All three preserve existing Secrets and render no credential values.
 
 The direct target leaves any existing Kong release and ingress routes untouched. It does not invoke
 the Kong uninstall target because a release named `kong` in the `kong` namespace may belong to a
 different local workload.
 
-If you also want the host-based Kong routes used by the Docker Desktop managed kind setup, use the
-guarded target so the bootstrap-only Secret, policy removal, image/operator prerequisites, and
+For the larger capacity profile, use the guarded target so the component Secrets, policy removal, image/operator prerequisites, and
 explicit context remain part of one transition:
 
 ```bash
@@ -301,7 +267,7 @@ make k8s-deploy-kong-local K8S_CONTEXT=docker-desktop
 ```
 
 Do not replace this target with a raw `kubectl apply -k k8s/overlays/kong-local`: the
-credential-free render deliberately assumes a separately provisioned live Secret, and an existing
+credential-free render deliberately assumes separately provisioned live Secrets, and an existing
 co-resident namespace must have its bounded application policy removed first.
 
 `make k8s-uninstall-kong-local K8S_CONTEXT=docker-desktop` is an explicit, destructive cleanup for the conventional `kong`
@@ -475,28 +441,16 @@ topology is production-ready.
 
 ### Secrets
 
-Set via Secret:
-
-```yaml
-# k8s/base/secret.yaml
-data:
-  DJANGO_SECRET_KEY: <base64-encoded-random-value-at-least-50-characters>
-  DJANGO_API_TOKEN: <base64-encoded-random-value-at-least-32-characters>
-  DATABASE_PASSWORD: <base64-encoded>
-```
-
-The checked-in `django-ray-secret` is a render and local-validation reference only. It combines the
-Django signing key, one operator API token, database/bootstrap credentials, and sample superuser
-credentials. Both the Django-aware static Ray containers and the generic upstream KubeRay head and
-worker pods import every value through `envFrom`; Prometheus separately mounts the operator token.
-That evaluation-only credential blast radius is a documented sample hazard, not an endorsement of
-the layout. Replacing the values does not create least-privilege isolation. A production design must
-source separate, externally managed credentials for each component and must not distribute database,
-signing, bootstrap, or operator credentials to generic Ray nodes.
+Use the [local credential preparation helper](local-credentials.md). No Secret resource or reusable
+credential is checked in. Eight separately provisioned Secrets deliver explicit keys to their
+consumers. The web-only operator token, web-only demo token, setup-only bootstrap, and monitoring
+credentials are absent from Ray pods. Generic execution still needs application database and
+Django signing credentials in this evaluation topology. A production design requires independently
+reviewed service identities, delivery, rotation, and task isolation.
 
 For durable RuntimeEnv snapshot encryption, use a dedicated key stored through the external secret
 manager and map it into `RUNTIME_ENV_ENCRYPTION_KEYS` only in Django processes that enqueue, retry,
-inspect, or execute durable tasks. Do not add that key to the shared sample Secret; generic Ray nodes
+inspect, or execute durable tasks. Do not add that key to the runtime Secret delivered to Ray nodes; they
 do not need the database-encryption key.
 
 The local `kuberay-kind` overlay deliberately exercises the lower-configuration
@@ -509,7 +463,7 @@ Those selectors are not placed in the shared ConfigMap or Ray pod specifications
 The base and other overlays therefore keep plaintext writes unless they opt in
 explicitly.
 This local fallback validates encryption behavior, not key isolation: the generic upstream KubeRay
-head and worker pods still import `django-ray-secret`, including the Django signing secret from
+head and worker pods still receive the Django signing key from `django-ray-runtime`, from
 which the fallback key is derived. A production deployment gets the read-only database separation
 described by the threat model only when a dedicated RuntimeEnv key is delivered exclusively to the
 Django application processes that need it.
@@ -601,9 +555,9 @@ curl -H "Authorization: Bearer $DJANGO_API_TOKEN" \
   http://localhost:30080/api/metrics
 ```
 
-The bundled Prometheus deployment mounts only `DJANGO_API_TOKEN` from the application
-Secret and uses it as a bearer credential for this scrape. Replace the base placeholder
-before deployment and rotate it with the same care as other service credentials.
+The bundled Prometheus deployment mounts only `DJANGO_METRICS_TOKEN` from the dedicated
+`django-ray-metrics` Secret. That bearer credential authorizes only this scrape endpoint, and
+cannot submit workloads or access operator routes. It does not receive `DJANGO_API_TOKEN`.
 
 The scrape pools have separate ownership boundaries. `ray-head` and `ray-workers` collect
 Ray's native process metrics from port 8080. `django-ray` collects the durable database
@@ -689,7 +643,7 @@ Treat the following as design-review inputs, not as instructions to promote `k8s
 5. **Managed state and storage:** operate PostgreSQL, backups, restore tests, RuntimeEnv/object
    storage, and persistent volumes with explicit durability and availability targets.
 6. **Scoped secrets:** use an external secret manager and component-scoped credentials with rotation
-   and revocation procedures; never reuse the checked-in shared Secret layout.
+   and revocation procedures; the local helper is not a production secret manager.
 7. **Resource policy:** set workload-derived requests, limits, quotas, autoscaling, node placement,
    disruption budgets, and tenant isolation rather than inheriting local sample values.
 8. **Observability and operations:** define metrics, logs, traces, alerting, retention, audit access,

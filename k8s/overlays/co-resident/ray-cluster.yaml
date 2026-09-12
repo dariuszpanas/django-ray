@@ -1,5 +1,3 @@
-# One-head, one-worker KubeRay cluster for the bounded co-resident profile.
-# KubeRay creates only an internal ClusterIP head Service for this resource.
 apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
@@ -11,15 +9,14 @@ metadata:
 spec:
   rayVersion: "2.58.0"
   enableInTreeAutoscaling: false
-
   headGroupSpec:
     serviceType: ClusterIP
     rayStartParams:
-      dashboard-host: "0.0.0.0"
-      dashboard-port: "8265"
-      disable-usage-stats: "true"
-      num-cpus: "0"
-      object-store-memory: "268435456"
+      dashboard-host: 0.0.0.0
+      dashboard-port: '8265'
+      disable-usage-stats: 'true'
+      num-cpus: '0'
+      object-store-memory: '268435456'
     template:
       metadata:
         labels:
@@ -33,8 +30,6 @@ spec:
             envFrom:
               - configMapRef:
                   name: django-ray-config
-              - secretRef:
-                  name: django-ray-secret
             ports:
               - containerPort: 6379
                 name: gcs
@@ -44,11 +39,11 @@ spec:
                 name: client
             resources:
               requests:
-                cpu: "100m"
-                memory: "1Gi"
+                cpu: 100m
+                memory: 1Gi
               limits:
-                cpu: "350m"
-                memory: "2Gi"
+                cpu: 350m
+                memory: 2Gi
             volumeMounts:
               - name: shared-memory
                 mountPath: /dev/shm
@@ -58,26 +53,50 @@ spec:
               - name: payload-storage
                 mountPath: /payload-storage
                 readOnly: true
+            env:
+              - name: DJANGO_SECRET_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: django-ray-runtime
+                    key: DJANGO_SECRET_KEY
+              - name: DATABASE_USER
+                valueFrom:
+                  secretKeyRef:
+                    name: django-ray-runtime
+                    key: DATABASE_USER
+              - name: DATABASE_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: django-ray-runtime
+                    key: DATABASE_PASSWORD
+              - name: RAY_AUTH_MODE
+                value: token
+              - name: RAY_AUTH_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: django-ray-auth
+                    key: RAY_AUTH_TOKEN
+              - name: DJANGO_API_ENABLED
+                value: 'false'
         volumes:
           - name: shared-memory
             emptyDir:
               medium: Memory
-              sizeLimit: "512Mi"
+              sizeLimit: 512Mi
           - name: runtime-env
             persistentVolumeClaim:
               claimName: runtime-env-pvc
           - name: payload-storage
             persistentVolumeClaim:
               claimName: payload-storage-pvc
-
   workerGroupSpecs:
     - groupName: worker-group
       replicas: 1
       minReplicas: 1
       maxReplicas: 1
       rayStartParams:
-        num-cpus: "1"
-        object-store-memory: "268435456"
+        num-cpus: '1'
+        object-store-memory: '268435456'
       template:
         metadata:
           labels:
@@ -91,15 +110,13 @@ spec:
               envFrom:
                 - configMapRef:
                     name: django-ray-config
-                - secretRef:
-                    name: django-ray-secret
               resources:
                 requests:
-                  cpu: "250m"
-                  memory: "768Mi"
+                  cpu: 250m
+                  memory: 768Mi
                 limits:
-                  cpu: "500m"
-                  memory: "1536Mi"
+                  cpu: 500m
+                  memory: 1536Mi
               volumeMounts:
                 - name: shared-memory
                   mountPath: /dev/shm
@@ -109,11 +126,36 @@ spec:
                 - name: payload-storage
                   mountPath: /payload-storage
                   readOnly: true
+              env:
+                - name: DJANGO_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: django-ray-runtime
+                      key: DJANGO_SECRET_KEY
+                - name: DATABASE_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: django-ray-runtime
+                      key: DATABASE_USER
+                - name: DATABASE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: django-ray-runtime
+                      key: DATABASE_PASSWORD
+                - name: RAY_AUTH_MODE
+                  value: token
+                - name: RAY_AUTH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: django-ray-auth
+                      key: RAY_AUTH_TOKEN
+                - name: DJANGO_API_ENABLED
+                  value: 'false'
           volumes:
             - name: shared-memory
               emptyDir:
                 medium: Memory
-                sizeLimit: "512Mi"
+                sizeLimit: 512Mi
             - name: runtime-env
               persistentVolumeClaim:
                 claimName: runtime-env-pvc
