@@ -12,7 +12,7 @@ spec:
     requests.memory: 3Gi
     requests.ephemeral-storage: 512Mi
     limits.cpu: 1600m
-    limits.memory: 5Gi
+    limits.memory: 9Gi
     limits.ephemeral-storage: 2Gi
     requests.storage: 2Gi
 ---
@@ -34,5 +34,5 @@ spec:
         ephemeral-storage: 256Mi
       max:
         cpu: 500m
-        memory: 2Gi
+        memory: 6Gi
         ephemeral-storage: 256Mi

@@ -18,8 +18,11 @@ from typing import Any
 
 from django.tasks import task
 
+from testproject.workload_limits import bounded_sample_task
+
 
 @task(queue_name="sync")
+@bounded_sample_task
 def simple_calculation(a: int, b: int, operation: str = "add") -> int:
     """Perform a simple calculation.
 
@@ -41,6 +44,7 @@ def simple_calculation(a: int, b: int, operation: str = "add") -> int:
 
 
 @task(queue_name="sync")
+@bounded_sample_task
 def process_data(items: list[Any]) -> dict[str, Any]:
     """Process a list of items.
 
@@ -61,6 +65,7 @@ def process_data(items: list[Any]) -> dict[str, Any]:
 
 
 @task(queue_name="sync")
+@bounded_sample_task
 def validate_email(email: str) -> dict[str, Any]:
     """Validate an email address format.
 
@@ -85,6 +90,7 @@ def validate_email(email: str) -> dict[str, Any]:
 
 
 @task(queue_name="sync")
+@bounded_sample_task
 def generate_report(data: dict[str, Any]) -> str:
     """Generate a simple text report from data.
 

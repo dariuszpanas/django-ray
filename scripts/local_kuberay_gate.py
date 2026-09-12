@@ -44,6 +44,11 @@ from scripts.check_prometheus_targets import (
     fetch_active_targets,
     wait_for_healthy_targets,
 )
+from scripts.local_kuberay_auth import (
+    grafana_auth_probe_script,
+    ray_auth_probe_script,
+    validate_auth_receipt,
+)
 
 # Preserve the host gate imports used by existing fixtures and tooling.
 EXECUTION_PROTOCOL_METRIC_SAMPLE_PATTERN = api_assertions.EXECUTION_PROTOCOL_METRIC_SAMPLE_PATTERN
@@ -303,7 +308,7 @@ WORKFLOW_SHOWCASE_NODE_LAYERS = (
             "0.1.g2",
         }
     ),
-    frozenset({"0.1.g0.1.m0", "0.1.g1.1"}),
+    frozenset({"0.1.g0.1", "0.1.g1.1"}),
     frozenset({"0.2"}),
     frozenset(
         {
@@ -316,7 +321,7 @@ WORKFLOW_SHOWCASE_NODE_LAYERS = (
     frozenset({"0.3.g1.0.g1.1"}),
     frozenset({"0.3.g1.1"}),
     frozenset({"0.4"}),
-    frozenset({"0.5.m0"}),
+    frozenset({"0.5"}),
     frozenset({"0.6"}),
     frozenset({"0.7.g0", "0.7.g1", "0.7.g2"}),
     frozenset({"0.8"}),
@@ -324,13 +329,13 @@ WORKFLOW_SHOWCASE_NODE_LAYERS = (
 WORKFLOW_SHOWCASE_EDGES = frozenset(
     {
         ("0.0", "0.1.g0.0"),
-        ("0.1.g0.0", "0.1.g0.1.m0"),
+        ("0.1.g0.0", "0.1.g0.1"),
         ("0.0", "0.1.g1.0.g0"),
         ("0.0", "0.1.g1.0.g1"),
         ("0.1.g1.0.g0", "0.1.g1.1"),
         ("0.1.g1.0.g1", "0.1.g1.1"),
         ("0.0", "0.1.g2"),
-        ("0.1.g0.1.m0", "0.2"),
+        ("0.1.g0.1", "0.2"),
         ("0.1.g1.1", "0.2"),
         ("0.1.g2", "0.2"),
         ("0.2", "0.3.g0"),
@@ -343,8 +348,8 @@ WORKFLOW_SHOWCASE_EDGES = frozenset(
         ("0.3.g1.0.g1.1", "0.3.g1.1"),
         ("0.3.g0", "0.4"),
         ("0.3.g1.1", "0.4"),
-        ("0.4", "0.5.m0"),
-        ("0.5.m0", "0.6"),
+        ("0.4", "0.5"),
+        ("0.5", "0.6"),
         ("0.6", "0.7.g0"),
         ("0.6", "0.7.g1"),
         ("0.6", "0.7.g2"),
@@ -353,8 +358,9 @@ WORKFLOW_SHOWCASE_EDGES = frozenset(
         ("0.7.g2", "0.8"),
     }
 )
-WORKFLOW_SHOWCASE_FAILURE_NODE_ID = "0.5.m0"
-WORKFLOW_SHOWCASE_VALIDATION_NODE_ID = "0.1.g0.1.m0"
+WORKFLOW_SHOWCASE_FAILURE_NODE_ID = "0.5"
+WORKFLOW_SHOWCASE_VALIDATION_NODE_ID = "0.1.g0.1"
+WORKFLOW_SHOWCASE_INPUT_PREVIEW_NODE_ID = "0.4"
 WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID = "0.1.g1.0.g1"
 WORKFLOW_SHOWCASE_FAILURE_DESCENDANTS = frozenset(
     {
@@ -364,6 +370,15 @@ WORKFLOW_SHOWCASE_FAILURE_DESCENDANTS = frozenset(
         "0.7.g2",
         "0.8",
     }
+)
+# A bounded map resolves its leaves before Chain submits the next signature.
+# On reservation failure, downstream signatures have not been discovered.
+WORKFLOW_SHOWCASE_FAILURE_NODE_LAYERS = WORKFLOW_SHOWCASE_NODE_LAYERS[:9]
+WORKFLOW_SHOWCASE_FAILURE_NODE_IDS = frozenset().union(*WORKFLOW_SHOWCASE_FAILURE_NODE_LAYERS)
+WORKFLOW_SHOWCASE_FAILURE_EDGES = frozenset(
+    (source, target)
+    for source, target in WORKFLOW_SHOWCASE_EDGES
+    if source in WORKFLOW_SHOWCASE_FAILURE_NODE_IDS and target in WORKFLOW_SHOWCASE_FAILURE_NODE_IDS
 )
 WORKFLOW_SHOWCASE_FAILURE_SUCCEEDED_NODES = (
     frozenset().union(*WORKFLOW_SHOWCASE_NODE_LAYERS)
@@ -600,10 +615,18 @@ PREREQUISITE_RESOURCE_IDENTITIES = frozenset(
         ("apps/v1", "Deployment", "grafana"),
         ("apps/v1", "Deployment", "postgres"),
         ("apps/v1", "Deployment", "prometheus"),
-        ("networking.k8s.io/v1", "Ingress", "django-ray-ingress"),
     }
 )
 PRESERVED_SECRET_IDENTITY = ("v1", "Secret", "django-ray-secret")
+COMPONENT_SECRET_NAMES = (
+    "django-ray-demo",
+    "django-ray-runtime",
+    "django-ray-database",
+    "django-ray-auth",
+    "django-ray-bootstrap",
+    "django-ray-grafana",
+    "django-ray-metrics",
+)
 SETUP_RESOURCE_IDENTITY = ("batch/v1", "Job", SETUP_JOB)
 WORKLOAD_RESOURCE_IDENTITIES = frozenset(
     {
@@ -1006,6 +1029,8 @@ class GateEvidence:
     ray_pod_identity_sha256: str = ""
     ray_head_count: int = 0
     ray_worker_count: int = 0
+    ray_auth_boundary_verified: bool = False
+    grafana_auth_boundary_verified: bool = False
     deployments: dict[str, int] = field(default_factory=dict)
     web_restart_count: int = 0
     task_id: str = ""
@@ -2022,8 +2047,8 @@ def normalize_ray_topology(ray_cluster: Mapping[str, Any]) -> RayTopology:
         raise ValueError("the guarded local RayCluster must declare rayVersion")
     head = _mapping(spec.get("headGroupSpec"), field_name="RayCluster headGroupSpec")
     head_service_type = head.get("serviceType")
-    if not isinstance(head_service_type, str) or not head_service_type:
-        raise ValueError("RayCluster headGroupSpec.serviceType must be a non-empty string")
+    if head_service_type != "ClusterIP":
+        raise ValueError("RayCluster headGroupSpec.serviceType must be ClusterIP")
     head_template = _mapping(head.get("template"), field_name="RayCluster head template")
     head_pod_spec = _mapping(head_template.get("spec"), field_name="RayCluster head template spec")
     head_images = pod_image_contract(head_pod_spec)
@@ -2249,6 +2274,16 @@ def inspect_rendered_resources(
         if identity in identities:
             raise ValueError(f"rendered resource {api_version} {kind}/{name} is duplicated")
         identities.add(identity)
+
+        if kind == "Service":
+            service_spec = _mapping(resource.get("spec", {}), field_name="Service spec")
+            ports = _sequence(service_spec.get("ports", []), field_name="Service ports")
+            if (
+                service_spec.get("type", "ClusterIP") != "ClusterIP"
+                or service_spec.get("externalIPs")
+                or any("nodePort" in _mapping(port, field_name="Service port") for port in ports)
+            ):
+                raise ValueError("sample Services must remain internal ClusterIP resources")
 
         resource_namespace = metadata.get("namespace")
         if kind == "Namespace":
@@ -2916,6 +2951,7 @@ class LocalKubeRayGate:
         self.mutated = False
         self._api_token: str | None = None
         self._secret_data_sha256: str | None = None
+        self._component_secret_digests: dict[str, str] = {}
         self._runtime_env_protected_values = [
             RUNTIME_ENV_STORAGE_PROBE_MARKER,
             RUNTIME_ENV_FAILURE_UNKNOWN_KEY_ID,
@@ -3238,6 +3274,7 @@ class LocalKubeRayGate:
                         self._wait_for_application_topology,
                     )
                     self._layer("image-identity", self._verify_deployed_images)
+                    self._layer("authentication", self._verify_authentication)
                     self._layer(
                         "protocol-handoff-recovery",
                         self._recover_protocol_handoff_residue,
@@ -3439,6 +3476,7 @@ class LocalKubeRayGate:
             "name",
         )
         self._secret_token()
+        self._capture_component_secrets()
         for kind in ("clusterrole", "clusterrolebinding"):
             legacy = self._kubectl_cluster(
                 "get",
@@ -3453,6 +3491,22 @@ class LocalKubeRayGate:
                     f"legacy cluster-scoped {legacy} still exists; remove it in a separately "
                     "reviewed one-time migration before this namespace-only gate"
                 )
+
+        legacy_ingress = self._kubectl(
+            "get",
+            "ingress",
+            "django-ray-ingress",
+            "grafana-ingress",
+            "prometheus-ingress",
+            "ray-dashboard-ingress",
+            "--ignore-not-found",
+            "-o",
+            "name",
+        ).stdout.strip()
+        if legacy_ingress:
+            raise ValueError(
+                "legacy sample ingress remains; remove owned routes in an explicit migration"
+            )
 
         assert self.temp_root is not None
         self.source_context = create_source_build_context(
@@ -3554,13 +3608,32 @@ class LocalKubeRayGate:
         self._verify_source_identity()
 
     def _build_released_v040_image(self) -> None:
-        """Build the exact released v0.4.0 application image from its pinned archive."""
+        """Build pinned released application code on the handoff cluster's Ray tuple."""
 
         if self.released_v040_source_context is None:
             raise ValueError("released v0.4.0 source archive has not been initialized")
         if self._ray_image_python_version is None:
             raise ValueError("rendered Ray image Python version has not been discovered")
+        if self.rendered_ray_topology is None:
+            raise ValueError("rendered Ray topology has not been captured")
+        ray_version = self.rendered_ray_topology.ray_version
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", ray_version) is None:
+            raise ValueError("handoff Ray version must be an exact stable version")
         self._verify_released_v040_source_identity()
+        dockerfile = self.released_v040_source_context.parent / "released-v040-handoff.Dockerfile"
+        released_dockerfile = self.released_v040_source_context / "Dockerfile"
+        dockerfile.write_text(
+            released_dockerfile.read_text(encoding="utf-8")
+            + "\n# The handoff tests old application code on the current Ray cluster.\n"
+            + f"RUN python -m pip install --no-cache-dir --no-deps ray=={ray_version} "
+            + "&& python -m pip check\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        shutil.copyfile(
+            self.released_v040_source_context / "Dockerfile.dockerignore",
+            dockerfile.with_name(dockerfile.name + ".dockerignore"),
+        )
         command = [
             "docker",
             "build",
@@ -3573,7 +3646,7 @@ class LocalKubeRayGate:
             "--label",
             f"org.opencontainers.image.source-tree={RELEASED_V040_SOURCE_TREE}",
             "--file",
-            str(self.released_v040_source_context / "Dockerfile"),
+            str(dockerfile),
             str(self.released_v040_source_context),
         ]
         self._docker(*command[1:], timeout=self.config.build_timeout)
@@ -3905,6 +3978,21 @@ class LocalKubeRayGate:
                 "Ray worker wait-gcs-ready init name/image does not match the pinned "
                 "KubeRay contract"
             )
+        auth_env = [
+            entry
+            for value in _sequence(init.get("env", []), field_name="wait-gcs-ready env")
+            if (entry := _mapping(value, field_name="wait-gcs-ready env entry")).get("name")
+            in {"RAY_AUTH_MODE", "RAY_AUTH_TOKEN"}
+        ]
+        expected_auth = [
+            {"name": "RAY_AUTH_MODE", "value": "token"},
+            {
+                "name": "RAY_AUTH_TOKEN",
+                "valueFrom": {"secretKeyRef": {"name": "django-ray-auth", "key": "RAY_AUTH_TOKEN"}},
+            },
+        ]
+        if sorted(auth_env, key=lambda entry: str(entry["name"])) != expected_auth:
+            raise ValueError("wait-gcs-ready must inherit the scoped Ray token credentials")
         command = _sequence(init.get("command"), field_name="wait-gcs-ready command")
         if command != ["/bin/bash", "-c", "--"]:
             raise ValueError("wait-gcs-ready command does not match KubeRay 1.6.2")
@@ -4978,6 +5066,37 @@ class LocalKubeRayGate:
         )
         return _mapping(secret.get("data"), field_name="Secret/django-ray-secret data")
 
+    def _component_secret_data(self, name: str) -> Mapping[str, Any]:
+        if name not in COMPONENT_SECRET_NAMES:
+            raise ValueError("unrecognized component Secret")
+        secret = self._json_command(
+            self._kubectl("get", "secret", name, "-o", "json", sensitive_output=True),
+            field_name=f"Secret/{name}",
+        )
+        return _mapping(secret.get("data"), field_name=f"Secret/{name} data")
+
+    def _capture_component_secrets(self) -> None:
+        """Capture existing component material without creating or rotating it."""
+        for name in COMPONENT_SECRET_NAMES:
+            data = self._component_secret_data(name)
+            inspect_runtime_env_encryption_secret_data(data)
+            self._component_secret_digests[name] = secret_data_sha256(data)
+            for key, encoded in data.items():
+                value = None
+                try:
+                    value = base64.b64decode(encoded, validate=True).decode("utf-8")
+                except (TypeError, ValueError, UnicodeDecodeError):
+                    pass
+                if value is None:
+                    raise ValueError("component Secret contains invalid credential data")
+                if value and any(
+                    part in key.upper() for part in ("PASSWORD", "SECRET", "TOKEN", "API_KEY")
+                ):
+                    self.redactor.register(value)
+                    self.runner.redactor.register(value)
+                    self.redactor.register(encoded)
+                    self.runner.redactor.register(encoded)
+
     def _secret_token(self) -> str:
         if self._api_token is not None:
             return self._api_token
@@ -5010,6 +5129,31 @@ class LocalKubeRayGate:
         self._api_token = token
         return token
 
+    def _workflow_enqueue_headers(self, path: str) -> dict[str, str]:
+        """Keep demo submission authority separate from operator read/lifecycle authority."""
+        if path.split("?", 1)[0] != "/api/cluster/complex-workflow":
+            return {"Authorization": f"Bearer {self._secret_token()}"}
+        encoded = self._component_secret_data("django-ray-demo").get("DJANGO_DEMO_TOKEN")
+        token = None
+        try:
+            if isinstance(encoded, str):
+                token = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            pass
+        if (
+            token is None
+            or not 32 <= len(token) <= 512
+            or BEARER_TOKEN68_PATTERN.fullmatch(token) is None
+        ):
+            raise ValueError("demo Secret has no valid bounded bearer token")
+        if token == self._secret_token():
+            raise ValueError("demo and operator credentials must be distinct")
+        self.redactor.register(token)
+        self.runner.redactor.register(token)
+        self.redactor.register(encoded)
+        self.runner.redactor.register(encoded)
+        return {"Authorization": f"Bearer {token}"}
+
     def _verify_preserved_secret(self) -> None:
         """Compare all Secret data to the preflight identity without emitting its digest."""
         if self._secret_data_sha256 is None:
@@ -5017,6 +5161,9 @@ class LocalKubeRayGate:
         current = secret_data_sha256(self._secret_data())
         if current != self._secret_data_sha256:
             raise ValueError("Secret/django-ray-secret data changed during the guarded gate")
+        for name, digest in self._component_secret_digests.items():
+            if secret_data_sha256(self._component_secret_data(name)) != digest:
+                raise ValueError("component Secret data changed during the guarded gate")
         self.evidence.django_ray_secret_preserved = True
 
     def _http(
@@ -5245,6 +5392,7 @@ else:
         return self._sensitive_django_shell(
             script,
             field_name="rq2 positive task observation",
+            ray_authorized=True,
         )
 
     def _wait_for_ray_job_gate_task(
@@ -5317,7 +5465,10 @@ else:
 
     def _decoded_credential_values(self) -> tuple[str, ...]:
         values: list[str] = []
-        for key, encoded in self._secret_data().items():
+        data = dict(self._secret_data())
+        for name in self._component_secret_digests:
+            data.update(self._component_secret_data(name))
+        for key, encoded in data.items():
             if not isinstance(key, str) or not any(
                 token in key.upper() for token in ("PASSWORD", "SECRET", "TOKEN", "API_KEY")
             ):
@@ -5641,9 +5792,22 @@ else:
                                 ],
                                 "envFrom": [
                                     {"configMapRef": {"name": "django-ray-config"}},
-                                    {"secretRef": {"name": "django-ray-secret"}},
                                 ],
                                 "env": [
+                                    {
+                                        "name": key,
+                                        "valueFrom": {"secretKeyRef": {"name": secret, "key": key}},
+                                    }
+                                    for secret, key in (
+                                        ("django-ray-runtime", "DJANGO_SECRET_KEY"),
+                                        ("django-ray-runtime", "DATABASE_USER"),
+                                        ("django-ray-runtime", "DATABASE_PASSWORD"),
+                                        ("django-ray-auth", "RAY_AUTH_TOKEN"),
+                                    )
+                                ]
+                                + [
+                                    {"name": "RAY_AUTH_MODE", "value": "token"},
+                                    {"name": "DJANGO_API_ENABLED", "value": "false"},
                                     {
                                         "name": "RAY_ADDRESS",
                                         "value": "ray://ray-head-svc:10001",
@@ -6246,12 +6410,13 @@ if not row.ray_job_id or not row.ray_address:
     print(json.dumps({{"ready": False, "state": str(row.state)}}))
 else:
     client = _address_pinned_job_client(row.ray_address)
-    info = client.get_job_info(row.ray_job_id)
-    submissions = sum(
-        1
+    matching_jobs = [
+        job
         for job in client.list_jobs()
         if getattr(job, "submission_id", None) == row.ray_job_id
-    )
+    ]
+    info = matching_jobs[0] if matching_jobs else None
+    submissions = len(matching_jobs)
     status = str(getattr(info, "status", "")) if info is not None else ""
     if info is None or submissions < 1 or status not in {
             "PENDING", "RUNNING", "SUCCEEDED", "FAILED", "STOPPED"
@@ -6285,6 +6450,7 @@ else:
         return self._sensitive_django_shell(
             script,
             field_name="released v0.4.0 handoff task observation",
+            ray_authorized=True,
         )
 
     def _wait_for_protocol_handoff_task(
@@ -6322,6 +6488,10 @@ else:
                 if state in accepted_states and worker_changed and durable_ready:
                     return observation
             elif isinstance(state_value, str):
+                if state_value in RAY_JOB_GATE_TERMINAL_STATES - accepted_states:
+                    raise ValueError(
+                        f"released v0.4.0 handoff task reached unexpected state {state_value}"
+                    )
                 last_state = state_value
             if time.monotonic() >= deadline:
                 raise ValueError(
@@ -7389,6 +7559,7 @@ print(json.dumps({{
         outcome = self._sensitive_django_shell(
             script,
             field_name="protocol-v2 direct Ray Core rejection",
+            ray_authorized=True,
         )
         validate_protocol_v2_rejection(outcome)
         final_row = self._observe_protocol_v2_fixture(fixture)
@@ -7507,7 +7678,7 @@ def await_target_result(runner, submission):
 context = ray.get_runtime_context()
 runtime = RayRuntimeVersion(
     ray_major=2,
-    ray_minor=56,
+    ray_minor=58,
     ray_patch=0,
     python_implementation=platform.python_implementation().strip().lower(),
     python_major=sys.version_info.major,
@@ -7687,6 +7858,7 @@ print(json.dumps({{
         outcome = self._sensitive_django_shell(
             script,
             field_name="protocol-v2 private target execution",
+            ray_authorized=True,
         )
         validate_protocol_v2_target_execution(outcome)
         final_row = self._observe_protocol_v2_fixture(fixture)
@@ -8309,6 +8481,7 @@ print(json.dumps({{
         return self._sensitive_django_shell(
             script,
             field_name="rq2 missing-reference submission",
+            ray_authorized=True,
         )
 
     def _observe_missing_ray_job_request_reference(
@@ -8408,6 +8581,7 @@ print(json.dumps({{
         return self._sensitive_django_shell(
             script,
             field_name="rq2 missing-reference observation",
+            ray_authorized=True,
         )
 
     def _wait_for_missing_ray_job_failure(
@@ -8491,6 +8665,7 @@ print(json.dumps({{
         return self._sensitive_django_shell(
             script,
             field_name="rq2 missing-reference disposition",
+            ray_authorized=True,
         )
 
     def _wait_for_missing_ray_job_disposition(self, task_id: str) -> Mapping[str, Any]:
@@ -8610,20 +8785,72 @@ print(json.dumps({{
             raise ValueError(f"{field_name} is not a canonical UUIDv4")
         return str(parsed)
 
+    def _verify_authentication(self) -> None:
+        """Prove private endpoints reject missing/invalid credentials and allow owners."""
+        self.evidence.ray_auth_boundary_verified = False
+        self.evidence.grafana_auth_boundary_verified = False
+        self._verify_ray_identity()
+        ray_receipt = self._authentication_probe(
+            ray_auth_probe_script(),
+            resource="deployment/django-ray-worker",
+            container="django-ray-worker",
+        )
+        validate_auth_receipt(ray_receipt, surface="ray")
+        self.evidence.ray_auth_boundary_verified = True
+        _, pods = self._ray_pods(expected_cluster_uid=self._ray_cluster_uid)
+        heads = [pod for pod in pods if self._rendered_ray_pod_contract(pod)[0] == "head"]
+        if len(heads) != 1:
+            raise ValueError("authentication probe requires exactly one verified Ray head")
+        grafana_receipt = self._authentication_probe(
+            grafana_auth_probe_script(),
+            resource=f"pod/{_metadata(heads[0])['name']}",
+            container="dashboard-importer",
+        )
+        validate_auth_receipt(grafana_receipt, surface="grafana")
+        self.evidence.grafana_auth_boundary_verified = True
+        self._verify_ray_identity()
+
+    def _authentication_probe(
+        self, script: str, *, resource: str, container: str
+    ) -> Mapping[str, Any]:
+        """Start a fresh, bounded process using only its existing component credentials."""
+        completion_marker = f"django_ray_private_json_complete_v1_{uuid4().hex}"
+        wrapped_script = f"{script.rstrip()}\nprint({completion_marker!r})\n"
+        result = self._kubectl(
+            "exec",
+            resource,
+            "-c",
+            container,
+            "--",
+            "python",
+            "-c",
+            wrapped_script,
+            sensitive_output=True,
+            timeout=max(90, self.config.command_timeout),
+        )
+        if len(result.stdout) > MAX_OUTPUT_CHARACTERS:
+            raise ValueError("authentication probe exceeded the private JSON size limit")
+        return _parse_single_json_object_line_without_cause(
+            result.stdout,
+            completion_marker=completion_marker,
+            error_message="authentication probe did not return valid private JSON",
+        )
+
     def _sensitive_django_shell(
         self,
         script: str,
         *,
         field_name: str,
+        ray_authorized: bool = False,
     ) -> Mapping[str, Any]:
         """Run one bounded in-pod inspector whose successful stdout stays private."""
         completion_marker = f"django_ray_private_json_complete_v1_{uuid4().hex}"
         wrapped_script = f"{script.rstrip()}\nprint({completion_marker!r})\n"
         result = self._kubectl(
             "exec",
-            "deployment/django-web",
+            "deployment/django-ray-worker" if ray_authorized else "deployment/django-web",
             "-c",
-            "django-web",
+            "django-ray-worker" if ray_authorized else "django-web",
             "--",
             "python",
             "testproject/manage.py",
@@ -9423,7 +9650,9 @@ print(json.dumps({{
 
         token = self._secret_token()
         headers = {"Authorization": f"Bearer {token}"}
-        status, body = self._http(enqueue_path, method="POST", headers=headers)
+        status, body = self._http(
+            enqueue_path, method="POST", headers=self._workflow_enqueue_headers(enqueue_path)
+        )
         if status != 200:
             raise ValueError(f"{workflow_label} enqueue returned a non-success status")
         enqueue = self._json_body(body, endpoint=f"{workflow_label} enqueue")
@@ -9819,7 +10048,9 @@ print(json.dumps({{
 
         token = self._secret_token()
         headers = {"Authorization": f"Bearer {token}"}
-        status, body = self._http(enqueue_path, method="POST", headers=headers)
+        status, body = self._http(
+            enqueue_path, method="POST", headers=self._workflow_enqueue_headers(enqueue_path)
+        )
         if status != 200:
             raise ValueError("terminal-only workflow enqueue returned a non-success status")
         enqueue = self._json_body(body, endpoint="terminal-only workflow enqueue")
@@ -10183,22 +10414,30 @@ print(json.dumps({{
             "callable_path": WORKFLOW_SHOWCASE_CALLABLE,
             "expected_leaf_tasks": 1,
             "expected_success_result": WORKFLOW_SHOWCASE_SUCCESS_RESULT,
-            "expected_node_layers": WORKFLOW_SHOWCASE_NODE_LAYERS,
-            "expected_edges": WORKFLOW_SHOWCASE_EDGES,
             "require_indexed_details": True,
             "page_limit": WORKFLOW_SHOWCASE_PAGE_LIMIT,
         }
         succeeded = self._verify_workflow_run(
+            expected_node_layers=WORKFLOW_SHOWCASE_NODE_LAYERS,
+            expected_edges=WORKFLOW_SHOWCASE_EDGES,
             enqueue_path=WORKFLOW_SHOWCASE_ENQUEUE_PATH,
             expected_enqueue_kwargs=WORKFLOW_SHOWCASE_ENQUEUE_KWARGS,
             expected_state="SUCCEEDED",
             expected_output_previews={
-                WORKFLOW_SHOWCASE_VALIDATION_NODE_ID: (
+                WORKFLOW_SHOWCASE_INPUT_PREVIEW_NODE_ID: (
                     "SUCCEEDED",
                     {
                         "schema_version": 1,
                         "availability": "AVAILABLE",
-                        "value": {"item_id": 0, "valid": True},
+                        "value": {"collection_size": 1},
+                    },
+                ),
+                WORKFLOW_SHOWCASE_VALIDATION_NODE_ID: (
+                    "SUCCEEDED",
+                    {
+                        "schema_version": 1,
+                        "availability": "NOT_REQUESTED",
+                        "value": None,
                     },
                 ),
                 WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID: (
@@ -10213,28 +10452,37 @@ print(json.dumps({{
                     "SUCCEEDED",
                     {
                         "schema_version": 1,
-                        "availability": "AVAILABLE",
-                        "value": {"item_id": 0, "reserved_units": 1},
+                        "availability": "NOT_REQUESTED",
+                        "value": None,
                     },
                 ),
             },
             **showcase_contract,
         )
         failed = self._verify_workflow_run(
+            expected_node_layers=WORKFLOW_SHOWCASE_FAILURE_NODE_LAYERS,
+            expected_edges=WORKFLOW_SHOWCASE_FAILURE_EDGES,
             enqueue_path=WORKFLOW_SHOWCASE_FAILURE_ENQUEUE_PATH,
             expected_enqueue_kwargs=WORKFLOW_SHOWCASE_FAILURE_ENQUEUE_KWARGS,
             expected_state="FAILED",
             expected_error=WORKFLOW_SHOWCASE_FAILURE_MESSAGE,
             failure_node_id=WORKFLOW_SHOWCASE_FAILURE_NODE_ID,
-            expected_pending_descendants=WORKFLOW_SHOWCASE_FAILURE_DESCENDANTS,
             required_succeeded_nodes=WORKFLOW_SHOWCASE_FAILURE_SUCCEEDED_NODES,
             expected_output_previews={
-                WORKFLOW_SHOWCASE_VALIDATION_NODE_ID: (
+                WORKFLOW_SHOWCASE_INPUT_PREVIEW_NODE_ID: (
                     "SUCCEEDED",
                     {
                         "schema_version": 1,
                         "availability": "AVAILABLE",
-                        "value": {"item_id": 0, "valid": True},
+                        "value": {"collection_size": 1},
+                    },
+                ),
+                WORKFLOW_SHOWCASE_VALIDATION_NODE_ID: (
+                    "SUCCEEDED",
+                    {
+                        "schema_version": 1,
+                        "availability": "NOT_REQUESTED",
+                        "value": None,
                     },
                 ),
                 WORKFLOW_SHOWCASE_PROJECTOR_FAILURE_NODE_ID: (
@@ -10256,19 +10504,6 @@ print(json.dumps({{
             },
             **showcase_contract,
         )
-        if (
-            succeeded.topology_nodes,
-            succeeded.topology_edges,
-            succeeded.longest_path_layers,
-            succeeded.detail_links,
-        ) != (
-            failed.topology_nodes,
-            failed.topology_edges,
-            failed.longest_path_layers,
-            failed.detail_links,
-        ):
-            raise ValueError("equivalent workflow showcase runs exposed different topology")
-
         self.evidence.workflow_showcase_task_id = succeeded.task_id
         self.evidence.workflow_showcase_task_state = succeeded.state
         self.evidence.workflow_showcase_attempt_number = succeeded.attempt_number
@@ -10753,7 +10988,7 @@ print(json.dumps({{
                     "graph_failure_path_nodes": 0,
                     "graph_failure_origins": 0,
                     "graph_incoming_failure_edges": 0,
-                    "graph_available_previews": 20,
+                    "graph_available_previews": 18,
                     "graph_failed_previews": 1,
                     "graph_unavailable_previews": 0,
                 },
@@ -10765,11 +11000,11 @@ print(json.dumps({{
                 self.evidence.workflow_showcase_failure_task_state,
                 self.evidence.workflow_showcase_failure_attempt_number,
                 {
-                    "topology_nodes": self.evidence.workflow_showcase_topology_nodes,
-                    "topology_edges": self.evidence.workflow_showcase_topology_edges,
+                    "topology_nodes": len(WORKFLOW_SHOWCASE_FAILURE_NODE_IDS),
+                    "topology_edges": len(WORKFLOW_SHOWCASE_FAILURE_EDGES),
                     "node_details": (self.evidence.workflow_showcase_failure_detail_links),
-                    "graph_nodes": self.evidence.workflow_showcase_topology_nodes,
-                    "graph_edges": self.evidence.workflow_showcase_topology_edges,
+                    "graph_nodes": len(WORKFLOW_SHOWCASE_FAILURE_NODE_IDS),
+                    "graph_edges": len(WORKFLOW_SHOWCASE_FAILURE_EDGES),
                     "graph_pending_nodes": (
                         self.evidence.workflow_showcase_failure_pending_descendants
                     ),
@@ -10783,7 +11018,7 @@ print(json.dumps({{
                     ),
                     "graph_failure_origins": 1,
                     "graph_incoming_failure_edges": 1,
-                    "graph_available_previews": 14,
+                    "graph_available_previews": 13,
                     "graph_failed_previews": 1,
                     "graph_unavailable_previews": (
                         self.evidence.workflow_showcase_failure_pending_descendants
@@ -10843,7 +11078,7 @@ print(json.dumps({{
                         for _source, target in WORKFLOW_RECOVERY_MID_EDGES
                     ),
                     "graph_available_previews": (
-                        self.evidence.workflow_recovery_mid_succeeded_nodes - 1
+                        self.evidence.workflow_recovery_mid_succeeded_nodes - 2
                     ),
                     "graph_failed_previews": 1,
                     "graph_unavailable_previews": (
@@ -10874,7 +11109,7 @@ print(json.dumps({{
                     "graph_failure_origins": 0,
                     "graph_incoming_failure_edges": 0,
                     "graph_available_previews": (
-                        self.evidence.workflow_recovery_success_succeeded_nodes - 2
+                        self.evidence.workflow_recovery_success_succeeded_nodes - 3
                     ),
                     "graph_failed_previews": 1,
                     "graph_unavailable_previews": 0,
@@ -11213,6 +11448,11 @@ print(json.dumps({{
         )
         if not all(value is True for value in protocol_evidence):
             raise ValueError("protocol handoff certification evidence is incomplete")
+        if (
+            self.evidence.ray_auth_boundary_verified is not True
+            or self.evidence.grafana_auth_boundary_verified is not True
+        ):
+            raise ValueError("private endpoint authentication evidence is incomplete")
 
     def _verify_prometheus(self) -> None:
         self._verify_ray_identity()
@@ -11289,6 +11529,8 @@ print(json.dumps({{
             ("ray_heads", self.evidence.ray_head_count),
             ("ray_workers", self.evidence.ray_worker_count),
             ("ray_pods_sha256", self.evidence.ray_pod_identity_sha256),
+            ("ray_auth_boundary_verified", self.evidence.ray_auth_boundary_verified),
+            ("grafana_auth_boundary_verified", self.evidence.grafana_auth_boundary_verified),
             ("generic_django_ray", "absent"),
             ("api_unauthenticated", 401),
             ("api_authenticated", 200),

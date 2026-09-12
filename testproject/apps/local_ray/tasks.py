@@ -15,8 +15,11 @@ from typing import Any
 
 from django.tasks import task
 
+from testproject.workload_limits import bounded_sample_task
+
 
 @task(queue_name="default")
+@bounded_sample_task
 def parallel_sum(numbers: list[int]) -> int:
     """Sum a large list of numbers.
 
@@ -32,6 +35,7 @@ def parallel_sum(numbers: list[int]) -> int:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def fibonacci(n: int) -> dict[str, Any]:
     """Calculate the nth Fibonacci number.
 
@@ -91,6 +95,7 @@ def fibonacci(n: int) -> dict[str, Any]:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def prime_check(n: int) -> dict[str, Any]:
     """Check if a number is prime and find its factors.
 
@@ -118,6 +123,7 @@ def prime_check(n: int) -> dict[str, Any]:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def matrix_multiply(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
     """Multiply two matrices.
 
@@ -150,6 +156,7 @@ def matrix_multiply(a: list[list[float]], b: list[list[float]]) -> list[list[flo
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def simulate_workload(iterations: int = 1000000, sleep_ms: int = 0) -> dict[str, Any]:
     """Simulate a CPU-intensive workload.
 
@@ -186,6 +193,7 @@ def simulate_workload(iterations: int = 1000000, sleep_ms: int = 0) -> dict[str,
 
 
 @task(queue_name="high-priority", priority=100)
+@bounded_sample_task
 def urgent_task(message: str) -> str:
     """A priority-100 task on the latency-sensitive queue.
 
@@ -201,6 +209,7 @@ def urgent_task(message: str) -> str:
 
 
 @task(queue_name="low-priority", priority=-100)
+@bounded_sample_task
 def background_task(message: str) -> str:
     """A priority-minus-100 task on the bulk-work queue.
 
@@ -222,6 +231,7 @@ def background_task(message: str) -> str:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def stress_cpu(duration_seconds: float = 5.0) -> dict[str, Any]:
     """Pure CPU stress test - burns CPU for specified duration.
 
@@ -253,7 +263,8 @@ def stress_cpu(duration_seconds: float = 5.0) -> dict[str, Any]:
 
 
 @task(queue_name="default")
-def stress_memory(size_mb: int = 100) -> dict[str, Any]:
+@bounded_sample_task
+def stress_memory(size_mb: int = 8) -> dict[str, Any]:
     """Memory stress test - allocates and processes large data.
 
     Args:
@@ -296,7 +307,8 @@ def stress_memory(size_mb: int = 100) -> dict[str, Any]:
 
 
 @task(queue_name="default")
-def stress_nested_compute(depth: int = 10, width: int = 100) -> dict[str, Any]:
+@bounded_sample_task
+def stress_nested_compute(depth: int = 3, width: int = 5) -> dict[str, Any]:
     """Nested computation stress test - recursive-like computation.
 
     Args:
@@ -316,22 +328,19 @@ def stress_nested_compute(depth: int = 10, width: int = 100) -> dict[str, Any]:
             total += compute_level(d - 1, acc + i)
         return total
 
-    # Limit depth to avoid stack overflow
-    safe_depth = min(depth, 15)
-    safe_width = min(width, 50) if safe_depth > 10 else width
-
-    result = compute_level(safe_depth, 0)
+    result = compute_level(depth, 0)
     elapsed = time.time() - start
 
     return {
-        "depth": safe_depth,
-        "width": safe_width,
+        "depth": depth,
+        "width": width,
         "result_hash": hash(result) % (10**9),  # Avoid huge int serialization
         "elapsed_seconds": round(elapsed, 4),
     }
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def stress_prime_search(start: int = 1000000, count: int = 100) -> dict[str, Any]:
     """Find prime numbers - CPU intensive search.
 
@@ -362,7 +371,7 @@ def stress_prime_search(start: int = 1000000, count: int = 100) -> dict[str, Any
     current = start
     checked = 0
 
-    while len(primes) < count:
+    while len(primes) < count and checked < 100_000:
         checked += 1
         if is_prime(current):
             primes.append(current)
@@ -383,7 +392,8 @@ def stress_prime_search(start: int = 1000000, count: int = 100) -> dict[str, Any
 
 
 @task(queue_name="default")
-def stress_json_payload(size_kb: int = 100, depth: int = 5) -> dict[str, Any]:
+@bounded_sample_task
+def stress_json_payload(size_kb: int = 16, depth: int = 3) -> dict[str, Any]:
     """Create and process large nested JSON structures.
 
     Args:
@@ -397,17 +407,10 @@ def stress_json_payload(size_kb: int = 100, depth: int = 5) -> dict[str, Any]:
 
     start = time.time()
 
-    def build_nested(d: int, target_size: int) -> dict[str, Any]:
-        if d <= 0:
-            return {"leaf": "x" * min(target_size, 1000)}
-
-        child_count = max(2, target_size // (d * 100))
-        children = {}
-        for i in range(child_count):
-            children[f"child_{i}"] = build_nested(d - 1, target_size // child_count)
-        return {"level": d, "children": children}
-
-    data = build_nested(min(depth, 10), size_kb * 1024)
+    # The requested bytes are allocated once; depth adds at most four wrappers.
+    data: dict[str, Any] = {"leaf": "x" * (size_kb * 1024)}
+    for level in range(depth):
+        data = {"level": level, "children": data}
     build_time = time.time() - start
 
     # Serialize and measure
@@ -433,6 +436,7 @@ def stress_json_payload(size_kb: int = 100, depth: int = 5) -> dict[str, Any]:
 
 
 @task(queue_name="default")
+@bounded_sample_task
 def stress_concurrent_simulation(
     task_count: int = 100,
     task_duration_ms: int = 10,

@@ -33,14 +33,13 @@ from django.db.models import (
     Value,
     When,
 )
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.tasks import TaskResultStatus
 from django.tasks.exceptions import InvalidTaskBackend
-from ninja import NinjaAPI, Schema
+from ninja import Schema
 from ninja.errors import HttpError
-from ninja.security import HttpBearer
-from pydantic import Field, field_validator
+from pydantic import Field, StrictInt, field_validator
 
 from django_ray import __version__ as django_ray_version
 from django_ray.lifecycle import (
@@ -69,9 +68,16 @@ from django_ray.workflow.progress.reads import (
     list_workflow_topology_edges,
     list_workflow_topology_nodes,
 )
+from testproject import tasks
 
 # Import tasks that use Django 6's @task decorator
-from testproject import tasks
+from testproject.admission import (
+    SampleAdmissionError,
+    SampleInputError,
+    admit_sample,
+    enqueue_sample,
+)
+from testproject.api_boundary import ApiTokenAuth, BoundedParser, MetricsTokenAuth, SampleAPI
 from testproject.apps.cluster_tasks import tasks as cluster_tasks
 from testproject.apps.local_ray import tasks as local_tasks
 from testproject.apps.ml_pipeline import tasks as ml_tasks
@@ -307,22 +313,33 @@ def _workflow_limit_argument(value: str | None) -> int:
     return normalized
 
 
-class ApiTokenAuth(HttpBearer):
-    """Require the configured bearer token for every operational API endpoint."""
-
-    def authenticate(self, request, token: str):
-        expected = getattr(settings, "DJANGO_API_TOKEN", None)
-        if expected and secrets.compare_digest(token, expected):
-            return "django-ray-testproject-operator"
-        return None
-
-
-api = NinjaAPI(
+api = SampleAPI(
     title="Django Ray API",
     version=django_ray_version,
-    description="API for managing Ray tasks using Django 6's native task framework",
+    description="API for managing bounded sample Ray tasks",
     auth=ApiTokenAuth(),
+    parser=BoundedParser(),
 )
+
+
+@api.exception_handler(SampleAdmissionError)
+def _sample_admission_error(request, error):
+    response = JsonResponse(
+        {"code": error.code, "message": "Sample admission is temporarily unavailable."},
+        status=error.status,
+    )
+    response["Retry-After"] = error.retry_after
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@api.exception_handler(SampleInputError)
+def _sample_input_error(request, error):
+    return JsonResponse(
+        {"code": "INVALID_INPUT", "message": "Sample input exceeds its supported bounds."},
+        status=422,
+    )
 
 
 def _task_state_counts() -> dict[str, int]:
@@ -1016,7 +1033,7 @@ def health_check(request):
     return _database_health_payload()
 
 
-@api.get("/metrics", tags=["Health"])
+@api.get("/metrics", auth=MetricsTokenAuth(), tags=["Health"])
 def prometheus_metrics(request):
     """Adapt the package metrics renderer behind testproject bearer auth."""
     return HttpResponse(
@@ -1037,7 +1054,7 @@ def enqueue_add(request, a: int, b: int, queue: str = "default"):
     Uses Django 6's native .enqueue() API for task submission.
     """
     task_obj = tasks.add_numbers.using(queue_name=queue)
-    result = task_obj.enqueue(a, b)
+    result = enqueue_sample(task_obj, a, b)
 
     return {
         "task_id": result.id,
@@ -1054,7 +1071,7 @@ def enqueue_add(request, a: int, b: int, queue: str = "default"):
 def enqueue_multiply(request, a: int, b: int, queue: str = "default"):
     """Enqueue multiply_numbers task."""
     task_obj = tasks.multiply_numbers.using(queue_name=queue)
-    result = task_obj.enqueue(a, b)
+    result = enqueue_sample(task_obj, a, b)
 
     return {
         "task_id": result.id,
@@ -1071,7 +1088,7 @@ def enqueue_multiply(request, a: int, b: int, queue: str = "default"):
 def enqueue_slow(request, seconds: float, queue: str = "default"):
     """Enqueue slow_task that sleeps for specified seconds."""
     task_obj = tasks.slow_task.using(queue_name=queue)
-    result = task_obj.enqueue(seconds=seconds)
+    result = enqueue_sample(task_obj, seconds=seconds)
 
     return {
         "task_id": result.id,
@@ -1091,7 +1108,7 @@ def enqueue_fail(request, queue: str = "default"):
     This task WILL be auto-retried based on MAX_TASK_ATTEMPTS setting.
     """
     task_obj = tasks.failing_task.using(queue_name=queue)
-    result = task_obj.enqueue()
+    result = enqueue_sample(task_obj)
 
     return {
         "task_id": result.id,
@@ -1118,7 +1135,7 @@ def enqueue_fail_no_retry(request, queue: str = "default"):
     confirmation for bulk recovery.
     """
     task_obj = tasks.failing_task_no_retry.using(queue_name=queue)
-    result = task_obj.enqueue()
+    result = enqueue_sample(task_obj)
 
     return {
         "task_id": result.id,
@@ -1146,7 +1163,7 @@ def enqueue_intermittent(request, fail_until_attempt: int = 3, queue: str = "def
         queue: Queue name (default: "default")
     """
     task_obj = tasks.intermittent_task.using(queue_name=queue)
-    result = task_obj.enqueue(fail_until_attempt=fail_until_attempt)
+    result = enqueue_sample(task_obj, fail_until_attempt=fail_until_attempt)
 
     return {
         "task_id": result.id,
@@ -1163,7 +1180,7 @@ def enqueue_intermittent(request, fail_until_attempt: int = 3, queue: str = "def
 def enqueue_cpu(request, n: int, queue: str = "default"):
     """Enqueue cpu_intensive_task for load testing."""
     task_obj = tasks.cpu_intensive_task.using(queue_name=queue)
-    result = task_obj.enqueue(n=n)
+    result = enqueue_sample(task_obj, n=n)
 
     return {
         "task_id": result.id,
@@ -1180,7 +1197,7 @@ def enqueue_cpu(request, n: int, queue: str = "default"):
 def enqueue_echo(request, queue: str = "default"):
     """Enqueue echo_task that returns its arguments."""
     task_obj = tasks.echo_task.using(queue_name=queue)
-    result = task_obj.enqueue()
+    result = enqueue_sample(task_obj)
 
     return {
         "task_id": result.id,
@@ -1994,7 +2011,8 @@ def retry_execution(request, execution_id: int):
             status_code=404,
         )
     try:
-        outcome = request_task_retry(
+        outcome = admit_sample(
+            request_task_retry,
             task.pk,
             expected_attempt_number=task.attempt_number,
             expected_execution_generation=task.execution_generation,
@@ -2033,7 +2051,7 @@ def sync_calculate(
 
     Run with: python manage.py django_ray_worker --sync --queue=sync
     """
-    result = sync_tasks.simple_calculation.enqueue(a, b, operation=operation)
+    result = enqueue_sample(sync_tasks.simple_calculation, a, b, operation=operation)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2048,7 +2066,7 @@ def sync_calculate(
 @api.post("/sync/validate-email", response=TaskResultSchema, tags=["Sync Tasks"])
 def sync_validate_email(request, email: str):
     """Validate an email address (sync queue)."""
-    result = sync_tasks.validate_email.enqueue(email)
+    result = enqueue_sample(sync_tasks.validate_email, email)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2071,7 +2089,7 @@ def local_fibonacci(request, n: int):
 
     Run with: python manage.py django_ray_worker --local
     """
-    result = local_tasks.fibonacci.enqueue(n)
+    result = enqueue_sample(local_tasks.fibonacci, n)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2086,7 +2104,7 @@ def local_fibonacci(request, n: int):
 @api.post("/local/workload", response=TaskResultSchema, tags=["Local Ray"])
 def local_workload(request, iterations: int = 1000000, sleep_ms: int = 0):
     """Simulate CPU workload (default queue)."""
-    result = local_tasks.simulate_workload.enqueue(iterations=iterations, sleep_ms=sleep_ms)
+    result = enqueue_sample(local_tasks.simulate_workload, iterations=iterations, sleep_ms=sleep_ms)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2101,7 +2119,7 @@ def local_workload(request, iterations: int = 1000000, sleep_ms: int = 0):
 @api.post("/local/urgent", response=TaskResultSchema, tags=["Local Ray"])
 def local_urgent(request, message: str):
     """Priority-100 urgent task on its workload-isolation queue."""
-    result = local_tasks.urgent_task.enqueue(message)
+    result = enqueue_sample(local_tasks.urgent_task, message)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2125,7 +2143,7 @@ def stress_cpu(request, duration_seconds: float = 5.0):
     Args:
         duration_seconds: How long to burn CPU (default: 5s)
     """
-    result = local_tasks.stress_cpu.enqueue(duration_seconds=duration_seconds)
+    result = enqueue_sample(local_tasks.stress_cpu, duration_seconds=duration_seconds)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2138,13 +2156,13 @@ def stress_cpu(request, duration_seconds: float = 5.0):
 
 
 @api.post("/stress/memory", response=TaskResultSchema, tags=["Stress Tests"])
-def stress_memory(request, size_mb: int = 100):
+def stress_memory(request, size_mb: int = 8):
     """Memory stress test - allocates and processes large data.
 
     Args:
         size_mb: Amount of memory to allocate in MB (default: 100)
     """
-    result = local_tasks.stress_memory.enqueue(size_mb=size_mb)
+    result = enqueue_sample(local_tasks.stress_memory, size_mb=size_mb)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2157,14 +2175,14 @@ def stress_memory(request, size_mb: int = 100):
 
 
 @api.post("/stress/compute", response=TaskResultSchema, tags=["Stress Tests"])
-def stress_compute(request, depth: int = 10, width: int = 100):
+def stress_compute(request, depth: int = 3, width: int = 5):
     """Nested computation stress test.
 
     Args:
         depth: Depth of nested loops (max 15)
         width: Width of each loop level
     """
-    result = local_tasks.stress_nested_compute.enqueue(depth=depth, width=width)
+    result = enqueue_sample(local_tasks.stress_nested_compute, depth=depth, width=width)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2184,7 +2202,7 @@ def stress_primes(request, start: int = 1000000, count: int = 100):
         start: Starting number to search from
         count: How many primes to find
     """
-    result = local_tasks.stress_prime_search.enqueue(start=start, count=count)
+    result = enqueue_sample(local_tasks.stress_prime_search, start=start, count=count)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2197,14 +2215,14 @@ def stress_primes(request, start: int = 1000000, count: int = 100):
 
 
 @api.post("/stress/json", response=TaskResultSchema, tags=["Stress Tests"])
-def stress_json(request, size_kb: int = 100, depth: int = 5):
+def stress_json(request, size_kb: int = 16, depth: int = 3):
     """Large JSON structure stress test.
 
     Args:
         size_kb: Target size in KB
         depth: Nesting depth
     """
-    result = local_tasks.stress_json_payload.enqueue(size_kb=size_kb, depth=depth)
+    result = enqueue_sample(local_tasks.stress_json_payload, size_kb=size_kb, depth=depth)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2224,8 +2242,10 @@ def stress_throughput(request, task_count: int = 100, task_duration_ms: int = 10
         task_count: Number of simulated tasks
         task_duration_ms: Duration of each task in ms
     """
-    result = local_tasks.stress_concurrent_simulation.enqueue(
-        task_count=task_count, task_duration_ms=task_duration_ms
+    result = enqueue_sample(
+        local_tasks.stress_concurrent_simulation,
+        task_count=task_count,
+        task_duration_ms=task_duration_ms,
     )
     return {
         "task_id": result.id,
@@ -2247,7 +2267,7 @@ class ChunkDataSchema(Schema):
     """Schema for chunk data input."""
 
     data: list
-    chunk_id: int = 0
+    chunk_id: StrictInt = 0
 
 
 @api.post("/cluster/process-chunk", response=TaskResultSchema, tags=["Cluster Tasks"])
@@ -2256,7 +2276,9 @@ def cluster_process_chunk(request, payload: ChunkDataSchema):
 
     Run with: python manage.py django_ray_worker --cluster ray://head:10001
     """
-    result = cluster_tasks.process_chunk.enqueue(data=payload.data, chunk_id=payload.chunk_id)
+    result = enqueue_sample(
+        cluster_tasks.process_chunk, data=payload.data, chunk_id=payload.chunk_id
+    )
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2272,13 +2294,14 @@ class BatchUrlsSchema(Schema):
     """Schema for batch URL requests."""
 
     urls: list[str]
-    timeout_seconds: int = 30
+    timeout_seconds: StrictInt = 30
 
 
 @api.post("/cluster/batch-http", response=TaskResultSchema, tags=["Cluster Tasks"])
 def cluster_batch_http(request, payload: BatchUrlsSchema):
     """Simulate batch HTTP requests (default queue)."""
-    result = cluster_tasks.batch_http_requests.enqueue(
+    result = enqueue_sample(
+        cluster_tasks.batch_http_requests,
         urls=payload.urls,
         timeout_seconds=payload.timeout_seconds,
     )
@@ -2317,7 +2340,8 @@ def cluster_distributed_search(request, payload: DistributedSearchSchema):
 
     The response will show cluster info including speedup from parallelization.
     """
-    result = cluster_tasks.distributed_search.enqueue(
+    result = enqueue_sample(
+        cluster_tasks.distributed_search,
         pattern=payload.pattern,
         data_sources=payload.data_sources,
         case_sensitive=payload.case_sensitive,
@@ -2358,7 +2382,8 @@ def cluster_cpu_benchmark(request, num_items: int = 10, seconds_per_item: float 
         num_items: Number of parallel tasks (default: 10)
         seconds_per_item: CPU time per task in seconds (default: 2.0)
     """
-    result = cluster_tasks.distributed_cpu_benchmark.enqueue(
+    result = enqueue_sample(
+        cluster_tasks.distributed_cpu_benchmark,
         num_items=num_items,
         seconds_per_item=seconds_per_item,
     )
@@ -2384,7 +2409,8 @@ def cluster_workflow_benchmark(
     Poll ``GET /api/cluster/workflow-benchmark/{task_id}`` for the result.
     Only the outer task creates a database execution row.
     """
-    result = cluster_tasks.workflow_fanout_benchmark.enqueue(
+    result = enqueue_sample(
+        cluster_tasks.workflow_fanout_benchmark,
         num_items=num_items,
         seconds_per_item=seconds_per_item,
     )
@@ -2457,7 +2483,7 @@ def cluster_complex_workflow(
         )
     if reporting_policy is not None:
         workflow_options["reporting_policy"] = reporting_policy
-    result = cluster_tasks.complex_workflow_benchmark.enqueue(**workflow_options)
+    result = enqueue_sample(cluster_tasks.complex_workflow_benchmark, **workflow_options)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2520,7 +2546,7 @@ def cluster_workflow_showcase(
             failure_stage=failure_stage,
             failure_item=failure_item,
         )
-    result = cluster_tasks.order_fulfillment_showcase_task.enqueue(**workflow_options)
+    result = enqueue_sample(cluster_tasks.order_fulfillment_showcase_task, **workflow_options)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -2589,9 +2615,10 @@ def cluster_workflow_recovery_showcase(
             raise ImproperlyConfigured(
                 "recovery-showcase RuntimeEnv has no immutable retry identity"
             )
-        result = cluster_tasks.order_fulfillment_recovery_showcase_task.using(
-            backend="recovery-showcase"
-        ).enqueue(
+        result = enqueue_sample(
+            cluster_tasks.order_fulfillment_recovery_showcase_task.using(
+                backend="recovery-showcase"
+            ),
             item_count=item_count,
             work_seconds=work_seconds,
         )
@@ -3020,7 +3047,7 @@ def cluster_runtime_env_probe(
 ):
     """Enqueue a task through a backend bound to the selected RuntimeEnv profile."""
     task_obj = cluster_tasks.runtime_env_probe.using(backend=_RUNTIME_ENV_BACKENDS[profile])
-    result = task_obj.enqueue(package=package)
+    result = enqueue_sample(task_obj, package=package)
     return {
         "task_id": result.id,
         "status": result.status.value,
@@ -3044,7 +3071,8 @@ def cluster_runtime_env_benchmark(
     package: str | None = None,
 ):
     """Time repeated workflow leaves to compare cold and cached environment setup."""
-    result = cluster_tasks.runtime_env_benchmark.enqueue(
+    result = enqueue_sample(
+        cluster_tasks.runtime_env_benchmark,
         profile=profile,
         repeats=repeats,
         package=package,
@@ -3109,7 +3137,7 @@ class TrainModelSchema(Schema):
 
     dataset_id: str
     hyperparams: dict | None = None
-    epochs: int = 10
+    epochs: StrictInt = 10
 
 
 @api.post("/ml/train", response=TaskResultSchema, tags=["ML Pipeline"])
@@ -3118,7 +3146,8 @@ def ml_train_model(request, payload: TrainModelSchema):
 
     Run with: python manage.py django_ray_worker --local --queue=ml
     """
-    result = ml_tasks.train_model.enqueue(
+    result = enqueue_sample(
+        ml_tasks.train_model,
         dataset_id=payload.dataset_id,
         hyperparams=payload.hyperparams,
         epochs=payload.epochs,
@@ -3144,7 +3173,8 @@ class BatchInferenceSchema(Schema):
 @api.post("/ml/inference", response=TaskResultSchema, tags=["ML Pipeline"])
 def ml_batch_inference(request, payload: BatchInferenceSchema):
     """Run batch inference (ml queue)."""
-    result = ml_tasks.batch_inference.enqueue(
+    result = enqueue_sample(
+        ml_tasks.batch_inference,
         model_id=payload.model_id,
         samples=payload.samples,
     )
@@ -3170,7 +3200,8 @@ class HyperparamSearchSchema(Schema):
 @api.post("/ml/hyperparam-search", response=TaskResultSchema, tags=["ML Pipeline"])
 def ml_hyperparam_search(request, payload: HyperparamSearchSchema):
     """Run hyperparameter grid search (ml queue)."""
-    result = ml_tasks.hyperparameter_search.enqueue(
+    result = enqueue_sample(
+        ml_tasks.hyperparameter_search,
         dataset_id=payload.dataset_id,
         param_grid=payload.param_grid,
         metric=payload.metric,

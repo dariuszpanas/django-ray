@@ -21,6 +21,7 @@ KUSTOMIZATIONS = (
     Path("k8s/overlays/local"),
     Path("k8s/overlays/kuberay-kind"),
     Path("k8s/overlays/kong-local"),
+    Path("k8s/overlays/co-resident"),
 )
 REQUIRE_KUSTOMIZE_ENV = "DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS"
 
@@ -106,6 +107,26 @@ def test_http_web_probes_send_a_host_django_accepts(
             assert response.status_code == 200, (
                 f"{path} {probe_name} Host {host_headers[0]!r} was rejected"
             )
+
+
+def test_metrics_scrape_target_passes_host_validation(
+    rendered_kustomization: tuple[Path, list[dict[str, Any]]],
+) -> None:
+    _, resources = rendered_kustomization
+    monitoring = [
+        item
+        for item in resources
+        if item.get("kind") == "ConfigMap" and item["metadata"]["name"] == "prometheus-config"
+    ]
+    if not monitoring:
+        return
+    config = yaml.safe_load(monitoring[0]["data"]["prometheus.yml"])
+    scrape = next(item for item in config["scrape_configs"] if item["job_name"] == "django-ray")
+    with override_settings(ALLOWED_HOSTS=_allowed_hosts(resources)):
+        for targets in scrape["static_configs"]:
+            for target in targets["targets"]:
+                request = RequestFactory().get(scrape["metrics_path"], HTTP_HOST=target)
+                assert request.get_host() == target
 
 
 def test_rendered_allowed_hosts_still_reject_a_dynamic_pod_ip(

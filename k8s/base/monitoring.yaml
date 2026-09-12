@@ -1,14 +1,3 @@
-# Monitoring Stack: Prometheus + Grafana for Ray and django-ray
-# Based on Ray's metrics documentation: https://docs.ray.io/en/latest/cluster/metrics.html
-#
-# Ray exposes Prometheus metrics on port 8080 by default on each node
-# Key metrics include:
-#   - ray_tasks (submitted, running, finished, failed)
-#   - ray_actors (pending, running)
-#   - ray_resources (cpu, memory, object_store_memory)
-#   - ray_node metrics
----
-# Prometheus ConfigMap
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -61,9 +50,8 @@ data:
         metrics_path: /api/metrics
         authorization:
           type: Bearer
-          credentials_file: /etc/prometheus-secrets/DJANGO_API_TOKEN
+          credentials_file: /etc/prometheus-secrets/DJANGO_METRICS_TOKEN
 ---
-# Prometheus Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -86,28 +74,28 @@ spec:
         - name: prometheus
           image: prom/prometheus:v2.48.0
           args:
-            - '--config.file=/etc/prometheus/prometheus.yml'
-            - '--storage.tsdb.path=/prometheus'
-            - '--storage.tsdb.retention.time=7d'
-            - '--web.enable-lifecycle'
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --web.enable-lifecycle
           ports:
             - containerPort: 9090
               name: http
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
-            - name: django-api-token
-              mountPath: /etc/prometheus-secrets
-              readOnly: true
             - name: data
               mountPath: /prometheus
+            - name: django-metrics-token
+              mountPath: /etc/prometheus-secrets
+              readOnly: true
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: 256Mi
+              cpu: 100m
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: 512Mi
+              cpu: 500m
           readinessProbe:
             httpGet:
               path: /-/ready
@@ -124,16 +112,15 @@ spec:
         - name: config
           configMap:
             name: prometheus-config
-        - name: django-api-token
-          secret:
-            secretName: django-ray-secret
-            items:
-              - key: DJANGO_API_TOKEN
-                path: DJANGO_API_TOKEN
         - name: data
           emptyDir: {}
+        - name: django-metrics-token
+          secret:
+            secretName: django-ray-metrics
+            items:
+              - key: DJANGO_METRICS_TOKEN
+                path: DJANGO_METRICS_TOKEN
 ---
-# Prometheus Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -148,29 +135,29 @@ spec:
     - name: http
       port: 9090
       targetPort: 9090
-      nodePort: 30090  # Access via http://localhost:30090
-  type: NodePort
+  type: ClusterIP
 ---
-# Prometheus ServiceAccount
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: prometheus
   namespace: django-ray
 ---
-# Prometheus namespace-scoped Role for the django-ray pod discovery job.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: prometheus-django-ray
   namespace: django-ray
 rules:
-  - apiGroups: [""]
+  - apiGroups:
+      - ''
     resources:
       - pods
-    verbs: ["get", "list", "watch"]
+    verbs:
+      - get
+      - list
+      - watch
 ---
-# Keep local scrape discovery confined to the django-ray namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -185,7 +172,6 @@ subjects:
     name: prometheus
     namespace: django-ray
 ---
-# Grafana ConfigMap - Datasources
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -202,7 +188,6 @@ data:
         isDefault: true
         editable: true
 ---
-# Grafana ConfigMap - Dashboard Providers
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -221,7 +206,6 @@ data:
         options:
           path: /var/lib/grafana/dashboards
 ---
-# Grafana ConfigMap - Ray Dashboard
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -636,7 +620,6 @@ data:
       "weekStart": ""
     }
 ---
-# Grafana Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -661,24 +644,26 @@ spec:
             - containerPort: 3000
               name: http
           env:
-            - name: GF_SECURITY_ADMIN_USER
-              value: "admin"
-            - name: GF_SECURITY_ADMIN_PASSWORD
-              value: "admin"
             - name: GF_USERS_ALLOW_SIGN_UP
-              value: "false"
+              value: 'false'
             - name: GF_AUTH_ANONYMOUS_ENABLED
-              value: "true"
-            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
-              value: "Admin"
-            # Allow embedding in iframes (required for Ray Dashboard)
+              value: 'false'
             - name: GF_SECURITY_ALLOW_EMBEDDING
-              value: "true"
+              value: 'true'
             - name: GF_AUTH_DISABLE_LOGIN_FORM
-              value: "false"
-            # CORS settings for Ray Dashboard integration
+              value: 'false'
             - name: GF_SECURITY_COOKIE_SAMESITE
-              value: "disabled"
+              value: lax
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-grafana
+                  key: GF_SECURITY_ADMIN_USER
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-grafana
+                  key: GF_SECURITY_ADMIN_PASSWORD
           volumeMounts:
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
@@ -688,11 +673,11 @@ spec:
               mountPath: /var/lib/grafana/dashboards
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "50m"
+              memory: 128Mi
+              cpu: 50m
             limits:
-              memory: "256Mi"
-              cpu: "200m"
+              memory: 256Mi
+              cpu: 200m
           readinessProbe:
             httpGet:
               path: /api/health
@@ -716,7 +701,6 @@ spec:
           configMap:
             name: grafana-dashboards
 ---
-# Grafana Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -731,10 +715,8 @@ spec:
     - name: http
       port: 3000
       targetPort: 3000
-      nodePort: 30030  # Access via http://localhost:30030
-  type: NodePort
+  type: ClusterIP
 ---
-# ConfigMap containing the dashboard import script
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -744,6 +726,7 @@ data:
   import_dashboards.py: |
     #!/usr/bin/env python3
     """Import Ray Grafana dashboards into Grafana."""
+    import base64
     import json
     import urllib.request
     import urllib.error
@@ -788,22 +771,22 @@ data:
     def import_dashboard(filepath):
         """Import a single dashboard JSON file into Grafana."""
         print(f"Importing {os.path.basename(filepath)}...")
-        
+
         with open(filepath) as f:
             dashboard = json.load(f)
-        
+
         payload = json.dumps({
             "dashboard": dashboard,
             "overwrite": True,
             "folderUid": "",
         }).encode("utf-8")
-        
+
         req = urllib.request.Request(
             f"{GRAFANA_URL}/api/dashboards/db",
             data=payload,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json", "Authorization": "Basic " + base64.b64encode((os.environ["GF_SECURITY_ADMIN_USER"] + ":" + os.environ["GF_SECURITY_ADMIN_PASSWORD"]).encode()).decode()}
         )
-        
+
         try:
             resp = urllib.request.urlopen(req)
             result = json.loads(resp.read().decode())
@@ -821,30 +804,29 @@ data:
         if not wait_for_grafana():
             print("ERROR: Grafana not available")
             return 1
-        
+
         if not wait_for_dashboards():
             print("ERROR: Ray dashboards not available")
             return 1
-        
+
         pattern = os.path.join(DASHBOARDS_PATH, "*_dashboard.json")
         files = glob.glob(pattern)
-        
+
         print(f"\nImporting {len(files)} dashboards...")
         success = 0
         for filepath in files:
             if import_dashboard(filepath):
                 success += 1
-        
+
         print(f"\nImported {success}/{len(files)} dashboards")
-        
+
         if success == len(files):
             print("Dashboard import complete! Sleeping to keep sidecar alive...")
             # Sleep forever to prevent container from exiting
             while True:
                 time.sleep(3600)
-        
+
         return 1
 
     if __name__ == "__main__":
         sys.exit(main())
-

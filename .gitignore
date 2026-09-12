@@ -6,6 +6,7 @@ __pycache__/
 dist/
 build/
 .env
+.local/k8s/
 .venv
 venv/
 node_modules/

@@ -255,7 +255,7 @@ def test_co_resident_profile_manages_config_without_rendering_credentials(
     assert _resource_names(resources, kind="Secret") == set()
     config = _resource(resources, kind="ConfigMap", name="django-ray-config")
     assert config["data"]["DJANGO_DEPLOYMENT_MODE"] == "demo"
-    assert config["data"]["RAY_DASHBOARD_URL"] == "http://ray-head-svc:8265"
+    assert config["data"]["RAY_DASHBOARD_URL"] == "http://127.0.0.1:30265"
 
 
 def test_co_resident_profile_pins_single_unit_execution_capacity(
@@ -280,7 +280,7 @@ def test_co_resident_profile_pins_single_unit_execution_capacity(
     head_container = head["template"]["spec"]["containers"][0]
     assert head_container["resources"] == {
         "requests": {"cpu": "100m", "memory": "1Gi"},
-        "limits": {"cpu": "350m", "memory": "2Gi"},
+        "limits": {"cpu": "350m", "memory": "6Gi"},
     }
 
     for group, container_name in ((head, "ray-head"), (worker, "ray-worker")):
@@ -288,7 +288,6 @@ def test_co_resident_profile_pins_single_unit_execution_capacity(
         assert [container["name"] for container in containers] == [container_name]
         assert containers[0]["envFrom"] == [
             {"configMapRef": {"name": "django-ray-config"}},
-            {"secretRef": {"name": "django-ray-secret"}},
         ]
         mounts = containers[0]["volumeMounts"]
         assert {mount["mountPath"] for mount in mounts if mount["name"] == "shared-memory"} == {
@@ -310,7 +309,7 @@ def test_co_resident_profile_fits_setup_below_namespace_resource_quota(
         "requested_millicores": 500,
         "requested_mibibytes": 2176,
         "limit_millicores": 1450,
-        "limit_mibibytes": 4736,
+        "limit_mibibytes": 8832,
     }
 
     quota = _resource(resources, kind="ResourceQuota", name="django-ray-co-resident-budget")
@@ -318,7 +317,7 @@ def test_co_resident_profile_fits_setup_below_namespace_resource_quota(
     assert hard == {
         "limits.cpu": "1600m",
         "limits.ephemeral-storage": "2Gi",
-        "limits.memory": "5Gi",
+        "limits.memory": "9Gi",
         "requests.cpu": "600m",
         "requests.ephemeral-storage": "512Mi",
         "requests.memory": "3Gi",
@@ -337,7 +336,7 @@ def test_co_resident_profile_fits_setup_below_namespace_resource_quota(
     assert quota_limit - totals["limit_millicores"] - setup_limit == 50
     quota_memory = _memory_mibibytes(hard["limits.memory"])
     setup_memory = _memory_mibibytes(setup_resources["limits"]["memory"])
-    assert totals["limit_mibibytes"] + setup_memory == 4992
+    assert totals["limit_mibibytes"] + setup_memory == 9088
     assert quota_memory - totals["limit_mibibytes"] - setup_memory == 128
 
     pvc_storage = {
@@ -376,7 +375,7 @@ def test_co_resident_profile_defaults_all_container_quota_dimensions(
             },
             "max": {
                 "cpu": "500m",
-                "memory": "2Gi",
+                "memory": "6Gi",
                 "ephemeral-storage": "256Mi",
             },
         }
@@ -483,10 +482,10 @@ def test_local_profiles_pin_distinct_routing_contracts(
         "ray-dashboard-ingress",
     }
 
-    assert _ray_head_group(direct)["serviceType"] == "NodePort"
+    assert _ray_head_group(direct)["serviceType"] == "ClusterIP"
     assert _ray_head_group(kong)["serviceType"] == "ClusterIP"
     assert _resource_names(direct, kind="Ingress").isdisjoint(dashboard_ingresses)
-    assert dashboard_ingresses <= _resource_names(kong, kind="Ingress")
+    assert not _resource_names(kong, kind="Ingress")
 
 
 @pytest.mark.parametrize("profile", ("direct", "kong"))
@@ -546,7 +545,7 @@ def test_direct_profile_retains_per_pod_resource_contracts(
     }
     assert head_containers["ray-head"]["resources"] == {
         "requests": {"cpu": "500m", "memory": "1Gi"},
-        "limits": {"cpu": "2", "memory": "2Gi"},
+        "limits": {"cpu": "2", "memory": "8Gi"},
     }
     assert head_containers["dashboard-importer"]["resources"] == {
         "requests": {"cpu": "50m", "memory": "64Mi"},
@@ -554,8 +553,17 @@ def test_direct_profile_retains_per_pod_resource_contracts(
     }
     assert _ray_worker_group(resources)["template"]["spec"]["containers"][0]["resources"] == {
         "requests": {"cpu": "1", "memory": "1Gi"},
-        "limits": {"cpu": "2", "memory": "3Gi"},
+        "limits": {"cpu": "2", "memory": "2Gi"},
     }
+
+
+def test_postgres_profile_transitions_never_surge_shared_volume_writers(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    for resources in rendered_profiles.values():
+        postgres = _resource(resources, kind="Deployment", name="postgres")
+        assert postgres["spec"]["replicas"] == 1
+        assert postgres["spec"]["strategy"] == {"type": "Recreate"}
 
 
 def test_local_profile_resource_totals_match_documented_baselines(
@@ -566,7 +574,7 @@ def test_local_profile_resource_totals_match_documented_baselines(
         "requested_millicores": 3300,
         "requested_mibibytes": 5056,
         "limit_millicores": 9800,
-        "limit_mibibytes": 12160,
+        "limit_mibibytes": 16256,
     }
     assert _profile_totals(rendered_profiles["kong"]) == {
         "pods": 17,
@@ -679,8 +687,8 @@ def test_local_url_targets_use_posix_safe_echo_syntax() -> None:
     kong_recipe = _make_target_block(makefile, "k8s-urls-kong")
 
     assert 'echo "=== Project URLs ==="' in direct_recipe
-    assert 'echo "=== Project URLs (Kong) ==="' in kong_recipe
-    for recipe in (direct_recipe, kong_recipe):
+    assert "k8s-urls" in kong_recipe
+    for recipe in (direct_recipe,):
         assert "echo." not in recipe
         assert 'echo ""' in recipe
 

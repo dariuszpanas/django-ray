@@ -1,6 +1,3 @@
-# PostgreSQL for development/testing
-# In production, use managed database service (RDS, Cloud SQL, etc.)
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -22,6 +19,8 @@ metadata:
     app: postgres
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: postgres
@@ -35,19 +34,16 @@ spec:
           image: postgres:16-alpine
           ports:
             - containerPort: 5432
-          envFrom:
-            - secretRef:
-                name: django-ray-secret
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: 256Mi
+              cpu: 100m
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: 512Mi
+              cpu: 500m
           readinessProbe:
             exec:
               command:
@@ -64,6 +60,22 @@ spec:
                 - django_ray
             initialDelaySeconds: 30
             periodSeconds: 10
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-database
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-database
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: django-ray-database
+                  key: POSTGRES_DB
       volumes:
         - name: postgres-data
           persistentVolumeClaim:
@@ -81,4 +93,3 @@ spec:
     - port: 5432
       targetPort: 5432
   type: ClusterIP
-

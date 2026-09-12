@@ -1053,7 +1053,7 @@ surface can report end-to-end capacity.
 The first target-attestation slice is deliberately Django-free and dormant. Its
 canonical contract binds an operator target key and policy revision to the runner
 family, one Ray cluster session, and an exact Ray/Python runtime tuple. A bounded Ray
-2.56.0 adapter takes resource-state snapshots before and after one hard-affinity probe
+2.58.0 adapter takes resource-state snapshots before and after one hard-affinity probe
 on every live schedulable node. The cluster session and exact sorted node set must stay
 unchanged across that interval, every node must report the expected tuple and its own
 identity, and the resource-state and per-node counters must not regress. Those counters

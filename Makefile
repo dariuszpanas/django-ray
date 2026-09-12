@@ -111,6 +111,7 @@ test-postgres:
 	python scripts/require_linux.py
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
+		tests/integration/test_sample_admission.py \
 		tests/integration/test_transactional_enqueue.py \
 		tests/integration/test_postgresql_workflow_progress_storage.py \
 		tests/integration/test_postgresql_workflow_progress_reads.py \
@@ -140,6 +141,8 @@ test-testproject:
 	python scripts/require_linux.py
 	python testproject/manage.py check
 	pytest tests/integration/test_api.py \
+		tests/integration/test_sample_admission.py \
+		tests/unit/test_sample_workload_limits.py \
 		tests/integration/test_testproject_admin_theme.py \
 		tests/integration/test_workflow_progress_api.py \
 		tests/unit/test_sample_security.py \

@@ -25,6 +25,7 @@ venv/
 ENV/
 
 # Local environment and credential files
+.local/
 **/.env
 **/.env.*
 !.env.example

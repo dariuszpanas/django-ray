@@ -10,6 +10,67 @@ Only `web` and the opt-in `smoke` service receive `DJANGO_API_TOKEN`. The migrat
 task-manager worker receive the shared database configuration but not the bearer credential, so
 local Ray worker processes cannot inherit the operator token.
 
+## Admission and credentials
+
+Apply `python testproject/manage.py migrate` before serving the updated sample. Its application
+migration seeds one shared admission row. A missing row, unsupported database/router, database
+contention, or exhausted outstanding-work budget fails closed with `503`, `Retry-After: 5`.
+The shared limit is 30 accepted workload requests per 60-second window and 32 outstanding
+`QUEUED`/`RUNNING`/`CANCELLING` executions. The request ceiling returns `429`, `Retry-After: 60`,
+even when synchronous work has already finished. Admission and enqueue commit together on the
+default SQLite or PostgreSQL database. A backwards wall-clock adjustment starts a fresh window.
+Settings `SAMPLE_MAX_REQUESTS_PER_WINDOW` and `SAMPLE_MAX_OUTSTANDING_EXECUTIONS` can reduce these
+ceilings; invalid values fail closed. This protects sample API producers; external producers and
+the package's Django Admin are trusted application authorities, not governed by this sample budget.
+
+All 34 POST routes are inventoried in [`route_policy.py`](route_policy.py), with a regression test
+requiring new mutations to be classified:
+
+| Capability | Routes beneath `/api` | Authority and admission |
+| --- | --- | --- |
+| Ordinary enqueue | `/enqueue/add/{a}/{b}`, `/enqueue/multiply/{a}/{b}`, `/enqueue/slow/{seconds}`, `/enqueue/fail`, `/enqueue/fail-no-retry`, `/enqueue/intermittent`, `/enqueue/echo` | Operator token; shared request and outstanding-work limits |
+| Ordinary sample functions | `/sync/calculate`, `/sync/validate-email`, `/local/fibonacci/{n}`, `/local/urgent`, `/cluster/runtime-env/probe`, `/ml/train`, `/ml/inference` | Operator token; same limits |
+| Bounded fanout | `/cluster/process-chunk`, `/cluster/batch-http`, `/cluster/search`, `/cluster/workflow-showcase`, `/cluster/workflow-recovery-showcase` | Operator token; same limits plus bounded children |
+| Local demo workloads | `/enqueue/cpu/{n}`, `/local/workload`, all six `/stress/*` routes, `/cluster/cpu-benchmark`, `/cluster/workflow-benchmark`, `/cluster/complex-workflow`, `/cluster/runtime-env/benchmark`, `/ml/hyperparam-search` | Disabled by default; distinct demo token and same limits |
+| Lifecycle | `/executions/{execution_id}/cancel`, `/executions/{execution_id}/retry` | Operator token; exact-ID and generation fencing retained; retry uses admission, cancellation remains available when full |
+
+Read/status routes use `DJANGO_API_TOKEN`. `/api/metrics` also accepts the separate
+`DJANGO_METRICS_TOKEN`, which cannot read task details, submit work, cancel, or retry. Existing
+operator-token metric access remains supported. Set `DJANGO_API_ENABLED=false` on non-HTTP setup,
+worker, and Ray components: production then does not require an operator token, and operational API
+authentication stays disabled even if a credential was accidentally supplied. API, metrics, and demo
+tokens must be distinct. Metrics and demo tokens, when configured, require at least 32 characters.
+
+Load and benchmark routes require **all three** of `DJANGO_DEPLOYMENT_MODE=demo`,
+`DJANGO_DEMO_WORKLOADS_ENABLED=true`, and a separate random `DJANGO_DEMO_TOKEN` on the web process.
+Production rejects the opt-in. Disabled routes reject authentication and disappear from OpenAPI.
+The ordinary operator token cannot enable them. Locust scenarios that use benchmark routes, including
+`ObservabilityDemoUser`, need both operator and demo credentials in their environment; the client
+uses the demo credential only for those POST requests. Configure this only in the explicit local
+demo deployment, and retain the one-user resource-bounded load commands below.
+
+Inputs are limited to 64 KiB, 8 levels of nesting, 2,048 visited JSON values, 100 values per
+collection, and 2,048 characters per string. Queries are limited to 8 KiB. Numeric workload fields
+reject booleans and non-finite values before enqueue, and task functions repeat the critical checks
+before doing work. [`workload_limits.py`](workload_limits.py) owns the exact limits, including:
+
+| Work | Ceiling |
+| --- | --- |
+| Sleep / CPU burn / simulated sleep | 300 seconds / 10 seconds / 10,000 ms |
+| Iterations / Fibonacci index / primality input | 2,000,000 / 10,000 / 100,000,000 |
+| Memory / generated JSON / JSON generation depth | 32 MiB / 64 KiB plus fixed wrappers / 4 |
+| Recursive computation | Depth 6, width 10, and at most 100,000 leaves |
+| Prime search | Start 1,000,000, count 100, at most 100,000 candidates |
+| Child items / concurrency | 100 total items and 4 in flight per dynamic map; complex branches share the 100-item ceiling |
+| Simulated tasks / task duration / epochs / runtime-env repeats | 100 / 100 ms / 100 / 10 |
+| ML parameter search | At most 8 parameters and 100 combinations, checked before Cartesian-product allocation |
+
+Bounded workflow maps publish aggregate map progress rather than individual physical child nodes;
+business split/join dependencies remain visible. Existing persisted plans retain their original
+identity and retry checks. Upgrade qualification must exercise a fresh bounded workflow as well as
+preserved executions. The PostgreSQL CI lane repeats the admission boundary and contention tests;
+release approval also requires current-source Linux CI and the cold local KubeRay deployment gate.
+
 ## Prerequisites
 
 - Docker with the Compose v2 plugin

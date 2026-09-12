@@ -226,7 +226,7 @@ def ray_cluster() -> Iterator[object]:
     try:
         yield ray
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.fixture(autouse=True)
@@ -247,9 +247,17 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
     request.getfixturevalue("django_db_setup")
     django_db_blocker = request.getfixturevalue("django_db_blocker")
 
+    from django.apps import apps
+    from django.utils import timezone
+
     from django_ray.models import LegacyWorkerAdmissionToken, TaskExecutionProtocolPolicy
 
     with django_db_blocker.unblock():
+        if apps.is_installed("testproject"):
+            SampleAdmissionBudget = apps.get_model("testproject", "SampleAdmissionBudget")
+            SampleAdmissionBudget.objects.get_or_create(
+                pk=1, defaults={"window_started_at": timezone.now()}
+            )
         policy, _ = TaskExecutionProtocolPolicy.objects.get_or_create(
             singleton_key=1,
             defaults={

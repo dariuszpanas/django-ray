@@ -24,20 +24,25 @@ import time
 
 from django.tasks import task
 
+from testproject.workload_limits import bounded_sample_task
+
 
 @task
+@bounded_sample_task
 def add_numbers(a: int, b: int) -> int:
     """Simple task that adds two numbers."""
     return a + b
 
 
 @task
+@bounded_sample_task
 def multiply_numbers(a: int, b: int) -> int:
     """Simple task that multiplies two numbers."""
     return a * b
 
 
 @task
+@bounded_sample_task
 def slow_task(seconds: float = 1.0) -> str:
     """Task that takes some time to complete."""
     time.sleep(seconds)
@@ -45,6 +50,7 @@ def slow_task(seconds: float = 1.0) -> str:
 
 
 @task
+@bounded_sample_task
 def failing_task() -> None:
     """Task that always fails (will be auto-retried based on MAX_TASK_ATTEMPTS)."""
     raise ValueError("This task is designed to fail!")
@@ -58,6 +64,7 @@ class NoRetryError(Exception):
 
 
 @task
+@bounded_sample_task
 def failing_task_no_retry() -> None:
     """Task that fails and won't be auto-retried.
 
@@ -68,6 +75,7 @@ def failing_task_no_retry() -> None:
 
 
 @task
+@bounded_sample_task
 async def async_add_numbers(a: int, b: int) -> int:
     """Add two numbers after crossing a real coroutine scheduling point."""
     await asyncio.sleep(0)
@@ -75,6 +83,7 @@ async def async_add_numbers(a: int, b: int) -> int:
 
 
 @task
+@bounded_sample_task
 async def async_context_probe(
     value: str,
     *,
@@ -112,6 +121,7 @@ async def async_context_probe(
 
 
 @task
+@bounded_sample_task
 async def async_failing_task(*, no_retry: bool = False) -> None:
     """Raise a retryable or denylisted exception from inside a coroutine."""
     await asyncio.sleep(0)
@@ -121,6 +131,7 @@ async def async_failing_task(*, no_retry: bool = False) -> None:
 
 
 @task
+@bounded_sample_task
 async def async_slow_task(seconds: float = 0.01) -> str:
     """Wait without blocking the task's event loop."""
     await asyncio.sleep(seconds)
@@ -128,6 +139,7 @@ async def async_slow_task(seconds: float = 0.01) -> str:
 
 
 @task
+@bounded_sample_task
 def intermittent_task(fail_until_attempt: int = 3) -> dict:
     """Task that fails until a certain attempt number, then succeeds.
 
@@ -165,6 +177,7 @@ def intermittent_task(fail_until_attempt: int = 3) -> dict:
 
 
 @task
+@bounded_sample_task
 def echo_task(*args, **kwargs) -> dict:
     """Task that echoes back its arguments."""
     return {
@@ -174,6 +187,7 @@ def echo_task(*args, **kwargs) -> dict:
 
 
 @task
+@bounded_sample_task
 def cpu_intensive_task(n: int = 1000000) -> int:
     """CPU-intensive task for testing."""
     total = 0

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Ray 2.58 baseline
+
+- Document the unresolved [Ray Client startup race](compatibility.md#ray-client-startup-limitation)
+  tracked in upstream #63202. The Ray 2.58 floor does not fix it; investigation
+  and requalification are deferred to 0.6.0 or later after an upstream fix.
+
+- Raise the required Ray version to 2.58.0, align the locked dependency, sample
+  images, Ray Data recipe, CI lanes, and dormant target probe, and retain exact
+  manager/head/worker runtime matching. Upgrade all components together through
+  the [coordinated Beta procedure](stability.md#coordinated-beta-upgrades).
+- Include upstream Dashboard log-path validation, repeated-cancellation and child-process
+  cleanup fixes, plus the optional Data nested-Parquet/Lance and Serve authentication
+  fixes. The [compatibility policy](compatibility.md#supported-versions) describes
+  the affected boundaries; application cancellation and durable recovery fences remain.
+- Owned local test runtimes now wait for their subprocesses during teardown and
+  failed-start cleanup. Ray Client shutdown and production worker deadlines are unchanged.
+  Compiled Graph remains disabled, and its historical cleanup evidence is not promoted
+  by this dependency update.
+
+### Sample admission and deployment security
+
+- Recreate the sample PostgreSQL pod during profile transitions instead of
+  overlapping database writers against the same persistent volume.
+- Allow 6 GiB for the co-resident Ray head and 9 GiB across its namespace.
+  The full profile allocates 8 GiB to its head and 2 GiB to each worker,
+  retaining its total memory budget while accommodating Client and Jobs processes.
+  The prior 2 GiB head limit can kill Ray 2.58 dashboard subprocesses during
+  startup, leaving Jobs unavailable despite a ready Ray pod. CPU ceilings stay unchanged.
+- Accept the explicit internal web Service hostname used by Prometheus and
+  the co-resident loopback forward, while retaining explicit host allow-lists.
+- Bound sample inputs, fanout and authenticated workload admission before
+  enqueue. Separate demo authority from ordinary API access and disable stress
+  routes by default. Shared request and outstanding-work budgets reject excess
+  work with fixed responses and `Retry-After` headers.
+- Remove reusable bootstrap credentials, require explicit superuser creation,
+  and split generated credentials by component. Keep Ray and monitoring services
+  private, require Ray token authentication, and use loopback-only local forwarding.
+
 ### Bounded distributed preparation
 
 - Map/starmap construct strict requests inside their submission window and reuse

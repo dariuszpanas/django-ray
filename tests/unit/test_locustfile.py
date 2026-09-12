@@ -45,6 +45,28 @@ def test_authenticated_task_user_sets_bearer_header(monkeypatch: pytest.MonkeyPa
     assert user.client.headers["Authorization"] == f"Bearer {token}"
 
 
+def test_demo_token_is_used_only_for_demo_post(monkeypatch):
+    monkeypatch.setenv("DJANGO_API_TOKEN", "operator-token")
+    monkeypatch.setenv("DJANGO_DEMO_TOKEN", "demo-token")
+    calls = []
+
+    class Client:
+        def post(self, path, **kwargs):
+            calls.append((path, kwargs))
+            return _Response({"task_id": "task-id"})
+
+    user = object.__new__(locustfile.AuthenticatedTaskUser)
+    user.client = Client()
+    user._post_task("/api/cluster/complex-workflow?fast_items=1&slow_items=1")
+    user._post_task("/api/enqueue/add/1/2")
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer demo-token"}
+    assert "headers" not in calls[1][1]
+    monkeypatch.delenv("DJANGO_DEMO_TOKEN")
+    with pytest.raises(StopTest, match="distinct DJANGO_DEMO_TOKEN"):
+        user._post_task("/api/stress/cpu")
+    assert len(calls) == 2
+
+
 def test_authenticated_task_user_fails_secret_safely_without_token(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

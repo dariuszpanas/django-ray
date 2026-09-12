@@ -37,8 +37,8 @@ the pilot evidence validator without enabling native execution.
 
 | Ray | Python | OS and architecture | Status | Why it is listed |
 |---|---|---|---|---|
-| 2.56.0 | 3.12 | Linux x86_64 | Candidate | Package security floor, current lock, and initial Windows investigation |
-| 2.56.1 | 3.12 | Linux x86_64 | Candidate | Latest PyPI and Ray release reviewed on 2026-07-19 |
+| 2.56.0 | 3.12 | Linux x86_64 | Historical candidate | Former package floor and retained investigation; below the current supported floor |
+| 2.56.1 | 3.12 | Linux x86_64 | Historical candidate | Release reviewed on 2026-07-19; below the current supported floor |
 
 The versions are exact. A new patch, minor, prerelease, or nightly is rejected until it
 is deliberately added as a candidate and then independently verified. Python 3.13 and
@@ -51,8 +51,12 @@ Version sources:
 - [Ray 2.56.1 on PyPI](https://pypi.org/project/ray/2.56.1/) and the
   [Ray 2.56.1 release](https://github.com/ray-project/ray/releases/tag/ray-2.56.1)
 
-The general django-ray dependency is `ray[default]>=2.56.0`. That broader range
-does not imply Compiled Graph eligibility.
+The general django-ray dependency is `ray[default]>=2.58.0`. That broader range
+does not imply Compiled Graph eligibility. Ray 2.58 is not a native candidate or a
+verified capability. The retained policy-v3 candidates and pinned pilot below are
+historical investigation tools, not supported current-package installation targets.
+The package-floor update neither re-runs nor promotes their evidence. Issue #154's
+reclamation boundary still needs a fix-containing build and independent qualification.
 
 Ray 2.53.0 remains named only in the retained 2026-07-19 and 2026-07-20
 investigation records below. It predates the current package security floor and is no

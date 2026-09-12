@@ -1,68 +1,39 @@
-# Local development overlay - optimized for AMD GPU workstation
-# Evaluation-only local overlay. Do not apply it to a production cluster.
-# Your machine: 16 CPUs, 32GB RAM, AMD GPU (ROCm)
-#
-# Note: AMD GPU support in Docker Desktop requires:
-#   1. ROCm drivers installed on Windows/WSL2
-#   2. Docker configured with AMD GPU passthrough
-#   3. amdgpu-dkms in WSL2 kernel (for WSL2-based Docker)
-#
-# For now, this uses CPU-only Ray. GPU support can be added once ROCm is configured.
-#
-# Resource allocation:
-#   Ray Head:   4 CPUs, 8GB RAM (for dashboard, GCS, scheduling)
-#   Ray Worker: 4 CPUs, 8GB RAM x 2 = 8 CPUs, 16GB total for tasks
-#   Django:     ~1 CPU, 1GB RAM
-#   Postgres:   ~0.5 CPU, 0.5GB RAM
-#   Total:      ~14 CPUs, 26GB RAM (leaves headroom for system)
-#
+# Local evaluation only; credentials are prepared separately.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 namespace: django-ray
-
 resources:
   - ../../base
-
 patches:
-  # This overlay is intentionally local-demo-only. A production topology must
-  # be designed separately; the base is only a shared render reference.
-  - patch: |-
+  - patch: |
       - op: replace
         path: /data/DJANGO_DEPLOYMENT_MODE
-        value: "demo"
+        value: demo
     target:
       kind: ConfigMap
       name: django-ray-config
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /data/DJANGO_ALLOWED_HOSTS
-        value: "localhost,127.0.0.1,django-ray.localhost"
+        value: localhost,127.0.0.1,django-ray.localhost,django-web-svc
     target:
       kind: ConfigMap
       name: django-ray-config
-
-  # Enable Django DEBUG mode
-  - patch: |-
+  - patch: |
       - op: replace
         path: /data/DJANGO_DEBUG
-        value: "True"
+        value: 'True'
     target:
       kind: ConfigMap
       name: django-ray-config
-
-  # 2 Ray workers for parallelism
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/replicas
         value: 2
     target:
       kind: Deployment
       name: ray-worker
-
-  # Ray Head - generous resources for dashboard and coordination
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/template/spec/containers/0/args
         value:
@@ -81,17 +52,15 @@ patches:
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
-            memory: "6Gi"
-            cpu: "2"
+            memory: 6Gi
+            cpu: '2'
           limits:
-            memory: "10Gi"
-            cpu: "4"
+            memory: 10Gi
+            cpu: '4'
     target:
       kind: Deployment
       name: ray-head
-
-  # Ray Workers - where the actual work happens
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/template/spec/containers/0/args
         value:
@@ -107,41 +76,63 @@ patches:
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
-            memory: "6Gi"
-            cpu: "2"
+            memory: 6Gi
+            cpu: '2'
           limits:
-            memory: "10Gi"
-            cpu: "4"
+            memory: 10Gi
+            cpu: '4'
     target:
       kind: Deployment
       name: ray-worker
-
-  # Django Web - scale up for stress testing
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/replicas
         value: 2
     target:
       kind: Deployment
       name: django-web
-
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/template/spec/containers/0/env
         value:
           - name: GUNICORN_WORKERS
-            value: "8"
+            value: '8'
           - name: GUNICORN_THREADS
-            value: "4"
+            value: '4'
+          - name: DJANGO_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DJANGO_SECRET_KEY
+          - name: DATABASE_USER
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_USER
+          - name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-runtime
+                key: DATABASE_PASSWORD
+          - name: DJANGO_API_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-secret
+                key: DJANGO_API_TOKEN
+          - name: DJANGO_METRICS_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: django-ray-metrics
+                key: DJANGO_METRICS_TOKEN
       - op: replace
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: 512Mi
+            cpu: 500m
           limits:
-            memory: "2Gi"
-            cpu: "2"
+            memory: 2Gi
+            cpu: '2'
       - op: replace
         path: /spec/template/spec/containers/0/livenessProbe
         value:
@@ -171,22 +162,19 @@ patches:
     target:
       kind: Deployment
       name: django-web
-
-  # PostgreSQL - more resources for stress testing
-  - patch: |-
+  - patch: |
       - op: replace
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: 512Mi
+            cpu: 500m
           limits:
-            memory: "2Gi"
-            cpu: "2"
+            memory: 2Gi
+            cpu: '2'
     target:
       kind: Deployment
       name: postgres
-
 images:
   - name: django-ray
     newName: django-ray
@@ -194,4 +182,3 @@ images:
   - name: django-ray-worker
     newName: django-ray-worker
     newTag: latest
-

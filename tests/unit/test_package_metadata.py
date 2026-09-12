@@ -409,7 +409,7 @@ def test_ray_security_floor_is_an_unconditional_runtime_dependency() -> None:
     config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
     project = config["project"]
 
-    assert project["dependencies"].count("ray[default]>=2.56.0") == 1
+    assert project["dependencies"].count("ray[default]>=2.58.0") == 1
     assert all(
         all(not requirement.startswith("ray[") for requirement in requirements)
         for requirements in project["optional-dependencies"].values()
@@ -420,7 +420,7 @@ def test_ray_security_floor_is_an_unconditional_runtime_dependency() -> None:
         Version(package["version"]) for package in lock["package"] if package["name"] == "ray"
     ]
     assert len(locked_versions) == 1
-    assert locked_versions[0] >= Version("2.56.0")
+    assert locked_versions[0] >= Version("2.58.0")
 
 
 def test_ray_security_floor_is_consistent_across_public_install_paths() -> None:
@@ -429,7 +429,7 @@ def test_ray_security_floor_is_consistent_across_public_install_paths() -> None:
     readme = (project_root / "README.md").read_text(encoding="utf-8")
     ray_dockerfile = (project_root / "Dockerfile.ray").read_text(encoding="utf-8")
 
-    assert "Ray 2.56.0+" in readme
+    assert "Ray 2.58.0+" in readme
     assert "Ray 2.53.0+" not in readme
-    assert "ARG RAY_VERSION=2.56.0" in ray_dockerfile
+    assert "ARG RAY_VERSION=2.58.0" in ray_dockerfile
     assert "ARG RAY_VERSION=2.53.0" not in ray_dockerfile
