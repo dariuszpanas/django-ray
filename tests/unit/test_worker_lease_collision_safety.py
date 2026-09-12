@@ -14,6 +14,8 @@ import pytest
 from django.core.management import CommandError
 from django.db import IntegrityError, OperationalError
 
+from django_ray import __version__
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
     CancellationStatus,
@@ -27,7 +29,20 @@ from django_ray.runner.cancellation import (
     CancellationOutcome,
     CancellationOutcomeStatus,
 )
-from django_ray.runner.leasing import get_active_worker_count
+from django_ray.runner.leasing import WorkerLeaseIdentity, get_active_worker_count
+from django_ray.target.attestation import RayRunnerFamily
+from django_ray.target.cohort_claim import CohortManagerRuntime, CohortRunnerFamily
+from tests.integration.test_cohort_claim_storage import (
+    _ray_arguments,
+    isolated_sqlite_ledger_maintenance,
+)
+from tests.integration.test_cohort_claim_storage import case as case
+from tests.integration.test_cohort_selection import _alias, _claim, _clone, _qualified
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+from tests.unit.test_cohort_claim import PYTHON
+
+cohort_ledger_cleanup = pytest.fixture(isolated_sqlite_ledger_maintenance.__wrapped__)
+del isolated_sqlite_ledger_maintenance
 
 
 class CapturingStdout:
@@ -44,6 +59,19 @@ class CapturingStdout:
         return "".join(self.messages)
 
 
+def _current_lease(**changes: Any) -> TaskWorkerLease:
+    """Create an explicit current capability, including hostile foreign owners."""
+    fields: dict[str, Any] = {
+        "capability_schema_version": 1,
+        "django_ray_version": __version__,
+        "min_supported_execution_protocol_version": 3,
+        "max_supported_execution_protocol_version": 3,
+        "legacy_admission_token": None,
+        **changes,
+    }
+    return TaskWorkerLease.objects.create(**fields)
+
+
 def _make_command(worker_id: str) -> Command:
     command = Command()
     command.stdout = CapturingStdout()
@@ -55,6 +83,50 @@ def _make_command(worker_id: str) -> Command:
     command.execution_mode = "sync"
     command.sync_mode = False
     return command
+
+
+def _historical_command(worker_id: str) -> Command:
+    """Own an explicit protocol1 lease only inside the real0034 schema."""
+    command = _make_command(worker_id)
+    started = datetime.now(UTC)
+    row = _current_lease(
+        worker_id=worker_id,
+        hostname="historical-host",
+        pid=123,
+        queue_name="default",
+        started_at=started,
+        last_heartbeat_at=started,
+        min_supported_execution_protocol_version=1,
+        max_supported_execution_protocol_version=1,
+    )
+    command.lease = row
+    command.lease_identity = WorkerLeaseIdentity(worker_id, row.hostname, row.pid, started)
+    return command
+
+
+def _collision_controller(case, command, execution_mode="sync"):
+    """Use real selector/ledger writes and source-created fake-SDK Ray proofs."""
+    assert command.lease_identity is not None
+    case.lease = TaskWorkerLease.objects.get(**command.lease_identity.database_filters())
+    case.owner = command.lease_identity
+    case.now = datetime.now(UTC) + timedelta(milliseconds=1)
+    family = CohortRunnerFamily(
+        {"sync": "sync", "local": "ray_core", "ray": "ray_job"}[execution_mode]
+    )
+    proofs = ()
+    if family is not CohortRunnerFamily.SYNC:
+        arguments = _ray_arguments(case, RayRunnerFamily(family.value), observed_at=case.now)
+        proofs = (_qualified(case, arguments),)
+    command._cohort_controller = SimpleNamespace(
+        family=family,
+        runtime=CohortManagerRuntime(
+            "0.5.0", PYTHON, None if family is CohortRunnerFamily.SYNC else (2, 58, 0)
+        ),
+        aliases=(_alias(case),),
+        stopped=False,
+        claim=lambda limit: _claim(case, qualifications=proofs, family=family, limit=limit),
+    )
+    return command._cohort_controller
 
 
 def _invalidate_exact_lease(command: Command, invalid_lease: str) -> None:
@@ -74,7 +146,7 @@ def _invalidate_exact_lease(command: Command, invalid_lease: str) -> None:
         return
     if invalid_lease == "replaced":
         TaskWorkerLease.objects.filter(**identity.database_filters()).delete()
-        TaskWorkerLease.objects.create(
+        _current_lease(
             worker_id=identity.worker_id,
             hostname="replacement-host",
             pid=222,
@@ -117,7 +189,7 @@ class TestWorkerLeaseCollisionSafety:
     def test_primary_key_collision_regenerates_identity_logger_and_jitter(
         self, monkeypatch
     ) -> None:
-        existing = TaskWorkerLease.objects.create(
+        existing = _current_lease(
             worker_id="colliding-worker",
             hostname="foreign-host",
             pid=111,
@@ -148,7 +220,7 @@ class TestWorkerLeaseCollisionSafety:
         monkeypatch,
     ) -> None:
         foreign_rows = [
-            TaskWorkerLease.objects.create(
+            _current_lease(
                 worker_id=worker_id,
                 hostname=f"{worker_id}-host",
                 pid=111,
@@ -177,10 +249,13 @@ class TestWorkerLeaseCollisionSafety:
             assert foreign.hostname == f"{foreign.worker_id}-host"
             assert foreign.pid == 111
 
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.usefixtures("cohort_ledger_cleanup")
     def test_collision_recovery_preserves_claim_and_reconciliation_boundaries(
-        self, monkeypatch
+        self, monkeypatch, case
     ) -> None:
-        TaskWorkerLease.objects.create(
+        case.lease.delete()
+        _current_lease(
             worker_id="shared-candidate",
             hostname="foreign-host",
             pid=111,
@@ -193,18 +268,14 @@ class TestWorkerLeaseCollisionSafety:
         )
         command._create_lease("default")
 
-        queued = RayTaskExecution.objects.create(
-            task_id="collision-safe-claim",
-            callable_path="testproject.tasks.add_numbers",
-            queue_name="default",
-            state=TaskState.QUEUED,
-            args_json="[1, 2]",
-            kwargs_json="{}",
-        )
+        queued = case.task
+        _collision_controller(case, command)
         processed: list[int] = []
-        monkeypatch.setattr(command, "process_task", lambda task: processed.append(task.pk))
+        monkeypatch.setattr(
+            command, "_dispatch_cohort_task", lambda item: processed.append(item.execution.pk)
+        )
 
-        assert command.claim_and_process_tasks(["default"], concurrency=1) == 1
+        assert command._claim_and_process_cohort_tasks(concurrency=1) == 1
 
         queued.refresh_from_db()
         assert queued.claimed_by_worker == "allocated-worker"
@@ -243,13 +314,17 @@ class TestWorkerLeaseCollisionSafety:
             ("ray", "ray-job"),
         ],
     )
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.usefixtures("cohort_ledger_cleanup")
     def test_collision_recovery_fences_claims_and_expiry_in_every_mode(
         self,
         monkeypatch,
+        case,
         execution_mode: str,
         expected_dispatch: str,
     ) -> None:
-        TaskWorkerLease.objects.create(
+        case.lease.delete()
+        _current_lease(
             worker_id=f"shared-{execution_mode}",
             hostname="foreign-host",
             pid=111,
@@ -264,32 +339,17 @@ class TestWorkerLeaseCollisionSafety:
         )
         command._create_lease("default")
 
-        queued = RayTaskExecution.objects.create(
-            task_id=f"mode-claim-{execution_mode}",
-            callable_path="testproject.tasks.add_numbers",
-            queue_name="default",
-            state=TaskState.QUEUED,
-            args_json="[1, 2]",
-            kwargs_json="{}",
-        )
+        queued = case.task
+        _collision_controller(case, command, execution_mode)
         dispatched: list[tuple[str, int, str | None]] = []
-        monkeypatch.setattr(
-            command,
-            "execute_task_sync",
-            lambda task: dispatched.append(("sync", task.pk, task.claimed_by_worker)),
-        )
-        monkeypatch.setattr(
-            command,
-            "submit_task_to_ray_core",
-            lambda task: dispatched.append(("ray-core", task.pk, task.claimed_by_worker)),
-        )
-        monkeypatch.setattr(
-            command,
-            "submit_task_to_ray",
-            lambda task: dispatched.append(("ray-job", task.pk, task.claimed_by_worker)),
-        )
 
-        assert command.claim_and_process_tasks(["default"], concurrency=1) == 1
+        def dispatch(item):
+            family = item.claim.facts.binding.runner_family.value.replace("_", "-")
+            dispatched.append((family, item.execution.pk, item.execution.claimed_by_worker))
+
+        monkeypatch.setattr(command, "_dispatch_cohort_task", dispatch)
+
+        assert command._claim_and_process_cohort_tasks(concurrency=1) == 1
 
         queued.refresh_from_db()
         assert queued.claimed_by_worker == allocated_worker
@@ -298,23 +358,22 @@ class TestWorkerLeaseCollisionSafety:
 
         assert command.lease_identity is not None
         TaskWorkerLease.objects.filter(**command.lease_identity.database_filters()).delete()
-        replacement = TaskWorkerLease.objects.create(
+        replacement = _current_lease(
             worker_id=allocated_worker,
             hostname="replacement-host",
             pid=222,
             queue_name="default",
         )
-        overdue = RayTaskExecution.objects.create(
-            task_id=f"mode-expiry-{execution_mode}",
-            callable_path="testproject.tasks.add_numbers",
-            queue_name="default",
-            state=TaskState.QUEUED,
-            args_json="[1, 2]",
-            kwargs_json="{}",
-            queue_deadline_at=datetime.now(UTC) - timedelta(seconds=1),
+        overdue = _clone(case, name=f"mode-expiry-{execution_mode}")
+        RayTaskExecution.objects.filter(pk=overdue.pk).update(
+            queue_deadline_at=datetime.now(UTC) - timedelta(seconds=1)
         )
+        from django_ray.target.cohort_claim_storage import CohortClaimStorageError
 
-        assert command.claim_and_process_tasks(["default"], concurrency=0) == 0
+        assert command._claim_and_process_cohort_tasks(concurrency=2) == 0
+        with pytest.raises(CohortClaimStorageError, match="lease_unavailable"):
+            command._expire_cohort_tasks()
+        command.send_heartbeat()
 
         overdue.refresh_from_db()
         replacement.refresh_from_db()
@@ -417,7 +476,7 @@ class TestWorkerLeaseCollisionSafety:
         self, monkeypatch
     ) -> None:
         for worker_id in ("collision-a", "collision-b"):
-            TaskWorkerLease.objects.create(
+            _current_lease(
                 worker_id=worker_id,
                 hostname="foreign-host",
                 pid=111,
@@ -445,7 +504,7 @@ class TestWorkerLeaseCollisionSafety:
     def test_unrelated_integrity_error_does_not_regenerate_existing_candidate(
         self, monkeypatch
     ) -> None:
-        TaskWorkerLease.objects.create(
+        _current_lease(
             worker_id="existing-candidate",
             hostname="foreign-host",
             pid=111,
@@ -554,7 +613,7 @@ class TestWorkerLeaseCollisionSafety:
         invalid_lease: str,
     ) -> None:
         stale_at = datetime.now(UTC) - timedelta(minutes=5)
-        source_lease = TaskWorkerLease.objects.create(
+        source_lease = _current_lease(
             worker_id="invalid-adoption-source",
             hostname="source-host",
             pid=111,
@@ -592,7 +651,7 @@ class TestWorkerLeaseCollisionSafety:
             )
         else:
             TaskWorkerLease.objects.filter(**identity.database_filters()).delete()
-            TaskWorkerLease.objects.create(
+            _current_lease(
                 worker_id=identity.worker_id,
                 hostname="replacement-host",
                 pid=222,
@@ -925,14 +984,17 @@ class TestWorkerLeaseCollisionSafety:
         assert command.lease_ownership_lost is True
         assert command.shutdown_requested is True
 
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.usefixtures("preactivation_protocol_schema")
     def test_timeout_owner_transfer_during_stop_blocks_terminal_write(
         self,
         monkeypatch,
     ) -> None:
         stale_at = datetime.now(UTC) - timedelta(minutes=10)
-        command = _make_command("timeout-transfer-owner")
+        command = _historical_command("timeout-transfer-owner")
         command._create_lease("default")
         task = RayTaskExecution.objects.create(
+            execution_protocol_version=1,
             task_id="timeout-owner-transfer-during-stop",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -946,6 +1008,7 @@ class TestWorkerLeaseCollisionSafety:
             attempt_number=2,
             execution_generation=7,
         )
+        _historical_command("replacement-worker")
         cancellation_calls: list[int] = []
 
         def transfer_owner_during_stop(current: RayTaskExecution) -> CancellationOutcome:
@@ -973,18 +1036,21 @@ class TestWorkerLeaseCollisionSafety:
         assert task.execution_generation == 7
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.usefixtures("preactivation_protocol_schema")
     def test_expired_cancellation_owner_cannot_duplicate_replacement_stop(
         self,
         monkeypatch,
     ) -> None:
         stale_at = datetime.now(UTC) - timedelta(minutes=5)
-        stale_owner = _make_command("expired-cancellation-owner")
+        stale_owner = _historical_command("expired-cancellation-owner")
         stale_owner._create_lease("default")
         assert stale_owner.lease_identity is not None
         TaskWorkerLease.objects.filter(**stale_owner.lease_identity.database_filters()).update(
             last_heartbeat_at=stale_at
         )
         task = RayTaskExecution.objects.create(
+            execution_protocol_version=1,
             task_id="expired-cancellation-owner-handoff",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1006,7 +1072,7 @@ class TestWorkerLeaseCollisionSafety:
 
         assert stale_owner.process_cancellations() == 0
 
-        replacement = _make_command("replacement-cancellation-owner")
+        replacement = _historical_command("replacement-cancellation-owner")
         replacement._create_lease("default")
         cancellation_calls: list[int] = []
 
@@ -1015,6 +1081,20 @@ class TestWorkerLeaseCollisionSafety:
             return CancellationOutcome(CancellationOutcomeStatus.REQUESTED)
 
         monkeypatch.setattr(replacement, "_request_cancellation_for_task", request_once)
+
+        def historical_finalization(current, **arguments):
+            from django_ray.lifecycle import cancel_task
+
+            # The retained v1 adapter predates the active default3. Declare
+            # its historical lifecycle range explicitly without widening it.
+            return cancel_task(
+                current, supported_protocols=ExecutionProtocolRange(1, 1), **arguments
+            )
+
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.finalize_cancellation",
+            historical_finalization,
+        )
 
         assert replacement.process_cancellations() == 1
 
@@ -1075,7 +1155,7 @@ class TestWorkerLeaseCollisionSafety:
         assert command.lease_identity is not None
         original_identity = command.lease_identity
         TaskWorkerLease.objects.filter(**original_identity.database_filters()).delete()
-        replacement = TaskWorkerLease.objects.create(
+        replacement = _current_lease(
             worker_id=original_identity.worker_id,
             hostname="replacement-host",
             pid=222,
@@ -1155,7 +1235,7 @@ class TestWorkerLeaseCollisionSafety:
         command._create_lease("default")
         assert command.lease_identity is not None
         TaskWorkerLease.objects.filter(**command.lease_identity.database_filters()).delete()
-        TaskWorkerLease.objects.create(
+        _current_lease(
             worker_id=command.worker_id,
             hostname="replacement-host",
             pid=222,
@@ -1196,7 +1276,7 @@ class TestWorkerLeaseCollisionSafety:
             started_at=datetime.now(UTC),
         )
         TaskWorkerLease.objects.filter(**command.lease_identity.database_filters()).delete()
-        TaskWorkerLease.objects.create(
+        _current_lease(
             worker_id=command.worker_id,
             hostname="replacement-host",
             pid=222,
@@ -1312,7 +1392,10 @@ def test_handle_acquires_lease_before_initializing_ray(monkeypatch) -> None:
         "_create_lease",
         lambda _queue: (_ for _ in ()).throw(CommandError("lease unavailable")),
     )
-    monkeypatch.setattr(command, "_init_local_ray", lambda: events.append("ray"))
+    monkeypatch.setattr(command, "_init_local_ray", lambda: events.append("legacy-ray"))
+    monkeypatch.setattr(
+        command, "_initialize_cohort_execution", lambda _queues: events.append("cohort")
+    )
 
     with pytest.raises(CommandError, match="lease unavailable"):
         command.handle(

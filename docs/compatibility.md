@@ -8,9 +8,9 @@ Beta upgrades follow the [coordinated upgrade procedure](stability.md#coordinate
 stop submissions, drain work, back up, stop old writers, migrate and update all components
 together. Historical data preservation and current-version failure recovery remain required;
 mixed-version managers and old-payload execution are not the Beta upgrade commitment.
-The dormant target and historical migration details below do not add a rolling-upgrade
-requirement. Transitional execution readers are retired at the announced release boundary,
-with preserved-data evidence, rather than removed by this documentation change.
+The dormant protocol-2 and historical migration details below do not add a rolling-upgrade
+requirement. Protocol 3 is the 0.5 execution boundary; preserved historical results do not
+authorize older payloads to execute in the new cohort.
 
 ## Module Path Compatibility
 
@@ -41,7 +41,7 @@ Beta users that imported those private modules must move to the canonical packag
 |---|---|
 | Python | 3.12, 3.13, 3.14 |
 | Django | 6.0.8 or newer compatible release |
-| Ray | 2.58.0 or newer compatible release |
+| Ray | Resolver floor 2.58.0; current Core/Jobs qualification requires exactly 2.58.0 |
 | Production operating system | Linux |
 
 Python 3.12 is the floor because Django 6.0 requires Python 3.12+, not because Ray does.
@@ -69,25 +69,15 @@ The package dependency range is a resolver boundary, not permission to mix remot
 runtime tuples. A target-attested task-manager cohort must match the configured Ray
 version and the Python implementation plus `major.minor.patch` exactly across the
 manager and every live schedulable cluster node. Ray's connection-time warning or
-`RAY_IGNORE_VERSION_MISMATCH` does not weaken that django-ray rule. The initial bounded
-attestation codec and Ray 2.58.0 probe are dormant infrastructure: current workers do
-not yet advertise target capacity or fence claims with their output. The additive
-target-persistence schema likewise records only immutable target intent, append-only
-policy revisions, and verified canonical observation history. Verified versus expired
-is derived from the latest matching proof and its bounded expiry; mismatch,
-unreachable, identity-drift, malformed, and expired probe outcomes are not fabricated
-as observation rows. The private coordinator registers Ray Core targets in `draining`,
-allows only revision-checked `active`/`draining` policy transitions, reserves `retired`
-for #368, and rejects Ray Job persistence until its authenticated response channel
-exists. Migration `0023` adds a deliberately unseeded, create-once relationship from an
-execution to one immutable target-policy revision. A future target-aware consumer must
-treat absence as unbound and fail closed; current workers remain target-unaware and do
-not consult the table. `created_at` records only when the relationship was written, not
-proof of enqueue-time selection. No writer, reader, Admin surface, enqueue, claim,
-adoption, lifecycle, routing, or backfill consumer exists. Legacy binding remains
-forbidden until #381 supplies exact mapping lineage. Until those later boundaries land,
-upgrade task managers and every cluster node together and treat any Ray or Python patch
-difference as unsupported.
+`RAY_IGNORE_VERSION_MISMATCH` does not weaken that django-ray rule. Current-cohort
+workers use the bounded Ray 2.58.0 probe, immutable target identity, revisioned policy
+and fresh canonical observations to qualify Core and Jobs claims. Verified versus
+expired is derived from the latest matching proof and its bounded expiry; mismatches,
+unreachable nodes, identity drift and malformed observations grant no capacity.
+The initial protocol-2 APIs and route records remain dormant historical infrastructure;
+their existence does not authorize protocol-2 execution or legacy binding/backfill.
+Upgrade task managers and every cluster node together and treat any Ray or Python patch
+difference as unsupported. See [current-cohort execution](#current-cohort-execution).
 
 The root `Dockerfile` and ordinary Compose path intentionally remain patch-flexible on
 Python `3.12`. After non-mutating preflight, the guarded local KubeRay gate's mutable images
@@ -101,9 +91,9 @@ automatically rediscovers the local image patch and must still pass the cold pro
 Python minor is rejected.
 
 Both binding foreign keys use `PROTECT`: once a binding exists, deleting its execution or
-target-policy revision is rejected by the ORM and database. Current cleanup paths remain
-unchanged only because the table is unseeded. Activation therefore requires every task-
-and policy-retention or cleanup path to define and test explicit ordering. A binding may
+target-policy revision is rejected by the ORM and database. Current protocol-3 claims
+use schema-2 bindings and retain their generation history and cleanup obligations.
+A binding may
 be deleted first only under that audit and retention policy, never through an implicit
 cascade or ordinary task cleanup.
 
@@ -131,19 +121,18 @@ Renewal changes that one ephemeral row under a bounded compare-and-set revision;
 append another audit history. Current Django ORM lease deletion cascades to the capability while
 raw parent deletion remains foreign-key restricted, so worker-ID reuse cannot inherit capacity.
 The immutable policy and attestation revisions remain the
-audit record, and a future execution path must separately archive authenticated target evidence
-per generation or attempt.
+audit record. Protocol-3 claims separately archive authenticated target evidence
+per generation and attempt.
 
-The private capability coordinator currently accepts Ray Core only. A fresh exact lease and
+The standalone capability coordinator accepts Ray Core only. A fresh exact lease and
 latest unexpired proof may support an `active` policy or preserve capacity for already-pinned
 work while its policy is `draining`; draining never permits a new route or enqueue. Ray Job
-capability APIs remain unsupported until an authenticated pre-Django proof channel exists.
-No production lease creation, heartbeat, reconnect, enqueue, claim, adoption, lifecycle,
-status, runner, or transport path creates, renews, or treats a capability row as
-capacity. The read-only doctor may aggregate scalar metadata without granting eligibility.
+capability APIs remain unsupported through that standalone coordinator. Current workers
+use the separate authenticated cohort publisher for Core and Jobs qualification.
+The read-only doctor may aggregate scalar metadata without granting eligibility.
 Existing exact-lease deletion, including supported Admin inactive-lease cleanup,
-may only fail-closed cascade-withdraw an otherwise unreachable row. Row presence alone is
-never authority: every future consumer must revalidate the exact live lease, current policy,
+may only fail-closed cascade-withdraw current capability. Row presence alone is
+never authority: every consumer must revalidate the exact live lease, current policy,
 same latest verified attestation, and proof expiry under its ownership locks.
 
 Protocol `2` now has a separate, package-private Ray Core transport and provenance boundary.
@@ -171,12 +160,12 @@ clock, or observation dated after manager receipt is uncertainty and retains the
 it cannot authorize compatibility handback. The result and observed-proof preimage must also echo
 the exact request-bound `claimed_at`; even a different canonical UTC timestamp is uncertainty.
 
-This transport is staged rather than activated. The package production protocol and supported
-range remain `1` and `1..1`; the seeded database policy still writes protocol `1`, and every
-production worker lease still advertises `1..1`. No backend enqueues protocol `2`, no worker
+This protocol-2 transport remains dormant. The package production protocol and supported
+range are `3` and `3..3`; migration `0035` selects that policy and closes legacy admission.
+No backend enqueues protocol `2`, no worker
 claims it, no capability producer supplies the required generation claim, and no production
-runner calls the package-private submission seam. The existing protocol-`1` request and
-completion bytes remain unchanged.
+runner calls this protocol-2 submission seam. Historical protocol-1 records retain
+their original bytes and are not executable by current workers.
 
 Migration `0026_ray_task_target_execution_evidence` adds two unseeded, immutable provenance
 records for that future activation. `RayTaskTargetExecutionEvidence` binds an exact execution,
@@ -200,9 +189,9 @@ codec is package-private provenance infrastructure and does not create a claim o
 Migrations `0022_ray_target_persistence`, `0023_ray_task_target_binding`, and
 `0024_ray_target_routes`, `0025_ray_worker_target_capabilities`, and
 `0026_ray_task_target_execution_evidence` are additive for a schema-first upgrade from 0.4.0.
-Exact 0.4.0 code ignores their new tables, so a code-only
-rollback retains the durable history while no old process consumes a capability, generation
-claim, or outcome row. Schema reversal is a separate stopped-writer operation. Delete every
+Exact 0.4.0 code ignores those additive tables. This observation applies only before
+the later activation migration; it does not permit code-only rollback after `0035`.
+Schema reversal is a separate stopped-writer operation. Delete every
 outcome and generation claim before reversing `0026`; delete every current capability before
 reversing `0025`; reverse `0024` only after exporting or auditing and deliberately deleting
 every selection, route revision, and route; reverse `0023` only after every binding is deleted;
@@ -225,13 +214,28 @@ requires an immutable deployment/image digest plus explicit shared-memory and Ra
 object-store profiles.
 See [Compiled Graph Compatibility](compiled-graph-compatibility.md).
 
-## Current-cohort guard preparation
+## Current-cohort execution
 
-The private `target/cohort_*` modules prepare the coordinated Beta guard. They do
-not activate target-aware enqueue, claim, retry, recovery, or cancellation.
-Protocol 3 is reserved for this contract; the ordinary producer and worker still
-use protocol 1. Protocol 2 remains dormant. The release's complete compatibility
-and upgrade proof is still required before changing those defaults.
+django-ray 0.5 producers and workers use protocol 3. Core and Jobs claims require
+fresh qualification for the exact current runtime and verified Ray session; Sync
+checks the current package and Python runtime without requiring Ray. Protocol 2
+remains dormant. Legacy task execution entry points refuse before request hydration
+or application import; historical terminal results remain readable without replay.
+
+Migration `0035_activate_current_cohort` is a stopped-writer transition. Stop
+submissions, finish or explicitly resolve all older queued/running/cancelling work,
+verify remote cleanup, retire old writers, and take the coordinated backup before
+applying it. The migration refuses unsupported nonterminal work, active incompatible
+leases, unresolved claims, or open Jobs cleanup obligations. It preserves historical
+rows, closes legacy admission and selects protocol 3 atomically; it does not convert
+old payloads. Subsequent database guards reject new legacy work and incompatible
+active leases. Changing the version constant or reopening legacy admission is not
+an upgrade or rollback procedure. Reversal requires empty current-cohort history;
+after activation, downgrade through the rehearsed stopped-writer backup/restore
+procedure with the matching artifacts and retained encryption keys, not a code-only swap.
+
+The release still requires matching Linux, PostgreSQL, native Ray and preserved-data
+upgrade evidence for the integrated candidate. Source activation alone is not that proof.
 
 A new producer intent records the package version, backend alias, selection policy,
 and a digest of the exact declared endpoint and current trust configuration. This
@@ -239,7 +243,7 @@ finite declaration can be matched before a worker limits its queue query. The
 task's original normalized RuntimeEnv JSON declaration has a separate immutable digest;
 task-specific environments do not create additional worker eligibility keys.
 Neither digest invents a cluster instance from an address or authenticates imported
-source. The intended activation validates intent before preparing inputs and stores
+source. The producer validates intent before preparing inputs and stores
 it with the new execution in one transaction. Migration `0028` adds an immutable,
 deliberately unseeded relation for schema-2 protocol-3 intent; historical protocol-1
 rows receive no inferred identity. This draft schema replaces the earlier unmerged
@@ -257,9 +261,10 @@ claim must bind the actual selected mode and runtime. Subsequent generations mus
 retain that binding. A replacement Ray session, including a new local Ray session
 after worker restart, cannot silently inherit already-bound work. Synchronous
 execution needs its own package/Python binding, without a fabricated Ray session.
-Those claim and synchronous bindings are integration work, not current behavior.
+The current protocol-3 claim path persists these bindings; historical terminal
+rows keep their original protocol and receive no inferred current binding.
 
-Migration `0030` prepares those bindings and a separate per-generation claim ledger.
+Migration `0030` supplies those bindings and a separate per-generation claim ledger.
 It preserves the meaning of schema-1 protocol-2 bindings. Schema-2 protocol-3 bindings
 record the first actual runner and package; only Sync records a local Python tuple
 without Ray fields. Claim facts retain the exact task, attempt, generation, intent,
@@ -275,7 +280,7 @@ not the lifetime of an execution. Resolution digests record independently verifi
 evidence and do not authenticate a caller or prove that application work had no effects.
 Reverse `0030` only in a stopped-writer maintenance window after exporting or auditing
 and deliberately removing every claim and schema-2 binding. No historical claims are
-backfilled, and production claims and lifecycle transitions remain unchanged.
+backfilled; protocol-3 claims and lifecycle transitions use this ledger after `0035`.
 Claim facts use schema 2 to retain each Jobs configuration's own qualification.
 The earlier unmerged schema-1 claim draft is rejected. A database that already
 applied draft `0030` needs a fresh qualification database or its reviewed empty
@@ -318,7 +323,9 @@ do not authorize claims against revision 2. After a lost bootstrap response, a
 manager must read the retained current policy and issue a new challenge for it.
 The private publication path supports Core and Jobs, with one Core target or up to
 64 Jobs targets per lease and no family mixing. Existing standalone target APIs
-remain Core-only. Production workers do not yet call this bootstrap path.
+remain Core-only. Production workers enable newly created verified sessions automatically.
+An existing target's drain remains in force, including after a manager restart or an
+alias/configuration change; a new local Ray session receives its own verification.
 
 Migration `0029` adds an immutable Jobs submission reservation and a one-time
 driver receipt for that exact pending challenge revision. The reservation binds
@@ -357,8 +364,8 @@ Package versions and transport digests do not attest imported source bytes or
 protect interpreter, installation, or setup hooks that execute before the entry
 point. A qualified probe profile remains a prerequisite; ordinary RuntimeEnv
 semantics are unchanged. The manager still owns external deadlines and exact Job
-cleanup. These private helpers have no production manager lifecycle or worker
-activation yet, and a published capability alone does not enable protocol-3 claims.
+cleanup. The worker owns this manager lifecycle; a published capability alone does
+not enable claims without current configuration, endpoint and shared-proof checks.
 Each successful private Jobs publication returns its own endpoint qualification,
 separate from the current shared target proof. If a slower Job observed the same
 membership before a newer compatible shared proof, publication can use that fresh
@@ -403,9 +410,9 @@ fixed preparation path. A `ray://` declaration first creates an isolated Client 
 corroborates its native identity and dashboard endpoint, disconnects, and independently
 observes that same driver as dead. Disconnect alone is insufficient, and a lost discovery
 response keeps the operation quarantined. Native driver IDs never enter the Jobs stop
-endpoint. The ordinary Jobs runner retains its existing address behavior. These adapters
-are not yet called by production workers; complete producer, claim, recovery, cancellation
-and native qualification evidence is still required before enabling protocol 3.
+endpoint. Production workers call these adapters before protocol-3 claims. The final
+release still requires matching deployed producer, recovery and cancellation evidence;
+an adapter test alone does not qualify the integrated application.
 
 The private Jobs parent binds one immutable prepared configuration to its exact lease
 incarnation. Its selected addresses come from the same declaration snapshot as its
@@ -429,7 +436,7 @@ resolved claim history and the original same-target binding, then revalidate und
 the authoritative claim locks. Merely having a binding, or an OPEN or HELD claim,
 cannot authorize another generation.
 
-The reserved transport binds the complete outer request separately from its
+The current transport binds the complete outer request separately from its
 cohort claim. Nested work carries a compact claim and independently derived
 digest, including the original membership digest. Point checks compare the actual
 package, Ray/Python tuple, session, and current schedulable node set before Django
@@ -438,6 +445,24 @@ time; it does not become a deadline for RuntimeEnv setup or a long workflow.
 Unknown observations and mismatches do not establish that earlier application
 work or sibling leaves had no effects. They require fenced disposition and cannot
 be converted into ordinary automatic retry.
+
+The worker captures immutable Core/Jobs preparation inputs on its owning thread,
+then runs filesystem scans and submission snapshots, uploads and remote calls in
+owned callbacks. The parent alone commits prepared requests and dispatch ownership
+to SQL before authorizing submission. It keeps heartbeats and completion polling
+moving while those callbacks are pending, retains late Core handles even after an
+uncertain response, and counts pending callbacks against capacity until actual exit
+and required local cleanup. A cancellation acknowledgment, terminal database row or
+local callback exit is not remote cleanup proof. Database operations and Sync
+execution can still block the parent; this is not a blanket latency guarantee.
+
+The Core connection has a retained creator thread. It publishes local readiness
+without exiting, then runs exact disconnect on that same thread after the owner
+has established probe and task quiescence. This preserves Linux parent-death
+ownership for locally started Ray processes. Disconnect waits for those owned
+processes, and the parent releases the connection ticket only after the creator
+exits. Failed or late callbacks remain held; neither a deadline nor creator exit
+alone proves remote cleanup.
 
 ## Dependency Policy
 

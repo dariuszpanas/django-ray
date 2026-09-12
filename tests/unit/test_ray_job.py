@@ -19,7 +19,6 @@ from django_ray.execution_codec import (
     ExecutionIdentity,
     ExecutionRequest,
     decode_execution_request,
-    encode_execution_request,
 )
 from django_ray.ray_job_protocol import (
     LEGACY_RAY_JOB_SUBMISSION_ID_PREFIX,
@@ -77,6 +76,8 @@ from django_ray.runtime.runtime_env import (
     runtime_env_for_storage,
 )
 from django_ray.workflow.plans import WorkflowPlanMismatchError
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+from tests.protocol_epochs import encode_legacy_execution_request
 
 _RQ2_REQUEST_LOCATOR = (
     base64.urlsafe_b64encode(b'{"schema":"django-ray.unit-test-locator"}')
@@ -103,6 +104,14 @@ def _runner_settings(ray_address: str) -> dict[str, object]:
         "INPUT_STORAGE_BACKEND": "filesystem",
         "INPUT_STORAGE_FILESYSTEM_PATH": str(Path.cwd()),
     }
+
+
+@pytest.fixture
+def historical_execution_epoch(monkeypatch):
+    """Opt in only retained protocol1 runner branches, never current cohort proof."""
+    from tests.protocol_epochs import install_legacy_execution_epoch
+
+    install_legacy_execution_epoch(monkeypatch)
 
 
 class FakeJobClient:
@@ -141,6 +150,55 @@ class FakeJobClient:
         modules = runtime_env.get("py_modules")
         if isinstance(modules, list):
             runtime_env["py_modules"] = [self._package_uri(module) for module in modules]
+
+
+@pytest.mark.parametrize("protocol", [1, 3])
+def test_current_epoch_refuses_generic_jobs_without_cohort_contract(monkeypatch, protocol):
+    from django_ray.execution_protocol import (
+        EXECUTION_PROTOCOL_VERSION,
+        SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    )
+
+    assert EXECUTION_PROTOCOL_VERSION == 3
+    assert SUPPORTED_EXECUTION_PROTOCOL_RANGE.minimum == 3
+    assert SUPPORTED_EXECUTION_PROTOCOL_RANGE.maximum == 3
+    runtime_env = normalize_runtime_env({})
+    task = SimpleNamespace(
+        pk=81,
+        task_id="current-generic-refusal",
+        attempt_number=1,
+        execution_generation=1,
+        execution_protocol_version=protocol,
+        callable_path="must.never.import",
+        args_json="[]",
+        kwargs_json="{}",
+        input_reference=None,
+        runtime_env_profile=runtime_env.profile,
+        runtime_env_json=runtime_env.serialized,
+        runtime_env_hash=runtime_env.digest,
+        ray_target_address="http://selected-dashboard:8265",
+    )
+    runner = RayJobRunner()
+    monkeypatch.setattr(
+        runner, "_get_client", lambda *args: pytest.fail("client before cohort contract")
+    )
+    monkeypatch.setattr(
+        "django_ray.runner.ray_job.prepare_ray_job_request",
+        lambda *args: pytest.fail("storage before cohort contract"),
+    )
+    with pytest.raises(RayJobRequestPreparationError) as caught:
+        runner.submit_durable(task)
+    assert caught.value.classification is RayJobRequestPreparationRejection.INVALID_REQUEST
+
+
+def test_historical_metadata_fixture_does_not_change_current_execution_epoch():
+    from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
+
+    request, serialized, metadata = TestRayJobRequestBinding._request()
+    assert request.execution_protocol_version == 1
+    assert json.loads(serialized)["execution_protocol_version"] == 1
+    assert metadata["django_ray_execution_protocol_version"] == "1"
+    assert EXECUTION_PROTOCOL_VERSION == 3
 
 
 class TestRayJobAddressResolution:
@@ -256,7 +314,7 @@ class TestRayJobRequestBinding:
             runtime_env_plan_identity={},
             compiled_graph_submission_transport="ray-job",
         )
-        serialized = encode_execution_request(request)
+        serialized = encode_legacy_execution_request(request)
         return request, serialized, build_ray_job_request_metadata(request, serialized)
 
     def test_loads_bounded_expectation_from_ray_job_config(self) -> None:
@@ -991,9 +1049,10 @@ class TestRayJobRequestPreparationErrors:
         assert exc_info.value.__cause__ is settings_error
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema", "historical_execution_epoch")
 class TestRayJobRunnerPublicReservation:
-    """The public runner reserves only an exact persisted claimed row."""
+    """Historical protocol1 public reservations at their actual0034 schema."""
 
     @staticmethod
     def _task(*, claimed_by_worker: str | None = "direct-owner"):
@@ -1463,6 +1522,7 @@ class TestRayJobRunnerSubmit:
             ),
         ],
     )
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_maps_typed_request_binding_failure_to_fixed_rejection(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1538,6 +1598,7 @@ class TestRayJobRunnerSubmit:
 
         assert self.storage_events == ["reserve", "release"]
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_rejects_storage_attachment_reference_mismatch(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1586,6 +1647,7 @@ class TestRayJobRunnerSubmit:
         assert handle.ray_address == "ray://selected-cluster:10001"
         assert handle.submitted_at.tzinfo is UTC
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_uses_bounded_request_reference_entrypoint(self, monkeypatch) -> None:
         """The command line carries only an opaque request locator."""
         fake_client = FakeJobClient()
@@ -1682,6 +1744,7 @@ class TestRayJobRunnerSubmit:
             request_locator=prepared.encoded_locator,
         )
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_prepares_and_binds_before_client_or_runtime_upload(
         self,
         monkeypatch,
@@ -1737,6 +1800,7 @@ class TestRayJobRunnerSubmit:
         ]
         assert task.ray_job_request_reference == self.prepared_requests[0].reference
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_oversized_request_is_fixed_before_storage_client_or_upload(
         self,
         monkeypatch,
@@ -1793,6 +1857,7 @@ class TestRayJobRunnerSubmit:
             ),
         ],
     )
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_storage_preparation_failure_is_fixed_and_definite(
         self,
         monkeypatch,
@@ -1836,6 +1901,7 @@ class TestRayJobRunnerSubmit:
         assert self.storage_events == ["reserve", "release"]
         assert task.ray_job_request_reference is None
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_rejects_a_returned_identity_mismatch(self, monkeypatch) -> None:
         alternate_submission_id = (
             f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{'f' * 64}"
@@ -1877,6 +1943,7 @@ class TestRayJobRunnerSubmit:
         assert exc_info.value.__cause__ is None
         assert fake_client.submissions[0]["submission_id"] == expected_id
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_does_not_retain_or_render_an_untrusted_returned_identity(
         self,
         monkeypatch,
@@ -1936,6 +2003,7 @@ class TestRayJobRunnerSubmit:
             assert "private-returned-id" not in str(exc_info.value)
             assert exc_info.value.observed_submission_id is None
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_durable_uses_persisted_opaque_inputs_without_hydration(
         self,
         monkeypatch,
@@ -1973,6 +2041,7 @@ class TestRayJobRunnerSubmit:
         assert request.serialized_kwargs == task_execution.kwargs_json
         assert request.compiled_graph_submission_transport == "ray-job"
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_wraps_only_the_submission_rpc_as_uncertain(self, monkeypatch) -> None:
         submission_error = TimeoutError("response timed out after acceptance")
 
@@ -2008,6 +2077,7 @@ class TestRayJobRunnerSubmit:
         assert exc_info.value.__cause__ is submission_error
         assert fake_client.submissions[0]["submission_id"] == expected_id
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_treats_post_request_snapshot_cleanup_failure_as_uncertain(
         self,
         monkeypatch,
@@ -2051,6 +2121,7 @@ class TestRayJobRunnerSubmit:
         assert exc_info.value.__cause__ is cleanup_error
         assert fake_client.submissions[0]["submission_id"] == expected_id
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_keeps_pre_request_errors_definite(self, monkeypatch) -> None:
         address_error = ConnectionError("selected Ray dashboard is unavailable")
         runner = RayJobRunner()
@@ -2080,6 +2151,7 @@ class TestRayJobRunnerSubmit:
 
         assert exc_info.value is address_error
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_keeps_runtime_env_secrets_out_of_plan_identity_payload(
         self,
         monkeypatch,
@@ -2151,6 +2223,7 @@ class TestRayJobRunnerSubmit:
 
         assert "arbitrary-customer-marker-7cf3" not in str(exc_info.value)
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_keeps_large_runtime_env_identity_out_of_entrypoint(self, monkeypatch) -> None:
         fake_client = FakeJobClient()
         runner = RayJobRunner()
@@ -2179,6 +2252,7 @@ class TestRayJobRunnerSubmit:
         entrypoint = str(fake_client.submissions[0]["entrypoint"])
         assert len(entrypoint.encode("utf-8")) < 32 * 1024
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_uploads_immutable_local_runtime_env_snapshots(
         self,
         monkeypatch,
@@ -2226,6 +2300,7 @@ class TestRayJobRunnerSubmit:
         assert str(submitted_py_modules[0]).startswith("gcs://_ray_pkg_")
         assert len(str(submitted_py_modules[0]).split("_")[-1]) == 20
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_rejects_local_source_mutation_before_job_creation(
         self,
         monkeypatch,
@@ -2266,6 +2341,7 @@ class TestRayJobRunnerSubmit:
 
         assert fake_client.submissions == []
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_transports_external_input_by_reference_only(self, monkeypatch) -> None:
         fake_client = FakeJobClient()
         runner = RayJobRunner()
@@ -2299,6 +2375,7 @@ class TestRayJobRunnerSubmit:
         assert payload["serialized_kwargs"] == "null"
         assert payload["compiled_graph_submission_transport"] == "ray-job"
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_uses_runtime_env_and_configured_ray_address(self, monkeypatch) -> None:
         """Submit should pass configured runtime_env and keep configured ray_address."""
         fake_client = FakeJobClient()
@@ -2339,6 +2416,7 @@ class TestRayJobRunnerSubmit:
         submission = fake_client.submissions[0]
         assert submission["runtime_env"] == {"env_vars": {"MY_ENV": "1"}}
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_decrypts_stored_runtime_env_before_job_submission(
         self,
         monkeypatch,
@@ -2488,6 +2566,7 @@ class TestRayJobRunnerSubmit:
             ("/bounded", _CONTROL_REQUEST_TIMEOUT_SECONDS),
         ]
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_uses_persisted_backend_target(self, monkeypatch) -> None:
         """Each backend alias must submit against its persisted Ray cluster."""
         addresses: list[str | None] = []
@@ -2524,6 +2603,7 @@ class TestRayJobRunnerSubmit:
 
         assert addresses == ["ray://alias-a:10001", "ray://alias-b:10001"]
 
+    @pytest.mark.usefixtures("historical_execution_epoch")
     def test_submit_accepts_legacy_address_without_dedicated_target(self, monkeypatch) -> None:
         addresses: list[str | None] = []
         fake_client = FakeJobClient()

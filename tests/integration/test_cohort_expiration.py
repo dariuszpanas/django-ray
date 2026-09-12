@@ -7,7 +7,7 @@ from threading import Event
 from time import monotonic, sleep
 
 import pytest
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models.query import QuerySet
 
 from django_ray import lifecycle, maintenance
@@ -245,18 +245,21 @@ def test_only_live_exact_current_package_protocol_lease_can_expire(case, mode):
         return
     else:
         case.lease.delete()
-        case.lease = TaskWorkerLease.objects.create(
-            worker_id=case.owner.worker_id,
-            hostname=case.owner.hostname,
-            pid=case.owner.pid,
-            started_at=case.owner.started_at,
-            last_heartbeat_at=case.now,
-            django_ray_version="0.5.0",
-            capability_schema_version=1,
-            legacy_admission_token=None,
-            min_supported_execution_protocol_version=1,
-            max_supported_execution_protocol_version=3,
-        )
+        # Activation rejects an incompatible active incarnation at insertion.
+        # The old identity also cannot expire work after its lease disappears.
+        with pytest.raises(IntegrityError), transaction.atomic():
+            TaskWorkerLease.objects.create(
+                worker_id=case.owner.worker_id,
+                hostname=case.owner.hostname,
+                pid=case.owner.pid,
+                started_at=case.owner.started_at,
+                last_heartbeat_at=case.now,
+                django_ray_version="0.5.0",
+                capability_schema_version=1,
+                legacy_admission_token=None,
+                min_supported_execution_protocol_version=1,
+                max_supported_execution_protocol_version=3,
+            )
     with pytest.raises(RuntimeError):
         _expire(case)
     assert not TaskAttempt.objects.exists()

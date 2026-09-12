@@ -9,6 +9,8 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 
 @pytest.mark.django_db(transaction=True)
 def test_existing_progress_gains_nullable_run_identity_and_reverses() -> None:
@@ -53,4 +55,5 @@ def test_existing_progress_gains_nullable_run_identity_and_reverses() -> None:
         reverted = reverted_execution.objects.get(task_id="workflow-progress-migration")
         assert reverted.progress_data == legacy_progress
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0034_cohort_timeouts")])
+        clear_historical_admission_fixtures()
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])

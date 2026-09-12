@@ -567,6 +567,10 @@ _RETRY_EXECUTION_RESPONSES = {
     409: RetryExecutionOutcomeSchema | RetryExecutionRuntimeEnvConflictSchema,
 }
 _RETRY_EXECUTION_MESSAGES = {
+    TaskRetryRequestStatus.MAINTENANCE_UNAVAILABLE: "Retry admission policy is unavailable.",
+    TaskRetryRequestStatus.MAINTENANCE_PAUSED: "Retry is paused by the admission policy.",
+    TaskRetryRequestStatus.QUARANTINED: "The execution is quarantined against a new attempt.",
+    TaskRetryRequestStatus.CLEANUP_PENDING: "The previous Ray Job still has a cleanup obligation.",
     TaskRetryRequestStatus.ACCEPTED: "A new task attempt was queued.",
     TaskRetryRequestStatus.NOT_RETRYABLE: (
         "The execution is not retryable from its current state."
@@ -663,7 +667,18 @@ def _retry_execution_outcome(
         next_action = "Verify the execution identifier and object authorization."
     elif result.status is TaskRetryRequestStatus.UNSUPPORTED_PROTOCOL:
         next_action = (
-            "Route this execution to a django-ray build that supports its protocol before retrying."
+            "Keep this execution as history. Enqueue a new task under the current "
+            "application configuration, authorization, and idempotency policy."
+        )
+    elif result.status in {
+        TaskRetryRequestStatus.MAINTENANCE_UNAVAILABLE,
+        TaskRetryRequestStatus.MAINTENANCE_PAUSED,
+        TaskRetryRequestStatus.QUARANTINED,
+        TaskRetryRequestStatus.CLEANUP_PENDING,
+    }:
+        next_action = (
+            "Inspect maintenance, quarantine, and Ray Job cleanup diagnostics. "
+            "Retry only after the corresponding blocker has been resolved."
         )
     else:
         next_action = (
@@ -709,8 +724,8 @@ def _cancellation_execution_outcome(
         next_action = "Refresh and re-authorize the current attempt before cancelling."
     elif result.status is TaskCancellationRequestStatus.UNSUPPORTED_PROTOCOL:
         next_action = (
-            "Route this execution to a django-ray build that supports its protocol "
-            "before cancelling."
+            "Keep historical executions unchanged. Resolve any unsupported active work "
+            "through the coordinated upgrade procedure."
         )
     else:
         next_action = "Leave the current execution unchanged and inspect its lifecycle state."

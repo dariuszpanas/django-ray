@@ -45,6 +45,7 @@ from django_ray.target.probe import (
     validate_ray_target_execution_result_semantics,
     verify_ray_target_execution,
 )
+from tests.protocol_epochs import install_legacy_execution_epoch
 from tests.unit.test_target_execution_codec import (
     _NODE_ID,
     _OBSERVED_AT,
@@ -53,6 +54,13 @@ from tests.unit.test_target_execution_codec import (
     _target_completion,
     _target_request,
 )
+
+
+@pytest.fixture(autouse=True)
+def _dormant_transport_epoch(monkeypatch):
+    """The protocol-2 pilot adapter existed only within the released epoch."""
+    install_legacy_execution_epoch(monkeypatch)
+
 
 _CLAIMED_AT = _OBSERVED_AT + timedelta(microseconds=1)
 

@@ -23,7 +23,10 @@ from django.db.models import (
     When,
 )
 
-from django_ray.execution_protocol import LEGACY_EXECUTION_PROTOCOL_VERSION
+from django_ray.execution_protocol import (
+    COHORT_EXECUTION_PROTOCOL_VERSION,
+    LEGACY_EXECUTION_PROTOCOL_VERSION,
+)
 from django_ray.observability import OBSERVABILITY_SCHEMA_VERSION
 from django_ray.runner.leasing import get_lease_duration
 
@@ -321,7 +324,16 @@ def render_prometheus_metrics(
             ),
             protocol_other=Count(
                 "pk",
-                filter=~Q(execution_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION),
+                filter=~Q(
+                    execution_protocol_version__in=(
+                        LEGACY_EXECUTION_PROTOCOL_VERSION,
+                        COHORT_EXECUTION_PROTOCOL_VERSION,
+                    )
+                ),
+            ),
+            protocol_3=Count(
+                "pk",
+                filter=Q(execution_protocol_version=COHORT_EXECUTION_PROTOCOL_VERSION),
             ),
         )
     )
@@ -329,7 +341,7 @@ def render_prometheus_metrics(
     protocol_task_counts = {
         (row["state"], protocol): row[f"protocol_{protocol}"]
         for row in task_rows
-        for protocol in ("1", "other")
+        for protocol in ("1", "3", "other")
     }
     queue_counts = {
         row["queue_name"]: row["count"]
@@ -372,7 +384,7 @@ def render_prometheus_metrics(
                 {"protocol": protocol, "state": str(state)},
                 protocol_task_counts.get((state, protocol), 0),
             )
-            for protocol in ("1", "other")
+            for protocol in ("1", "3", "other")
             for state in TaskState
         ],
     )

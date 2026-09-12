@@ -249,21 +249,18 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
     request.getfixturevalue("django_db_setup")
     django_db_blocker = request.getfixturevalue("django_db_blocker")
 
-    from django_ray.models import LegacyWorkerAdmissionToken, TaskExecutionProtocolPolicy
+    from django_ray.models import TaskExecutionProtocolPolicy
 
     with django_db_blocker.unblock():
-        policy, _ = TaskExecutionProtocolPolicy.objects.get_or_create(
+        TaskExecutionProtocolPolicy.objects.get_or_create(
             singleton_key=1,
             defaults={
                 "schema_version": 1,
-                "active_write_protocol_version": 1,
-                "legacy_worker_admission_enabled": True,
+                "active_write_protocol_version": 3,
+                "legacy_worker_admission_enabled": False,
                 "revision": 1,
             },
         )
-        if policy.legacy_worker_admission_enabled:
-            LegacyWorkerAdmissionToken.objects.get_or_create(singleton_key=1)
-
         # Transactional flush removes migration data. Reuse the exact seed
         # function for isolated tests; production never repairs a missing or
         # incoherent maintenance policy automatically.

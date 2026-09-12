@@ -109,10 +109,12 @@ def publish_initial_workflow(
     node_count: int,
     *,
     case_id: int = 0,
+    execution_protocol_version: int = 3,
 ) -> PublishedWorkflow:
     run_value = node_count * 1_000 + case_id
     run_id = f"00000000-0000-0000-0000-{run_value:012d}"
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=execution_protocol_version,
         task_id=f"workflow-storage-{node_count}-{case_id}",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,

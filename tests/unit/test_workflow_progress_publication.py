@@ -29,6 +29,7 @@ from django_ray.workflow.progress.reads import (
 from django_ray.workflow.progress.summary import (
     deserialize_workflow_progress_summary,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 RUN_ID = "00000000-0000-0000-0000-000000000212"
 FINGERPRINT = "sha256:" + "a" * 64
@@ -397,13 +398,16 @@ def _legacy_snapshot(identity: WorkflowRunIdentity) -> dict[str, Any]:
     return snapshot
 
 
-def _execution() -> tuple[RayTaskExecution, WorkflowRunIdentity]:
+def _execution(
+    *, execution_protocol_version: int = 3
+) -> tuple[RayTaskExecution, WorkflowRunIdentity]:
     selection = PlanEligibility(("dynamic_tasks",), (), 0).select(
         "dynamic_tasks",
         requested_policy="auto",
         reporting_policy="full",
     )
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=execution_protocol_version,
         task_id="workflow-schema-v3-pilot",
         callable_path="tests.unit.test_workflows.run_nested_workflow",
         state=TaskState.RUNNING,
@@ -1487,9 +1491,10 @@ def test_failed_publication_discards_its_pending_candidate(
     assert execution.workflow_progress_summary_json is None
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_stale_and_unpinned_runs_never_stage_topology() -> None:
-    execution, identity = _execution()
+    execution, identity = _execution(execution_protocol_version=1)
     stale_snapshot = _snapshot(identity)
     execution.state = TaskState.SUCCEEDED
     execution.save(update_fields=["state"])

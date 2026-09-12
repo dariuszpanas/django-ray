@@ -103,8 +103,8 @@ def test_postgresql_workflow_poll_guards_diagnostics_before_transfer(
 @pytest.mark.parametrize(
     ("disable_broad_interceptor", "message"),
     [
-        (False, "unrecognized task-row locking SELECT"),
-        (True, "protected application processing boundary"),
+        (False, "unrecognized candidate SELECT"),
+        (True, "protected claim mutation boundary"),
     ],
 )
 def test_production_claim_capture_drift_cannot_mutate_or_process(
@@ -113,14 +113,14 @@ def test_production_claim_capture_drift_cannot_mutate_or_process(
     message: str,
 ) -> None:
     queue_name = f"capture-drift-{disable_broad_interceptor}"
-    execution = RayTaskExecution.objects.create(
+    execution = Command._create_execution(
         task_id=f"capture-drift-task-{disable_broad_interceptor}",
-        callable_path="django_ray.benchmarks.polling_probe",
         queue_name=queue_name,
-        state=TaskState.QUEUED,
-        args_json="[]",
-        kwargs_json="{}",
     )
+    worker = benchmark.WorkerCommand()
+    worker._set_worker_id(f"benchmark-{queue_name}-capture")
+    worker._create_lease(queue_name)
+    cohort = benchmark._BenchmarkCohort.current(queue_name, worker.lease_identity)
     process_mock = Mock()
     monkeypatch.setattr(benchmark, "_is_production_claim_query", lambda _sql: False)
     if disable_broad_interceptor:
@@ -128,13 +128,14 @@ def test_production_claim_capture_drift_cannot_mutate_or_process(
     monkeypatch.setattr(benchmark.WorkerCommand, "process_task", process_mock)
 
     with pytest.raises(CommandError, match=message):
-        Command._capture_production_claim_sql(queue_name=queue_name, query_limit=1)
+        Command._capture_production_claim_sql(queue_name=queue_name, query_limit=1, cohort=cohort)
 
     execution.refresh_from_db()
     assert execution.state == TaskState.QUEUED
     assert execution.claimed_by_worker is None
     assert execution.execution_generation == 0
     process_mock.assert_not_called()
+    Command._delete_exact_leases([cohort.identity])
     assert not TaskWorkerLease.objects.filter(queue_name=queue_name).exists()
 
 
@@ -187,16 +188,16 @@ def test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up() -
         assert all(math.isfinite(value) for key, value in result.items() if key not in {"policy"})
 
     evidence = payload["protocol_predicate_evidence"]
-    assert evidence["schema_version"] == 1
-    assert evidence["method"] == "paired_counterbalanced_production_claim"
+    assert evidence["schema_version"] == 2
+    assert evidence["method"] == "paired_counterbalanced_current_cohort_selection"
     assert evidence["seeded_rows"] == 8
     assert evidence["query_limit"] == 8
     assert evidence["timed_pairs"] == 12
     assert evidence["production_first_pairs"] == 6
     assert evidence["control_first_pairs"] == 6
-    assert evidence["seeded_protocol_version"] == 1
-    assert evidence["protocol_minimum"] == 1
-    assert evidence["protocol_maximum"] == 1
+    assert evidence["seeded_protocol_version"] == 3
+    assert evidence["protocol_minimum"] == 3
+    assert evidence["protocol_maximum"] == 3
     assert evidence["production_claim_sql_shape_verified"] is True
     assert evidence["variant_selection_verified"] is True
     assert len(evidence["paired_delta_samples_ms"]) == evidence["timed_pairs"]
@@ -213,7 +214,7 @@ def test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up() -
         assert math.isfinite(variant["duration_p50_ms"])
         assert math.isfinite(variant["duration_p95_ms"])
         assert "0:limit" in variant["plan"]["node_shape"]
-        assert any(node.endswith(":lock_rows") for node in variant["plan"]["node_shape"])
+        assert not any(node.endswith(":lock_rows") for node in variant["plan"]["node_shape"])
         assert variant["plan"]["actual_rows"] == evidence["query_limit"]
         assert variant["plan"]["actual_loops"] == 1
         assert all(
@@ -232,3 +233,73 @@ def test_production_claim_benchmark_records_repeatable_metrics_and_cleans_up() -
     ).exists()
     assert RayTaskExecution.objects.filter(pk=foreign_protocol_row.pk).exists()
     assert not TaskWorkerLease.objects.filter(worker_id__startswith="benchmark-").exists()
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_current_benchmark_qualifies_before_limit_and_cleanup_preserves_changed_claim(prepared):
+    """Real PG qualification and ledger cleanup, without any Ray execution."""
+    from datetime import UTC, datetime
+
+    queue = "pg-current-benchmark"
+    worker = benchmark.WorkerCommand()
+    worker._set_worker_id("benchmark-pg-current")
+    worker._create_lease(queue)
+    cohort = benchmark._BenchmarkCohort.current(queue, worker.lease_identity)
+    excluded = RayTaskExecution.objects.create(
+        task_id="poll-pg-no-intent",
+        callable_path="unused",
+        queue_name=queue,
+        priority=100,
+    )
+    execution = Command._create_execution(task_id="poll-pg-current", queue_name=queue)
+    batch = cohort.claim(1)
+    assert [item.execution.pk for item in batch] == [execution.pk]
+    record = batch[0].claim
+    assert record.facts.binding.runner_family is benchmark.CohortRunnerFamily.SYNC
+    assert record.facts.binding.sync_python == cohort.runtime.python
+    if prepared:
+        with benchmark.transaction.atomic():
+            benchmark.cohort_claim_storage.prepare_cohort_claim(
+                record.owner,
+                record.claim_id,
+                expected_identity=record.facts.identity,
+                expected_revision=record.revision,
+                request_digest="sha256:" + "a" * 64,
+                now=datetime.now(UTC),
+            )
+        before = benchmark.RayTaskCohortClaim.objects.values().get(pk=record.claim_id)
+        with pytest.raises(benchmark.cohort_claim_storage.CohortClaimStorageError):
+            Command._cleanup_phase_rows(
+                task_prefix="poll-pg-",
+                queue_name=queue,
+                lease_identities=[cohort.identity],
+                claims=list(batch),
+                created_pks=[execution.pk],
+                threads=[],
+            )
+        assert benchmark.RayTaskCohortClaim.objects.values().get(pk=record.claim_id) == before
+        execution.refresh_from_db()
+        assert execution.state == TaskState.RUNNING
+    else:
+        witnessed = []
+
+        def observe(execute, sql, params, many, context):
+            if sql.lstrip().upper().startswith("DELETE") and "django_ray_raytaskcohortclaim" in sql:
+                row = benchmark.RayTaskCohortClaim.objects.get(pk=record.claim_id)
+                execution.refresh_from_db()
+                witnessed.append((row.disposition, row.resolution_kind, execution.state))
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(observe):
+            Command._cleanup_phase_rows(
+                task_prefix="poll-pg-",
+                queue_name=queue,
+                lease_identities=[cohort.identity],
+                claims=list(batch),
+                created_pks=[execution.pk],
+                threads=[],
+            )
+        assert witnessed == [("RESOLVED", "verified_not_invoked", TaskState.CANCELLED)]
+        assert not RayTaskExecution.objects.filter(pk=execution.pk).exists()
+    excluded.refresh_from_db()
+    assert excluded.state == TaskState.QUEUED and excluded.execution_generation == 0

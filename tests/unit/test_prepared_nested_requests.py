@@ -7,13 +7,27 @@ from dataclasses import replace
 import pytest
 
 from django_ray import execution_codec as codec
+from django_ray.target.cohort_contract import (
+    derive_cohort_leaf_contract,
+    encode_cohort_leaf_contract,
+)
+from tests.unit.test_cohort_contract import contract
 from tests.unit.test_execution_codec import _workflow_nested_request
+
+
+def _current_workflow_request(identity):
+    parent = replace(contract(), identity=identity)
+    return replace(
+        _workflow_nested_request(identity),
+        execution_protocol_version=3,
+        cohort_leaf_contract_json=encode_cohort_leaf_contract(derive_cohort_leaf_contract(parent)),
+    )
 
 
 def _request(kind=codec.NestedExecutionBoundaryKind.DISTRIBUTED_MAP):
     identity = codec.ExecutionIdentity(41, 'task-雪-"item_index":0', 2, 7)
     return replace(
-        _workflow_nested_request(identity),
+        _current_workflow_request(identity),
         boundary_kind=kind,
         boundary_identity=codec.NestedDistributedBoundaryIdentity("operation-41", 0),
         callable_binding_kind=codec.NestedCallableBindingKind.DIGEST,
@@ -98,7 +112,7 @@ def test_preparation_retains_full_prototype_validation() -> None:
 def test_prepared_encoder_rejects_other_callable_boundaries(workflow: bool) -> None:
     request = _request()
     if workflow:
-        request = _workflow_nested_request(request.outer_identity)
+        request = _current_workflow_request(request.outer_identity)
     else:
         request = replace(
             request,

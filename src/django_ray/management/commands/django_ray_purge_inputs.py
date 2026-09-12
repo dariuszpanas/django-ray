@@ -7,14 +7,16 @@ from datetime import timedelta
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.db import transaction
-from django.db.models import Q
+from django.db import router, transaction
+from django.db.models import JSONField, Q
+from django.db.models.functions import Cast
 from django.utils import timezone
 
 from django_ray.management.diagnostics import render_exception_type_label
 from django_ray.models import (
     InputPayloadKind,
     InputPayloadState,
+    RayCohortJobCleanup,
     RayTaskExecution,
     TaskInputPayload,
     TaskState,
@@ -57,21 +59,26 @@ class Command(BaseCommand):
 
         delete = bool(options["delete"])
         cutoff = timezone.now() - timedelta(days=retention_days)
+        using = router.db_for_write(TaskInputPayload)
         references = list(
-            TaskInputPayload.objects.filter(
+            TaskInputPayload.objects.using(using)
+            .filter(
                 state=InputPayloadState.ACTIVE,
                 last_used_at__lte=cutoff,
-            ).values_list("reference", flat=True)
+            )
+            .values_list("reference", flat=True)
         )
 
         eligible = 0
         purged = 0
         failures = 0
+        cleanup_blocked = 0
         for reference in references:
             outcome = self._process_reference(
                 str(reference),
                 cutoff=cutoff,
                 delete=delete,
+                using=using,
             )
             if outcome == "eligible":
                 eligible += 1
@@ -81,18 +88,32 @@ class Command(BaseCommand):
             elif outcome == "failed":
                 eligible += 1
                 failures += 1
+            elif outcome == "cleanup-pending":
+                cleanup_blocked += 1
 
         mode = "delete" if delete else "dry-run"
         self.stdout.write(
             f"Input payload purge {mode}: {eligible} eligible, {purged} purged, {failures} failed."
         )
+        if cleanup_blocked:
+            self.stdout.write(
+                f"Retained {cleanup_blocked} payload(s) for pending Ray Job cleanup. "
+                "An uninspectable OPEN obligation retains all Ray Job request payloads "
+                "in this database until its cleanup is resolved."
+            )
         if failures:
             raise CommandError(f"Failed to purge {failures} input payload(s); see cleanup_error")
 
-    def _process_reference(self, reference: str, *, cutoff: Any, delete: bool) -> str:
-        with transaction.atomic():
+    def _process_reference(
+        self, reference: str, *, cutoff: Any, delete: bool, using: str | None = None
+    ) -> str:
+        # Registry, execution and cleanup observations must share the write
+        # database: a lagging replica cannot establish permission to delete.
+        using = using or router.db_for_write(TaskInputPayload)
+        with transaction.atomic(using=using):
             payload = (
-                TaskInputPayload.objects.select_for_update()
+                TaskInputPayload.objects.using(using)
+                .select_for_update()
                 .filter(reference=reference, state=InputPayloadState.ACTIVE)
                 .first()
             )
@@ -100,7 +121,8 @@ class Command(BaseCommand):
                 return "skipped"
 
             executions = list(
-                RayTaskExecution.objects.select_for_update()
+                RayTaskExecution.objects.using(using)
+                .select_for_update()
                 .filter(Q(input_reference=reference) | Q(ray_job_request_reference=reference))
                 .only(
                     "pk",
@@ -111,6 +133,21 @@ class Command(BaseCommand):
                 )
                 .order_by("pk")
             )
+            pending = RayCohortJobCleanup.objects.using(using).filter(state="OPEN")
+            if pending.filter(execution_id__in=[row.pk for row in executions]).exists():
+                return "cleanup-pending"
+            if payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST:
+                # The original immutable reference survives retry clearing the
+                # task's mutable submission handles. Missing attribution must
+                # retain requests; it cannot identify a safe object to delete.
+                if pending.filter(expectation_json__isnull=True).exists():
+                    return "cleanup-pending"
+                if (
+                    pending.alias(_expectation=Cast("expectation_json", JSONField()))
+                    .filter(_expectation__request_reference=reference)
+                    .exists()
+                ):
+                    return "cleanup-pending"
             if not self._all_references_are_old_and_terminal(
                 executions,
                 reference=reference,
@@ -132,7 +169,7 @@ class Command(BaseCommand):
                 delete_input_reference(reference)
             except Exception as error:
                 payload.cleanup_error = self._format_cleanup_error(error)
-                payload.save(update_fields=["cleanup_error"])
+                payload.save(update_fields=["cleanup_error"], using=using)
                 self.stderr.write(
                     "Failed to purge input payload "
                     f"reference_sha256={self._reference_fingerprint(reference)}: "
@@ -143,7 +180,7 @@ class Command(BaseCommand):
             payload.state = InputPayloadState.PURGED
             payload.purged_at = timezone.now()
             payload.cleanup_error = ""
-            payload.save(update_fields=["state", "purged_at", "cleanup_error"])
+            payload.save(update_fields=["state", "purged_at", "cleanup_error"], using=using)
             self.stdout.write(
                 self.style.SUCCESS(
                     "Purged input payload "

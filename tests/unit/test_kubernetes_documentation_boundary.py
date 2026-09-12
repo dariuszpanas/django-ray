@@ -288,6 +288,8 @@ def test_task_target_binding_has_only_reviewed_cohort_consumers() -> None:
     }
 
     assert references == {
+        "src/django_ray/lifecycle.py",
+        "src/django_ray/management/commands/django_ray_benchmark_polling.py",
         "src/django_ray/migrations/0023_ray_task_target_binding.py",
         "src/django_ray/migrations/0024_ray_target_routes.py",
         "src/django_ray/migrations/0026_ray_task_target_execution_evidence.py",
@@ -447,6 +449,7 @@ def test_worker_target_capability_has_only_reviewed_cohort_consumers() -> None:
             "src/django_ray/runner/cohort_timeout.py",
         },
         "resolve_cohort_claim": {
+            "src/django_ray/management/commands/django_ray_benchmark_polling.py",
             "src/django_ray/runner/cohort_cancellation.py",
             "src/django_ray/runner/cohort_completion.py",
         },

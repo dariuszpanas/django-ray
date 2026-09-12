@@ -1,11 +1,118 @@
 """Public runner receipt and owned-cleanup contracts without external processes."""
 
+import hashlib
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from qualification.application import run_chainsaw as runner
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        "old-pod",
+        "old-job",
+        "wrong-owner",
+        "restart",
+        "wrong-image",
+        "dead-manager",
+        "history",
+        "receipt",
+        "session",
+        "incarnation",
+    ],
+)
+def test_transition_correlates_reaping_new_job_and_exact_candidate_manager(failure):
+    now = datetime.now(UTC)
+    image = "example/core@sha256:" + "a" * 64
+    before = receipt("application_core")
+    old = {
+        "before_core_sha256": hashlib.sha256(before).hexdigest(),
+        "manager": {
+            "worker_id": "old",
+            "hostname": "django-manager-old",
+            "started_at": (now - timedelta(seconds=30)).isoformat(),
+        },
+        "cleanup_confirmed_at": (now - timedelta(seconds=10)).isoformat(),
+        "cluster_session": "old",
+    }
+    raw = json.dumps(old).encode()
+    new = {
+        "previous_retirement_sha256": hashlib.sha256(raw).hexdigest(),
+        "original_history_preserved": True,
+        "cluster_session": "new",
+        "manager": {
+            "worker_id": "new",
+            "hostname": "django-manager-new",
+            "started_at": (now - timedelta(seconds=2)).isoformat(),
+        },
+    }
+    job = {
+        "metadata": {
+            "name": "django-manager",
+            "uid": "new-job",
+            "creationTimestamp": (now - timedelta(seconds=3)).isoformat(),
+        },
+        "spec": {"backoffLimit": 0, "template": {"spec": {"restartPolicy": "Never"}}},
+    }
+    pod = {
+        "metadata": {
+            "name": "django-manager-new",
+            "uid": "new-pod",
+            "labels": {"app": "django-manager"},
+            "ownerReferences": [
+                {"controller": True, "name": "django-manager", "uid": "new-job", "kind": "Job"}
+            ],
+        },
+        "spec": {"containers": [{"name": "manager", "image": image}]},
+        "status": {
+            "containerStatuses": [
+                {
+                    "name": "manager",
+                    "restartCount": 0,
+                    "imageID": "containerd://" + image,
+                    "state": {"running": {}},
+                }
+            ]
+        },
+    }
+    pods = [pod]
+    if failure == "old-pod":
+        pods.append({"metadata": {"name": "django-manager-old"}})
+    if failure == "old-job":
+        job["metadata"]["creationTimestamp"] = (now - timedelta(seconds=35)).isoformat()
+    if failure == "wrong-owner":
+        pod["metadata"]["ownerReferences"][0]["uid"] = "another"
+    if failure == "restart":
+        pod["status"]["containerStatuses"][0]["restartCount"] = 1
+    if failure == "wrong-image":
+        pod["status"]["containerStatuses"][0]["imageID"] = "wrong"
+    if failure == "dead-manager":
+        pod["status"]["containerStatuses"][0]["state"] = {"terminated": {"exitCode": 0}}
+    if failure == "history":
+        new["original_history_preserved"] = False
+    if failure == "receipt":
+        new["previous_retirement_sha256"] = "wrong"
+    if failure == "session":
+        new["cluster_session"] = "old"
+    if failure == "incarnation":
+        new["manager"]["worker_id"] = "old"
+    arguments = {
+        "before_core": before,
+        "retirement": raw,
+        "after_core": json.dumps({"replacement": new}).encode(),
+    }
+    if failure:
+        with pytest.raises(ValueError):
+            runner.verify_manager_transition(pods, job, image, **arguments)
+    else:
+        result = runner.verify_manager_transition(pods, job, image, **arguments)
+        assert result["original_manager_reaped"] is True
+        assert result["complete_application_gate"] is False
 
 
 def receipt(layer="application_setup", **changes):

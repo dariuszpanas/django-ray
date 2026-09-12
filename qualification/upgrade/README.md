@@ -17,21 +17,29 @@ outcomes were produced by real remote execution.
 
 1. Read-only inventory observes two nonterminal tasks and an active lease. It
    verifies the database is unchanged; that state must block a real upgrade.
-2. The released lifecycle cancels the queued fixture and records the explicitly
+2. Back up that blocked snapshot and restore it into an independent database.
+   The candidate applies migrations through `0034` there, then attempts `0035`. The
+   activation must refuse the old queued/running work and leave every original
+   field, the protocol 1 policy and the legacy admission token unchanged. The
+   source database is never opened by the candidate during this negative phase;
+   its blocked backup digest must still match after the entire rehearsal.
+3. The released lifecycle cancels the queued fixture and records the explicitly
    synthetic uncertain fixture as LOST without retry. Its synthetic lease is
    stopped. This is fixture preparation, **not deployed drain evidence**.
-3. Back up the settled database and all fixture artifacts. SQLite uses its native
+4. Back up the settled database and all fixture artifacts. SQLite uses its native
    backup API; PostgreSQL uses `pg_dump` with a separate socket-only database.
-4. Restore into an independent database and artifact directory. A fresh released
+5. Restore into an independent database and artifact directory. A fresh released
    process compares every original model field and reads the actual filesystem
    input and result through released storage APIs.
-5. The candidate migrates that restored database. It compares all historical
+6. The candidate migrates that restored database. It compares all historical
    fields, reads input/result artifacts, and proves historical result reads do
    not import the removed callable or let the historical Task enqueue work.
    Temporarily missing and corrupt result files are rejected by the storage API;
    the original bytes are restored and the complete artifact digest must match.
-6. Enqueue one current task without starting a worker.
-7. Restore the original backup into a second independent database and read it
+7. Enqueue one current protocol 3 task and read its persisted immutable intent
+   back against the package, configured declaration and normalized RuntimeEnv
+   snapshot. No worker starts and the application callable must not execute.
+8. Restore the settled backup into another independent database and read it
    with the old version. The candidate-only write is absent: restoring this
    backup after new writes would lose those writes. The rehearsal never replaces
    the database that received the candidate write.
@@ -131,15 +139,17 @@ Linux CI checkpoint and exact-source application/release evidence remain require
 Mixed-version running cohorts, live ObjectRef migration and two-cluster handoff
 are outside the coordinated Beta commitment.
 
-## Remaining execution-retirement inventory
+## Separate runtime preservation boundaries
 
-The database fixture deliberately does not remove these current paths:
+The current runtime closes the old generic execution entries when protocol 3 is
+active. This database fixture does not exercise their remote rejection or the
+following preservation boundaries:
 
 | Boundary | Current source to audit in the retirement change |
 | --- | --- |
-| Old Ray Job payload execution | `src/django_ray/runtime/entrypoint.py`, `_execute_legacy_payload` |
-| Positional unversioned remote invocation | `src/django_ray/runtime/remote.py` |
-| Non-strict Job failure/log fallback | `src/django_ray/management/commands/django_ray_worker.py`, legacy `get_logs` path; `src/django_ray/runner/ray_job.py` |
+| Old Ray Job payload refusal before invocation | `src/django_ray/runtime/entrypoint.py`, `_execute_legacy_payload` |
+| Positional unversioned remote refusal | `src/django_ray/runtime/remote.py` |
+| Exact current Job completion and retained uncertainty | `src/django_ray/management/commands/django_ray_worker.py`, cohort completion/control paths; `src/django_ray/runner/ray_job.py` |
 | Strict request-family discrimination | `src/django_ray/ray_job_protocol.py`, rq1/rq2 classification |
 | Input artifact purgers and reference readers | `src/django_ray/input_storage.py`, `src/django_ray/ray_job_request_storage.py` and their cleanup commands |
 

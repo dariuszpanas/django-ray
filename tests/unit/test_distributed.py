@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import pickle
 import time
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -16,12 +17,15 @@ from django_ray.execution_codec import (
     NestedExecutionRequestRejected,
     NestedExecutionRequestRejection,
     decode_execution_completion,
+    decode_nested_execution_request,
 )
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.runtime import distributed, entrypoint
-from django_ray.runtime.context import durable_task_execution, get_current_task_context
+from django_ray.runtime.context import get_current_task_context
 from django_ray.runtime.runtime_env import normalize_runtime_env
 from django_ray.workflow.plans import runtime_env_plan_identity
 from tests.local_ray import init_local_ray
+from tests.protocol_epochs import cohort_sender_context, encode_legacy_nested_execution_request
 
 
 # Module-level functions for Ray tests (must be picklable)
@@ -131,15 +135,11 @@ def _strict_runtime_env_identity() -> dict[str, Any]:
 
 
 def _strict_execution_context():
-    return durable_task_execution(
-        73,
-        task_id="task-73",
-        execution_protocol_version=1,
-        attempt_number=2,
-        execution_generation=5,
-        runtime_env_plan_identity=_strict_runtime_env_identity(),
-        strict_execution_request=True,
-    )
+    import ray
+
+    from tests.native_cohort import execution_context, observed_contract
+
+    return execution_context(observed_contract(ray, ExecutionIdentity(73, "task-73", 2, 5)))
 
 
 def _strict_map_controls(
@@ -151,6 +151,44 @@ def _strict_map_controls(
         )
         assert operation is not None
         return distributed._nested_distributed_request(operation, pickled_func, 0)
+
+
+def _mismatched_protocol_request(serialized: str) -> str:
+    """Send a canonical released envelope to an unchanged current3 receiver.
+
+    Merely changing epoch3's version retains its cohort-only field and tests
+    malformed shape instead of the independent protocol compatibility fence.
+    """
+    current = decode_nested_execution_request(
+        serialized, supported_protocols=ExecutionProtocolRange(3, 3)
+    )
+    return encode_legacy_nested_execution_request(
+        replace(current, execution_protocol_version=1, cohort_leaf_contract_json=None)
+    )
+
+
+def test_native_protocol_mismatch_fixture_rejects_before_application(monkeypatch) -> None:
+    pickled_func = pickle.dumps(_square)
+    with cohort_sender_context():
+        operation = distributed._strict_nested_operation(
+            NestedExecutionBoundaryKind.DISTRIBUTED_MAP
+        )
+        assert operation is not None
+        controls = distributed._nested_distributed_request(operation, pickled_func, 0)
+    serialized = _mismatched_protocol_request(controls[0])
+    released = decode_nested_execution_request(
+        serialized, supported_protocols=ExecutionProtocolRange(1, 1)
+    )
+    assert released.execution_protocol_version == 1 and released.cohort_leaf_contract_json is None
+    assert json.loads(controls[0])["execution_protocol_version"] == controls[5] == 3
+    events = []
+    monkeypatch.setattr(distributed, "_bootstrap_django_if_needed", lambda: events.append("setup"))
+    monkeypatch.setattr(pickle, "loads", lambda _value: events.append("unpickle"))
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        distributed._parallel_map_remote(pickled_func, 2, {}, serialized, *controls[1:])
+    assert caught.value.classification is NestedExecutionRequestRejection.PROTOCOL_MISMATCH
+    assert caught.value.retryable is False
+    assert events == []
 
 
 class TestDistributedUtilities:
@@ -454,7 +492,7 @@ class TestDistributedWithRay:
                 "task_id": "task-73",
                 "attempt_number": 2,
                 "execution_generation": 5,
-                "execution_protocol_version": 1,
+                "execution_protocol_version": 3,
                 "runtime_env_plan_identity": expected_runtime_env,
                 "compiled_graph_submission_transport": "direct-ray-core",
                 "strict_execution_request": True,
@@ -481,14 +519,7 @@ class TestDistributedWithRay:
         controls = _strict_map_controls(pickled_func)
         serialized = controls[0]
         if tamper == "protocol":
-            value = json.loads(serialized)
-            value["execution_protocol_version"] += 1
-            serialized = json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
+            serialized = _mismatched_protocol_request(serialized)
             submitted_callable = pickled_func
         else:
             submitted_callable = pickle.dumps(_square)
@@ -538,9 +569,17 @@ def test_nested_rejection_reaches_outer_enriched_completion(
         attempt_number=2,
         execution_generation=5,
     )
-    runtime_env_identity = _strict_runtime_env_identity()
     counter_name = "strict-distributed-entrypoint-counter"
     counter = ray_cluster.remote(_InvocationCounter).options(name=counter_name).remote()
+    from django_ray.runtime.cohort_execution import execute_cohort_request
+    from django_ray.target.cohort_transport import decode_cohort_execution_result
+    from tests.native_cohort import observed_contract, prepared_execution
+
+    prepared = prepared_execution(
+        observed_contract(ray_cluster, identity),
+        "tests.unit.test_distributed._strict_entrypoint_parallel_map",
+        json.dumps([counter_name]),
+    )
     original_nested_request = distributed._nested_distributed_request
     monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
 
@@ -554,38 +593,30 @@ def test_nested_rejection_reaches_outer_enriched_completion(
             pickled_func,
             item_index,
         )
-        request = json.loads(serialized)
-        request["execution_protocol_version"] += 1
         return (
-            json.dumps(
-                request,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
+            _mismatched_protocol_request(serialized),
             *expected_controls,
         )
 
     monkeypatch.setattr(distributed, "_nested_distributed_request", tamper_nested_protocol)
     try:
-        encoded = entrypoint.execute_task(
-            "tests.unit.test_distributed._strict_entrypoint_parallel_map",
-            json.dumps([counter_name]),
-            "{}",
-            task_execution_pk=identity.task_execution_pk,
-            task_id=identity.task_id,
-            attempt_number=identity.attempt_number,
-            execution_generation=identity.execution_generation,
-            runtime_env_plan_identity=runtime_env_identity,
-            ray_job_driver=False,
-            _completion_identity=identity,
-            _execution_protocol_version=1,
-            _strict_execution_request=True,
+        encoded = execute_cohort_request(
+            prepared.request_json,
+            expected_identity=identity,
+            expected_request_digest=prepared.request_digest,
+            expected_cohort_contract_digest=prepared.contract_digest,
         )
-        decoded = decode_execution_completion(
+        wrapped = decode_cohort_execution_result(
             encoded,
             expected_identity=identity,
-            expected_execution_protocol_version=1,
+            expected_request_digest=prepared.request_digest,
+            expected_cohort_contract_digest=prepared.contract_digest,
+        )
+        assert wrapped.refusal is None and wrapped.completion_json is not None
+        decoded = decode_execution_completion(
+            wrapped.completion_json,
+            expected_identity=identity,
+            expected_execution_protocol_version=3,
         )
         completion = decoded.completion
 

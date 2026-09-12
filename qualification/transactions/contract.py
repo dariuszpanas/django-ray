@@ -82,8 +82,18 @@ def validate_probe(value, *, expected_module):
                 )
             )
             require(observations["writer_pid"] != observations["observer_pid"])
-            require(observations["before"] == [0, 0])
-            require(observations["after"] == ([1, 1] if name.endswith("[True]") else [0, 0]))
+            # The fixture observes execution, application receipt and cohort
+            # intent on the same independent connection, in that order.
+            for phase in ("before", "after"):
+                counts = observations[phase]
+                require(
+                    type(counts) is list
+                    and len(counts) == 3
+                    and all(type(count) is int for count in counts)
+                )
+            require(observations["before"] == [0, 0, 0])
+            committed = [1, 1, int(value["execution_protocol_version"] == 3)]
+            require(observations["after"] == (committed if name.endswith("[True]") else [0, 0, 0]))
         else:
             require(observations == {})
     return value

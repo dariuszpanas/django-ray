@@ -13,6 +13,7 @@ from django.test.utils import CaptureQueriesContext
 
 import django_ray.workflow.progress.reads as reads
 import django_ray.workflow.progress.storage as storage
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.lifecycle import succeed_task
 from django_ray.models import (
     RayTaskExecution,
@@ -56,6 +57,7 @@ from django_ray.workflow.progress.storage import (
     stage_workflow_progress_topology,
 )
 from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_storage_helpers import (
     PublishedWorkflow,
     publish_initial_workflow,
@@ -166,10 +168,12 @@ def _publish_workflow_with_edges(
     edge_count: int,
     *,
     case_id: int,
+    execution_protocol_version: int = 3,
 ) -> PublishedWorkflow:
     run_value = node_count * 100_000 + edge_count + case_id
     run_id = f"00000000-0000-0000-0000-{run_value:012d}"
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=execution_protocol_version,
         task_id=f"workflow-read-{node_count}-{edge_count}-{case_id}",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
@@ -223,12 +227,14 @@ def _publish_with_legacy_terminal_redaction(
     monkeypatch: pytest.MonkeyPatch,
     *,
     case_id: int,
+    execution_protocol_version: int = 3,
     nodes: list[dict[str, Any]],
     edges: list[dict[str, str]],
     details: list[dict[str, Any]],
 ) -> PublishedWorkflow:
     """Prepare protocol-v1 bytes using the pre-terminal-normalization policy."""
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=execution_protocol_version,
         task_id=f"workflow-legacy-terminal-{case_id}",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
@@ -279,6 +285,7 @@ def _legacy_ansi_workflow(
     monkeypatch: pytest.MonkeyPatch,
     *,
     case_id: int,
+    execution_protocol_version: int = 3,
 ) -> PublishedWorkflow:
     first_id = workflow_node_id(0)
     second_id = workflow_node_id(1)
@@ -309,6 +316,7 @@ def _legacy_ansi_workflow(
     return _publish_with_legacy_terminal_redaction(
         monkeypatch,
         case_id=case_id,
+        execution_protocol_version=execution_protocol_version,
         nodes=[first_node, workflow_node(second_id)],
         edges=[{"source": first_id, "target": second_id}],
         details=[first_detail, workflow_detail(second_id)],
@@ -321,6 +329,7 @@ def _archive_workflow_attempt(published: PublishedWorkflow, *, next_run: int) ->
     assert summary is not None
     TaskAttempt.objects.create(
         execution=published.execution,
+        execution_protocol_version=published.execution.execution_protocol_version,
         attempt_number=1,
         state=TaskState.SUCCEEDED,
         workflow_progress_summary_json=summary,
@@ -649,12 +658,15 @@ def test_terminal_full_selection_without_v3_publication_is_missing() -> None:
     assert missing.value.code is WorkflowProgressReadErrorCode.MISSING
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_disabled_selection_query_is_fenced_against_a_new_workflow_run(
     monkeypatch,
 ) -> None:
     old_run_id = "00000000-0000-0000-0000-000000127230"
     new_run_id = "00000000-0000-0000-0000-000000127231"
     execution = RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id="selection-race",
         callable_path="tests.racing.workflow",
         state=TaskState.RUNNING,
@@ -745,12 +757,15 @@ def test_legacy_summary_clamps_untrusted_primitives_and_bounds_the_response() ->
     assert len(_wire_bytes(response)) <= WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_retained_attempt_reads_authorize_the_owner_after_current_task_advances() -> None:
-    published = publish_initial_workflow(3, case_id=127_008)
+    published = publish_initial_workflow(3, execution_protocol_version=1, case_id=127_008)
     published.execution.refresh_from_db()
     terminal_summary = published.execution.workflow_progress_summary_json
     assert terminal_summary is not None
     TaskAttempt.objects.create(
+        execution_protocol_version=1,
         execution=published.execution,
         attempt_number=1,
         state=TaskState.SUCCEEDED,
@@ -790,10 +805,13 @@ def test_retained_attempt_reads_authorize_the_owner_after_current_task_advances(
     assert calls == [published.execution.pk, published.execution.pk]
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_archived_attempt_summary_uses_one_bounded_attempt_projection() -> None:
-    published = publish_initial_workflow(1, case_id=127_133)
+    published = publish_initial_workflow(1, execution_protocol_version=1, case_id=127_133)
     terminal_summary = _stored_summary(published.execution)
     TaskAttempt.objects.create(
+        execution_protocol_version=1,
         execution=published.execution,
         attempt_number=1,
         state=TaskState.SUCCEEDED,
@@ -1317,12 +1335,15 @@ def test_cursor_rejects_invalid_bound_identity_revision_and_seen_shapes() -> Non
             pytest.fail(f"cursor accepted invalid bound fields: {update!r}")
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize("collection", ["detail", "topology"])
 def test_expired_cursor_preserves_its_original_public_run_and_publication(
     collection: str,
 ) -> None:
     published = publish_initial_workflow(
         101,
+        execution_protocol_version=1,
         case_id=127_127 if collection == "detail" else 127_128,
     )
     if collection == "detail":
@@ -1778,8 +1799,10 @@ def test_current_summary_must_match_the_current_run_generation() -> None:
     )
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_invalid_persisted_current_attempt_fails_closed() -> None:
-    published = publish_initial_workflow(1, case_id=127_2021)
+    published = publish_initial_workflow(1, execution_protocol_version=1, case_id=127_2021)
     RayTaskExecution.objects.filter(pk=published.execution.pk).update(attempt_number=0)
     published.execution.refresh_from_db()
 
@@ -2726,12 +2749,14 @@ def test_public_detail_exposes_only_normalized_metric_and_resource_keys() -> Non
     assert "\x1b" not in repr(node)
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
 def test_authenticated_legacy_ansi_records_are_normalized_only_for_presentation(
     monkeypatch: pytest.MonkeyPatch,
     archived: bool,
 ) -> None:
-    published = _legacy_ansi_workflow(monkeypatch, case_id=127_251)
+    published = _legacy_ansi_workflow(monkeypatch, execution_protocol_version=1, case_id=127_251)
     node_page = WorkflowProgressTopologyPage.objects.get(
         run_storage__execution=published.execution,
         collection="NODE",
@@ -2789,6 +2814,8 @@ def test_authenticated_legacy_ansi_records_are_normalized_only_for_presentation(
     assert detail_row.digest == original_detail_digest
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
 def test_authenticated_records_follow_new_redaction_policy_only_in_presentation(
     monkeypatch: pytest.MonkeyPatch,
@@ -2830,6 +2857,7 @@ def test_authenticated_records_follow_new_redaction_policy_only_in_presentation(
     }
     published = _publish_with_legacy_terminal_redaction(
         monkeypatch,
+        execution_protocol_version=1,
         case_id=127_259,
         nodes=[node],
         edges=[],
@@ -2886,6 +2914,8 @@ def test_authenticated_records_follow_new_redaction_policy_only_in_presentation(
     assert detail_row.digest == original_detail_digest
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
 @pytest.mark.parametrize("surface", ["node", "edge", "detail"])
 def test_legacy_identity_that_normalizes_is_rejected_without_remapping(
@@ -2897,6 +2927,7 @@ def test_legacy_identity_that_normalizes_is_rejected_without_remapping(
     safe_id = "node-source"
     published = _publish_with_legacy_terminal_redaction(
         monkeypatch,
+        execution_protocol_version=1,
         case_id=127_253,
         nodes=[workflow_node(unsafe_id), workflow_node(safe_id)],
         edges=[{"source": unsafe_id, "target": safe_id}],
@@ -2925,6 +2956,8 @@ def test_legacy_identity_that_normalizes_is_rejected_without_remapping(
     assert _error_code(operations[surface]) is WorkflowProgressReadErrorCode.CORRUPT
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
 @pytest.mark.parametrize("surface", ["topology", "detail"])
 def test_new_redaction_policy_cannot_remap_an_authenticated_identity(
@@ -2936,6 +2969,7 @@ def test_new_redaction_policy_cannot_remap_an_authenticated_identity(
     node_id = "newly-sensitive-node-identity"
     published = _publish_with_legacy_terminal_redaction(
         monkeypatch,
+        execution_protocol_version=1,
         case_id=127_261,
         nodes=[workflow_node(node_id)],
         edges=[],
@@ -2963,6 +2997,8 @@ def test_new_redaction_policy_cannot_remap_an_authenticated_identity(
     assert _error_code(operation) is WorkflowProgressReadErrorCode.CORRUPT
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
 @pytest.mark.parametrize("surface", ["topology", "detail"])
 def test_legacy_display_key_collisions_fail_closed(
@@ -2987,6 +3023,7 @@ def test_legacy_display_key_collisions_fail_closed(
     }
     published = _publish_with_legacy_terminal_redaction(
         monkeypatch,
+        execution_protocol_version=1,
         case_id=127_255,
         nodes=[node],
         edges=[],
@@ -3138,6 +3175,8 @@ def test_recomputed_topology_digest_cannot_authenticate_an_oversized_label() -> 
         )
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize("archived", [False, True], ids=["current", "archived"])
 @pytest.mark.parametrize("surface", ["topology", "detail"])
 def test_legacy_payload_digest_authenticates_original_bytes_before_presentation(
@@ -3145,7 +3184,7 @@ def test_legacy_payload_digest_authenticates_original_bytes_before_presentation(
     archived: bool,
     surface: str,
 ) -> None:
-    published = _legacy_ansi_workflow(monkeypatch, case_id=127_257)
+    published = _legacy_ansi_workflow(monkeypatch, execution_protocol_version=1, case_id=127_257)
     attempt_number = _archive_workflow_attempt(published, next_run=127_258) if archived else None
     if surface == "topology":
         row = WorkflowProgressTopologyPage.objects.get(
@@ -3319,11 +3358,14 @@ def test_single_node_rejects_a_row_when_authenticated_epoch_count_is_zero() -> N
     )
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_lifecycle_success_keeps_preterminal_retained_detail_readable() -> None:
-    published = publish_initial_workflow(1, case_id=127_241)
+    published = publish_initial_workflow(1, execution_protocol_version=1, case_id=127_241)
 
     assert succeed_task(
         published.execution,
+        supported_protocols=ExecutionProtocolRange(1, 1),
         result_data='{"ok":true}',
         result_reference=None,
     )

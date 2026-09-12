@@ -271,6 +271,15 @@ def execute_django_task_remote(
     _target_execution_transport: bool = False,
 ) -> str:
     """Execute one durable task through the strict or released-v1 boundary."""
+    from django_ray.execution_protocol import (
+        EXECUTION_PROTOCOL_VERSION,
+        LEGACY_EXECUTION_PROTOCOL_VERSION,
+    )
+
+    # This generic adapter cannot establish a cohort contract or independent
+    # claim expectations. Current-cohort execution owns its separate entrypoint.
+    if EXECUTION_PROTOCOL_VERSION != LEGACY_EXECUTION_PROTOCOL_VERSION:
+        return _fixed_legacy_request_rejection("unsupported_protocol")
     if _target_execution_transport is True:
         from django_ray.execution_protocol import TARGET_EXECUTION_PROTOCOL_VERSION
 

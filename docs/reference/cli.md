@@ -181,6 +181,23 @@ cancelling, held and orphaned claim totals. Stored timestamps and digests are me
 the command does not contact Ray or independently validate a canonical proof. A lease
 dated in the future is not treated as heartbeat-live.
 
+The fixed `quarantine`, `worker_retirement`, and `job_cleanup` summaries cover the
+entire selected database, using the same observation transaction as the protocol and
+claim totals. Quarantine counts use the latest decision and match the exact current
+task ID, attempt and generation; released or purged history does not become current
+quarantined work. Retirement counts use the latest decision for each exact worker
+incarnation, distinguishing a live requested worker, an inactive retired record, and
+retained history whose original lease is absent or replaced. Future decisions are
+reported separately. Actor/reason text and individual identities are never printed.
+
+OPEN Jobs cleanup remains visible after a terminal result or queued retry, including
+uninspectable request references and unavailable exact owners. Closed records remain
+historical counts. All unresolved cohort claims remain counted, including any outside
+the task's current nonterminal generation. Nonzero unresolved, quarantine, retirement
+request and cleanup counts produce fixed database blockers; zero counts never prove
+drain, stopped writers, endpoint qualification or remote cleanup. A recorded RETIRED
+decision does not certify that the rest of the deployment is drained.
+
 Read `blockers` and `unverified` even when the command exits successfully: exit code 0
 means it emitted a report. The report always leaves remote readiness, runtime-qualified
 queue serviceability, remote cleanup, drain, upgrade and rollback unverified. It cannot
@@ -204,27 +221,29 @@ python manage.py django_ray_benchmark_polling \
   --seed=53 --json
 ```
 
-The command starts the production worker claim loop on isolated temporary queues. It
-separately measures idle query load and poll de-synchronization, spaced enqueue-to-claim
-latency, and preloaded-burst claim throughput, then deletes its benchmark rows. Options
-control worker count, task count per active phase, idle duration, enqueue interval, base
-and maximum poll intervals, cross-worker overlap window, random seed, and
-startup-barrier timeout.
-`--json` records Django, Python, PostgreSQL, migration, timing, and seed metadata. It
-refuses SQLite and other database engines because their locking behavior is not
-representative.
+The command runs current protocol-3 Sync claims on isolated temporary queues using real
+producer intent and the manager's package/Python identity. It measures idle candidate
+query load and poll de-synchronization, spaced enqueue-to-claim latency, and preloaded
+burst claim throughput. Qualification and maintenance checks occur before priority and
+`LIMIT`; actual claims retain the production ledger and skip-locked task transaction.
+No application callable or Ray runtime runs. Options control worker count, task count,
+idle duration, enqueue interval, poll intervals, overlap window, seed and startup timeout.
+`--json` records Django, Python, PostgreSQL, migration, timing and seed metadata. SQLite
+and other database engines are refused because their locking behavior is not representative.
 
-Every run also emits additive schema-v1 `protocol_predicate_evidence`. The command
-intercepts the production priority claim `SELECT` before it executes, proves that its
-bounded comparison query has the same SQL shape, and compares it with a control that
-omits only the execution-protocol range. Both variants select the same exact owned
-rows at the package's active write protocol (currently protocol `1`) and use 12
-deterministic, counterbalanced timing pairs. The report
-contains fixed-vocabulary bounded `EXPLAIN ANALYZE` summaries, p50/p95 timings, and
-signed production-minus-control deltas; it never includes SQL, queue names, task IDs,
-or row IDs. Those timings are benchmark evidence rather than a pass/fail latency gate.
-The command deletes only its exact temporary rows and capture lease, including on
-failure.
+Each run emits schema-v2 `protocol_predicate_evidence`. The actual pre-LIMIT candidate
+`SELECT` is intercepted before execution and matched against the bounded comparison query.
+The SELECT-only control omits just the root task's `protocol=3` equality; it keeps all
+qualification predicates and never authorizes a claim. Both variants select the same
+exact owned rows using 12 counterbalanced timing pairs. Fixed-vocabulary bounded plans,
+p50/p95 timings and signed deltas contain no SQL, queue names, task IDs or row IDs. These
+measurements have different semantics from historical schema-v1 range-query evidence.
+
+After owned threads exit, cleanup resolves only retained claims independently verified
+under their exact lease/task locks as unchanged, unprepared and undispatched. It records
+verified non-invocation and a terminal state before deleting owned benchmark history.
+Cleanup is outside measured claim timing. Ownership drift or unconfirmed thread exit
+preserves evidence and fails the command; no general history or foreign rows are deleted.
 
 ## django_ray_purge_inputs
 

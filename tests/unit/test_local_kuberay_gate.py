@@ -145,7 +145,7 @@ def _task_status_payload(
         "state": state,
         "attempt_number": 1,
         "execution_generation": 1,
-        "execution_protocol_version": 1,
+        "execution_protocol_version": 3,
         "created_with_django_ray_version": "0.5.0-producer",
         "managed_with_django_ray_version": "0.5.0-manager",
         "executor_django_ray_version": "0.5.0-executor",
@@ -170,7 +170,7 @@ def _execution_protocol_metrics(*, unsupported_queued: int = 0) -> bytes:
             f'{name}{{protocol="{protocol}",state="{state}"}} '
             f"{unsupported_queued if (protocol, state) == ('other', 'QUEUED') else 0}"
         )
-        for protocol in ("1", "other")
+        for protocol in ("1", "3", "other")
         for state in gate_module.TASK_STATUS_BY_STATE
     )
     return ("\n".join(lines) + "\n").encode()
@@ -1408,7 +1408,7 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                                 "task_id": TASK_ID,
                                 "state": "SUCCEEDED",
                                 "result_data": "5",
-                                "execution_protocol_version": 1,
+                                "execution_protocol_version": 3,
                                 "created_with_django_ray_version": "0.5.0-producer",
                                 "managed_with_django_ray_version": "0.5.0-manager",
                                 "executor_django_ray_version": "0.5.0-executor",
@@ -1428,7 +1428,7 @@ def test_real_http_path_allows_internal_queries_without_crossing_origin(
                         "task_id": TASK_ID,
                         "state": "SUCCEEDED",
                         "result_data": "5",
-                        "execution_protocol_version": 1,
+                        "execution_protocol_version": 3,
                         "created_with_django_ray_version": "0.5.0-producer",
                         "managed_with_django_ray_version": "0.5.0-manager",
                         "executor_django_ray_version": "0.5.0-executor",
@@ -7389,7 +7389,7 @@ def test_api_smoke_requires_401_200_and_durable_five(
         "task_id": TASK_ID,
         "state": "SUCCEEDED",
         "result_data": "5",
-        "execution_protocol_version": 1,
+        "execution_protocol_version": 3,
         "created_with_django_ray_version": "0.5.0-producer",
         "managed_with_django_ray_version": "0.5.0-manager",
         "executor_django_ray_version": "0.5.0-executor",
@@ -7446,7 +7446,7 @@ def test_api_smoke_requires_401_200_and_durable_five(
                             "task_id": TASK_ID,
                             "state": "SUCCEEDED",
                             "result_data": "5",
-                            "execution_protocol_version": 1,
+                            "execution_protocol_version": 3,
                             "created_with_django_ray_version": "0.5.0-producer",
                             "managed_with_django_ray_version": "0.5.0-manager",
                             "executor_django_ray_version": "0.5.0-executor",

@@ -40,10 +40,11 @@ from django_ray.target.attestation import (
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,
 )
+from tests.migration_cleanup import clear_historical_admission_fixtures
 
 MIGRATE_FROM = [("django_ray", "0021_ray_job_request_reference")]
 MIGRATE_TO = [("django_ray", "0022_ray_target_persistence")]
-LATEST = [("django_ray", "0034_cohort_timeouts")]
+LATEST = [("django_ray", "0035_activate_current_cohort")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _TARGET_TRIGGER_NAMES = {
@@ -797,6 +798,7 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
         reverted_execution = reverted_apps.get_model("django_ray", "RayTaskExecution")
         assert reverted_execution.objects.filter(pk=existing.pk).exists()
     finally:
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
         _clear_target_tables()
 
@@ -883,6 +885,7 @@ def test_sqlite_active_target_writer_cannot_partially_reverse_schema() -> None:
         assert _SQLITE_TRIGGER_NAMES <= _database_trigger_names()
     finally:
         release_writer.set()
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
         _clear_target_tables()
 
@@ -968,5 +971,6 @@ def test_postgresql_target_writer_serializes_before_reverse_guard() -> None:
         assert _TARGET_TRIGGER_NAMES <= _database_trigger_names()
     finally:
         release_writer.set()
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
         _clear_target_tables()

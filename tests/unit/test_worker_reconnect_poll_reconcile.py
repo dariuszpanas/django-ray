@@ -1,4 +1,7 @@
-"""Focused coverage tests for worker reconnect/poll/reconcile paths."""
+"""Historical protocol-1 reconnect/poll/reconcile behavior on the preactivation schema.
+
+Current protocol-3 ownership and no-replay behavior are covered by cohort worker tests.
+"""
 
 from __future__ import annotations
 
@@ -19,15 +22,13 @@ from django_ray.execution_codec import (
     ExecutionCompletion,
     ExecutionIdentity,
     ExecutionRequest,
-    encode_execution_completion,
+    _encode_execution_completion_for_protocols,
 )
 from django_ray.execution_protocol import (
-    MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
-    MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
-    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     WORKER_CAPABILITY_SCHEMA_VERSION,
+    ExecutionProtocolRange,
 )
-from django_ray.lifecycle import record_lost, retry_task
+from django_ray.lifecycle import _request_task_retry, record_lost
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
     CancellationStatus,
@@ -62,17 +63,54 @@ from django_ray.runner.cancellation import (
 )
 from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
+LEGACY_PROTOCOLS = ExecutionProtocolRange(1, 1)
 _USE_REAL_COMMAND_LEASES = False
+
+
+def _historical_task(**fields):
+    """Explicit old task fixture; deliberate unsupported epochs remain explicit."""
+    fields.setdefault("execution_protocol_version", 1)
+    return RayTaskExecution.objects.create(**fields)
+
+
+class HistoricalCommand(Command):
+    """Explicit old per-call failure range for retained direct worker methods."""
+
+    def _handle_task_failure(self, *args, **kwargs):
+        kwargs.setdefault("supported_protocols", LEGACY_PROTOCOLS)
+        return super()._handle_task_failure(*args, **kwargs)
+
+    def _terminalize_mismatched_ray_job_submission(self, *args, **kwargs):
+        kwargs.setdefault("supported_protocols", LEGACY_PROTOCOLS)
+        return super()._terminalize_mismatched_ray_job_submission(*args, **kwargs)
+
+
+def _historical_retry(execution, **options):
+    return _request_task_retry(execution, supported_protocols=LEGACY_PROTOCOLS, **options)[1]
+
+
+@pytest.fixture
+def historical_cancellation(monkeypatch):
+    from django_ray.lifecycle import cancel_task
+
+    def finalize(task, **options):
+        return cancel_task(task, supported_protocols=LEGACY_PROTOCOLS, **options)
+
+    monkeypatch.setattr(
+        "django_ray.management.commands.django_ray_worker.finalize_cancellation", finalize
+    )
 
 
 def _make_command(
     worker_id: str = "worker-coverage",
     *,
     claim_ownerless_tasks: bool = True,
+    protocols: ExecutionProtocolRange = LEGACY_PROTOCOLS,
 ) -> Command:
     """Build a command and, in DB tests, its exact pre-existing worker lease."""
-    cmd = Command()
+    cmd = HistoricalCommand()
     cmd.stdout = StringIO()
     cmd.style = cmd.style
     cmd.worker_id = worker_id
@@ -91,12 +129,8 @@ def _make_command(
                 "queue_name": "default",
                 "capability_schema_version": WORKER_CAPABILITY_SCHEMA_VERSION,
                 "django_ray_version": "test",
-                "min_supported_execution_protocol_version": (
-                    MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION
-                ),
-                "max_supported_execution_protocol_version": (
-                    MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION
-                ),
+                "min_supported_execution_protocol_version": protocols.minimum,
+                "max_supported_execution_protocol_version": protocols.maximum,
                 "legacy_admission_token": None,
                 "started_at": now,
                 "last_heartbeat_at": now,
@@ -174,9 +208,10 @@ def _versioned_completion_json(
     error: str | None = None,
     retryable: bool | None = None,
     executor_version: str = "0.5.0-executor",
+    protocols: ExecutionProtocolRange = LEGACY_PROTOCOLS,
 ) -> str:
     assert task.pk is not None
-    return encode_execution_completion(
+    return _encode_execution_completion_for_protocols(
         ExecutionCompletion(
             identity=ExecutionIdentity(
                 task_execution_pk=int(task.pk),
@@ -193,8 +228,28 @@ def _versioned_completion_json(
             traceback=None,
             exception_type="builtins.RuntimeError" if not success else None,
             retryable=retryable if not success else None,
-        )
+        ),
+        supported_protocols=protocols,
     )
+
+
+@pytest.fixture
+def historical_reconciliation(preactivation_protocol_schema):
+    """Explicit released-v1 factories on the real preactivation database."""
+    protocols = ExecutionProtocolRange(1, 1)
+
+    def task(**fields):
+        fields.setdefault("execution_protocol_version", 1)
+        assert fields["execution_protocol_version"] == 1
+        return _historical_task(**fields)
+
+    def command(**fields):
+        return _make_command(protocols=protocols, **fields)
+
+    def completion(task, **fields):
+        return _versioned_completion_json(task, protocols=protocols, **fields)
+
+    return SimpleNamespace(task=task, command=command, completion=completion)
 
 
 def _strict_ray_job_id(suffix: str = "a") -> str:
@@ -550,7 +605,8 @@ class TestWorkerDispatchAndReconnectHelpers:
         assert "Error during shutdown: RuntimeError: shutdown failed" in cmd.stdout.getvalue()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema", "historical_cancellation")
 class TestWorkerReconnectPollReconcile:
     """DB-backed tests for reconnect/poll/reconcile branches."""
 
@@ -575,7 +631,7 @@ class TestWorkerReconnectPollReconcile:
     def test_ray_core_callers_fail_closed_without_authoritative_capability(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-core-authority-unavailable-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -633,7 +689,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_lost_handle_terminalization_ignores_superseded_and_missing_rows(self) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-core-lost-handle-toctou-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -687,7 +743,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_ray_core_cancellation_authority_loss_is_a_noop(self) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-core-cancellation-authority-loss-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -713,7 +769,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_submit_task_to_ray_core_handles_unavailable_cluster(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-unavailable-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -740,7 +796,7 @@ class TestWorkerReconnectPollReconcile:
         assert captured[0]["expected_execution_generation"] == task.execution_generation
 
     def test_submit_task_to_ray_core_success_persists_tracking(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-success-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -783,7 +839,7 @@ class TestWorkerReconnectPollReconcile:
     def test_ray_core_post_attachment_error_does_not_fail_live_submission(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-post-attach-error-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -831,7 +887,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_stale_ray_core_submission_is_cancelled_without_attaching(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-stale-submit-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -887,7 +943,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-tracking-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -935,7 +991,7 @@ class TestWorkerReconnectPollReconcile:
 
     def test_submit_task_to_ray_core_preserves_external_input_reference(self, monkeypatch) -> None:
         reference = "resultfs://sha256/" + "a" * 64 + "?rel=aa/input.json&bytes=4"
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-reference-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -963,7 +1019,7 @@ class TestWorkerReconnectPollReconcile:
         assert captured["task_execution"].input_reference == reference
 
     def test_submit_task_to_ray_core_submit_exception_routes_failure(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-submit-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1001,7 +1057,7 @@ class TestWorkerReconnectPollReconcile:
         assert captured[0]["expected_execution_generation"] == task.execution_generation
 
     def test_ray_core_submit_exception_does_not_fail_replacement_attempt(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconnect-core-submit-stale-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1045,7 +1101,7 @@ class TestWorkerReconnectPollReconcile:
         cmd.poll_ray_core_tasks()
 
     def test_poll_ray_core_tasks_throttles_monitor_heartbeat_writes(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-heartbeat-throttle-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1082,8 +1138,8 @@ class TestWorkerReconnectPollReconcile:
 
         monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(is_initialized=lambda: True))
         monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.time.monotonic",
-            lambda: next(clock),
+            "django_ray.management.commands.django_ray_worker.time",
+            SimpleNamespace(monotonic=lambda: next(clock)),
         )
 
         cmd.poll_ray_core_tasks()
@@ -1102,7 +1158,7 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.last_task_monitor_heartbeat == 116.0
 
     def test_poll_ray_core_tasks_does_not_heartbeat_replacement_attempt(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-heartbeat-stale-attempt-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1149,7 +1205,7 @@ class TestWorkerReconnectPollReconcile:
             worker_id="poll-v1-worker",
             claim_ownerless_tasks=False,
         )
-        supported = RayTaskExecution.objects.create(
+        supported = _historical_task(
             task_id="poll-supported-protocol-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1159,7 +1215,7 @@ class TestWorkerReconnectPollReconcile:
             execution_protocol_version=1,
             claimed_by_worker=cmd.worker_id,
         )
-        unsupported = RayTaskExecution.objects.create(
+        unsupported = _historical_task(
             task_id="poll-unsupported-protocol-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1223,7 +1279,7 @@ class TestWorkerReconnectPollReconcile:
             expected_revision=1,
             legacy_producers_retired=True,
         )
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="store-success-unsupported-protocol-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1253,7 +1309,7 @@ class TestWorkerReconnectPollReconcile:
     def test_completion_losing_lease_after_poll_cannot_store_or_terminalize(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-completion-lease-loss-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1306,7 +1362,7 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.shutdown_requested is True
 
     def test_cancellation_committing_after_poll_read_wins_over_success(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-completion-cancellation-race-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1378,7 +1434,7 @@ class TestWorkerReconnectPollReconcile:
     def test_disconnect_retires_cancelling_handle_without_claiming_cancellation(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-disconnect-cancelling-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1420,7 +1476,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_poll_ray_core_tasks_handles_disconnected_and_missing_tasks(self, monkeypatch) -> None:
-        existing = RayTaskExecution.objects.create(
+        existing = _historical_task(
             task_id="poll-disconnect-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1480,7 +1536,7 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.ray_core_runner._pending_tasks == {}
 
     def test_ray_disconnect_does_not_fail_replacement_attempt(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-disconnect-stale-attempt-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1528,7 +1584,7 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.ray_core_runner._pending_tasks == {}
 
     def test_poll_ray_core_tasks_handles_poll_exception(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-exception-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1565,7 +1621,7 @@ class TestWorkerReconnectPollReconcile:
     def test_poll_ray_core_tasks_processes_success_failure_missing_and_bad_json(
         self, monkeypatch
     ) -> None:
-        success_task = RayTaskExecution.objects.create(
+        success_task = _historical_task(
             task_id="poll-success-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1575,7 +1631,7 @@ class TestWorkerReconnectPollReconcile:
             error_message="transient failure",
             error_traceback="RuntimeError: transient failure",
         )
-        failure_task = RayTaskExecution.objects.create(
+        failure_task = _historical_task(
             task_id="poll-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1583,7 +1639,7 @@ class TestWorkerReconnectPollReconcile:
             args_json="[3, 4]",
             kwargs_json="{}",
         )
-        bad_json_task = RayTaskExecution.objects.create(
+        bad_json_task = _historical_task(
             task_id="poll-bad-json-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1666,7 +1722,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="strict-ray-core-transport-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1720,7 +1776,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-versioned-success-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1760,7 +1816,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-versioned-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1815,7 +1871,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="poll-legacy-resource-limit-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1885,7 +1941,7 @@ class TestWorkerReconnectPollReconcile:
     def test_poll_ray_core_tasks_ignores_completion_from_replaced_execution(
         self, monkeypatch, result_json: str
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"poll-stale-completion-{json.loads(result_json)['success']}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1899,11 +1955,12 @@ class TestWorkerReconnectPollReconcile:
         stale_generation = task.execution_generation
         assert record_lost(
             task,
+            supported_protocols=LEGACY_PROTOCOLS,
             error_message="old worker disappeared",
             expected_attempt_number=stale_attempt,
             expected_execution_generation=stale_generation,
         )
-        replacement = retry_task(
+        replacement = _historical_retry(
             task.pk,
             allowed_states=(TaskState.LOST,),
             expected_attempt_number=stale_attempt,
@@ -1962,7 +2019,7 @@ class TestWorkerReconnectPollReconcile:
         assert "Retired 1 stale or unsupported Ray Core handle" in cmd.stdout.getvalue()
 
     def test_submit_task_to_ray_success_tracks_active_task(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-success-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2013,7 +2070,7 @@ class TestWorkerReconnectPollReconcile:
             if failure_stage == "constructor"
             else RayJobRequestPreparationRejection.INVALID_REQUEST
         )
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"rq2-pre-reservation-{failure_stage}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2063,7 +2120,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-uncertain-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2125,7 +2182,7 @@ class TestWorkerReconnectPollReconcile:
         classification: RayJobRequestPreparationRejection,
         expected_retryable: bool | None,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"rq2-preparation-{classification.value}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2173,7 +2230,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
         django_capture_on_commit_callbacks,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2235,7 +2292,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-untrusted-return-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2286,7 +2343,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_mismatched_submission_rollback_retains_exact_tracking(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-mismatch-rollback-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2377,7 +2434,7 @@ class TestWorkerReconnectPollReconcile:
     ) -> None:
         from django_ray.runtime.entrypoint import _persist_task_completion
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-mismatch-completion-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2585,7 +2642,7 @@ class TestWorkerReconnectPollReconcile:
         expected_traceback,
     ) -> None:
         cmd = _make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"ray-job-mismatch-{suffix}-completion-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2637,7 +2694,7 @@ class TestWorkerReconnectPollReconcile:
         legacy_reference = f"s3://historical-results/{key}?bytes=256"
         canonical_reference = f"s3://historical-results/{quote(key, safe='/-._~')}?bytes=256"
         cmd = _make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-mismatch-legacy-success-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2727,7 +2784,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
         transferred_state: str,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-mismatch-adopted-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2790,7 +2847,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-tracking-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2849,7 +2906,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
         uncertain,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"ray-job-submit-owner-transfer-{uncertain}",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2902,7 +2959,7 @@ class TestWorkerReconnectPollReconcile:
         assert "ownership moved to replacement-worker" in cmd.stdout.getvalue()
 
     def test_ray_job_post_attachment_error_does_not_fail_live_submission(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-post-attach-error-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2950,7 +3007,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_stale_ray_job_submission_is_stopped_without_attaching(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-stale-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3007,7 +3064,7 @@ class TestWorkerReconnectPollReconcile:
 
     def test_submit_task_to_ray_preserves_external_input_reference(self, monkeypatch) -> None:
         reference = "s3://inputs/django-ray/inputs/aa/input.json?bytes=4"
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-reference-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3036,7 +3093,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.input_reference == reference
 
     def test_ray_job_submit_exception_does_not_fail_replacement_attempt(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="ray-job-submit-stale-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3094,7 +3151,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-cancelling-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3139,7 +3196,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="strict-completion-during-status-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3183,7 +3240,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         reference = _rq2_request_reference("a" * 64)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="rq2-running-binding-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3225,7 +3282,7 @@ class TestWorkerReconnectPollReconcile:
     ) -> None:
         metadata_reference = _rq2_request_reference("b" * 64)
         durable_reference = None if mismatch == "missing" else _rq2_request_reference("c" * 64)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"rq2-reference-{mismatch}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3292,7 +3349,7 @@ class TestWorkerReconnectPollReconcile:
         replacement: str,
     ) -> None:
         reference = _rq2_request_reference("4" * 64)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"rq2-content-{metadata_field}-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3347,7 +3404,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         expected_reference = _rq2_request_reference("5" * 64)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="rq2-malformed-reference-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3401,7 +3458,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         reference = _rq2_request_reference("6" * 64)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="rq2-submission-id-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3457,7 +3514,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         original_reference = _rq2_request_reference("d" * 64)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="rq2-completion-precedence-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3505,7 +3562,7 @@ class TestWorkerReconnectPollReconcile:
     ) -> None:
         expected_reference = _rq2_request_reference("1" * 64)
         stale_reference = _rq2_request_reference("2" * 64)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="rq2-reference-lock-revalidation-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3559,7 +3616,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="strict-exit-78-generic-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3642,7 +3699,7 @@ class TestWorkerReconnectPollReconcile:
         status: JobStatus,
     ) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"strict-missing-completion-{status.value.lower()}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3710,7 +3767,7 @@ class TestWorkerReconnectPollReconcile:
             ray_job_id = f"{STRICT_RAY_JOB_SUBMISSION_ID_FAMILY_PREFIX}3_{'3' * 64}"
         else:
             ray_job_id = _strict_ray_job_id("3")
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"strict-binding-{binding_kind}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3772,7 +3829,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         ray_job_id = "raysubmit_django_ray_v1_strict-marker-conflict"
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="legacy-id-strict-marker-conflict-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3816,7 +3873,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         ray_job_id = "raysubmit_django_ray_v1_strict-marker-no-completion"
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="legacy-id-strict-marker-no-completion-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3867,11 +3924,13 @@ class TestWorkerReconnectPollReconcile:
         assert task.result_data is None
         assert task.pk not in cmd.active_tasks
 
-    def test_reconcile_strict_running_job_allows_compatible_manager_handoff(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_reconcile_strict_running_job_allows_compatible_manager_handoff(
         self,
         monkeypatch,
+        historical_reconciliation,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = historical_reconciliation.task(
             task_id="strict-compatible-handoff-running-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3884,7 +3943,7 @@ class TestWorkerReconnectPollReconcile:
             managed_with_django_ray_version="0.4.0-manager",
             started_at=datetime.now(UTC),
         )
-        cmd = _make_command(worker_id="adopting-worker")
+        cmd = historical_reconciliation.command(worker_id="adopting-worker")
         metadata = _strict_ray_job_metadata(task)
 
         monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
@@ -3912,12 +3971,14 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.active_tasks[task.pk] == task.ray_job_id
 
     @pytest.mark.parametrize("completion_kind", ["legacy", "enriched_v1"])
-    def test_reconcile_strict_handoff_accepts_released_v1_completion_forms(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_reconcile_strict_handoff_accepts_released_v1_completion_forms(
         self,
         monkeypatch,
+        historical_reconciliation,
         completion_kind: str,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = historical_reconciliation.task(
             task_id=f"strict-compatible-handoff-{completion_kind}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -3933,10 +3994,10 @@ class TestWorkerReconnectPollReconcile:
         task.completion_data = (
             json.dumps({"success": True, "result": 3})
             if completion_kind == "legacy"
-            else _versioned_completion_json(task, result=3)
+            else historical_reconciliation.completion(task, result=3)
         )
         task.save(update_fields=["completion_data"])
-        cmd = _make_command(worker_id="adopting-worker")
+        cmd = historical_reconciliation.command(worker_id="adopting-worker")
 
         monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
@@ -3957,7 +4018,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="legacy-failed-job-policy-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4000,7 +4061,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_success_with_non_json_logs_waits_for_completion_envelope(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-logs-fallback-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4031,7 +4092,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_success_with_no_logs_waits_for_completion_envelope(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-no-logs-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4065,7 +4126,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_uses_result_reference_from_completion_envelope(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-result-reference-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4110,7 +4171,7 @@ class TestWorkerReconnectPollReconcile:
         key = f"{prefix}/{digest[:2]}/{digest[2:4]}/{digest}.json"
         legacy_reference = f"s3://historical-results/{key}?bytes=256"
         canonical_reference = f"s3://historical-results/{quote(key, safe='/-._~')}?bytes=256"
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-legacy-result-reference-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4161,7 +4222,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-running-completion-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -4192,7 +4253,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_refreshes_envelope_after_terminal_status_rpc(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-envelope-race-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4227,7 +4288,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_pending_status_retires_task_terminalized_during_rpc(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-terminal-during-pending-status-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4261,7 +4322,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_uses_valid_envelope_when_ray_reports_failed(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-envelope-authoritative-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4296,7 +4357,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_ignores_status_for_replaced_ray_job(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-replaced-ray-job-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4338,7 +4399,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_ignores_replaced_attempt_with_same_ray_job_identity(
         self, monkeypatch, status: JobStatus
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"reconcile-replaced-attempt-{status.value.lower()}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4393,7 +4454,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_rejects_preexisting_replacement_with_same_ray_job_id(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-preexisting-replacement-same-job-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4426,8 +4487,11 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.active_tasks == {}
         assert cmd.active_task_identities == {}
 
-    def test_claim_clears_previous_ray_job_identity_before_submission(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_claim_clears_previous_ray_job_identity_before_submission(
+        self, monkeypatch, historical_reconciliation
+    ) -> None:
+        task = historical_reconciliation.task(
             task_id="claim-clears-ray-job-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4440,12 +4504,11 @@ class TestWorkerReconnectPollReconcile:
             ray_target_address="ray://target:10001",
             execution_generation=4,
         )
-        cmd = _make_command()
+        cmd = historical_reconciliation.command()
         cmd.execution_mode = "ray"
         claimed: list[RayTaskExecution] = []
         monkeypatch.setattr(cmd, "process_task", lambda current_task: claimed.append(current_task))
 
-        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -4456,8 +4519,11 @@ class TestWorkerReconnectPollReconcile:
         assert task.ray_address is None
         assert task.ray_target_address == "ray://target:10001"
 
-    def test_claim_stamps_manager_without_backfilling_legacy_creator(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_claim_stamps_manager_without_backfilling_legacy_creator(
+        self, monkeypatch, historical_reconciliation
+    ) -> None:
+        task = historical_reconciliation.task(
             task_id="claim-stamps-manager-legacy-001",
             callable_path="testproject.tasks.add_numbers",
             metadata_schema_version=0,
@@ -4468,7 +4534,7 @@ class TestWorkerReconnectPollReconcile:
             args_json="[1, 2]",
             kwargs_json="{}",
         )
-        cmd = _make_command()
+        cmd = historical_reconciliation.command()
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
         assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
@@ -4482,8 +4548,11 @@ class TestWorkerReconnectPollReconcile:
         assert task.managed_with_django_ray_version == django_ray_version
         assert task.executor_django_ray_version is None
 
-    def test_claim_promotes_legacy_address_before_clearing_handle(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_claim_promotes_legacy_address_before_clearing_handle(
+        self, monkeypatch, historical_reconciliation
+    ) -> None:
+        task = historical_reconciliation.task(
             task_id="claim-promotes-legacy-routing-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4492,19 +4561,21 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
             ray_address="ray://legacy:10001",
         )
-        cmd = _make_command()
+        cmd = historical_reconciliation.command()
         cmd.execution_mode = "ray"
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
-        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
         assert task.ray_target_address == "ray://legacy:10001"
         assert task.ray_address is None
 
-    def test_claim_keeps_ambiguous_legacy_auto_on_global_fallback(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_claim_keeps_ambiguous_legacy_auto_on_global_fallback(
+        self, monkeypatch, historical_reconciliation
+    ) -> None:
+        task = historical_reconciliation.task(
             task_id="claim-keeps-legacy-auto-fallback-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4513,22 +4584,23 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
             ray_address="auto",
         )
-        cmd = _make_command()
+        cmd = historical_reconciliation.command()
         cmd.execution_mode = "ray"
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
-        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
         assert task.ray_target_address is None
         assert task.ray_address is None
 
-    def test_claim_does_not_promote_automatic_ray_core_retry_handle(
+    @pytest.mark.django_db(transaction=True)
+    def test_historical_claim_does_not_promote_automatic_ray_core_retry_handle(
         self,
         monkeypatch,
+        historical_reconciliation,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = historical_reconciliation.task(
             task_id="claim-keeps-ray-core-routing-metadata-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4538,11 +4610,10 @@ class TestWorkerReconnectPollReconcile:
             ray_job_id="ray_core:19",
             ray_address="ray://core-cluster:10001",
         )
-        cmd = _make_command()
+        cmd = historical_reconciliation.command()
         cmd.execution_mode = "ray"
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
-        cmd._create_lease("default")
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
@@ -4552,7 +4623,7 @@ class TestWorkerReconnectPollReconcile:
 
     def test_reconcile_tasks_missing_completion_eventually_retries(self, monkeypatch) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-missing-completion-stale-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4583,8 +4654,8 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         cmd = _make_command()
-        cmd._create_lease("default")
-        task = RayTaskExecution.objects.create(
+        assert cmd.lease_identity is not None
+        task = _historical_task(
             task_id="reconcile-owner-transfer-during-status-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4644,8 +4715,8 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         cmd = _make_command()
-        cmd._create_lease("default")
-        task = RayTaskExecution.objects.create(
+        assert cmd.lease_identity is not None
+        task = _historical_task(
             task_id="reconcile-stopped-owner-transfer-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4691,7 +4762,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_malformed_completion_envelope_remains_active(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-malformed-completion-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4719,7 +4790,7 @@ class TestWorkerReconnectPollReconcile:
         self, monkeypatch
     ) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-malformed-completion-expired-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4752,7 +4823,7 @@ class TestWorkerReconnectPollReconcile:
         self, monkeypatch
     ) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-running-malformed-completion-expired-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4791,7 +4862,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_tasks_incomplete_completion_envelope_remains_active(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-incomplete-completion-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4819,7 +4890,7 @@ class TestWorkerReconnectPollReconcile:
         self, monkeypatch
     ) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-no-completion-expired-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4848,7 +4919,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_failure_envelope_uses_retry_policy(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-failure-envelope-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4894,7 +4965,7 @@ class TestWorkerReconnectPollReconcile:
                 "expected_execution_generation": 0,
                 "expected_completion_data": task.completion_data,
                 "require_completion_data_match": True,
-                "supported_protocols": SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+                "supported_protocols": LEGACY_PROTOCOLS,
                 "executor_django_ray_version": None,
             }
         ]
@@ -4904,7 +4975,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-versioned-success-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -4952,7 +5023,7 @@ class TestWorkerReconnectPollReconcile:
         expected_state: str,
         expected_cancel_count: int,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"reconcile-versioned-mismatch-{remote_status.value.lower()}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -5009,7 +5080,7 @@ class TestWorkerReconnectPollReconcile:
         assert "must_not_store" not in (task.error_message or "")
 
     def test_reconcile_tasks_handles_missing_task_and_runner_exception(self, monkeypatch) -> None:
-        existing = RayTaskExecution.objects.create(
+        existing = _historical_task(
             task_id="reconcile-exception-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -5041,7 +5112,7 @@ class TestWorkerReconnectPollReconcile:
         assert "Error reconciling task" in cmd.stdout.getvalue()
 
     def test_reconcile_tasks_adopts_orphaned_running_ray_job(self, monkeypatch) -> None:
-        orphan = RayTaskExecution.objects.create(
+        orphan = _historical_task(
             task_id="reconcile-orphan-running-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -5081,7 +5152,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         started_at = datetime.now(UTC)
-        orphan = RayTaskExecution.objects.create(
+        orphan = _historical_task(
             task_id="reconcile-orphan-other-queue-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="ray-data",
@@ -5136,7 +5207,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         started_at = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="timeout-other-queue-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="ray-data",
@@ -5171,7 +5242,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         started_at = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="cancellation-other-queue-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="ray-data",
@@ -5201,7 +5272,7 @@ class TestWorkerReconnectPollReconcile:
         assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_reconcile_tasks_completes_orphaned_succeeded_ray_job(self, monkeypatch) -> None:
-        orphan = RayTaskExecution.objects.create(
+        orphan = _historical_task(
             task_id="reconcile-orphan-success-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -5242,7 +5313,7 @@ class TestWorkerReconnectPollReconcile:
     def test_detect_stuck_tasks_leaves_exact_active_ray_job_to_reconciliation(
         self,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-unknown-stuck-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -5270,7 +5341,7 @@ class TestWorkerReconnectPollReconcile:
     def test_detect_stuck_tasks_leaves_orphaned_ray_job_to_exact_reconciliation(
         self,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-unknown-orphan-boundary-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -5292,7 +5363,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.run_after is None
 
     def test_timeout_cancellation_client_failure_is_indeterminate(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="timeout-client-failure-001",
             callable_path="testproject.tasks.slow_task",
             state=TaskState.RUNNING,
@@ -5314,7 +5385,7 @@ class TestWorkerReconnectPollReconcile:
         assert "Ray client unavailable" in (outcome.message or "")
 
     def test_reconcile_does_not_overwrite_timed_out_terminal_task(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-timeout-terminal-001",
             callable_path="testproject.tasks.slow_task",
             state=TaskState.FAILED,
@@ -5343,7 +5414,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_terminal_status_retires_tracking_but_leaves_cancellation_owner(
         self,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-cancellation-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5374,7 +5445,7 @@ class TestWorkerReconnectPollReconcile:
         assert completed == [task.pk]
 
     def test_reconcile_discards_task_deleted_during_status_rpc(self) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-deleted-during-rpc-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5403,7 +5474,7 @@ class TestWorkerReconnectPollReconcile:
 
     def test_reconcile_malformed_envelope_race_keeps_task_active(self, monkeypatch) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-malformed-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5430,7 +5501,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk in cmd.active_tasks
 
     def test_reconcile_success_result_race_does_not_apply_stale_update(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-success-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5457,7 +5528,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.FAILED
 
     def test_reconcile_failure_envelope_race_keeps_task_active(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-failure-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5483,7 +5554,7 @@ class TestWorkerReconnectPollReconcile:
 
     def test_reconcile_missing_envelope_race_keeps_task_active(self, monkeypatch) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-missing-envelope-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5509,7 +5580,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk in cmd.active_tasks
 
     def test_reconcile_failed_job_race_keeps_task_active(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-failed-job-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5543,7 +5614,7 @@ class TestWorkerReconnectPollReconcile:
         self,
         monkeypatch,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-failed-job-completion-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5583,7 +5654,7 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-missing-envelope-completion-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5640,7 +5711,7 @@ class TestWorkerReconnectPollReconcile:
         expected: str,
         absent: str,
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-unknown-status-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5672,7 +5743,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_stale_unknown_job_stops_exact_id_without_automatic_retry(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-unknown-status-stale-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5727,7 +5798,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_consumes_valid_completion_before_status_rpc(
         self, monkeypatch, poll_method
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-unknown-valid-completion-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5768,7 +5839,7 @@ class TestWorkerReconnectPollReconcile:
         self, monkeypatch, job_id, success
     ) -> None:
         cmd = _make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="fast-exact-receipt",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5824,7 +5895,7 @@ class TestWorkerReconnectPollReconcile:
         if "execution_protocol_version" in change:
             close_legacy_worker_admission(expected_revision=1, legacy_producers_retired=True)
         cmd = _make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="fast-replaced-receipt",
             execution_protocol_version=change.get("execution_protocol_version", 1),
             callable_path="testproject.tasks.add_numbers",
@@ -5882,7 +5953,7 @@ class TestWorkerReconnectPollReconcile:
         self, monkeypatch, change
     ) -> None:
         cmd = _make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="fast-receipt-late-race",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5913,7 +5984,7 @@ class TestWorkerReconnectPollReconcile:
 
     def test_fast_receipt_losing_lease_after_read_cannot_terminalize(self, monkeypatch) -> None:
         cmd = _make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="fast-receipt-late-lease-loss",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -5964,7 +6035,7 @@ class TestWorkerReconnectPollReconcile:
         cmd = _make_command()
         tasks = []
         for index in range(2):
-            task = RayTaskExecution.objects.create(
+            task = _historical_task(
                 task_id=f"fast-receipt-interrupt-{index}",
                 callable_path="testproject.tasks.add_numbers",
                 state=TaskState.RUNNING,
@@ -6019,6 +6090,7 @@ class TestWorkerReconnectPollReconcile:
         tasks = RayTaskExecution.objects.bulk_create(
             [
                 RayTaskExecution(
+                    execution_protocol_version=1,
                     task_id=f"fast-batch-{index}",
                     callable_path="testproject.tasks.add_numbers",
                     state=TaskState.RUNNING,
@@ -6054,6 +6126,7 @@ class TestWorkerReconnectPollReconcile:
                 new_tasks = RayTaskExecution.objects.bulk_create(
                     [
                         RayTaskExecution(
+                            execution_protocol_version=1,
                             task_id=f"fast-new-arrival-{index}",
                             callable_path="testproject.tasks.add_numbers",
                             state=TaskState.RUNNING,
@@ -6083,7 +6156,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_stale_unknown_orphan_with_malformed_completion_stops_exact_id(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-unknown-orphan-malformed-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -6129,7 +6202,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_timed_out_malformed_completion_survives_unavailable_client(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-malformed-client-unavailable-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -6167,7 +6240,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_adopts_ray_job_without_previous_owner(self, monkeypatch) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-ownerless-ray-job-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -6193,7 +6266,7 @@ class TestWorkerReconnectPollReconcile:
     def test_reconcile_stopped_state_race_does_not_overwrite_terminal_update(
         self, monkeypatch
     ) -> None:
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="reconcile-stopped-race-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,

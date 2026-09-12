@@ -128,6 +128,9 @@ test-postgres:
 		tests/integration/test_cohort_cleanup_recovery.py \
 		tests/integration/test_cohort_job_cleanup.py \
 		tests/integration/test_cohort_timeout.py \
+		tests/integration/test_cohort_activation_migration.py \
+		tests/integration/test_cohort_activation_operations.py \
+		tests/integration/test_upgrade_activation_snapshot.py \
 		tests/integration/test_cohort_expiration.py \
 		tests/integration/test_cohort_cancellation.py \
 		tests/integration/test_cohort_cancel_request.py \

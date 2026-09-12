@@ -424,7 +424,7 @@ def test_malformed_observation_is_uncertainty_not_a_runtime_mismatch(field, valu
     assert error.value.classification is CohortContractRejection.INVALID_OBSERVATION
 
 
-def test_module_import_needs_neither_django_nor_ray_and_does_not_activate_protocol():
+def test_module_import_needs_neither_django_nor_ray_under_current_protocol():
     root = Path(__file__).resolve().parents[2]
     code = """
 import builtins, sys
@@ -448,5 +448,5 @@ assert 'django' not in sys.modules and 'ray' not in sys.modules
     )
     assert result.returncode == 0, result.stderr
     assert COHORT_EXECUTION_PROTOCOL_VERSION == 3
-    assert EXECUTION_PROTOCOL_VERSION == 1
+    assert EXECUTION_PROTOCOL_VERSION == COHORT_EXECUTION_PROTOCOL_VERSION
     assert TARGET_EXECUTION_PROTOCOL_VERSION == 2

@@ -1,4 +1,4 @@
-"""SQLite and PostgreSQL contracts for dormant worker target capabilities."""
+"""Current worker capabilities plus explicit historical malformed-lease checks."""
 
 from __future__ import annotations
 
@@ -75,6 +75,10 @@ from django_ray.target.coordination import (
     register_ray_target,
     transition_ray_target_desired_state,
 )
+from tests.migration_cleanup import (
+    closed_preactivation_protocol_schema as closed_preactivation_protocol_schema,
+)
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -86,7 +90,7 @@ NODE_ID = "b" * 56
 def _runtime(**changes: object) -> RayRuntimeVersion:
     values: dict[str, object] = {
         "ray_major": 2,
-        "ray_minor": 56,
+        "ray_minor": 58,
         "ray_patch": 0,
         "python_implementation": "cpython",
         "python_major": 3,
@@ -183,8 +187,8 @@ def _lease(
         pid=2101,
         capability_schema_version=1,
         django_ray_version="0.5.0-test",
-        min_supported_execution_protocol_version=1,
-        max_supported_execution_protocol_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
         legacy_admission_token=None,
         started_at=NOW - timedelta(minutes=1),
         last_heartbeat_at=heartbeat_at,
@@ -400,11 +404,15 @@ def test_advertisement_requires_an_exact_fresh_explicit_lease(
         ("worker-protocol-maximum-overflow", 1, 32768),
     ),
 )
+@pytest.mark.usefixtures("closed_preactivation_protocol_schema")
 def test_sqlite_raw_lease_protocol_poison_maps_to_fixed_refusal(
     poisoned_worker_id: str,
     minimum: object,
     maximum: object,
 ) -> None:
+    # The current activation trigger refuses these malformed active leases at
+    # INSERT. Retain the older capability-service corruption boundary on the
+    # actual preactivation schema; the fixture restores0035 after assertions.
     if connection.vendor != "sqlite":
         pytest.skip("SQLite storage-class regression")
 

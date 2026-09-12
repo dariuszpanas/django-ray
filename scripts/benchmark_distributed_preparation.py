@@ -37,6 +37,95 @@ def _add(left: int, right: int) -> int:
     raise AssertionError("benchmark must not execute application code")
 
 
+def _sender_context(identity):
+    """Create canonical synthetic sender controls; never qualify a Ray target."""
+    from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
+    from django_ray.runtime.context import durable_task_execution
+
+    controls = {}
+    if EXECUTION_PROTOCOL_VERSION == 3:
+        from datetime import UTC, datetime, timedelta
+
+        from django_ray import __version__
+        from django_ray.execution_codec import ExecutionIdentity
+        from django_ray.target.attestation import (
+            RayNodeStateVersion,
+            RayRunnerFamily,
+            RayRuntimeVersion,
+            RayTargetExpectation,
+            build_ray_cluster_attestation,
+            build_ray_node_observation,
+            build_ray_observation_boundary,
+            ray_target_expectation_digest,
+        )
+        from django_ray.target.cohort_contract import (
+            CohortExecutionContract,
+            cohort_execution_contract_digest,
+            encode_cohort_execution_contract,
+        )
+
+        # Fixed times and identities make request-byte comparisons reproducible.
+        # No collector or point guard runs, and the sink never executes a leaf.
+        now = datetime(2020, 1, 1, tzinfo=UTC)
+        runtime = RayRuntimeVersion(2, 58, 0, "cpython", 3, 12, 0)
+        expectation = RayTargetExpectation(
+            "benchmark-only", RayRunnerFamily.RAY_CORE, "session_benchmark", 1, runtime
+        )
+        node_id = "a" * 56
+        nodes = (RayNodeStateVersion(node_id, 1),)
+        observation = build_ray_cluster_attestation(
+            expectation=expectation,
+            boundary=build_ray_observation_boundary(
+                resource_state_version_before=1,
+                resource_state_version_after=1,
+                node_state_versions_before=nodes,
+                node_state_versions_after=nodes,
+            ),
+            nodes=(
+                build_ray_node_observation(
+                    node_id=node_id, cluster_session=expectation.cluster_session, runtime=runtime
+                ),
+            ),
+            observed_at=now,
+            expires_at=now + timedelta(seconds=60),
+        )
+        contract = CohortExecutionContract(
+            identity=ExecutionIdentity(41, "benchmark-41", 1, 1),
+            expected_django_ray_version=__version__,
+            target_binding_id=1,
+            cohort_evidence_id=1,
+            cohort_evidence_digest="sha256:" + "a" * 64,
+            claimed_at=now,
+            target_expectation=expectation,
+            target_expectation_digest=ray_target_expectation_digest(expectation),
+            claim_attestation=observation,
+            claim_attestation_digest=observation.attestation_digest,
+        )
+        controls = {
+            "cohort_contract_json": encode_cohort_execution_contract(contract),
+            "cohort_contract_digest": cohort_execution_contract_digest(contract),
+        }
+    elif EXECUTION_PROTOCOL_VERSION != 1:
+        raise ValueError("benchmark requires a supported sender protocol")
+    return durable_task_execution(
+        41,
+        task_id="benchmark-41",
+        execution_protocol_version=EXECUTION_PROTOCOL_VERSION,
+        attempt_number=1,
+        execution_generation=1 if EXECUTION_PROTOCOL_VERSION == 3 else 0,
+        runtime_env_plan_identity=identity,
+        strict_execution_request=True,
+        **controls,
+    )
+
+
+def _compare_request_bytes(baseline, candidate):
+    if baseline["execution_protocol_version"] != candidate["execution_protocol_version"]:
+        raise ValueError("benchmark cannot compare different active execution protocols")
+    if baseline["wire_sha256"] != candidate["wire_sha256"]:
+        raise AssertionError("baseline and candidate request bytes differ")
+
+
 def _measure(helper: str, count: int, window: int) -> dict:
     from django.conf import settings
 
@@ -46,8 +135,8 @@ def _measure(helper: str, count: int, window: int) -> dict:
         )
 
     from django_ray import execution_codec as codec
+    from django_ray.execution_protocol import EXECUTION_PROTOCOL_VERSION
     from django_ray.runtime import distributed
-    from django_ray.runtime.context import durable_task_execution
     from django_ray.runtime.runtime_env import normalize_runtime_env
     from django_ray.workflow.plans import runtime_env_plan_identity
 
@@ -86,7 +175,8 @@ def _measure(helper: str, count: int, window: int) -> dict:
         nonlocal submitted, first_submit_seconds
         if first_submit_seconds is None:
             first_submit_seconds = time.perf_counter() - started
-        wire_digest.update(args[-10].encode("utf-8"))
+        request_index = -12 if EXECUTION_PROTOCOL_VERSION == 3 else -10
+        wire_digest.update(args[request_index].encode("utf-8"))
         result = submitted
         submitted += 1
         return result
@@ -113,15 +203,7 @@ def _measure(helper: str, count: int, window: int) -> dict:
         patch.object(distributed, "_nested_distributed_request", request),
         patch.object(codec, encoder_name, encode),
         patch.object(codec, "nested_callable_digest", callable_hash),
-        durable_task_execution(
-            41,
-            task_id="benchmark-41",
-            execution_protocol_version=1,
-            attempt_number=1,
-            execution_generation=0,
-            runtime_env_plan_identity=identity,
-            strict_execution_request=True,
-        ),
+        _sender_context(identity),
     ):
         tracemalloc.start()
         started = time.perf_counter()
@@ -142,6 +224,8 @@ def _measure(helper: str, count: int, window: int) -> dict:
     if result != items or submitted != count or consumed != count:
         raise AssertionError("collector did not preserve all ordered results")
     return {
+        "execution_protocol_version": EXECUTION_PROTOCOL_VERSION,
+        "context_kind": "synthetic-sender-only",
         "source_paths": {"distributed": distributed.__file__, "codec": codec.__file__},
         "helper": helper,
         "items": count,
@@ -271,11 +355,7 @@ def main() -> int:
                         report["cases"].append(
                             {"variant": variant, "repetition": repetition, **measurement}
                         )
-                    if (
-                        comparison["baseline"]["wire_sha256"]
-                        != comparison["candidate"]["wire_sha256"]
-                    ):
-                        raise AssertionError("baseline and candidate request bytes differ")
+                    _compare_request_bytes(comparison["baseline"], comparison["candidate"])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0

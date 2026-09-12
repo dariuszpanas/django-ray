@@ -1,4 +1,4 @@
-"""Resource-free Client composition and one explicitly owned native Linux case."""
+"""Resource-free Client composition and a mandatory owned native Linux comparison."""
 
 import ipaddress
 import json
@@ -457,10 +457,32 @@ def install():
 
     def start(command, process_type, *args, **kwargs):
         nonlocal recorded
+        selected_child = role(command) == "specific-server_shim" and not recorded
+        if selected_child:
+            recorded = True
+            # Arm in the already-running proxy before Ray's preexec_fn fork.
+            # The child inherits this fatal handler until exec; its later
+            # sitecustomize handler cannot diagnose that earlier interval.
+            # This adds no timer, retry, signal or altered launch arguments.
+            try:
+                import faulthandler
+                stream = (directory / "owned_client_proxy.stack").open("x")
+                options = {"file": stream, "all_threads": False}
+                if sys.version_info >= (3, 14):
+                    options["c_stack"] = False
+                try:
+                    faulthandler.enable(**options)
+                except BaseException:
+                    stream.close()
+                    raise
+                globals()["_proxy_stack_stream"] = stream
+                stream.write("PROXY_FATAL_HANDLER_INSTALLED\n")
+                stream.flush()
+            except Exception:
+                record("PROXY_FATAL_HANDLER_UNAVAILABLE")
         process_info = original(command, process_type, *args, **kwargs)
-        if role(command) != "specific-server_shim" or recorded:
+        if not selected_child:
             return process_info
-        recorded = True
         record("SPECIFIC_CHILD_STARTED")
 
         def observe_exit():
@@ -551,6 +573,8 @@ def _owned_client_log_markers(directory, diagnostic_directory=None):
         "traceback_present": "Traceback (most recent call last)",
         "grpc_channel_timeout": "grpc.FutureTimeoutError",
         "proxy_diagnostic_installed": "PROXY_DIAGNOSTIC_INSTALLED",
+        "proxy_fatal_handler_installed": "PROXY_FATAL_HANDLER_INSTALLED",
+        "proxy_fatal_handler_unavailable": "PROXY_FATAL_HANDLER_UNAVAILABLE",
         "specific_child_started": "SPECIFIC_CHILD_STARTED",
         "specific_shim_entered": "SPECIFIC_SHIM_ENTERED",
         "specific_module_entered": "SPECIFIC_MODULE_ENTERED",
@@ -665,15 +689,47 @@ def _owned_client_log_markers(directory, diagnostic_directory=None):
         "auth_server": "_private/authentication/grpc_authentication_server_interceptor.py",
         "ray_import": "__init__.py",
     }
+    # Exact upstream gRPC signatures, with only bounded numeric logging fields.
+    # Emit booleans, not C++ diagnostics, descriptors, timestamps, or process IDs.
+    grpc_prefix = (
+        r"^[ \t]*(?:[IWEF](?:[0-9]{4} [0-9]{2}:[0-9]{2}:"
+        r"[0-9]{2,12}\.[0-9]{1,9}[ \t]+[0-9]{1,10})?[ \t]+)?"
+    )
     classifications = {
+        "grpc_epoll1_worker_kicked": (
+            grpc_prefix + r"ev_epoll1_linux\.cc:[0-9]{1,6}\] "
+            r"Check failed: next_worker->state == KICKED[ \t]*\r?$"
+        ),
+        "grpc_fork_handlers_skipped": (
+            grpc_prefix + r"fork_posix\.cc:[0-9]{1,6}\] "
+            r"Other threads are currently calling into gRPC, skipping fork\(\) handlers[ \t]*\r?$"
+        ),
+        "grpc_poll_inherited_fd": (
+            grpc_prefix + r"ev_poll_posix\.cc:[0-9]{1,6}\] "
+            r"FD from fork parent still in poll list: fd\([0-9]{1,10}, "
+            r"generation: [0-9]{1,10}\)[ \t]*\r?$"
+        ),
         **{f"exception_{name}": rf"^\s*(?:builtins\.)?{name}(?::|$)" for name in exceptions},
         **{
             f"frame_{label}": rf'^\s*File "[^"\r\n]*/ray/{re.escape(path)}", line [0-9]+(?:,| in )'
             for label, path in frames.items()
         },
     }
+    # The proxy owns this stream and its pre-exec child inherits it. These
+    # observations localize frames; they do not identify a crash's root cause.
+    proxy_classifications = {
+        "proxy_fatal_segv": r"^Fatal Python error: Segmentation fault\s*$",
+        "proxy_fatal_abort": r"^Fatal Python error: Aborted\s*$",
+        "proxy_frame_subprocess": (
+            r'^\s*File "[^"\r\n]*/subprocess\.py", line [0-9]+ in _execute_child\s*$'
+        ),
+        "proxy_frame_preexec": (
+            r'^\s*File "[^"\r\n]*/ray/_private/services\.py", line [0-9]+ in preexec_fn\s*$'
+        ),
+    }
     result = dict.fromkeys(markers, False)
     result.update(dict.fromkeys(classifications, False))
+    result.update(dict.fromkeys(proxy_classifications, False))
     result.update(files_read=0, read_failed=False, truncated=False)
     paths = sorted(
         path
@@ -706,9 +762,126 @@ def _owned_client_log_markers(directory, diagnostic_directory=None):
                 result[key] |= marker in body
             for key, pattern in classifications.items():
                 result[key] |= re.search(pattern, body, flags=re.MULTILINE) is not None
+            if (
+                diagnostic_directory is not None
+                and path == Path(diagnostic_directory) / "owned_client_proxy.stack"
+            ):
+                for key, pattern in proxy_classifications.items():
+                    result[key] |= re.search(pattern, body, flags=re.MULTILINE) is not None
         except OSError:
             result["read_failed"] = True
     return result
+
+
+_FATAL_TRACE_BYTES = 16384
+_FATAL_TRACE_FRAMES = 16
+_FATAL_TRACE_FILES = (
+    "subprocess.py",
+    "threading.py",
+    "runpy.py",
+    "site.py",
+    "importlib/__init__.py",
+    "importlib/_bootstrap.py",
+    "importlib/_bootstrap_external.py",
+    "ctypes/__init__.py",
+    "ray/__init__.py",
+    "ray/_private/services.py",
+    "ray/_private/utils.py",
+    "ray/_private/node.py",
+    "ray/_private/worker.py",
+    "ray/_private/workers/setup_worker.py",
+    "ray/_private/runtime_env/context.py",
+    "ray/util/client/server/__main__.py",
+    "ray/util/client/server/server.py",
+    "ray/util/client/server/proxier.py",
+    "grpc/__init__.py",
+    "grpc/_channel.py",
+    "grpc/_server.py",
+    "grpc/_common.py",
+    "grpc/_cython/cygrpc.pyx",
+)
+
+
+def _parse_owned_client_fatal_trace(body):
+    """Keep only a fatal header and reviewed framework frames, never raw lines."""
+    result = {"header": None, "frames": [], "truncated": len(body) > _FATAL_TRACE_BYTES}
+    for line in body[:_FATAL_TRACE_BYTES].decode("utf-8", errors="replace").splitlines():
+        if result["header"] is None:
+            if re.fullmatch(
+                r"Fatal Python error: (?:Aborted|Segmentation fault|Bus error|"
+                r"Illegal instruction|Floating point exception)",
+                line,
+            ):
+                result["header"] = line
+            continue
+        frame = re.fullmatch(
+            r'\s*File "([^"\r\n]{1,1024})", line ([1-9][0-9]{0,6})(?:,)? in '
+            r"([A-Za-z_][A-Za-z_0-9]{0,63}|<(?:module|listcomp|dictcomp|setcomp|genexpr)>)",
+            line,
+        )
+        if frame is None:
+            continue
+        path, number, function = frame.groups()
+        # Never retain an absolute path, arbitrary package name, exception
+        # message, thread address, C frame, environment, argv or request value.
+        path = path.replace("\\", "/")
+        if path in {"<frozen importlib._bootstrap>", "<frozen importlib._bootstrap_external>"}:
+            source = path[8:-1].replace(".", "/") + ".py"
+        else:
+            source = next(
+                (name for name in _FATAL_TRACE_FILES if path == name or path.endswith("/" + name)),
+                None,
+            )
+        if source is None or ".." in path.split("/"):
+            continue
+        if len(result["frames"]) == _FATAL_TRACE_FRAMES:
+            result["truncated"] = True
+            break
+        result["frames"].append({"file": source, "line": int(number), "function": function})
+    return result
+
+
+def _owned_client_fatal_traces(diagnostic_directory):
+    """Read only the three streams created for this fixture's one owned child.
+
+    The proxy stream can be inherited before exec; its label identifies the
+    stream, not which process faulted. No PID or crash cause is inferred.
+    """
+    result = {"streams": {}, "read_failed": False}
+    if diagnostic_directory is None:
+        return result
+    for role in ("proxy", "shim", "module"):
+        path = Path(diagnostic_directory) / f"owned_client_{role}.stack"
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            with path.open("rb") as stream:
+                trace = _parse_owned_client_fatal_trace(stream.read(_FATAL_TRACE_BYTES + 1))
+            if trace["header"] is not None or trace["truncated"]:
+                result["streams"][role] = trace
+        except OSError:
+            result["read_failed"] = True
+    return result
+
+
+def _owned_client_failure_evidence(directory, diagnostic_directory):
+    # Diagnostics must not replace the original failure or prevent node reaping.
+    try:
+        return {
+            "markers": _owned_client_log_markers(directory, diagnostic_directory),
+            "fatal_traces": _owned_client_fatal_traces(diagnostic_directory),
+        }
+    except Exception:
+        return {"diagnostic_failed": True}
+
+
+def _assert_owned_client_helper_succeeded(node, command, reason):
+    if reason is not None:
+        raise AssertionError(
+            f"Owned {command} helper failed: {reason}; "
+            f"readiness={json.dumps(node.readiness, sort_keys=True)}; "
+            f"ray_evidence={json.dumps(node.diagnostics(), sort_keys=True)}"
+        )
 
 
 def _client_proxy_ready(port, timeout):
@@ -1012,9 +1185,10 @@ def test_specific_stage_arms_one_nonfatal_nonrepeating_stack_dump(tmp_path, monk
         script["_stack_stream"].close()
 
 
-@pytest.mark.parametrize("outcome", [-9, 127, "timeout"])
+@pytest.mark.parametrize("outcome", [-9, -11, 127, "timeout"])
+@pytest.mark.parametrize("python_version", [(3, 12), (3, 14)])
 def test_proxy_diagnostic_observes_exact_child_without_stopping_or_retrying(
-    tmp_path, monkeypatch, outcome
+    tmp_path, monkeypatch, outcome, python_version
 ):
     import subprocess
     import threading
@@ -1024,8 +1198,16 @@ def test_proxy_diagnostic_observes_exact_child_without_stopping_or_retrying(
     script = _owned_client_diagnostic_namespace(tmp_path)
     directory = tmp_path / "diagnostics"
     directory.mkdir()
-    script["sys"] = SimpleNamespace(orig_argv=_diagnostic_command("proxy"))
-    waits, threads, starts = [], [], []
+    script["sys"] = SimpleNamespace(
+        orig_argv=_diagnostic_command("proxy"), version_info=python_version
+    )
+    waits, threads, starts, handlers = [], [], [], []
+
+    def enable(**kwargs):
+        assert not starts and not threads
+        handlers.append(kwargs)
+
+    monkeypatch.setitem(sys.modules, "faulthandler", SimpleNamespace(enable=enable))
 
     def wait(*, timeout):
         waits.append(timeout)
@@ -1041,12 +1223,18 @@ def test_proxy_diagnostic_observes_exact_child_without_stopping_or_retrying(
         threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: threads.append(kwargs))
     )
     script["install"]()
-    assert (
-        services.start_ray_process(
-            _diagnostic_command("specific-server", shim=True), "ray_client_server", fate_share=False
-        )
-        is info
-    )
+    assert not handlers
+    command = _diagnostic_command("specific-server", shim=True)
+    try:
+        assert services.start_ray_process(command, "ray_client_server", fate_share=False) is info
+        assert len(handlers) == 1
+        assert handlers[0]["file"] is script["_proxy_stack_stream"]
+        assert handlers[0]["all_threads"] is False
+        assert handlers[0].get("c_stack") is (False if python_version >= (3, 14) else None)
+        assert starts == [(command, "ray_client_server")]
+    finally:
+        if "_proxy_stack_stream" in script:
+            script["_proxy_stack_stream"].close()
     assert len(starts) == len(threads) == 1 and not waits
     assert threads[0]["daemon"] is True
     threads[0]["target"]()
@@ -1058,14 +1246,121 @@ def test_proxy_diagnostic_observes_exact_child_without_stopping_or_retrying(
     )
     marker = {
         -9: "child_signal_kill",
+        -11: "child_signal_segv",
         127: "child_exec_not_found",
         "timeout": "child_running_at_deadline",
     }[outcome]
     result = _owned_client_log_markers(tmp_path, directory)
     assert result[marker] and result["frame_ray_import"] and result["specific_module_entered"]
     assert result["proxy_diagnostic_installed"] and result["specific_child_started"]
+    assert result["proxy_fatal_handler_installed"] and not result["proxy_fatal_handler_unavailable"]
     assert "private" not in json.dumps(result) and "123" not in json.dumps(result)
     assert all(type(value) in {bool, int} for value in result.values())
+
+
+def test_proxy_fatal_handler_failure_does_not_change_or_retry_owned_launch(tmp_path, monkeypatch):
+    import threading
+
+    from ray._private import services
+
+    script = _owned_client_diagnostic_namespace(tmp_path)
+    directory = tmp_path / "diagnostics"
+    directory.mkdir()
+    script["sys"] = SimpleNamespace(orig_argv=_diagnostic_command("proxy"), version_info=(3, 14))
+    streams, launches, watchers = [], [], []
+
+    def unavailable(**kwargs):
+        streams.append(kwargs["file"])
+        raise OSError("private provider diagnostic must not escape")
+
+    info = SimpleNamespace(process=object())
+    monkeypatch.setitem(sys.modules, "faulthandler", SimpleNamespace(enable=unavailable))
+    monkeypatch.setattr(
+        services,
+        "start_ray_process",
+        lambda *args, **kwargs: launches.append((args, kwargs)) or info,
+    )
+    monkeypatch.setattr(
+        threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: watchers.append(kwargs))
+    )
+    script["install"]()
+    command = _diagnostic_command("specific-server", shim=True)
+    assert services.start_ray_process(command, "ray_client_server", fate_share=True) is info
+    assert launches == [((command, "ray_client_server"), {"fate_share": True})]
+    assert len(watchers) == len(streams) == 1 and streams[0].closed
+    result = _owned_client_log_markers(tmp_path, directory)
+    assert result["proxy_fatal_handler_unavailable"] and not result["proxy_fatal_handler_installed"]
+    assert result["specific_child_started"]
+    assert "private" not in json.dumps(result)
+    assert "private" not in (directory / "owned_client_process.log").read_text()
+
+
+@pytest.mark.parametrize("origin", ["proxy", "other", "embedded"])
+def test_proxy_fatal_classification_is_bounded_and_scoped_to_owned_stream(tmp_path, origin):
+    directory = tmp_path / "diagnostics"
+    directory.mkdir()
+    name = "owned_client_module.stack" if origin == "other" else "owned_client_proxy.stack"
+    lines = [
+        "Fatal Python error: Segmentation fault",
+        '  File "/private-root/subprocess.py", line 123 in _execute_child',
+        '  File "/private-root/ray/_private/services.py", line 456 in preexec_fn',
+    ]
+    if origin == "embedded":
+        lines = ["untrusted message contains " + line for line in lines]
+    (directory / name).write_text("\n".join(lines) + "\nsecret-marker", encoding="utf-8")
+    result = _owned_client_log_markers(tmp_path, directory)
+    for key in ("proxy_fatal_segv", "proxy_frame_subprocess", "proxy_frame_preexec"):
+        assert result[key] is (origin == "proxy")
+    assert not result["proxy_fatal_abort"]
+    assert all(type(value) in {bool, int} for value in result.values())
+    assert all(
+        value not in json.dumps(result) for value in ("private-root", "secret-marker", "123", "456")
+    )
+    (directory / name).write_bytes(b"x" * 65536 + b"\nFatal Python error: Aborted\n")
+    assert _owned_client_log_markers(tmp_path, directory)["truncated"]
+
+
+@pytest.mark.parametrize(
+    "prefix", ["", "F  ", "E0908 12:34:56.123456 1234 ", "E0000 00:00:1750000000.123456 1234 "]
+)
+@pytest.mark.parametrize("alteration", ["exact", "embedded", "suffix", "wrong-source"])
+def test_upstream_grpc_signatures_emit_only_exact_bounded_classifications(
+    tmp_path, prefix, alteration
+):
+    lines = [
+        "ev_epoll1_linux.cc:1125] Check failed: next_worker->state == KICKED",
+        "fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers",
+        "ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(18, generation: 1)",
+    ]
+    lines = [prefix + line for line in lines]
+    if alteration == "embedded":
+        lines = ["private-payload " + line for line in lines]
+    elif alteration == "suffix":
+        lines = [line + " private-payload" for line in lines]
+    elif alteration == "wrong-source":
+        lines = [line.replace(".cc:", ".py:") for line in lines]
+    log = tmp_path / "ray_client_server.err"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = _owned_client_log_markers(tmp_path)
+    for name in (
+        "grpc_epoll1_worker_kicked",
+        "grpc_fork_handlers_skipped",
+        "grpc_poll_inherited_fd",
+    ):
+        assert result[name] is (alteration == "exact")
+    assert all(type(value) in {bool, int} for value in result.values())
+    assert "private-payload" not in json.dumps(result)
+    log.write_bytes(log.read_bytes() + b"x" * 65536)
+    result = _owned_client_log_markers(tmp_path)
+    assert result["truncated"]
+    assert not any(
+        result[name]
+        for name in (
+            "grpc_epoll1_worker_kicked",
+            "grpc_fork_handlers_skipped",
+            "grpc_poll_inherited_fd",
+        )
+    )
 
 
 def test_client_readiness_retries_only_read_only_services(monkeypatch):
@@ -1110,6 +1405,156 @@ def test_client_readiness_stops_at_deadline_without_creating_a_driver(monkeypatc
         )
     assert now[0] == 10
     assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("header", ["Aborted", "Segmentation fault"])
+def test_owned_fatal_trace_keeps_structural_frames_without_private_payload(header):
+    body = (
+        '  File "/before/ray/_private/services.py", line 1 in ignored_before_fatal\n'
+        f"Fatal Python error: {header}\n\n"
+        "Current thread 0x12345678 (most recent call first):\n"
+        '  File "/private-owner/.venv/lib/python3.12/subprocess.py", line 1883 in _execute_child\n'
+        '  File "/private-token/site-packages/ray/_private/services.py", line 1046, in preexec_fn\n'
+        '  File "<frozen importlib._bootstrap>", line 488 in _call_with_frames_removed\n'
+        '  File "/private-owner/application.py", line 123 in secret_request\n'
+        '  File "/private-owner/ray/secret_token.py", line 12 in leak\n'
+        '  File "/private-owner/../ray/_private/services.py", line 13 in traversal\n'
+        '  File "/private-owner/subprocess.py", line 14 in bad_function=secret\n'
+        'message: File "/private-owner/subprocess.py", line 15 in embedded\n'
+        "Fatal Python error: unbounded-provider-payload\n"
+        "environment TOKEN=secret, argv=request-bytes, exception=private-provider-value\n"
+        "Extension modules: application-secret (total: 1)\n"
+    ).encode()
+    result = _parse_owned_client_fatal_trace(body)
+    assert result == {
+        "header": f"Fatal Python error: {header}",
+        "frames": [
+            {"file": "subprocess.py", "line": 1883, "function": "_execute_child"},
+            {"file": "ray/_private/services.py", "line": 1046, "function": "preexec_fn"},
+            {
+                "file": "importlib/_bootstrap.py",
+                "line": 488,
+                "function": "_call_with_frames_removed",
+            },
+        ],
+        "truncated": False,
+    }
+    assert all(
+        value not in json.dumps(result)
+        for value in (
+            "private-owner",
+            "private-token",
+            "secret",
+            "request",
+            "argv",
+            "0x12345678",
+            "traversal",
+        )
+    )
+
+
+def test_owned_fatal_trace_bounds_input_and_frames_and_requires_exact_fatal_header():
+    frame = b'  File "/private/subprocess.py", line 123 in _execute_child\n'
+    assert _parse_owned_client_fatal_trace(frame)["frames"] == []
+    assert (
+        _parse_owned_client_fatal_trace(
+            b"untrusted message: Fatal Python error: Aborted\n" + frame
+        )["header"]
+        is None
+    )
+    result = _parse_owned_client_fatal_trace(b"Fatal Python error: Aborted\n" + frame * 100)
+    assert len(result["frames"]) == _FATAL_TRACE_FRAMES and result["truncated"]
+    result = _parse_owned_client_fatal_trace(
+        b"x" * _FATAL_TRACE_BYTES + b"\nFatal Python error: Aborted\n" + frame
+    )
+    assert result == {"header": None, "frames": [], "truncated": True}
+
+
+def test_owned_fatal_reader_uses_only_bounded_owned_streams(tmp_path, monkeypatch):
+    body = b"Fatal Python error: Aborted\n" + b"x" * (_FATAL_TRACE_BYTES * 2)
+    (tmp_path / "owned_client_proxy.stack").write_bytes(body)
+    (tmp_path / "unrelated.stack").write_bytes(b"Fatal Python error: Segmentation fault\n")
+    (tmp_path / "owned_client_helper.log").write_bytes(b"Fatal Python error: Segmentation fault\n")
+    reads = []
+    original = Path.open
+
+    class BoundedReader:
+        def __init__(self, path):
+            self.stream = original(path, "rb")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.stream.close()
+
+        def read(self, size):
+            reads.append(size)
+            return self.stream.read(size)
+
+    monkeypatch.setattr(Path, "open", lambda path, *_args: BoundedReader(path))
+    result = _owned_client_fatal_traces(tmp_path)
+    assert reads == [_FATAL_TRACE_BYTES + 1]
+    assert result == {
+        "streams": {
+            "proxy": {"header": "Fatal Python error: Aborted", "frames": [], "truncated": True}
+        },
+        "read_failed": False,
+    }
+    assert _owned_client_fatal_traces(None) == {"streams": {}, "read_failed": False}
+
+
+def test_owned_fatal_reader_refuses_symlink_and_redacts_read_failure(tmp_path, monkeypatch):
+    for role in ("proxy", "shim"):
+        (tmp_path / f"owned_client_{role}.stack").write_bytes(b"Fatal Python error: Aborted\n")
+    original = Path.is_symlink
+    monkeypatch.setattr(
+        Path, "is_symlink", lambda path: path.name == "owned_client_proxy.stack" or original(path)
+    )
+    opened = []
+
+    def unavailable(path, *_args):
+        opened.append(path.name)
+        raise OSError("private provider detail")
+
+    monkeypatch.setattr(Path, "open", unavailable)
+    assert _owned_client_fatal_traces(tmp_path) == {"streams": {}, "read_failed": True}
+    assert opened == ["owned_client_shim.stack"]
+
+
+@pytest.mark.parametrize("diagnostic_failure", [False, True])
+def test_owned_helper_failure_retains_evidence_before_cleanup_and_preserves_reason(
+    tmp_path, monkeypatch, diagnostic_failure
+):
+    reads = []
+    original = _owned_client_fatal_traces
+
+    def read(directory):
+        assert directory.is_dir()
+        reads.append(directory)
+        if diagnostic_failure:
+            raise RuntimeError("private diagnostic failure")
+        return original(directory)
+
+    monkeypatch.setattr(sys.modules[__name__], "_owned_client_fatal_traces", read)
+    with pytest.raises(AssertionError, match="helper failed: deadline") as error:
+        with tempfile.TemporaryDirectory(dir=tmp_path) as directory:
+            owned = Path(directory)
+            (owned / "owned_client_proxy.stack").write_text(
+                'Fatal Python error: Aborted\n  File "/private/subprocess.py", line 123 in _execute_child\n'
+            )
+            node = SimpleNamespace(
+                readiness={"owned_processes_alive": True},
+                diagnostics=lambda: _owned_client_failure_evidence(owned, owned),
+            )
+            _assert_owned_client_helper_succeeded(node, "discover-client", "deadline")
+    assert reads == [owned] and not owned.exists()
+    assert "private" not in str(error.value)
+    if diagnostic_failure:
+        assert '"diagnostic_failed": true' in str(error.value)
+    else:
+        assert '"header": "Fatal Python error: Aborted"' in str(error.value)
+        assert '"function": "_execute_child"' in str(error.value)
 
 
 def _configure_owned_client_network(monkeypatch, client_port):
@@ -1163,7 +1608,7 @@ def test_owned_node_advertisement_survives_fresh_driver_canonicalization(monkeyp
     ]
 
 
-@pytest.fixture
+@pytest.fixture(params=(False, True), ids=("stock", "instrumented"))
 def owned_client_ray_node(request, monkeypatch):
     """One unconnected host head with loopback Dashboard/Client access.
 
@@ -1174,6 +1619,11 @@ def owned_client_ray_node(request, monkeypatch):
     GCS/Raylet use Ray's native host advertisement and all-interface listeners;
     the admitted disposable Linux VM is the isolation boundary. The runtime
     agent listens at the advertised host IP. No shared cluster is attached.
+
+    Each mandatory variant owns and reaps a separate node in the serial native
+    lane. Stock launches install no diagnostic sitecustomize or launch wrappers;
+    only existing owned Ray logs are read. The other variant retains the bounded
+    instrumentation. One outcome pair does not establish a deterministic cause.
     """
     from scripts.require_linux import require_linux
 
@@ -1197,8 +1647,10 @@ def owned_client_ray_node(request, monkeypatch):
     # A port race fails startup and cleans this owned node; never discover or
     # attach another server that happens to occupy an allocated port.
     with tempfile.TemporaryDirectory(prefix="dr-client-", dir="/tmp") as directory:
-        diagnostic_directory = _install_owned_client_diagnostics(
-            monkeypatch, Path(directory) / "client-diagnostic"
+        diagnostic_directory = (
+            _install_owned_client_diagnostics(monkeypatch, Path(directory) / "client-diagnostic")
+            if request.param
+            else None
         )
         parameters: dict[str, Any] = {
             "num_cpus": 2,
@@ -1235,18 +1687,19 @@ def owned_client_ray_node(request, monkeypatch):
                 jobs_endpoint=discovery._dashboard_endpoint(node.webui_url),
                 cluster_session=node.session_name,
                 readiness=readiness,
-                diagnostics=lambda: _owned_client_log_markers(
+                diagnostics=lambda: _owned_client_failure_evidence(
                     node.get_logs_dir_path(), diagnostic_directory
                 ),
             )
         except BaseException:
-            # Setup errors occur before a helper exists, so retain only fixed
-            # classifications before deleting this fixture's owned log tree.
+            # Retain bounded, filtered evidence before deleting the owned tree.
             if hasattr(node, "_logs_dir"):
                 print(
                     "OWNED_CLIENT_RAY_DIAGNOSTICS "
                     + json.dumps(
-                        _owned_client_log_markers(node.get_logs_dir_path(), diagnostic_directory),
+                        _owned_client_failure_evidence(
+                            node.get_logs_dir_path(), diagnostic_directory
+                        ),
                         sort_keys=True,
                     )
                 )
@@ -1264,7 +1717,11 @@ def owned_client_ray_node(request, monkeypatch):
 def test_native_client_discovery_and_driver_death_use_owned_exec_helpers(
     owned_client_ray_node, monkeypatch: pytest.MonkeyPatch
 ):
-    """Prove actual Client DRIVER lifecycle, not deployed authentication policy."""
+    """Require the same Client DRIVER lifecycle with and without instrumentation.
+
+    Both independently collected cases must pass; neither retries, replaces or
+    promotes the other's outcome. This is not deployed authentication evidence.
+    """
     from django.db.backends.utils import CursorWrapper
 
     from django_ray.runner.cohort_process import CohortProcessPhase, CohortProcessSupervisor
@@ -1291,10 +1748,8 @@ def test_native_client_discovery_and_driver_death_use_owned_exec_helpers(
                     assert supervisor.outstanding is None
                     assert supervisor.phase is CohortProcessPhase.IDLE
                     assert result.operation_id == ticket.operation_id
-                    assert result.reason is None, (
-                        f"Owned {command} helper failed: {result.reason}; "
-                        f"readiness={json.dumps(owned_client_ray_node.readiness, sort_keys=True)}; "
-                        f"ray_markers={json.dumps(owned_client_ray_node.diagnostics(), sort_keys=True)}"
+                    _assert_owned_client_helper_succeeded(
+                        owned_client_ray_node, command, result.reason
                     )
                     assert result.response is not None
                     return result.response

@@ -55,6 +55,13 @@ run in full; its implementation is unchanged. The instructions below describe th
 explicit full run. They do not make every historical scenario a per-PR requirement
 or claim that a partial DRT workload completed the full script.
 
+That historical handoff expects a protocol-1 current manager and is incompatible
+with the protocol-3 activation in migration `0035`. It cannot qualify the 0.5
+candidate as written. The replacement coordinated-upgrade workload must prove
+released-runtime drain, writer retirement, backup and independent restore, then
+current Core/Jobs execution and cleanup. Preserve this missing evidence explicitly
+until that workload passes; changing the old receipt's protocol label is insufficient.
+
 This is a maintainer integration-validation gate for the checked-in local profile. A passing run
 is not deployment certification, a threat-model review, or evidence that the sample manifests form
 a production-ready topology.

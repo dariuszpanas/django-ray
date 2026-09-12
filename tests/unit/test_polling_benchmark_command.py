@@ -25,9 +25,8 @@ from django_ray.management.commands.django_ray_benchmark_polling import (
     ProtocolPredicatePlanSummary,
     ProtocolPredicateVariantResult,
     _cross_worker_overlap_metrics,
-    _has_inclusive_protocol_predicates,
+    _has_current_protocol_predicate,
     _is_claim_query,
-    _is_expiry_sweep_query,
     _is_production_claim_query,
     _percentile,
     _summarize_explain,
@@ -106,16 +105,16 @@ def _protocol_evidence() -> ProtocolPredicateEvidence:
         plan=plan,
     )
     return ProtocolPredicateEvidence(
-        schema_version=1,
-        method="paired_counterbalanced_production_claim",
+        schema_version=2,
+        method="paired_counterbalanced_current_cohort_selection",
         seeded_rows=5,
         query_limit=5,
         timed_pairs=2,
         production_first_pairs=1,
         control_first_pairs=1,
-        seeded_protocol_version=1,
-        protocol_minimum=1,
-        protocol_maximum=1,
+        seeded_protocol_version=3,
+        protocol_minimum=3,
+        protocol_maximum=3,
         production_claim_sql_shape_verified=True,
         variant_selection_verified=True,
         paired_delta_samples_ms=(0.1, 0.1),
@@ -174,24 +173,25 @@ def test_overlap_metrics_use_sliding_window_across_fixed_boundaries() -> None:
 
 def test_claim_query_detection_matches_production_select_only() -> None:
     table = benchmark.RayTaskExecution._meta.db_table
-    assert _is_claim_query(f'SELECT * FROM "{table}" FOR UPDATE SKIP LOCKED') is True
-    assert _is_claim_query(f'UPDATE "{table}" SET state = 2') is False
-    assert _is_claim_query("SELECT 1 FOR UPDATE") is False
+    selection = (
+        f'SELECT id FROM "{table}" JOIN django_ray_raytaskcohortintent ON true '
+        'WHERE "execution_protocol_version" = %s '
+        'ORDER BY "priority" DESC, "created_at" ASC LIMIT 1'
+    )
+    assert _is_claim_query(selection)
+    assert _is_production_claim_query(selection)
+    assert not _is_claim_query(f'SELECT * FROM "{table}" FOR UPDATE SKIP LOCKED')
+    assert not _is_claim_query(f'UPDATE "{table}" SET state = 2')
+    assert not _is_production_claim_query(
+        selection.replace("django_ray_raytaskcohortintent", "other")
+    )
 
-    production = (
-        f'SELECT * FROM "{table}" WHERE run_after IS NULL '
-        'AND queue_deadline_at IS NULL ORDER BY "priority" DESC, '
-        '"created_at" ASC FOR UPDATE SKIP LOCKED'
-    )
-    expiry = (
-        f'SELECT * FROM "{table}" WHERE "queue_deadline_at" IS NOT NULL '
-        'AND "queue_deadline_at" <= %s ORDER BY "queue_deadline_at" ASC '
-        "FOR UPDATE SKIP LOCKED"
-    )
-    assert _is_production_claim_query(production) is True
-    assert _is_production_claim_query(expiry) is False
-    assert _is_expiry_sweep_query(expiry) is True
-    assert _is_expiry_sweep_query(production) is False
+
+def _current_cohort(queue_name="predicate-queue"):
+    worker = benchmark.WorkerCommand()
+    worker._set_worker_id(f"benchmark-unit-{queue_name}")
+    worker._create_lease(queue_name)
+    return benchmark._BenchmarkCohort.current(queue_name, worker.lease_identity)
 
 
 def test_explain_summary_uses_bounded_fixed_vocabulary() -> None:
@@ -271,25 +271,28 @@ def test_explain_summary_rejects_malformed_shapes(raw: str) -> None:
 def test_claim_query_variants_select_identical_rows_and_verify_shape() -> None:
     first = Command._create_execution(task_id="predicate-query-1", queue_name="predicate-queue")
     second = Command._create_execution(task_id="predicate-query-2", queue_name="predicate-queue")
+    cohort = _current_cohort()
     claim_now = datetime.now(UTC)
 
     with benchmark.transaction.atomic():
         production = Command._claim_queryset(
             queue_name="predicate-queue",
+            cohort=cohort,
             claim_now=claim_now,
             query_limit=2,
             protocol_predicate=True,
         )
         control = Command._claim_queryset(
             queue_name="predicate-queue",
+            cohort=cohort,
             claim_now=claim_now,
             query_limit=2,
             protocol_predicate=False,
         )
         production_sql, _ = production.query.sql_with_params()
         control_sql, _ = control.query.sql_with_params()
-        assert [row.pk for row in production] == [first.pk, second.pk]
-        assert [row.pk for row in control] == [first.pk, second.pk]
+        assert list(production) == [first.pk, second.pk]
+        assert list(control) == [first.pk, second.pk]
 
     def lookup_field_name(lookup: object) -> object:
         return getattr(getattr(getattr(lookup, "lhs", None), "target", None), "name", None)
@@ -305,32 +308,34 @@ def test_claim_query_variants_select_identical_rows_and_verify_shape() -> None:
         if lookup_field_name(lookup) == "execution_protocol_version"
     ]
     assert [getattr(lookup, "lookup_name", None) for lookup in production_protocol_lookups] == [
-        "gte",
-        "lte",
+        "exact",
     ]
     assert control_protocol_lookups == []
+    compiler = production.query.get_compiler(using="default")
     assert [
-        str(lookup)
+        compiler.compile(lookup)
         for lookup in production.query.where.children
         if lookup_field_name(lookup) != "execution_protocol_version"
-    ] == [str(lookup) for lookup in control.query.where.children]
+    ] == [compiler.compile(lookup) for lookup in control.query.where.children]
 
     production_where = production_sql.split(" WHERE ", 1)[1]
     control_where = control_sql.split(" WHERE ", 1)[1]
     assert "execution_protocol_version" in production_where
-    assert "execution_protocol_version" not in control_where
-    assert _has_inclusive_protocol_predicates(production_sql) is True
-    assert _has_inclusive_protocol_predicates(control_sql) is False
+    assert '"execution_protocol_version"' not in control_where
+    assert _has_current_protocol_predicate(production_sql) is True
+    assert _has_current_protocol_predicate(control_sql) is False
     Command._verify_production_claim_sql_shape(
         captured_sql=production_sql.lower(),
         queue_name="predicate-queue",
+        cohort=cohort,
         claim_now=claim_now,
         query_limit=2,
     )
-    with pytest.raises(CommandError, match="missing the inclusive"):
+    with pytest.raises(CommandError, match="missing the exact current"):
         Command._verify_production_claim_sql_shape(
             captured_sql=control_sql,
             queue_name="predicate-queue",
+            cohort=cohort,
             claim_now=claim_now,
             query_limit=2,
         )
@@ -338,12 +343,14 @@ def test_claim_query_variants_select_identical_rows_and_verify_shape() -> None:
         Command._verify_production_claim_sql_shape(
             captured_sql=f"{production_sql} OFFSET 0",
             queue_name="predicate-queue",
+            cohort=cohort,
             claim_now=claim_now,
             query_limit=2,
         )
 
     duration_ms, selected_pks = Command._time_claim_query(
         queue_name="predicate-queue",
+        cohort=cohort,
         claim_now=claim_now,
         query_limit=2,
         protocol_predicate=True,
@@ -426,7 +433,7 @@ def test_handle_emits_json_with_environment_metadata(monkeypatch) -> None:
     assert payload["environment"]["seed"] == 53
     assert [result["policy"] for result in payload["results"]] == ["fixed", "adaptive"]
     evidence = payload["protocol_predicate_evidence"]
-    assert evidence["schema_version"] == 1
+    assert evidence["schema_version"] == 2
     assert evidence["production_claim_sql_shape_verified"] is True
     assert evidence["variant_selection_verified"] is True
     assert [variant["name"] for variant in evidence["variants"]] == [
@@ -590,10 +597,11 @@ def test_idle_latency_phase_snapshots_idle_sql_and_claims_spaced_tasks(monkeypat
     monkeypatch.setattr(benchmark.time, "monotonic", monotonic)
     monkeypatch.setattr(benchmark.time, "sleep", lambda _seconds: None)
 
-    def create(*, task_id: str, queue_name: str) -> None:
+    def create(*, task_id: str, queue_name: str):
         assert queue_name.startswith("django-ray-poll-latency-")
         on_claim = cast(Callable[[object], None], callbacks["on_claim"])
         on_claim(SimpleNamespace(task_id=task_id))
+        return SimpleNamespace(pk=len(observed_times))
 
     monkeypatch.setattr(command, "_create_execution", create)
     monkeypatch.setattr(
@@ -667,7 +675,7 @@ def test_idle_latency_phase_reports_claim_timeout(monkeypatch) -> None:
     monkeypatch.setattr(command, "_start_workers", lambda **_kwargs: group)
     monkeypatch.setattr(command, "_release_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_stop_workers", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(command, "_create_execution", lambda **_kwargs: None)
+    monkeypatch.setattr(command, "_create_execution", lambda **_kwargs: SimpleNamespace(pk=1))
     monkeypatch.setattr(command, "_cleanup_phase_rows", lambda **_kwargs: None)
     monkeypatch.setattr(threading.Event, "wait", lambda _self, _timeout=None: False)
 
@@ -694,7 +702,9 @@ def test_throughput_phase_measures_preloaded_burst(monkeypatch) -> None:
     monkeypatch.setattr(
         command,
         "_create_execution",
-        lambda *, task_id, queue_name: created.append(f"{queue_name}:{task_id}"),
+        lambda *, task_id, queue_name: (
+            created.append(f"{queue_name}:{task_id}") or SimpleNamespace(pk=len(created))
+        ),
     )
 
     def start(**kwargs):
@@ -731,7 +741,7 @@ def test_throughput_phase_measures_preloaded_burst(monkeypatch) -> None:
 def test_throughput_phase_reports_timeout(monkeypatch) -> None:
     command = Command()
     group = _group()
-    monkeypatch.setattr(command, "_create_execution", lambda **_kwargs: None)
+    monkeypatch.setattr(command, "_create_execution", lambda **_kwargs: SimpleNamespace(pk=1))
     monkeypatch.setattr(command, "_start_workers", lambda **_kwargs: group)
     monkeypatch.setattr(command, "_release_workers", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(command, "_stop_workers", lambda *_args, **_kwargs: None)
@@ -783,21 +793,20 @@ def test_start_workers_runs_production_claim_under_sql_wrapper(monkeypatch) -> N
             heartbeat_calls.append(True)
             return True
 
-        def claim_and_process_tasks(self, _queues, concurrency):
-            assert concurrency == 1
-            table = benchmark.RayTaskExecution._meta.db_table
-            observer = cast(Callable[..., object], fake_connection.observer)
-            observer(
-                lambda _sql, _params, _many, _context: None,
-                f'SELECT * FROM "{table}" FOR UPDATE SKIP LOCKED',
-                (),
-                False,
-                {},
-            )
-            process_task = cast(Callable[[object], None], self.process_task)
-            process_task(SimpleNamespace(task_id="claimed"))
-            return 1
+    def claim(cohort, limit):
+        assert limit == 1
+        observer = cast(Callable[..., object], fake_connection.observer)
+        observer(
+            lambda *_: None,
+            f'SELECT id FROM "{benchmark.RayTaskExecution._meta.db_table}" '
+            'ORDER BY "priority" DESC, "created_at" ASC LIMIT 1',
+            (),
+            False,
+            {},
+        )
+        return (SimpleNamespace(execution=SimpleNamespace(task_id="claimed")),)
 
+    monkeypatch.setattr(benchmark._BenchmarkCohort, "claim", claim)
     monkeypatch.setattr(benchmark, "connection", fake_connection)
     monkeypatch.setattr(benchmark, "WorkerCommand", FakeWorker)
     monkeypatch.setattr(benchmark, "close_old_connections", lambda: None)
@@ -823,69 +832,20 @@ def test_start_workers_runs_production_claim_under_sql_wrapper(monkeypatch) -> N
     assert heartbeat_calls
 
 
-@pytest.mark.django_db
-def test_capture_production_claim_sql_uses_real_worker_boundary(monkeypatch) -> None:
-    table = benchmark.RayTaskExecution._meta.db_table
-    expiry_sql = (
-        f'SELECT * FROM "{table}" WHERE "queue_deadline_at" IS NOT NULL '
-        'AND "queue_deadline_at" <= %s ORDER BY "queue_deadline_at" ASC '
-        "FOR UPDATE SKIP LOCKED"
-    )
-    production_sql = (
-        f'SELECT * FROM "{table}" WHERE run_after IS NULL '
-        'AND queue_deadline_at IS NULL ORDER BY "priority" DESC, '
-        '"created_at" ASC FOR UPDATE SKIP LOCKED'
-    )
-
-    class FakeConnection:
-        observer: Callable[..., object] | None = None
-
-        @contextmanager
-        def execute_wrapper(self, observer):
-            self.observer = observer
-            yield
-
-    fake_connection = FakeConnection()
-
-    class FakeWorker:
-        def __init__(self) -> None:
-            self.lease_identity = None
-
-        def _set_worker_id(self, _worker_id: str) -> None:
-            return
-
-        def _create_lease(self, queue_name: str) -> None:
-            assert queue_name == "owned-queue"
-            self.lease_identity = _lease_identity("capture-worker")
-
-        def claim_and_process_tasks(self, queues, concurrency):
-            assert queues == ["owned-queue"]
-            assert concurrency == 5
-            observer = cast(Callable[..., object], fake_connection.observer)
-            executed_sql: list[str] = []
-
-            def execute(sql, _params, _many, _context):
-                executed_sql.append(sql)
-                return None
-
-            observer(execute, expiry_sql, (), False, {})
-            assert executed_sql == [benchmark._CAPTURE_EMPTY_SELECT]
-            observer(execute, production_sql, (), False, {})
-            pytest.fail("the production query must be intercepted before execution")
-
-    delete_leases = Mock()
-    monkeypatch.setattr(benchmark, "connection", fake_connection)
-    monkeypatch.setattr(benchmark, "WorkerCommand", FakeWorker)
-    monkeypatch.setattr(Command, "_delete_exact_leases", delete_leases)
-
+@pytest.mark.django_db(transaction=True)
+def test_capture_production_claim_sql_uses_real_worker_boundary() -> None:
+    cohort = _current_cohort("owned-queue")
+    execution = Command._create_execution(task_id="capture-owned", queue_name="owned-queue")
     captured = Command._capture_production_claim_sql(
         queue_name="owned-queue",
         query_limit=5,
+        cohort=cohort,
     )
-
-    assert captured == production_sql
-    delete_leases.assert_called_once()
-    assert delete_leases.call_args.args[0][0].worker_id == "capture-worker"
+    assert _is_production_claim_query(captured)
+    execution.refresh_from_db()
+    assert execution.state == benchmark.TaskState.QUEUED
+    assert execution.execution_generation == 0
+    assert not benchmark.RayTaskCohortClaim.objects.filter(binding_id=execution.pk).exists()
 
 
 def test_benchmark_worker_fails_closed_before_claim_after_lease_loss(monkeypatch) -> None:
@@ -1068,6 +1028,9 @@ def test_partial_thread_start_failure_joins_started_threads(monkeypatch) -> None
             del timeout
             joined.append(self.name)
 
+        def is_alive(self) -> bool:
+            return False
+
     monkeypatch.setattr(benchmark.threading, "Thread", FakeThread)
     monkeypatch.setattr(benchmark.TaskWorkerLease.objects, "filter", Mock())
 
@@ -1099,33 +1062,24 @@ def test_stop_workers_rejects_lingering_thread() -> None:
         Command._stop_workers(group, max_interval=0.01)
 
 
-def test_create_execution_uses_realistic_payload(monkeypatch) -> None:
-    create = Mock()
-    monkeypatch.setattr(benchmark.RayTaskExecution.objects, "create", create)
-
-    Command._create_execution(task_id="task", queue_name="queue")
-
-    create.assert_called_once_with(
-        task_id="task",
-        callable_path="django_ray.benchmarks.polling_probe",
-        metadata_schema_version=benchmark.EXECUTION_METADATA_SCHEMA_VERSION,
-        execution_protocol_version=benchmark.EXECUTION_PROTOCOL_VERSION,
-        created_with_django_ray_version=benchmark.django_ray_version,
-        queue_name="queue",
-        state=benchmark.TaskState.QUEUED,
-        args_json="[]",
-        kwargs_json="{}",
+@pytest.mark.django_db
+def test_create_execution_uses_realistic_payload() -> None:
+    execution = Command._create_execution(task_id="task", queue_name="queue")
+    assert execution.execution_protocol_version == 3
+    assert execution.args_json == "[]" and execution.kwargs_json == "{}"
+    assert execution.state == benchmark.TaskState.QUEUED
+    assert execution.cohort_intent.backend_alias == "polling-benchmark"
+    assert execution.cohort_intent.package_version == benchmark.django_ray_version
+    assert (
+        execution.cohort_intent.configuration_digest
+        == benchmark._benchmark_intent().configuration_digest
     )
 
 
 @pytest.mark.django_db
 def test_cleanup_deletes_only_exact_acquired_lease_identity() -> None:
-    acquired = benchmark.TaskWorkerLease.objects.create(
-        worker_id="regenerated-benchmark-worker",
-        hostname="acquired-host",
-        pid=123,
-        queue_name="benchmark-queue",
-    )
+    acquired_cohort = _current_cohort("benchmark-queue")
+    acquired = benchmark.TaskWorkerLease.objects.get(pk=acquired_cohort.identity.worker_id)
     acquired_identity = WorkerLeaseIdentity(
         worker_id=str(acquired.worker_id),
         hostname=acquired.hostname,
@@ -1137,9 +1091,14 @@ def test_cleanup_deletes_only_exact_acquired_lease_identity() -> None:
         hostname="foreign-host",
         pid=456,
         queue_name="benchmark-queue",
+        capability_schema_version=1,
+        legacy_admission_token=None,
+        django_ray_version=benchmark.django_ray_version,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
     )
-    benchmark.RayTaskExecution.objects.create(
-        task_id="poll-cleanup-owned-001",
+    owned = benchmark.RayTaskExecution.objects.create(
+        task_id="poll-cleanup-owned-0",
         callable_path="django_ray.benchmarks.polling_probe",
         queue_name="benchmark-queue",
         state=benchmark.TaskState.QUEUED,
@@ -1149,10 +1108,14 @@ def test_cleanup_deletes_only_exact_acquired_lease_identity() -> None:
 
     Command._cleanup_phase_rows(
         task_prefix="poll-cleanup-owned-",
+        queue_name="benchmark-queue",
         lease_identities=[acquired_identity],
+        claims=[],
+        created_pks=[owned.pk],
+        threads=[],
     )
 
-    assert not benchmark.RayTaskExecution.objects.filter(task_id="poll-cleanup-owned-001").exists()
+    assert not benchmark.RayTaskExecution.objects.filter(task_id="poll-cleanup-owned-0").exists()
     assert not benchmark.TaskWorkerLease.objects.filter(
         **acquired_identity.database_filters()
     ).exists()
@@ -1163,6 +1126,11 @@ def test_cleanup_deletes_only_exact_acquired_lease_identity() -> None:
         hostname="replacement-host",
         pid=999,
         queue_name="benchmark-queue",
+        capability_schema_version=1,
+        legacy_admission_token=None,
+        django_ray_version=benchmark.django_ray_version,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
     )
     Command._delete_exact_leases([acquired_identity])
 
@@ -1207,22 +1175,22 @@ def test_protocol_predicate_evidence_is_counterbalanced_and_exactly_cleans(
             .order_by("created_at", "pk")
             .values_list("pk", "execution_protocol_version")
         )
-        assert {protocol for _pk, protocol in rows} == {1}
+        assert {protocol for _pk, protocol in rows} == {3}
         return (2.0 if protocol_predicate else 1.0), [int(pk) for pk, _protocol in rows]
 
     monkeypatch.setattr(Command, "_time_claim_query", staticmethod(time_query))
 
     evidence = Command()._run_protocol_predicate_evidence(task_count=5, seed=53)
 
-    assert evidence.schema_version == 1
+    assert evidence.schema_version == 2
     assert evidence.seeded_rows == 5
     assert evidence.query_limit == 5
     assert evidence.timed_pairs == 12
     assert evidence.production_first_pairs == 6
     assert evidence.control_first_pairs == 6
-    assert evidence.seeded_protocol_version == 1
-    assert evidence.protocol_minimum == 1
-    assert evidence.protocol_maximum == 1
+    assert evidence.seeded_protocol_version == 3
+    assert evidence.protocol_minimum == 3
+    assert evidence.protocol_maximum == 3
     assert evidence.variant_selection_verified is True
     assert evidence.paired_delta_samples_ms == (1.0,) * 12
     assert evidence.paired_delta_p50_ms == 1.0
@@ -1315,3 +1283,167 @@ def test_claim_integrity_reports_exact_counts(monkeypatch) -> None:
             expected_count=2,
             phase="fixed latency",
         )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_current_benchmark_qualification_precedes_limit_and_cleanup_keeps_real_history(monkeypatch):
+    cohort = _current_cohort("current-limit")
+    rejected = benchmark.RayTaskExecution.objects.create(
+        task_id="poll-owned-without-intent",
+        callable_path="unused",
+        queue_name="current-limit",
+        priority=100,
+    )
+    execution = Command._create_execution(task_id="poll-owned-current", queue_name="current-limit")
+    batch = cohort.claim(1)
+    assert [item.execution.pk for item in batch] == [execution.pk]
+    assert batch[0].claim.facts.binding.runner_family is benchmark.CohortRunnerFamily.SYNC
+    assert batch[0].claim.facts.binding.sync_python == cohort.runtime.python
+    assert batch[0].claim.prepared_request_digest is None and batch[0].claim.dispatched_at is None
+    witnessed = []
+    original_delete = benchmark.RayTaskCohortClaim.objects.filter
+
+    def capture_delete(*args, **kwargs):
+        query = original_delete(*args, **kwargs)
+        if "pk__in" in kwargs:
+            row = query.get()
+            task = benchmark.RayTaskExecution.objects.get(pk=row.binding_id)
+            witnessed.append((row.disposition, row.resolution_kind, task.state))
+        return query
+
+    monkeypatch.setattr(benchmark.RayTaskCohortClaim.objects, "filter", capture_delete)
+    Command._cleanup_phase_rows(
+        task_prefix="poll-owned-",
+        queue_name="current-limit",
+        lease_identities=[cohort.identity],
+        claims=list(batch),
+        created_pks=[execution.pk],
+        threads=[],
+    )
+    assert witnessed == [("RESOLVED", "verified_not_invoked", benchmark.TaskState.CANCELLED)]
+    assert not benchmark.RayTaskExecution.objects.filter(pk=execution.pk).exists()
+    assert not benchmark.RayTaskTargetBinding.objects.filter(execution_id=execution.pk).exists()
+    assert not benchmark.RayTaskCohortIntent.objects.filter(execution_id=execution.pk).exists()
+    rejected.refresh_from_db()
+    assert rejected.state == benchmark.TaskState.QUEUED and rejected.execution_generation == 0
+
+
+@pytest.fixture
+def stopped_refusal_fixture():
+    """Discard only this stopped SQLite test fixture after refusal assertions.
+
+    No cleanup proof is invented and no product trigger is disabled. Normal
+    isolated test database flush can then remove orphaned fixture ledger rows.
+    """
+    yield
+    if benchmark.connection.vendor == "sqlite":
+        with (
+            benchmark.connection.constraint_checks_disabled(),
+            benchmark.connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                "DELETE FROM django_ray_raytaskexecution WHERE task_id=%s",
+                ["poll-refuse-current"],
+            )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("drift", ["prepared", "lost_owner", "held", "thread_alive"])
+@pytest.mark.usefixtures("stopped_refusal_fixture")
+def test_current_benchmark_cleanup_refuses_changed_ownership_without_resolving(drift):
+    cohort = _current_cohort("cleanup-refuse")
+    execution = Command._create_execution(
+        task_id="poll-refuse-current", queue_name="cleanup-refuse"
+    )
+    batch = cohort.claim(1)
+    record = batch[0].claim
+    threads = []
+    if drift == "prepared":
+        with benchmark.transaction.atomic():
+            benchmark.cohort_claim_storage.prepare_cohort_claim(
+                record.owner,
+                record.claim_id,
+                expected_identity=record.facts.identity,
+                expected_revision=record.revision,
+                request_digest="sha256:" + "a" * 64,
+                now=datetime.now(UTC),
+            )
+    elif drift == "held":
+        from django_ray.target.cohort_claim import CohortHoldBoundary, CohortHoldReason
+
+        with benchmark.transaction.atomic():
+            benchmark.cohort_claim_storage.hold_cohort_claim(
+                record.owner,
+                record.claim_id,
+                expected_identity=record.facts.identity,
+                expected_revision=record.revision,
+                reason=CohortHoldReason.DISPATCH_UNCERTAIN,
+                boundary=CohortHoldBoundary.CONTROL,
+                evidence_digest="sha256:" + "b" * 64,
+                application_invoked=None,
+                now=datetime.now(UTC),
+            )
+    elif drift == "lost_owner":
+        benchmark.TaskWorkerLease.objects.filter(pk=cohort.identity.worker_id).update(
+            is_active=False
+        )
+    else:
+        threads = [SimpleNamespace(is_alive=lambda: True)]
+    before = benchmark.RayTaskCohortClaim.objects.values().get(pk=record.claim_id)
+    with pytest.raises((CommandError, benchmark.cohort_claim_storage.CohortClaimStorageError)):
+        Command._cleanup_phase_rows(
+            task_prefix="poll-refuse-",
+            queue_name="cleanup-refuse",
+            lease_identities=[cohort.identity],
+            claims=list(batch),
+            created_pks=[execution.pk],
+            threads=threads,
+        )
+    assert benchmark.RayTaskCohortClaim.objects.values().get(pk=record.claim_id) == before
+    execution.refresh_from_db()
+    assert execution.state == benchmark.TaskState.RUNNING
+    assert benchmark.TaskWorkerLease.objects.filter(pk=cohort.identity.worker_id).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("changed", ["queue", "task_id"])
+def test_protocol_query_cleanup_preserves_changed_rows_and_intent(monkeypatch, changed):
+    owned = []
+
+    def refuse_capture(**kwargs):
+        row = benchmark.RayTaskExecution.objects.get(queue_name=kwargs["queue_name"])
+        owned.append(row.pk)
+        if changed == "queue":
+            row.queue_name = "moved-by-another-owner"
+            row.save(update_fields=("queue_name",))
+        else:
+            # Retain the original prefix: cleanup must compare the exact seed.
+            row.task_id += "-changed"
+            row.save(update_fields=("task_id",))
+        raise CommandError("source selection changed")
+
+    monkeypatch.setattr(Command, "_capture_production_claim_sql", staticmethod(refuse_capture))
+    with pytest.raises(CommandError, match="row ownership changed"):
+        Command()._run_protocol_predicate_evidence(task_count=1, seed=53)
+    assert benchmark.RayTaskExecution.objects.filter(pk=owned[0]).exists()
+    assert benchmark.RayTaskCohortIntent.objects.filter(execution_id=owned[0]).exists()
+
+
+@pytest.mark.django_db
+def test_phase_cleanup_preserves_moved_unclaimed_row_and_intent():
+    cohort = _current_cohort("phase-pristine")
+    execution = Command._create_execution(task_id="poll-pristine-0", queue_name="phase-pristine")
+    execution.queue_name = "moved-queue"
+    execution.save(update_fields=("queue_name",))
+    with pytest.raises(CommandError, match="task ownership changed"):
+        Command._cleanup_phase_rows(
+            task_prefix="poll-pristine-",
+            queue_name="phase-pristine",
+            lease_identities=[cohort.identity],
+            claims=[],
+            created_pks=[execution.pk],
+            threads=[],
+        )
+    assert benchmark.RayTaskExecution.objects.filter(pk=execution.pk).exists()
+    assert benchmark.RayTaskCohortIntent.objects.filter(execution_id=execution.pk).exists()
+    assert benchmark.TaskWorkerLease.objects.filter(pk=cohort.identity.worker_id).exists()

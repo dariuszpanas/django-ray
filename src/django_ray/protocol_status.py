@@ -27,6 +27,7 @@ from django.db.utils import ConnectionDoesNotExist
 from django.utils import timezone
 
 from django_ray.execution_protocol import (
+    EXECUTION_PROTOCOL_VERSION,
     LEGACY_EXECUTION_METADATA_SCHEMA_VERSION,
     LEGACY_EXECUTION_PROTOCOL_VERSION,
     LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
@@ -69,6 +70,7 @@ class ProtocolStatusBlockerCode(StrEnum):
 
     ACTIVE_LEGACY_LEASES = "active_legacy_leases"
     ACTIVE_UPGRADED_LEASES = "active_upgraded_leases"
+    HISTORICAL_WRITE_POLICY = "historical_write_policy"
     LEGACY_METADATA_PROVENANCE_UNATTESTED = "legacy_metadata_provenance_unattested"
     LEGACY_PRODUCERS_UNATTESTED = "legacy_producers_unattested"
     LEGACY_READERS_UNATTESTED = "legacy_readers_unattested"
@@ -226,7 +228,10 @@ def _valid_protocol_policy(*, using: str, legacy_open: bool | None = None) -> Qu
         policies.filter(
             singleton_key=_POLICY_KEY,
             schema_version=PROTOCOL_POLICY_SCHEMA_VERSION,
-            active_write_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION,
+            active_write_protocol_version__in=(
+                LEGACY_EXECUTION_PROTOCOL_VERSION,
+                EXECUTION_PROTOCOL_VERSION,
+            ),
             revision__gte=1,
             revision__lte=_MAX_POLICY_REVISION,
         )
@@ -250,6 +255,11 @@ def _valid_protocol_policy(*, using: str, legacy_open: bool | None = None) -> Qu
             )
         )
     )
+    if EXECUTION_PROTOCOL_VERSION != LEGACY_EXECUTION_PROTOCOL_VERSION:
+        policy = policy.filter(
+            Q(active_write_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION)
+            | Q(legacy_worker_admission_enabled=False, _expected_token_present=False)
+        )
     if legacy_open is not None:
         policy = policy.filter(legacy_worker_admission_enabled=legacy_open)
     return policy
@@ -327,7 +337,10 @@ def _load_policy(*, using: str) -> ProtocolPolicyStatus:
     revision = int(policy["revision"])
     if schema_version != PROTOCOL_POLICY_SCHEMA_VERSION:
         raise ProtocolStatusError("the execution-protocol policy schema is unsupported")
-    if active_write_protocol_version != LEGACY_EXECUTION_PROTOCOL_VERSION:
+    if active_write_protocol_version not in (
+        LEGACY_EXECUTION_PROTOCOL_VERSION,
+        EXECUTION_PROTOCOL_VERSION,
+    ):
         raise ProtocolStatusError("the execution-protocol active write version is unsupported")
     if revision < 1 or revision > _MAX_POLICY_REVISION:
         raise ProtocolStatusError("the execution-protocol policy revision is invalid")
@@ -341,6 +354,8 @@ def _load_policy(*, using: str) -> ProtocolPolicyStatus:
         raise ProtocolStatusError("the legacy-admission token singleton is invalid")
     token_present = bool(token_keys)
     legacy_enabled = bool(policy["legacy_worker_admission_enabled"])
+    if active_write_protocol_version != LEGACY_EXECUTION_PROTOCOL_VERSION and legacy_enabled:
+        raise ProtocolStatusError("legacy admission is incompatible with the active write protocol")
     if token_present != legacy_enabled:
         raise ProtocolStatusError("the execution-protocol policy and token are inconsistent")
 
@@ -576,6 +591,14 @@ def _blockers(
                 ProtocolStatusBlockerCode.ACTIVE_LEGACY_LEASES,
                 "legacy_close",
                 leases.active_legacy,
+            )
+        )
+    if policy.active_write_protocol_version != EXECUTION_PROTOCOL_VERSION:
+        blockers.append(
+            ProtocolStatusBlocker(
+                ProtocolStatusBlockerCode.HISTORICAL_WRITE_POLICY,
+                f"package_execution_protocol_{EXECUTION_PROTOCOL_VERSION}",
+                1,
             )
         )
     if leases.active_explicit:

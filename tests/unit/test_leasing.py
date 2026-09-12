@@ -125,6 +125,11 @@ class TestLeaseExpiration:
     def test_fresh_lease_not_expired(self) -> None:
         """Test that a freshly created lease is not expired."""
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host",
             pid=12345,
@@ -136,6 +141,11 @@ class TestLeaseExpiration:
     def test_old_lease_is_expired(self) -> None:
         """Test that an old lease is detected as expired."""
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host",
             pid=12345,
@@ -152,6 +162,11 @@ class TestLeaseExpiration:
     def test_recently_updated_lease_not_expired(self) -> None:
         """Test that a recently updated lease is not expired."""
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host",
             pid=12345,
@@ -167,6 +182,11 @@ class TestLeaseExpiration:
     def test_inactive_lease_is_expired(self) -> None:
         """Test that an inactive lease is always considered expired."""
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host",
             pid=12345,
@@ -186,6 +206,11 @@ class TestLeaseLifecycle:
         """Test creating a worker lease."""
         worker_id = generate_worker_id()
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=worker_id,
             hostname="test-host",
             pid=12345,
@@ -202,6 +227,11 @@ class TestLeaseLifecycle:
     def test_update_lease_heartbeat(self) -> None:
         """Test updating lease heartbeat."""
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host",
             pid=12345,
@@ -224,6 +254,11 @@ class TestLeaseLifecycle:
         """Test deleting a worker lease."""
         worker_id = generate_worker_id()
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=worker_id,
             hostname="test-host",
             pid=12345,
@@ -239,12 +274,22 @@ class TestLeaseLifecycle:
     def test_multiple_leases_per_queue(self) -> None:
         """Test that multiple workers can have leases on the same queue."""
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-1",
             pid=12345,
             queue_name="default",
         )
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-2",
             pid=12346,
@@ -256,12 +301,22 @@ class TestLeaseLifecycle:
     def test_leases_on_different_queues(self) -> None:
         """Test workers on different queues have separate leases."""
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-1",
             pid=12345,
             queue_name="default",
         )
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-2",
             pid=12346,
@@ -281,6 +336,11 @@ class TestLeaseCleanup:
         # Create an expired lease
         old_time = datetime.now(UTC) - timedelta(hours=1)
         expired_lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host",
             pid=12345,
@@ -290,6 +350,11 @@ class TestLeaseCleanup:
 
         # Create a fresh lease
         fresh_lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host-2",
             pid=12346,
@@ -314,6 +379,11 @@ class TestLeaseCleanup:
         """Test cleanup when no leases are expired."""
         # Create only fresh leases
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="test-host",
             pid=12345,
@@ -327,6 +397,11 @@ class TestLeaseCleanup:
         """Test releasing a lease by worker ID marks it inactive."""
         worker_id = generate_worker_id()
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=worker_id,
             hostname="test-host",
             pid=12345,
@@ -355,6 +430,11 @@ class TestLeaseCleanup:
 
     def test_release_lease_does_not_release_replacement_owner(self) -> None:
         lease = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="reused-worker-id",
             hostname="original-host",
             pid=12345,
@@ -363,6 +443,11 @@ class TestLeaseCleanup:
         original_identity = _identity(lease)
         lease.delete()
         replacement = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="reused-worker-id",
             hostname="replacement-host",
             pid=54321,
@@ -383,12 +468,22 @@ class TestActiveWorkers:
         """Test counting active workers."""
         # Create 2 active leases
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-1",
             pid=12345,
             queue_name="default",
         )
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-2",
             pid=12346,
@@ -397,6 +492,11 @@ class TestActiveWorkers:
         # Create 1 lease with expired heartbeat
         old_time = datetime.now(UTC) - timedelta(hours=1)
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-3",
             pid=12347,
@@ -405,6 +505,11 @@ class TestActiveWorkers:
         )
         # Create 1 inactive lease
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-4",
             pid=12348,
@@ -420,6 +525,11 @@ class TestActiveWorkers:
         # Create 1 active lease
         active_id = generate_worker_id()
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=active_id,
             hostname="host-1",
             pid=12345,
@@ -428,6 +538,11 @@ class TestActiveWorkers:
         # Create 1 lease with expired heartbeat
         old_time = datetime.now(UTC) - timedelta(hours=1)
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-2",
             pid=12346,
@@ -436,6 +551,11 @@ class TestActiveWorkers:
         )
         # Create 1 inactive lease
         TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id=generate_worker_id(),
             hostname="host-3",
             pid=12347,

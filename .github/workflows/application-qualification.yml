@@ -33,7 +33,8 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Application Core (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # Include checkpoint wait, bounded build/run stages, cleanup and artifact upload.
+    timeout-minutes: 135
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       VALIDATION_INTENT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'diagnostic' && 'diagnostic' || 'acceptance' }}
@@ -45,11 +46,12 @@ jobs:
 
       - name: Require the current source Linux CI checkpoint
         if: env.VALIDATION_INTENT == 'acceptance'
-        timeout-minutes: 20
+        timeout-minutes: 55
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for attempt in $(seq 1 40); do
+          # Allow the 40-minute test lanes and the final package/gate jobs to finish.
+          for attempt in $(seq 1 120); do
             conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/check-runs" \
               --jq '[.check_runs[] | select(.name == "CI Gate")] | sort_by(.started_at) | last | .conclusion // "pending"')
             case "$conclusion" in
@@ -94,7 +96,11 @@ jobs:
           tar -xf "$RUNNER_TEMP/application-build/source.tar" -C "$RUNNER_TEMP/application-source"
           git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/application-build/source.txt"
           sha256sum "$RUNNER_TEMP/application-build/source.tar" > "$RUNNER_TEMP/application-build/source.sha256"
-          docker build --platform linux/amd64 --provenance=false -t localhost:5001/application-base:candidate "$RUNNER_TEMP/application-source"
+          python_patch=$(python "$RUNNER_TEMP/application-source/qualification/application/image_runtime.py" \
+            --profile "$RUNNER_TEMP/application-source/qualification/application/core.yaml")
+          printf '%s\n' "$python_patch" > "$RUNNER_TEMP/application-build/python-patch.txt"
+          docker build --platform linux/amd64 --provenance=false --build-arg PYTHON_VERSION="$python_patch" \
+            -t localhost:5001/application-base:candidate "$RUNNER_TEMP/application-source"
           docker push localhost:5001/application-base:candidate
           base=$(docker image inspect localhost:5001/application-base:candidate --format '{{index .RepoDigests 0}}')
           docker build --platform linux/amd64 --provenance=false \
@@ -103,6 +109,8 @@ jobs:
             -t localhost:5001/application-core:candidate "$RUNNER_TEMP/application-source"
           docker push localhost:5001/application-core:candidate
           image=$(docker image inspect localhost:5001/application-core:candidate --format '{{index .RepoDigests 0}}')
+          python "$RUNNER_TEMP/application-source/qualification/application/image_runtime.py" \
+            --image "$image" --expected "$python_patch"
           echo "APPLICATION_IMAGE=$image" >> "$GITHUB_ENV"
           docker image inspect "$base" "$image" > "$RUNNER_TEMP/application-build/images.json"
           python - <<'PY'
@@ -167,6 +175,7 @@ jobs:
             ${{ runner.temp }}/application-build/source.txt
             ${{ runner.temp }}/application-build/source.sha256
             ${{ runner.temp }}/application-build/images.json
+            ${{ runner.temp }}/application-build/python-patch.txt
             ${{ runner.temp }}/application-build/validation-intent.txt
           if-no-files-found: warn
           retention-days: 14

@@ -45,6 +45,8 @@ from django_ray.workflows import (
     step,
 )
 from tests.local_ray import init_local_ray
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+from tests.protocol_epochs import cohort_sender_task_context
 
 
 def make_range(limit: int) -> list[int]:
@@ -2568,8 +2570,13 @@ def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
         NestedCallableBindingKind,
         NestedExecutionBoundaryKind,
         NestedWorkflowBoundaryIdentity,
-        decode_nested_execution_request,
     )
+    from django_ray.target.cohort_contract import (
+        cohort_leaf_contract_digest,
+        decode_cohort_execution_contract,
+        derive_cohort_leaf_contract,
+    )
+    from django_ray.target.cohort_transport import decode_cohort_nested_execution_request
     from django_ray.workflow.plans import materialize_workflow_plan
 
     def thaw(value: Any) -> Any:
@@ -2610,14 +2617,15 @@ def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
         run_id="00000000-0000-4000-8000-000000000701",
     )
     executor = object.__new__(_RayExecutor)
-    executor.task_context = DurableTaskContext(
-        task_pk=42,
+    expected_outer = ExecutionIdentity(
+        task_execution_pk=42,
         task_id="00000000-0000-4000-8000-000000000042",
         attempt_number=2,
         execution_generation=5,
-        execution_protocol_version=1,
-        runtime_env_plan_identity=thaw(binding.runtime_env_plan_identity),
-        strict_execution_request=True,
+    )
+    executor.task_context = cohort_sender_task_context(
+        expected_outer,
+        runtime_env_identity=thaw(binding.runtime_env_plan_identity),
     )
     executor.task_execution_pk = 42
     executor.workflow_run_identity = workflow_identity
@@ -2631,16 +2639,14 @@ def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
 
     assert len(remote_calls) == 1
     args, kwargs = remote_calls[0]
-    expected_outer = ExecutionIdentity(
-        task_execution_pk=42,
-        task_id="00000000-0000-4000-8000-000000000042",
-        attempt_number=2,
-        execution_generation=5,
+    expected_leaf = derive_cohort_leaf_contract(
+        decode_cohort_execution_contract(executor.task_context.cohort_contract_json)
     )
-    request = decode_nested_execution_request(
+    request, leaf = decode_cohort_nested_execution_request(
         kwargs["nested_execution_request"],
         expected_outer_identity=expected_outer,
-        expected_execution_protocol_version=1,
+        expected_cohort_leaf_digest=cohort_leaf_contract_digest(expected_leaf),
+        expected_outer_contract_digest=expected_leaf.outer_contract_digest,
         expected_boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
         expected_boundary_identity=NestedWorkflowBoundaryIdentity(
             workflow_run_id=workflow_identity.run_id,
@@ -2656,6 +2662,10 @@ def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
     assert kwargs["output_preview_path"] == f"{__name__}.preview_increment"
     assert request.output_preview_callable_path == f"{__name__}.preview_increment"
     assert request.runtime_env_plan_identity == thaw(binding.runtime_env_plan_identity)
+    assert request.execution_protocol_version == kwargs["expected_execution_protocol_version"] == 3
+    assert leaf == expected_leaf
+    assert kwargs["expected_cohort_leaf_digest"] == cohort_leaf_contract_digest(expected_leaf)
+    assert kwargs["expected_outer_contract_digest"] == expected_leaf.outer_contract_digest
     assert kwargs["expected_node_id"] == "0"
 
 
@@ -3012,7 +3022,8 @@ def test_ray_executor_flushes_failed_progress_snapshot() -> None:
     assert json.loads(execution.progress_data)["state"] == "FAILED"
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_ray_executor_disables_reporter_after_stale_write(
     monkeypatch,
     workflow_progress_warning_records,
@@ -3022,6 +3033,8 @@ def test_ray_executor_disables_reporter_after_stale_write(
 
     execution = RayTaskExecution.objects.create(
         task_id="workflow-stale-flush",
+        # Retained storage/fence behavior for a released protocol 1 execution.
+        execution_protocol_version=1,
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
         attempt_number=1,

@@ -1537,9 +1537,9 @@ class RayTaskQuarantine(models.Model):
 class TaskExecutionProtocolPolicy(models.Model):
     """Singleton rollout policy for the durable execution protocol.
 
-    The first schema migration seeds protocol v1 with legacy worker admission
-    open.  Mutation and activation are intentionally reserved for the later
-    fenced rollout service rather than ordinary model or Admin writes.
+    Migration 0035 activates protocol 3 after the coordinated stopped-writer
+    upgrade. Its fixed database latch cannot reopen legacy admission through
+    ordinary model or Admin writes.
     """
 
     singleton_key = models.PositiveSmallIntegerField(
@@ -1561,8 +1561,8 @@ class TaskExecutionProtocolPolicy(models.Model):
         validators=[MinValueValidator(1)],
     )
     legacy_worker_admission_enabled = models.BooleanField(
-        default=True,
-        db_default=True,
+        default=False,
+        db_default=False,
         editable=False,
     )
     revision = models.PositiveBigIntegerField(

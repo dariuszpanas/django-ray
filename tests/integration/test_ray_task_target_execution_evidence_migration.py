@@ -42,10 +42,13 @@ from django_ray.target.execution_evidence import (
     RayTaskTargetExecutionEvidenceClaim,
     ray_task_target_execution_evidence_digest,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
 
 MIGRATE_FROM = [("django_ray", "0025_ray_worker_target_capabilities")]
 MIGRATE_TO = [("django_ray", "0026_ray_task_target_execution_evidence")]
-LATEST = [("django_ray", "0034_cohort_timeouts")]
+HISTORICAL_LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST_A = f"sha256:{'a' * 64}"
 _DIGEST_B = f"sha256:{'b' * 64}"
@@ -810,7 +813,7 @@ def test_migration_is_additive_and_reverse_refuses_retained_evidence() -> None:
                 "django_ray", "RayTaskTargetExecutionEvidence"
             )
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
 
 
 def _hold_evidence_writer(
@@ -874,7 +877,7 @@ def test_sqlite_evidence_writer_cannot_race_partial_schema_reverse() -> None:
         assert RayTaskTargetExecutionEvidence.objects.filter(pk=2001).exists()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         RayTaskTargetExecutionOutcome.objects.all().delete()
         RayTaskTargetExecutionEvidence.objects.filter(pk=2001).delete()
 
@@ -952,6 +955,6 @@ def test_postgresql_evidence_writer_serializes_before_reverse_guard() -> None:
         assert RayTaskTargetExecutionEvidence.objects.filter(pk=2001).exists()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         RayTaskTargetExecutionOutcome.objects.all().delete()
         RayTaskTargetExecutionEvidence.objects.filter(pk=2001).delete()

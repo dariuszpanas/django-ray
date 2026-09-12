@@ -147,7 +147,8 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The expanded cohort suite reached 60% on Python 3.12 at the old 20m limit.
+    timeout-minutes: 40
     env:
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
@@ -625,7 +626,8 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Dependencies (${{ matrix.resolution }}, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The minimum lane reached 39% at 10m while tests continued making progress.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

@@ -29,6 +29,7 @@ from django_ray.models import (
     WorkflowProgressTopologySlot,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 RUN_ID = "00000000-0000-0000-0000-000000000126"
 
@@ -37,8 +38,10 @@ def _execution(
     *,
     task_id: str = "workflow-storage-persistence",
     run_id: str = RUN_ID,
+    execution_protocol_version: int = 3,
 ) -> RayTaskExecution:
     return RayTaskExecution.objects.create(
+        execution_protocol_version=execution_protocol_version,
         task_id=task_id,
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
@@ -340,7 +343,8 @@ def _captured_queries() -> Iterator[CaptureQueriesContext]:
         yield queries
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 @pytest.mark.parametrize(
     "stale_update",
     [
@@ -353,7 +357,7 @@ def _captured_queries() -> Iterator[CaptureQueriesContext]:
 def test_stage_rejects_every_stale_execution_fence_without_creating_a_run(
     stale_update: dict[str, object],
 ) -> None:
-    execution = _execution()
+    execution = _execution(execution_protocol_version=1)
     topology = _topology(_identity(execution))
     RayTaskExecution.objects.filter(pk=execution.pk).update(**stale_update)
 
@@ -363,11 +367,12 @@ def test_stage_rejects_every_stale_execution_fence_without_creating_a_run(
     assert not WorkflowProgressTopologyPage.objects.exists()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_stage_final_fence_rolls_back_without_holding_a_task_row_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    execution = _execution()
+    execution = _execution(execution_protocol_version=1)
     topology = _topology(_identity(execution))
     original_exists = QuerySet.exists
     original_select_for_update = QuerySet.select_for_update
@@ -1996,9 +2001,10 @@ def test_nonadvancing_summary_revision_rolls_back_a_sparse_detail_change() -> No
     assert row.last_detail_revision == 1
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_publication_stale_fence_rejects_without_mutating_candidate_or_run() -> None:
-    execution = _execution()
+    execution = _execution(execution_protocol_version=1)
     identity = _identity(execution)
     manifest_id = storage.stage_workflow_progress_topology(_topology(identity))
     assert manifest_id is not None

@@ -12,12 +12,12 @@ from django_ray.execution_codec import (
     EXECUTION_REQUEST_MAX_BYTES,
     ExecutionIdentity,
     ExecutionRequest,
-    encode_execution_request,
 )
 from django_ray.execution_protocol import (
     EXECUTION_PROTOCOL_VERSION,
     MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
+    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     TARGET_EXECUTION_PROTOCOL_VERSION,
 )
 from django_ray.target.attestation import (
@@ -57,6 +57,7 @@ from django_ray.target.execution_codec import (
     encode_target_execution_result,
     target_execution_observed_proof_digest,
 )
+from tests.protocol_epochs import encode_legacy_execution_request
 
 _NODE_ID = "01" * 28
 _SESSION = "session_target_transport"
@@ -193,15 +194,16 @@ def _target_completion(
     )
 
 
-def test_protocol_2_is_named_but_production_support_remains_1_to_1() -> None:
+def test_protocol_2_is_named_but_current_support_is_only_3() -> None:
     assert TARGET_EXECUTION_PROTOCOL_VERSION == 2
-    assert EXECUTION_PROTOCOL_VERSION == 1
-    assert MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION == 1
-    assert MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION == 1
+    assert EXECUTION_PROTOCOL_VERSION == 3
+    assert MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION == 3
+    assert MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION == 3
+    assert not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(TARGET_EXECUTION_PROTOCOL_VERSION)
 
 
 def test_protocol_1_request_bytes_remain_unchanged() -> None:
-    serialized = encode_execution_request(
+    serialized = encode_legacy_execution_request(
         ExecutionRequest(
             identity=ExecutionIdentity(
                 task_execution_pk=1,

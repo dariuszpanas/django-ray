@@ -19,6 +19,66 @@ from qualification.application.api import (
 from qualification.application.run_api import ApplicationHttp, read_token
 
 
+def _verify_cohort_claim(row, worker) -> None:
+    """Corroborate retained claim history; this read never grants admission."""
+    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.models import RayTaskCohortClaim
+    from django_ray.target.cohort_claim import (
+        CohortRunnerFamily,
+        cohort_task_runtime_env_snapshot_digest,
+        decode_cohort_claim_facts,
+    )
+    from django_ray.target.cohort_claim_storage import _binding_spec
+    from django_ray.target.cohort_intent import encode_cohort_intent
+    from django_ray.target.cohort_intent_storage import read_cohort_intent
+
+    claim = RayTaskCohortClaim.objects.get(
+        binding_id=row.pk,
+        attempt_number=row.attempt_number,
+        execution_generation=row.execution_generation,
+    )
+    facts = decode_cohort_claim_facts(claim.facts_json, expected_digest=claim.facts_digest)
+    identity = ExecutionIdentity(row.pk, row.task_id, row.attempt_number, row.execution_generation)
+    owner = (worker.worker_id, worker.hostname, worker.pid, worker.started_at)
+    if (
+        facts.identity != identity
+        or facts.binding != _binding_spec(row.ray_target_binding)
+        or facts.binding.runner_family is not CohortRunnerFamily.RAY_CORE
+        or facts.manager.package_version != worker.django_ray_version
+        or (
+            facts.worker_lease_id,
+            facts.worker_lease_hostname,
+            facts.worker_lease_pid,
+            facts.worker_lease_started_at,
+        )
+        != owner
+        or (
+            claim.owner_lease_id,
+            claim.owner_lease_hostname,
+            claim.owner_lease_pid,
+            claim.owner_lease_started_at,
+        )
+        != owner
+        or facts.intent_json != encode_cohort_intent(read_cohort_intent(row.pk))
+        or facts.runtime_env_snapshot_digest
+        != cohort_task_runtime_env_snapshot_digest(
+            profile=row.runtime_env_profile,
+            serialized=row.runtime_env_json,
+            digest=row.runtime_env_hash,
+        )
+        or claim.target_policy_id != facts.target_policy_id
+        or claim.claim_attestation_id != facts.claim_attestation_id
+        or claim.disposition != "RESOLVED"
+        or claim.resolution_kind != "application_completed"
+        or not claim.prepared_request_digest
+        or not claim.resolution_digest
+        or not claim.dispatched_at
+        or not claim.resolved_at
+        or not facts.claimed_at <= claim.dispatched_at <= claim.resolved_at <= row.finished_at
+    ):
+        raise ValueError("Durable application execution lacks matching current-cohort history")
+
+
 def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> dict:
     """Inspect only this disposable application DB, with no executor authority."""
     from datetime import timedelta
@@ -42,7 +102,7 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         row.state != "SUCCEEDED"
         or row.attempt_number != 1
         or row.execution_generation < 1
-        or row.execution_protocol_version != 1
+        or row.execution_protocol_version != 3
         or row.runtime_env_profile != profile
         or row.ray_target_address != config["RAY_ADDRESS"]
         or not row.ray_job_id
@@ -61,12 +121,17 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         not worker.is_active
         or not worker.hostname.startswith(manager_prefix)
         or worker.django_ray_version != current_version
+        or worker.capability_schema_version != 1
+        or worker.legacy_admission_token_id is not None
+        or worker.min_supported_execution_protocol_version != 3
+        or worker.max_supported_execution_protocol_version != 3
         or worker.started_at > row.started_at
         or not now - timedelta(seconds=config["WORKER_LEASE_SECONDS"])
         <= worker.last_heartbeat_at
         <= now
     ):
         raise ValueError("Durable application execution lacks a current manager owner")
+    _verify_cohort_claim(row, worker)
     attempts = list(row.attempts.all())
     if len(attempts) != 1:
         raise ValueError("Core execution has unexpected attempt history")
@@ -121,6 +186,7 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         "worker_hostname": worker.hostname,
         "django_ray_version": current_version,
         "encrypted_snapshot_authenticated": True,
+        "current_cohort_claim_correlated": True,
         "elapsed_seconds": round((row.finished_at - row.created_at).total_seconds(), 3),
     }
 
@@ -188,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--manager-prefix", default="django-manager-")
+    parser.add_argument("--previous-retirement", type=Path)
     args = parser.parse_args(argv)
     receipt = {
         "schema_version": 1,
@@ -226,9 +293,18 @@ def main(argv: list[str] | None = None) -> int:
             probe_id, profile="thin", manager_prefix=args.manager_prefix
         )
         receipt.update(api=asdict(api), executions=[api_owner, probe_owner])
+        if args.previous_retirement is not None:
+            from qualification.application.retire_manager import verify_replacement
+
+            receipt["failed_stage"] = "manager_replacement"
+            receipt["replacement"] = verify_replacement(
+                args.previous_retirement, [api_owner, probe_owner]
+            )
         receipt["failed_stage"] = "receipt"
         encoded = json.dumps(
-            {**receipt, "status": "passed", "failed_stage": None}, sort_keys=True
+            {**receipt, "status": "passed", "failed_stage": None},
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode()
         if len(encoded) > 16 * 1024:
             raise ValueError("Application core receipt exceeds its byte limit")

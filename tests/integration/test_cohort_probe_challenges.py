@@ -81,8 +81,8 @@ def _lease(key="manager"):
         last_heartbeat_at=NOW,
         capability_schema_version=1,
         django_ray_version="0.5.0",
-        min_supported_execution_protocol_version=1,
-        max_supported_execution_protocol_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
         legacy_admission_token=None,
     )
     return lease, WorkerLeaseIdentity(key, lease.hostname, lease.pid, lease.started_at)

@@ -30,10 +30,14 @@ from django_ray.target.cohort_intent_storage import (
     persist_cohort_intent,
     read_cohort_intent,
 )
+from tests.migration_cleanup import (
+    closed_preactivation_protocol_schema as closed_preactivation_protocol_schema,
+)
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 pytestmark = pytest.mark.django_db(transaction=True)
 NOW = datetime(2026, 9, 12, 2, 0, tzinfo=UTC)
-LATEST = [("django_ray", "0034_cohort_timeouts")]
+LATEST = [("django_ray", "0035_activate_current_cohort")]
 INTENT = CohortIntent(
     "0.5.0",
     "default",
@@ -178,7 +182,10 @@ def test_storage_requires_caller_transaction_and_one_insert():
 
 
 @pytest.mark.parametrize("protocol", [1, 2, 4])
+@pytest.mark.usefixtures("closed_preactivation_protocol_schema")
 def test_other_protocols_have_no_inferred_intent(protocol):
+    # Only the actual historical schema can admit these foreign-epoch rows.
+    # Neither the service nor SQL may infer a current-cohort intent for them.
     execution = _execution(protocol=protocol)
     with pytest.raises(CohortIntentStorageError, match="execution_unavailable"):
         _persist(execution)
@@ -326,6 +333,7 @@ def test_new_migrations_do_not_backfill_old_execution_history():
             task_id="old-history",
             callable_path="removed.old.callable",
             execution_protocol_version=1,
+            state="SUCCEEDED",
         )
         MigrationExecutor(connection).migrate(LATEST)
         assert not RayTaskCohortIntent.objects.exists()

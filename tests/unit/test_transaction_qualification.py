@@ -19,7 +19,7 @@ from qualification.docker.scenario import QualificationError
 from qualification.transactions import contract, plugin, probe, scenario
 
 
-def receipt():
+def receipt(protocol=3):
     cases = {}
     for name in contract.CASES:
         observations = {}
@@ -27,8 +27,8 @@ def receipt():
             observations = {
                 "writer_pid": 12,
                 "observer_pid": 34,
-                "before": [0, 0],
-                "after": [1, 1] if name.endswith("[True]") else [0, 0],
+                "before": [0, 0, 0],
+                "after": [1, 1, int(protocol == 3)] if name.endswith("[True]") else [0, 0, 0],
             }
         cases[name] = {
             "phases": ["setup:passed", "call:passed", "teardown:passed"],
@@ -36,7 +36,7 @@ def receipt():
         }
     return {
         "module": "/installed/module",
-        "execution_protocol_version": 1,
+        "execution_protocol_version": protocol,
         "server_version": 170011,
         "cases": cases,
         "socket_only": True,
@@ -63,8 +63,9 @@ def receipt():
         "missing-observation",
     ],
 )
-def test_incomplete_or_inconsistent_receipts_cannot_emit_success(mutation):
-    value = receipt()
+@pytest.mark.parametrize("protocol", [1, 3])
+def test_incomplete_or_inconsistent_receipts_cannot_emit_success(mutation, protocol):
+    value = receipt(protocol)
     committed = value["cases"][f"{contract.VISIBILITY}[True]"]
     rolled_back = value["cases"][f"{contract.VISIBILITY}[False]"]
     if mutation == "missing-case":
@@ -86,11 +87,11 @@ def test_incomplete_or_inconsistent_receipts_cannot_emit_success(mutation):
     elif mutation == "same-connection":
         committed["observations"]["observer_pid"] = 12
     elif mutation == "visible-before-commit":
-        committed["observations"]["before"] = [1, 0]
+        committed["observations"]["before"] = [1, 0, 0]
     elif mutation == "commit-lost":
-        committed["observations"]["after"] = [0, 1]
+        committed["observations"]["after"] = [0, 1, int(protocol == 3)]
     elif mutation == "rollback-visible":
-        rolled_back["observations"]["after"] = [1, 1]
+        rolled_back["observations"]["after"] = [1, 1, int(protocol == 3)]
     elif mutation == "bool-pid":
         committed["observations"]["writer_pid"] = True
     else:
@@ -99,10 +100,11 @@ def test_incomplete_or_inconsistent_receipts_cannot_emit_success(mutation):
         scenario.junit(value, expected_module="/installed/module", failure=None)
 
 
-def test_complete_receipt_emits_all_sixteen_cases_and_failure_stays_failure():
+@pytest.mark.parametrize("protocol", [1, 3])
+def test_complete_receipt_emits_all_sixteen_cases_and_failure_stays_failure(protocol):
     suite = ElementTree.fromstring(
         scenario.junit(
-            receipt(),
+            receipt(protocol),
             expected_module="/installed/module",
             failure=None,
         )
@@ -117,6 +119,51 @@ def test_complete_receipt_emits_all_sixteen_cases_and_failure_stays_failure():
         )
     )
     assert failed.attrib["failures"] == "1"
+
+
+@pytest.mark.parametrize("protocol", [1, 3])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-intent-count",
+        "extra-count",
+        "bool-count",
+        "float-count",
+        "string-count",
+        "tuple-counts",
+        "intent-visible-before-commit",
+        "wrong-committed-intent",
+        "intent-survives-rollback",
+        "relabelled-epoch",
+    ],
+)
+def test_visibility_proof_requires_exact_epoch_intent_observation(protocol, mutation):
+    value = receipt(protocol)
+    committed = value["cases"][f"{contract.VISIBILITY}[True]"]["observations"]
+    rolled_back = value["cases"][f"{contract.VISIBILITY}[False]"]["observations"]
+    if mutation == "missing-intent-count":
+        committed["before"].pop()
+        committed["after"].pop()
+    elif mutation == "extra-count":
+        committed["before"].append(0)
+    elif mutation == "bool-count":
+        committed["after"][2] = protocol == 3
+    elif mutation == "float-count":
+        committed["before"][2] = 0.0
+    elif mutation == "string-count":
+        committed["before"][2] = "0"
+    elif mutation == "tuple-counts":
+        committed["before"] = (0, 0, 0)
+    elif mutation == "intent-visible-before-commit":
+        committed["before"][2] = 1
+    elif mutation == "wrong-committed-intent":
+        committed["after"][2] = int(protocol != 3)
+    elif mutation == "intent-survives-rollback":
+        rolled_back["after"][2] = 1
+    else:
+        value["execution_protocol_version"] = 3 if protocol == 1 else 1
+    with pytest.raises(QualificationError, match="transaction-proof-mismatch"):
+        scenario.junit(value, expected_module="/installed/module", failure=None)
 
 
 def test_server_stop_requires_clean_exit_and_kills_a_timed_out_child(monkeypatch):
@@ -276,7 +323,7 @@ def test_scenario_reports_failure_and_removes_only_owned_fixtures(invocation, mo
     assert manifest["outcome"] == ("passed" if failure is None else "failed")
     assert manifest["fixture_cleanup"] is True
     if failure is None:
-        assert manifest["execution_protocol_version"] == 1
+        assert manifest["execution_protocol_version"] == 3
     if failure == "early-exit":
         assert manifest["failure"] == "transaction-probe-failed"
     assert state["fixtures"] and all(not path.exists() for path in state["fixtures"])

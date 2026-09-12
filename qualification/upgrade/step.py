@@ -144,10 +144,10 @@ def _seed(root, artifacts):
     return {"tasks": 8, "fixture_kind": "synthetic-released-models"}
 
 
-def _blocked(root):
+def _blocked(root, *, fields=None):
     from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
 
-    before = _snapshot()
+    before = _snapshot(fields)
     blockers = list(
         RayTaskExecution.objects.filter(
             state__in=[TaskState.QUEUED, TaskState.RUNNING, TaskState.CANCELLING],
@@ -193,6 +193,76 @@ def _settle(root):
     snapshot = _snapshot()
     (root / "history.json").write_text(_json(snapshot), encoding="utf-8")
     return {"nonterminal_tasks": 0, "active_leases": 0, "settlement": "synthetic-only"}
+
+
+def _refuse_activation(root):
+    """Prove the candidate refuses the independently restored old-work snapshot."""
+    from django.core.management import call_command
+    from django.db import connection
+    from django.db.migrations.recorder import MigrationRecorder
+
+    from django_ray.models import LegacyWorkerAdmissionToken, TaskExecutionProtocolPolicy
+
+    expected = json.loads((root / "seed-snapshot.json").read_text(encoding="utf-8"))
+    fields = {name: value["fields"] for name, value in expected.items()}
+    call_command("migrate", "django_ray", "0034_cohort_timeouts", verbosity=0)
+    assert _snapshot(fields) == expected
+    policy = TaskExecutionProtocolPolicy.objects.values().get()
+    assert policy["active_write_protocol_version"] == 1
+    assert policy["legacy_worker_admission_enabled"] is True
+    assert list(LegacyWorkerAdmissionToken.objects.values_list("singleton_key", flat=True)) == [1]
+    _blocked(root, fields=fields)
+    try:
+        call_command("migrate", "django_ray", "0035_activate_current_cohort", verbosity=0)
+    except RuntimeError as error:
+        assert str(error) == "Current-cohort activation refuses unsupported nonterminal work"
+    else:
+        raise AssertionError("candidate activated with unsupported old work")
+    assert _snapshot(fields) == expected
+    assert TaskExecutionProtocolPolicy.objects.values().get() == policy
+    assert list(LegacyWorkerAdmissionToken.objects.values_list("singleton_key", flat=True)) == [1]
+    assert (
+        not MigrationRecorder(connection)
+        .migration_qs.filter(app="django_ray", name="0035_activate_current_cohort")
+        .exists()
+    )
+    return {
+        "blocked_tasks": 2,
+        "active_leases": 1,
+        "activation_refused": True,
+        "activation_recorded": False,
+        "active_write_protocol_version": 1,
+        "legacy_token_present": True,
+        "original_fields_unchanged": True,
+    }
+
+
+def _current_write():
+    from django.conf import settings
+
+    import django_ray
+    from django_ray.models import RayTaskExecution
+    from django_ray.target.cohort_intent import build_cohort_intent, prepare_cohort_declaration
+    from django_ray.target.cohort_intent_storage import read_cohort_intent
+    from qualification.upgrade.tasks import current_task
+
+    result = current_task.enqueue(7)
+    assert RayTaskExecution.objects.count() == len(FIXTURE_IDS) + 1
+    assert result.task is current_task
+    row = RayTaskExecution.objects.get(task_id=result.id)
+    assert row.execution_protocol_version == 3
+    expected_intent = build_cohort_intent(
+        prepare_cohort_declaration("default", options={}, current_settings=settings.DJANGO_RAY),
+        package_version=django_ray.__version__,
+        runtime_env_identity_digest="sha256:" + row.runtime_env_hash,
+    )
+    assert read_cohort_intent(row.pk) == expected_intent
+    return {
+        "current_enqueue": True,
+        "candidate_only_rows": 1,
+        "execution_protocol_version": 3,
+        "persisted_intent_matches": True,
+    }
 
 
 def _historical(root, artifacts, *, inert):
@@ -269,7 +339,13 @@ def main():
     root, backend, database, phase, module, artifacts_arg = sys.argv[1:]
     root, artifacts = Path(root), Path(artifacts_arg)
     assert root.is_dir() and not root.is_symlink() and (root / "owned-fixture").is_file()
-    assert backend in ("sqlite", "postgresql") and database in ("baseline", "restored", "rollback")
+    assert backend in ("sqlite", "postgresql") and database in (
+        "baseline",
+        "blocked",
+        "restored",
+        "rollback",
+    )
+    assert (phase == "candidate-blocked-activation") == (database == "blocked")
     assert artifacts.is_dir() and artifacts.is_relative_to(root)
     import django_ray
 
@@ -317,16 +393,12 @@ def main():
         observations = _seed(root, artifacts)
     elif phase == "baseline-blocked":
         observations = _blocked(root)
+    elif phase == "candidate-blocked-activation":
+        observations = _refuse_activation(root)
     elif phase == "baseline-settle-fixture":
         observations = _settle(root)
     elif phase == "candidate-new-write":
-        from django_ray.models import RayTaskExecution
-        from qualification.upgrade.tasks import current_task
-
-        result = current_task.enqueue(7)
-        assert RayTaskExecution.objects.count() == len(FIXTURE_IDS) + 1
-        assert result.task is current_task
-        observations = {"current_enqueue": True, "candidate_only_rows": 1}
+        observations = _current_write()
     else:
         if phase == "candidate-migrate-read":
             call_command("migrate", verbosity=0)

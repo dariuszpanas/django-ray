@@ -18,17 +18,16 @@ from django_ray.models import RayTaskCohortIntent, RayTaskExecution, TaskInputPa
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
-@pytest.fixture(params=[1, 3], autouse=True)
-def enqueue_protocol(request, monkeypatch, _restore_execution_protocol_rollout_seed):
-    if request.param == 3:
-        from django_ray.models import TaskExecutionProtocolPolicy
-        from django_ray.protocol_coordination import close_legacy_worker_admission
+@pytest.fixture(params=[3], autouse=True)
+def enqueue_protocol(request, _restore_execution_protocol_rollout_seed):
+    """Exercise the active producer against the real closed0035 admission policy."""
+    from django_ray.backends import EXECUTION_PROTOCOL_VERSION
+    from django_ray.models import TaskExecutionProtocolPolicy
 
-        policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
-        close_legacy_worker_admission(
-            expected_revision=policy.revision, legacy_producers_retired=True
-        )
-    monkeypatch.setattr("django_ray.backends.EXECUTION_PROTOCOL_VERSION", request.param)
+    policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+    assert request.param == EXECUTION_PROTOCOL_VERSION == 3
+    assert policy.active_write_protocol_version == 3
+    assert not policy.legacy_worker_admission_enabled
     return request.param
 
 

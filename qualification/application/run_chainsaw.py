@@ -9,6 +9,7 @@ import re
 import secrets
 import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,10 +24,15 @@ CREDENTIAL_KEYS = (
 )
 RECEIPTS = {
     "django-web": ("setup", ("setup",)),
-    "assert-before": ("assertions", ("before-nodes", "before-core")),
+    "assert-before": ("assertions", ("before-nodes", "before-core", "before-retirement")),
     "assert-after": ("assertions", ("after-nodes", "after-core")),
 }
-LAYERS = {"setup": "application_setup", "nodes": "generic_ray_nodes", "core": "application_core"}
+LAYERS = {
+    "setup": "application_setup",
+    "nodes": "generic_ray_nodes",
+    "core": "application_core",
+    "retirement": "application_retirement",
+}
 
 
 def checked(argv, *, data=None, timeout=40):
@@ -120,7 +126,88 @@ def collect(kubectl, namespace: str, output: Path, image: str) -> None:
         or after["previous_receipt_sha256"] != hashlib.sha256(before).hexdigest()
     ):
         raise ValueError("Cold generation is not bound to the original receipt")
+    job = json.loads(
+        checked([*kubectl, "get", "job", "django-manager", "-n", namespace, "-o", "json"])
+    )
+    transition = verify_manager_transition(
+        pods,
+        job,
+        image,
+        before_core=(output / "before-core.json").read_bytes(),
+        retirement=(output / "before-retirement.json").read_bytes(),
+        after_core=(output / "after-core.json").read_bytes(),
+    )
+    (output / "manager-transition.json").write_text(
+        json.dumps(transition, sort_keys=True), encoding="utf-8"
+    )
     (output / "producers.json").write_text(json.dumps(identities, indent=2), encoding="utf-8")
+
+
+def verify_manager_transition(pods, job, image, *, before_core, retirement, after_core):
+    """Correlate source receipts with actual replacement Job and Pod ownership.
+
+    Foreground deletion in the serial profile already awaited the old Job and
+    dependents. Require its name now belongs to a newly created Job, and that the
+    old manager Pod is absent, independently of the worker's SQL cleanup receipt.
+    """
+    old = json.loads(retirement)
+    new = json.loads(after_core)["replacement"]
+    original = old["manager"]
+    current = new["manager"]
+    metadata = job["metadata"]
+    confirmed = datetime.fromisoformat(old["cleanup_confirmed_at"])
+    created = datetime.fromisoformat(metadata["creationTimestamp"])
+    started = datetime.fromisoformat(current["started_at"])
+    if (
+        old["before_core_sha256"] != hashlib.sha256(before_core).hexdigest()
+        or new["previous_retirement_sha256"] != hashlib.sha256(retirement).hexdigest()
+        or new["original_history_preserved"] is not True
+        or new["cluster_session"] == old["cluster_session"]
+        or original["worker_id"] == current["worker_id"]
+        or original["hostname"] == current["hostname"]
+        # Kubernetes creation timestamps have second precision. The exact DB
+        # incarnation must still start strictly after cleanup confirmation.
+        or not confirmed.replace(microsecond=0) <= created <= started <= datetime.now(UTC)
+        or started <= confirmed
+        or created <= datetime.fromisoformat(original["started_at"])
+        or metadata["name"] != "django-manager"
+        or metadata.get("deletionTimestamp")
+        or job["spec"]["backoffLimit"] != 0
+        or job["spec"]["template"]["spec"]["restartPolicy"] != "Never"
+        or any(pod["metadata"]["name"] == original["hostname"] for pod in pods)
+    ):
+        raise ValueError("Original manager was not reaped before its replacement")
+    (pod,) = [p for p in pods if p["metadata"].get("labels", {}).get("app") == "django-manager"]
+    (owner,) = [
+        o for o in pod["metadata"].get("ownerReferences", []) if o.get("controller") is True
+    ]
+    (container,) = pod["spec"]["containers"]
+    (status,) = pod["status"]["containerStatuses"]
+    if (
+        pod["metadata"]["name"] != current["hostname"]
+        or pod["metadata"].get("deletionTimestamp")
+        or owner["kind"] != "Job"
+        or owner["uid"] != metadata["uid"]
+        or owner["name"] != metadata["name"]
+        or container["name"] != "manager"
+        or container["image"] != image
+        or status["name"] != "manager"
+        or status["restartCount"] != 0
+        or "running" not in status["state"]
+        or status.get("imageID", "").removeprefix("containerd://").rsplit("@", 1)[-1]
+        != image.rsplit("@", 1)[-1]
+    ):
+        raise ValueError("New lease does not belong to the exact candidate manager Job")
+    return {
+        "schema_version": 1,
+        "layer": "application_manager_transition",
+        "status": "passed",
+        "complete_application_gate": False,
+        "original_manager_reaped": True,
+        "original_history_preserved": True,
+        "new_job_uid": metadata["uid"],
+        "new_pod_uid": pod["metadata"]["uid"],
+    }
 
 
 def diagnose(kubectl, namespace: str, output: Path) -> None:

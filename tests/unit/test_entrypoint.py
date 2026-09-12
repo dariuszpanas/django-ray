@@ -40,6 +40,13 @@ from django_ray.ray_job_request_storage import (
     encode_ray_job_request_locator,
 )
 from django_ray.workflow.plans import WorkflowPlanMismatchError
+from tests.protocol_epochs import install_legacy_execution_epoch
+
+
+@pytest.fixture(autouse=True)
+def _released_runtime_epoch(monkeypatch):
+    """Exercise retained adapter behavior in its explicit released epoch."""
+    install_legacy_execution_epoch(monkeypatch)
 
 
 def _payload_b64(serialized: str) -> str:

@@ -25,8 +25,6 @@ from django_ray.execution_codec import (
     NestedExecutionRequestRejection,
     NestedWorkflowBoundaryIdentity,
     decode_execution_completion,
-    encode_execution_request,
-    encode_nested_execution_request,
 )
 from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.runtime.remote import (
@@ -42,6 +40,20 @@ from django_ray.workflow.progress.protocol import (
     decode_workflow_progress_event,
     prepare_workflow_progress_event,
 )
+from tests.protocol_epochs import (
+    encode_legacy_execution_request as encode_execution_request,
+)
+from tests.protocol_epochs import (
+    encode_legacy_nested_execution_request as encode_nested_execution_request,
+)
+from tests.protocol_epochs import install_legacy_execution_epoch
+
+
+@pytest.fixture(autouse=True)
+def _released_runtime_epoch(monkeypatch, request):
+    """This module retains protocol-1 and standalone workflow behavior."""
+    if request.node.get_closest_marker("real_ray") is None:
+        install_legacy_execution_epoch(monkeypatch)
 
 
 class _RemoteMethod:
@@ -729,13 +741,60 @@ def test_strict_workflow_step_installs_exact_nested_context() -> None:
 def test_real_ray_strict_workflow_step_round_trip_has_full_context(
     ray_cluster: Any,
 ) -> None:
+    from django_ray import __version__
+    from django_ray.execution_codec import (
+        decode_nested_execution_request,
+        find_nested_execution_request_rejection,
+    )
+    from django_ray.target.attestation import RayRunnerFamily, ray_target_expectation_digest
+    from django_ray.target.cohort_contract import (
+        CohortExecutionContract,
+        cohort_leaf_contract_digest,
+        derive_cohort_leaf_contract,
+        encode_cohort_leaf_contract,
+    )
+    from django_ray.target.cohort_probe import observe_current_cohort_target
+    from django_ray.target.cohort_runtime import _local_runtime
+    from django_ray.target.cohort_transport import encode_cohort_nested_execution_request
+
     callable_path = f"{__name__}.strict_workflow_full_context_target"
     workflow_run_id = "00000000-0000-4000-8000-000000000514"
     node_id = "0.strict-real-ray"
-    serialized, runtime_identity = _strict_nested_workflow_request(
+    legacy_serialized, runtime_identity = _strict_nested_workflow_request(
         callable_path=callable_path,
         workflow_run_id=workflow_run_id,
         node_id=node_id,
+    )
+    _, actual_runtime = _local_runtime(ray_cluster)
+    attestation = observe_current_cohort_target(
+        target_key=None,
+        runner_family=RayRunnerFamily.RAY_CORE,
+        expected_django_ray_version=__version__,
+        expected_runtime=actual_runtime,
+        ttl_seconds=60,
+        timeout_seconds=20,
+        max_nodes=4,
+    )
+    claim = CohortExecutionContract(
+        identity=_STRICT_IDENTITY,
+        expected_django_ray_version=__version__,
+        target_binding_id=1,
+        cohort_evidence_id=1,
+        cohort_evidence_digest="sha256:" + "a" * 64,
+        claimed_at=datetime.now(UTC),
+        target_expectation=attestation.expectation,
+        target_expectation_digest=ray_target_expectation_digest(attestation.expectation),
+        claim_attestation=attestation,
+        claim_attestation_digest=attestation.attestation_digest,
+    )
+    leaf = derive_cohort_leaf_contract(claim)
+    leaf_json = encode_cohort_leaf_contract(leaf)
+    leaf_digest = cohort_leaf_contract_digest(leaf)
+    legacy_request = decode_nested_execution_request(
+        legacy_serialized, supported_protocols=ExecutionProtocolRange(1, 1)
+    )
+    serialized = encode_cohort_nested_execution_request(
+        replace(legacy_request, execution_protocol_version=3, cohort_leaf_contract_json=leaf_json)
     )
     expected_context = {
         "task_pk": _STRICT_IDENTITY.task_execution_pk,
@@ -747,12 +806,12 @@ def test_real_ray_strict_workflow_step_round_trip_has_full_context(
         "ray_job_driver": False,
         "compiled_graph_submission_transport": "direct-ray-core",
         "task_id": _STRICT_IDENTITY.task_id,
-        "execution_protocol_version": 1,
+        "execution_protocol_version": 3,
         "strict_execution_request": True,
         "cohort_contract_json": None,
-        "cohort_contract_digest": None,
-        "cohort_leaf_contract_json": None,
-        "cohort_leaf_digest": None,
+        "cohort_contract_digest": leaf.outer_contract_digest,
+        "cohort_leaf_contract_json": leaf_json,
+        "cohort_leaf_digest": leaf_digest,
     }
     run_identity = {
         "schema_version": 1,
@@ -761,29 +820,56 @@ def test_real_ray_strict_workflow_step_round_trip_has_full_context(
         "attempt_number": _STRICT_IDENTITY.attempt_number,
         "execution_generation": _STRICT_IDENTITY.execution_generation,
     }
-    remote = ray_cluster.remote(num_cpus=0.25)(execute_workflow_step_remote)
-
-    result = ray_cluster.get(
-        remote.remote(
-            callable_path,
-            False,
-            (expected_context,),
-            {},
-            {},
-            _STRICT_IDENTITY.task_execution_pk,
-            None,
-            node_id,
-            workflow_run_identity=run_identity,
-            **_strict_nested_workflow_kwargs(
-                serialized,
-                runtime_identity,
-                workflow_run_id=workflow_run_id,
-                node_id=node_id,
-            ),
-        )
+    executor = ray_cluster.remote(num_cpus=0.25)(execute_workflow_step_remote)
+    controls = _strict_nested_workflow_kwargs(
+        legacy_serialized, runtime_identity, workflow_run_id=workflow_run_id, node_id=node_id
     )
-
-    assert result == "strict-context-ready"
+    pending = []
+    try:
+        pending.append(
+            executor.remote(
+                callable_path,
+                False,
+                (expected_context,),
+                {},
+                {},
+                _STRICT_IDENTITY.task_execution_pk,
+                None,
+                node_id,
+                workflow_run_identity=run_identity,
+                **controls,
+            )
+        )
+        with pytest.raises(ray_cluster.exceptions.RayTaskError) as rejected:
+            ray_cluster.get(pending[-1], timeout=30)
+        reason = find_nested_execution_request_rejection(rejected.value)
+        assert reason is not None
+        assert reason.classification is NestedExecutionRequestRejection.UNSUPPORTED_PROTOCOL
+        controls.update(
+            nested_execution_request=serialized,
+            expected_execution_protocol_version=3,
+            expected_cohort_leaf_digest=leaf_digest,
+            expected_outer_contract_digest=leaf.outer_contract_digest,
+        )
+        pending.append(
+            executor.remote(
+                callable_path,
+                False,
+                (expected_context,),
+                {},
+                {},
+                _STRICT_IDENTITY.task_execution_pk,
+                None,
+                node_id,
+                workflow_run_identity=run_identity,
+                **controls,
+            )
+        )
+        assert ray_cluster.get(pending[-1], timeout=30) == "strict-context-ready"
+    finally:
+        for reference in pending:
+            ray_cluster.cancel(reference, force=True, recursive=True)
+        ray_cluster.wait(pending, num_returns=len(pending), timeout=5)
 
 
 def test_strict_workflow_step_rejects_mixed_progress_identity_before_setup(

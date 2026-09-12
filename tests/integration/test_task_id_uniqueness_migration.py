@@ -10,10 +10,11 @@ from django.db import IntegrityError, close_old_connections, connection, transac
 from django.db.migrations.executor import MigrationExecutor
 
 from django_ray.models import RayTaskExecution
+from tests.migration_cleanup import clear_historical_admission_fixtures
 
 MIGRATE_FROM = [("django_ray", "0014_raytaskexecution_ray_target_address")]
 MIGRATE_TO = [("django_ray", "0015_raytaskexecution_task_id_unique")]
-LATEST = [("django_ray", "0034_cohort_timeouts")]
+LATEST = [("django_ray", "0035_activate_current_cohort")]
 
 
 def _assert_task_id_uniqueness_migration_round_trip() -> None:
@@ -77,6 +78,7 @@ def _assert_task_id_uniqueness_migration_round_trip() -> None:
         assert reverted_execution.objects.filter(task_id=duplicate_id).count() == 2
         reverted_execution.objects.filter(task_id=duplicate_id).exclude(pk=first.pk).delete()
     finally:
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
 
 

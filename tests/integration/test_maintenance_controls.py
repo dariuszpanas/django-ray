@@ -15,16 +15,32 @@ import pytest
 from django.apps import apps
 from django.db import DatabaseError, close_old_connections, connection, transaction
 
+from django_ray import lifecycle
 from django_ray import maintenance as controls
 from django_ray.execution_codec import ExecutionIdentity
 from django_ray.models import (
+    RayTaskCohortClaim,
     RayTaskExecution,
     RayTaskQuarantine,
     RayWorkerRetirement,
     TaskWorkerLease,
 )
+from django_ray.runner import cohort_dispatch as dispatch
+from django_ray.runner.cohort_claims import ClaimedCohortTask
 from django_ray.runner.leasing import WorkerLeaseIdentity
+from django_ray.target.attestation import RayRunnerFamily
+from tests.integration.test_cohort_cancellation import _apply as _apply_cancellation
+from tests.integration.test_cohort_claim_storage import _claim, _lease, _ray_arguments, storage
+from tests.integration.test_cohort_claim_storage import case as _cohort_case
+from tests.integration.test_cohort_claim_storage import (
+    closed_legacy_admission as closed_legacy_admission,
+)
+from tests.integration.test_cohort_claim_storage import (
+    isolated_sqlite_ledger_maintenance as isolated_sqlite_ledger_maintenance,
+)
+from tests.integration.test_cohort_completion import _apply, _result, _started
 
+cohort_case = _cohort_case
 pytestmark = pytest.mark.django_db(transaction=True)
 DIGEST = "sha256:" + "a" * 64
 OPERATOR = {"actor": "test-operator", "reason": "planned-maintenance", "authorized": True}
@@ -74,7 +90,7 @@ def _complete(identity, **changes):
 
 
 @pytest.fixture(autouse=True)
-def isolated_controls(transactional_db):
+def isolated_controls(transactional_db, isolated_sqlite_ledger_maintenance):
     """Release fixture controls before ordinary SQLite parent-first maintenance."""
     yield
     if connection.vendor != "sqlite":
@@ -86,7 +102,7 @@ def isolated_controls(transactional_db):
             _quarantine(task, revision=latest.revision, quarantined=False)
     RayTaskExecution.objects.filter(
         pk__in=RayTaskQuarantine.objects.values("task_execution_pk")
-    ).delete()
+    ).exclude(pk__in=RayTaskCohortClaim.objects.values("binding_id")).delete()
     TaskWorkerLease.objects.filter(
         worker_id__in=RayWorkerRetirement.objects.values("worker_id")
     ).delete()
@@ -121,6 +137,50 @@ def case_data(monkeypatch):
         value.lease.started_at,
     )
     return value
+
+
+@pytest.fixture
+def owned_data(cohort_case, monkeypatch):
+    """Current producer intent plus one exact manager, before any claim."""
+    case = cohort_case
+    case.now = datetime.now(UTC)
+    case.lease.last_heartbeat_at = case.now
+    case.lease.save(update_fields=["last_heartbeat_at"])
+    monkeypatch.setattr(controls, "_clock", lambda: case.now)
+    return case
+
+
+@pytest.fixture
+def owned_case(selected_database, owned_data):
+    return owned_data
+
+
+@pytest.fixture
+def postgres_owned_case(owned_data):
+    if connection.vendor != "postgresql":
+        pytest.skip("Requires PostgreSQL")
+    return owned_data
+
+
+def _complete_application(case, value, *, success=True):
+    def complete(task, decoded, *, retry_admitted):
+        assert decoded.completion.success is success
+        if success:
+            return lifecycle.succeed_task(
+                task,
+                result_data="5",
+                result_reference=None,
+                _allow_cancelling_completion=True,
+            )
+        assert not retry_admitted
+        return lifecycle.record_failure(
+            task,
+            error_message=decoded.completion.error,
+            retry=False,
+            _allow_cancelling_completion=True,
+        )
+
+    return _apply(value, case, _result(value, success=success), callback=complete)
 
 
 @pytest.fixture
@@ -208,29 +268,50 @@ def test_quarantine_query_excludes_before_limit_and_release_restores_candidate(c
 
 
 @pytest.mark.parametrize("terminal", ["SUCCEEDED", "FAILED", "CANCELLED"])
-def test_owned_completion_and_cancellation_remain_allowed_but_retry_is_fenced(case, terminal):
-    RayTaskExecution.objects.filter(pk=case.task.pk).update(
-        state="RUNNING",
-        execution_generation=1,
-        claimed_by_worker=case.owner.worker_id,
-    )
+def test_owned_completion_and_cancellation_remain_allowed_but_retry_is_fenced(owned_case, terminal):
+    case = owned_case
+    if terminal == "CANCELLED":
+        arguments = _ray_arguments(case, RayRunnerFamily.RAY_CORE, observed_at=case.now)
+        record = _claim(case, **arguments)
+        case.task.refresh_from_db()
+        value = dispatch.prepare_claimed_cohort_dispatch(
+            ClaimedCohortTask(case.task, record, None), now=case.now
+        )
+        value = dispatch.mark_cohort_dispatch_started(value, now=case.now)
+    else:
+        value = _started(case)
+    original = value.claim.facts
     case.task.refresh_from_db()
     _quarantine(case.task)
     RayTaskExecution.objects.filter(pk=case.task.pk).update(state="CANCELLING")
     with transaction.atomic(), controls.maintenance_admission_barrier() as token:
-        task = RayTaskExecution.objects.select_for_update().get(pk=case.task.pk)
-        assert not controls.task_quarantine_retry_allowed(task, barrier=token)
-        task.state = terminal
-        task.save(update_fields=["state"])
+        current = RayTaskExecution.objects.select_for_update().get(pk=case.task.pk)
+        assert not controls.task_quarantine_retry_allowed(current, barrier=token)
+    if terminal == "CANCELLED":
+
+        def cancel(task):
+            return lifecycle.cancel_task(task, expected_worker_id=case.owner.worker_id)
+
+        assert _apply_cancellation(case, value, callback=cancel).applied
+    else:
+        assert _complete_application(case, value, success=terminal == "SUCCEEDED").applied
     with pytest.raises(DatabaseError), transaction.atomic():
         RayTaskExecution.objects.filter(pk=case.task.pk).update(state="QUEUED", attempt_number=2)
     case.task.refresh_from_db()
     assert case.task.state == terminal and case.task.attempt_number == 1
+    assert case.task.attempts.get().state == terminal
+    record = storage._record(RayTaskCohortClaim.objects.get(pk=value.claim.claim_id))
+    assert record.disposition == "RESOLVED" and record.facts == original
+    refused = lifecycle.request_task_retry(case.task.pk, allowed_states=(terminal,))
+    assert refused.status is lifecycle.TaskRetryRequestStatus.QUARANTINED
     _quarantine(case.task, revision=1, quarantined=False)
     with transaction.atomic(), controls.maintenance_admission_barrier() as token:
         current = RayTaskExecution.objects.select_for_update().get(pk=case.task.pk)
         assert controls.task_quarantine_retry_allowed(current, barrier=token)
-    RayTaskExecution.objects.filter(pk=case.task.pk).update(state="QUEUED", attempt_number=2)
+    result = lifecycle.request_task_retry(case.task.pk, allowed_states=(terminal,))
+    assert result.status is lifecycle.TaskRetryRequestStatus.ACCEPTED
+    case.task.refresh_from_db()
+    assert case.task.state == "QUEUED" and case.task.attempt_number == 2
 
 
 def test_retirement_request_keeps_exact_lease_alive_and_dry_run_is_read_only(case):
@@ -252,30 +333,51 @@ def test_retirement_request_keeps_exact_lease_alive_and_dry_run_is_read_only(cas
 
 
 @pytest.mark.parametrize("operation", ["new_claim", "adopt"])
-def test_retirement_raw_sql_fences_new_claim_and_destination_adoption(case, operation):
-    if operation == "adopt":
-        RayTaskExecution.objects.filter(pk=case.task.pk).update(
-            state="RUNNING", execution_generation=1
-        )
-    _request(case.owner)
+def test_retirement_raw_sql_fences_new_claim_and_destination_adoption(owned_case, operation):
+    case = owned_case
+    if operation == "new_claim":
+        _request(case.owner)
+        with pytest.raises(controls.MaintenanceAdmissionError, match="retiring"):
+            _claim(case)
+        assert not RayTaskCohortClaim.objects.exists()
+        destination = case.owner
+    else:
+        original = _claim(case)
+        case.lease.is_active = False
+        case.lease.stopped_at = case.now
+        case.lease.save(update_fields=["is_active", "stopped_at"])
+        lease, destination = _lease("retiring-destination")
+        lease.last_heartbeat_at = case.now
+        lease.save(update_fields=["last_heartbeat_at"])
+        _request(destination)
+        with pytest.raises(storage.CohortClaimStorageError, match="persistence_refused"):
+            with transaction.atomic(), controls.maintenance_admission_barrier():
+                storage.adopt_cohort_claim(
+                    destination,
+                    original.claim_id,
+                    expected_identity=original.facts.identity,
+                    expected_revision=original.revision,
+                    expected_owner=case.owner,
+                    now=case.now,
+                )
+        retained = storage._record(RayTaskCohortClaim.objects.get(pk=original.claim_id))
+        assert retained == original
     with pytest.raises(DatabaseError), transaction.atomic():
         RayTaskExecution.objects.filter(pk=case.task.pk).update(
             state="RUNNING",
             execution_generation=1,
-            claimed_by_worker=case.owner.worker_id,
+            claimed_by_worker=destination.worker_id,
         )
 
 
-def test_retirement_does_not_change_owned_completion_and_requires_independent_cleanup(case):
-    RayTaskExecution.objects.filter(pk=case.task.pk).update(
-        state="RUNNING",
-        execution_generation=1,
-        claimed_by_worker=case.owner.worker_id,
-    )
+def test_retirement_does_not_change_owned_completion_and_requires_independent_cleanup(owned_case):
+    case = owned_case
+    value = _started(case)
     _request(case.owner)
     with pytest.raises(controls.MaintenanceAdmissionError, match="ownership_remains"):
         _complete(case.owner)
-    RayTaskExecution.objects.filter(pk=case.task.pk).update(state="SUCCEEDED")
+    assert _complete_application(case, value).applied
+    assert RayTaskCohortClaim.objects.get().disposition == "RESOLVED"
     with pytest.raises(controls.MaintenanceAdmissionError, match="cleanup_unconfirmed"):
         _complete(case.owner, independently_confirmed_cleanup=False)
     preview = _complete(case.owner, dry_run=True)
@@ -605,26 +707,52 @@ def test_postgresql_retirement_cas_has_one_winner(postgres_case):
         ]
 
 
+def _assert_postgresql_waiting(pid):
+    deadline = monotonic() + 3
+    while monotonic() < deadline:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=%s AND NOT granted)",
+                [pid],
+            )
+            if cursor.fetchone()[0]:
+                return
+        sleep(0.01)
+    pytest.fail("contending maintenance operation never waited for the owned lock")
+
+
 @pytest.mark.postgresql
-def test_postgresql_claim_winner_makes_waiting_quarantine_identity_stale(postgres_case):
-    case = postgres_case
-    locked, release = Event(), Event()
+def test_postgresql_claim_winner_makes_waiting_quarantine_identity_stale(
+    postgres_owned_case, monkeypatch
+):
+    case = postgres_owned_case
+    locked, release, attempting = Event(), Event(), Event()
+    quarantine_pid = []
+    original = storage._lock_task
+
+    def locked_task(*args, **kwargs):
+        task = original(*args, **kwargs)
+        locked.set()
+        assert release.wait(timeout=5)
+        return task
+
+    monkeypatch.setattr(storage, "_lock_task", locked_task)
 
     def claim():
         close_old_connections()
         try:
-            with transaction.atomic(), controls.maintenance_admission_barrier():
-                task = RayTaskExecution.objects.select_for_update().get(pk=case.task.pk)
-                locked.set()
-                assert release.wait(timeout=5)
-                task.state, task.execution_generation = "RUNNING", 1
-                task.save(update_fields=("state", "execution_generation"))
+            return _claim(case)
         finally:
             close_old_connections()
 
     def quarantine():
         close_old_connections()
         try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout='8s'")
+                cursor.execute("SELECT pg_backend_pid()")
+                quarantine_pid.append(cursor.fetchone()[0])
+                attempting.set()
             try:
                 _quarantine(case.task)
             except controls.MaintenanceAdmissionError as error:
@@ -634,38 +762,42 @@ def test_postgresql_claim_winner_makes_waiting_quarantine_identity_stale(postgre
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         claimed = pool.submit(claim)
-        assert locked.wait(timeout=5)
-        pending = pool.submit(quarantine)
-        release.set()
-        claimed.result(timeout=10)
+        try:
+            assert locked.wait(timeout=5)
+            pending = pool.submit(quarantine)
+            assert attempting.wait(timeout=5)
+            _assert_postgresql_waiting(quarantine_pid[0])
+        finally:
+            release.set()
+        record = claimed.result(timeout=10)
         assert pending.result(timeout=10) == "identity_changed"
     assert not RayTaskQuarantine.objects.exists()
+    case.task.refresh_from_db()
+    assert case.task.state == "RUNNING" and case.task.execution_generation == 1
+    assert storage._record(RayTaskCohortClaim.objects.get()) == record
 
 
 @pytest.mark.postgresql
-def test_postgresql_quarantine_winner_refuses_waiting_raw_claim_with_fresh_policy(postgres_case):
-    case = postgres_case
+def test_postgresql_quarantine_winner_refuses_waiting_current_claim_with_fresh_policy(
+    postgres_owned_case, monkeypatch
+):
+    case = postgres_owned_case
     locked, release, attempting = Event(), Event(), Event()
     claimant_pid = []
+    original = RayTaskQuarantine.save
+
+    def retained_audit(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        locked.set()
+        assert release.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(RayTaskQuarantine, "save", retained_audit)
 
     def quarantine():
         close_old_connections()
         try:
-            with transaction.atomic(), controls.maintenance_admission_barrier():
-                task = RayTaskExecution.objects.select_for_update().get(pk=case.task.pk)
-                RayTaskQuarantine.objects.create(
-                    task_execution_pk=task.pk,
-                    task_id=task.task_id,
-                    attempt_number=1,
-                    execution_generation=0,
-                    revision=1,
-                    state="QUARANTINED",
-                    actor="operator",
-                    reason="maintenance",
-                    created_at=case.now,
-                )
-                locked.set()
-                assert release.wait(timeout=5)
+            return _quarantine(case.task)
         finally:
             close_old_connections()
 
@@ -678,43 +810,26 @@ def test_postgresql_quarantine_winner_refuses_waiting_raw_claim_with_fresh_polic
                     cursor.execute("SELECT pg_backend_pid()")
                     claimant_pid.append(cursor.fetchone()[0])
                     attempting.set()
-                    cursor.execute(
-                        "UPDATE django_ray_raytaskexecution SET state='RUNNING', execution_generation=1 WHERE id=%s",
-                        [case.task.pk],
-                    )
-        except DatabaseError as error:
-            cause = error.__cause__
-            return getattr(cause, "sqlstate", None) or getattr(cause, "pgcode", None), str(error)
+                return _claim(case)
+        except storage.CohortClaimStorageError as error:
+            return error.reason.value
         finally:
             close_old_connections()
-        return None, "unexpected success"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         control = pool.submit(quarantine)
-        assert locked.wait(timeout=5)
-        pending = pool.submit(claim)
-        assert attempting.wait(timeout=5)
         try:
-            deadline = monotonic() + 3
-            waiting = False
-            while monotonic() < deadline:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=%s AND NOT granted)",
-                        [claimant_pid[0]],
-                    )
-                    waiting = cursor.fetchone()[0]
-                if waiting:
-                    break
-                sleep(0.01)
-            assert waiting
+            assert locked.wait(timeout=5)
+            pending = pool.submit(claim)
+            assert attempting.wait(timeout=5)
+            _assert_postgresql_waiting(claimant_pid[0])
         finally:
             release.set()
-        control.result(timeout=10)
-        code, reason = pending.result(timeout=10)
-    assert code == "P0001" and "maintenance control rejected" in reason
+        assert control.result(timeout=10).state == "QUARANTINED"
+        assert pending.result(timeout=10) == "execution_changed"
     case.task.refresh_from_db()
     assert case.task.state == "QUEUED" and case.task.execution_generation == 0
+    assert not RayTaskCohortClaim.objects.exists()
 
 
 def test_failed_control_audit_insert_is_fixed_and_rolls_back(case, monkeypatch):

@@ -39,10 +39,13 @@ from django_ray.target.attestation import (
     RAY_TARGET_EXPECTATION_SCHEMA_VERSION,
     RayRunnerFamily,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
+
+pytestmark = pytest.mark.usefixtures("preactivation_protocol_schema")
 
 MIGRATE_FROM = [("django_ray", "0022_ray_target_persistence")]
 MIGRATE_TO = [("django_ray", "0023_ray_task_target_binding")]
-LATEST = [("django_ray", "0034_cohort_timeouts")]
+HISTORICAL_LATEST = [("django_ray", "0034_cohort_timeouts")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGER = "ray_tbinding_guard_0023"
@@ -116,6 +119,7 @@ def _create_target_and_policy(
 
 def _create_execution(*, task_id: str = "task-target-binding") -> RayTaskExecution:
     return RayTaskExecution.objects.create(
+        execution_protocol_version=1,
         task_id=task_id,
         callable_path="testproject.tasks.add_numbers",
     )
@@ -556,7 +560,7 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
         reverted_execution = reverted_apps.get_model("django_ray", "RayTaskExecution")
         assert reverted_execution.objects.filter(pk__in=(existing.pk, rolling.pk)).count() == 2
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         table_names = set(connection.introspection.table_names())
         if RayTaskTargetBinding._meta.db_table in table_names:
             RayTaskTargetBinding.objects.all().delete()
@@ -644,7 +648,7 @@ def test_sqlite_active_binding_writer_cannot_partially_reverse_schema() -> None:
         assert _expected_binding_trigger_names() <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_binding_tables()
 
 
@@ -724,5 +728,5 @@ def test_postgresql_binding_writer_serializes_before_reverse_guard() -> None:
         assert _expected_binding_trigger_names() <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(HISTORICAL_LATEST)
         _clear_binding_tables()

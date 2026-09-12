@@ -59,6 +59,11 @@ class TestAdminCoverage:
 
     def test_lease_admin_reports_expired_lease_and_returns_base_queryset(self) -> None:
         recent = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="admin-coverage-recent",
             hostname="admin-host",
             pid=6001,
@@ -67,6 +72,11 @@ class TestAdminCoverage:
             is_active=True,
         )
         expired = TaskWorkerLease.objects.create(
+            capability_schema_version=1,
+            django_ray_version="0.5.0-test",
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
+            legacy_admission_token=None,
             worker_id="admin-coverage-expired",
             hostname="admin-host",
             pid=6002,

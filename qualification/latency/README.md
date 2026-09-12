@@ -1,5 +1,12 @@
 # Ray Job completion latency qualification
 
+This retained workload describes the earlier protocol-1 manager. It is not
+current protocol-3 release evidence: its direct handoff, adoption and polling
+instrumentation must be adapted to the current claim, retirement and cleanup
+rules before running it against 0.5. The resource-free observer test exercises
+current Sync execution and the real SQL receipt writer only; it does not qualify
+native Jobs transport, manager replacement or receipt-to-terminal latency.
+
 Register `qualification/latency/jobs.yaml` from the exact candidate archive and run
 `python -m qualification.latency.scenario` on the existing capacity-one Linux
 `external-evidence-v1` Kubernetes Job lane. Use the reviewed offline image procedure
@@ -15,7 +22,7 @@ deadline after the 60-second offline install, within the 420-second workload bud
 external cleanup has a separate 180-second ceiling. Managers run serially at
 concurrency one. No local Windows Ray or full CI is part of this workload.
 
-Five cases execute seven real current-protocol `rq2` Jobs against an owned SQLite WAL
+The earlier five cases execute seven real protocol-1 `rq2` Jobs against an owned SQLite WAL
 database and filesystem request store:
 
 - A recovery-only control disables the new receipt method in the same installed

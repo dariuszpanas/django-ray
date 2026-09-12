@@ -13,7 +13,7 @@ from django.db import DatabaseError, close_old_connections, connection, connecti
 from django.db.migrations.recorder import MigrationRecorder
 from django.test.utils import CaptureQueriesContext
 
-from django_ray import doctor
+from django_ray import doctor, maintenance
 from django_ray.models import RayTaskExecution, TaskWorkerLease
 from django_ray.target.attestation import RayRunnerFamily
 from django_ray.target.coordination import record_ray_target_attestation
@@ -31,6 +31,10 @@ from tests.integration.test_cohort_claim_storage import (
 from tests.integration.test_cohort_claim_storage import (
     isolated_sqlite_ledger_maintenance as isolated_sqlite_ledger_maintenance,
 )
+from tests.integration.test_cohort_completion import (
+    isolated_completion_controls as isolated_completion_controls,
+)
+from tests.integration.test_cohort_job_cleanup import _close, _completed
 from tests.integration.test_cohort_probe_challenges import (
     NOW as PROBE_NOW,
 )
@@ -40,6 +44,7 @@ from tests.integration.test_cohort_probe_challenges import (
     _policy,
     _target,
 )
+from tests.integration.test_maintenance_controls import _complete, _quarantine, _request
 from tests.integration.test_ray_target_coordination import _attestation
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -64,7 +69,10 @@ def test_empty_database_state_is_never_healthy_or_drained():
         value["drain_status"] == value["upgrade_status"] == value["rollback_status"] == "unverified"
     )
     assert "remote_work_quiescence_and_cleanup" in value["unverified"]
-    assert "pause_drain_retirement_and_quarantine_controls" in value["unverified"]
+    assert "drain_completion_and_remote_retirement" in value["unverified"]
+    assert value["scope"] == "selected_database"
+    for section in ("quarantine", "worker_retirement", "job_cleanup"):
+        assert all(count == 0 for count in value["cohort"][section].values())
 
 
 def test_observation_is_read_only_and_does_not_materialize_sensitive_blobs(monkeypatch):
@@ -275,8 +283,8 @@ def test_displayed_package_names_are_bounded_in_sql_and_terminal_safe():
             last_heartbeat_at=NOW,
             capability_schema_version=1,
             django_ray_version=name,
-            min_supported_execution_protocol_version=1,
-            max_supported_execution_protocol_version=1,
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
             legacy_admission_token=None,
         )
     report = doctor.build_doctor(observed_at=NOW)
@@ -298,15 +306,15 @@ def test_combined_groups_are_redacted_bounded_and_deterministic():
             last_heartbeat_at=NOW,
             capability_schema_version=1,
             django_ray_version=f"{index:03d}" + "🙂" * 125,
-            min_supported_execution_protocol_version=1,
-            max_supported_execution_protocol_version=1,
+            min_supported_execution_protocol_version=3,
+            max_supported_execution_protocol_version=3,
             legacy_admission_token=None,
         )
         RayTaskExecution.objects.create(
             task_id=f"bounded-{index}",
             callable_path="never.import",
             queue_name=f"{index:03d}" + "🙂" * 97,
-            execution_protocol_version=1000 + index,
+            execution_protocol_version=3,
         )
     TaskWorkerLease.objects.create(
         worker_id="redacted",
@@ -316,8 +324,8 @@ def test_combined_groups_are_redacted_bounded_and_deterministic():
         last_heartbeat_at=NOW,
         capability_schema_version=1,
         django_ray_version="token=secret",
-        min_supported_execution_protocol_version=1,
-        max_supported_execution_protocol_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
         legacy_admission_token=None,
     )
     report = doctor.build_doctor(observed_at=NOW)
@@ -358,6 +366,206 @@ def test_public_command_output(arguments):
 def test_rejects_existing_transaction():
     with transaction.atomic(), pytest.raises(doctor.DoctorError, match="outermost"):
         doctor.build_doctor(observed_at=NOW)
+
+
+def test_quarantine_latest_decision_is_exact_and_history_is_retained(case):
+    case.monkeypatch.setattr(maintenance, "_clock", lambda: case.now)
+    case.task = RayTaskExecution.objects.create(
+        task_id="doctor-quarantine", callable_path="never.import", created_at=case.now
+    )
+    _quarantine(case.task, actor="operator-private", reason="private-reason")
+    _quarantine(case.task, revision=1, quarantined=False)
+    _quarantine(case.task, revision=2)
+    report = doctor.build_doctor(observed_at=case.now)
+    counts = _cohort(report)["quarantine"]
+    assert counts["total"] == counts["current_quarantined"] == 1
+    assert counts["current_nonterminal_quarantined"] == 1
+    assert counts["current_released"] == 0
+    assert "operator-private" not in doctor.render_doctor_json(report)
+    assert "private-reason" not in doctor.render_doctor_json(report)
+    _quarantine(case.task, revision=3, quarantined=False)
+    released = _cohort(doctor.build_doctor(observed_at=case.now))["quarantine"]
+    assert released["current_quarantined"] == 0 and released["current_released"] == 1
+    old_pk = case.task.pk
+    case.task.delete()
+    replacement = RayTaskExecution.objects.create(
+        pk=old_pk, task_id="replacement", callable_path="never.import"
+    )
+    retained = _cohort(doctor.build_doctor(observed_at=case.now))["quarantine"]
+    assert retained["total"] == retained["retained_without_current_identity"] == 1
+    assert retained["current_quarantined"] == retained["current_released"] == 0
+    replacement.delete()
+
+
+@pytest.mark.parametrize("retired", [False, True])
+def test_retirement_latest_decision_never_applies_to_reused_worker_id(case, retired):
+    case.monkeypatch.setattr(maintenance, "_clock", lambda: case.now)
+    _request(case.owner)
+    if retired:
+        _complete(case.owner)
+    report = doctor.build_doctor(observed_at=case.now)
+    counts = _cohort(report)["worker_retirement"]
+    assert counts["total"] == 1
+    assert counts["requested_with_exact_live_lease"] == int(not retired)
+    assert counts["retired_with_exact_inactive_lease"] == int(retired)
+    case.lease.delete()
+    TaskWorkerLease.objects.create(
+        worker_id=case.owner.worker_id,
+        hostname=case.owner.hostname,
+        pid=case.owner.pid,
+        started_at=case.owner.started_at + timedelta(seconds=1),
+        last_heartbeat_at=case.now,
+        capability_schema_version=1,
+        django_ray_version="0.5.0",
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
+        legacy_admission_token=None,
+    )
+    retained = _cohort(doctor.build_doctor(observed_at=case.now))["worker_retirement"]
+    assert retained["retained_without_exact_lease"] == 1
+    assert retained["requested_without_exact_live_lease"] == int(not retired)
+    assert retained["retired_without_exact_inactive_lease"] == int(retired)
+    assert doctor.doctor_to_dict(report)["drain_status"] == "unverified"
+
+
+def test_future_control_decisions_are_not_reported_as_current(case):
+    case.monkeypatch.setattr(maintenance, "_clock", lambda: case.now)
+    _hold(case, _claim(case))
+    case.task.refresh_from_db()
+    _request(case.owner)
+    _quarantine(case.task)
+    counts = _cohort(doctor.build_doctor(observed_at=case.now - timedelta(microseconds=1)))
+    assert counts["worker_retirement"]["future_decisions"] == 1
+    assert counts["worker_retirement"]["requested"] == 0
+    assert counts["quarantine"]["future_decisions"] == 1
+    assert counts["quarantine"]["current_quarantined"] == 0
+
+
+@pytest.mark.parametrize("reference", [False, True])
+def test_open_cleanup_survives_terminal_result_without_materializing_expectation(case, reference):
+    _completed(case, reference=reference)
+    with CaptureQueriesContext(connection) as captured:
+        report = doctor.build_doctor(observed_at=case.now)
+    counts = _cohort(report)["job_cleanup"]
+    assert counts["open"] == counts["open_for_terminal_task"] == 1
+    assert counts["open_uninspectable"] == int(not reference)
+    assert counts["open_without_exact_live_owner"] == 0
+    assert _cohort(report)["claims"]["unresolved"] == 0
+    assert any(item["code"] == "open_jobs_cleanup" for item in report.blockers)
+    for query in captured.captured_queries:
+        assert '"expectation_json"' not in query["sql"]
+        assert '"facts_json"' not in query["sql"]
+    assert doctor.doctor_to_dict(report)["drain_status"] == "unverified"
+
+
+def test_cleanup_prior_attempt_and_unavailable_owner_remain_visible_until_closed(case):
+    def retry(task, _decoded, *, retry_admitted):
+        assert retry_admitted
+        task.state = "QUEUED"
+        task.attempt_number += 1
+        task.save(update_fields=("state", "attempt_number"))
+        return True
+
+    _value, record = _completed(case, callback=retry, success=False)
+    TaskWorkerLease.objects.filter(pk=case.lease.pk).update(
+        last_heartbeat_at=case.now + timedelta(seconds=1)
+    )
+    counts = _cohort(doctor.build_doctor(observed_at=case.now))["job_cleanup"]
+    assert counts["open"] == counts["open_for_prior_attempt_or_generation"] == 1
+    assert counts["open_without_exact_live_owner"] == 1
+    assert counts["open_for_terminal_task"] == 0
+    TaskWorkerLease.objects.filter(pk=case.lease.pk).update(last_heartbeat_at=case.now)
+    _close(case, record)
+    report = doctor.build_doctor(observed_at=case.now)
+    assert _cohort(report)["job_cleanup"]["closed_records"] == 1
+    assert _cohort(report)["job_cleanup"]["open"] == 0
+    assert not any(item["code"] == "open_jobs_cleanup" for item in report.blockers)
+    assert doctor.doctor_to_dict(report)["drain_status"] == "unverified"
+
+
+def test_new_summaries_remain_on_explicit_database_despite_read_router(case, monkeypatch):
+    from django.db import router
+
+    _completed(case, reference=False)
+    case.monkeypatch.setattr(maintenance, "_clock", lambda: case.now)
+    case.task.refresh_from_db()
+    _quarantine(case.task)
+    _request(case.owner)
+    with monkeypatch.context() as routed:
+        routed.setattr(
+            router, "db_for_read", lambda *args, **kwargs: pytest.fail("unqualified routed read")
+        )
+        report = doctor.build_doctor(using="default", observed_at=case.now)
+    counts = _cohort(report)
+    assert counts["quarantine"]["current_quarantined"] == 1
+    assert counts["worker_retirement"]["requested"] == 1
+    assert counts["job_cleanup"]["open_uninspectable"] == 1
+
+
+def test_selected_database_does_not_mix_default_control_or_cleanup_rows(
+    case, tmp_path, django_db_blocker
+):
+    from django.db.migrations.executor import MigrationExecutor
+
+    if connection.vendor != "sqlite":
+        pytest.skip("uses an independently migrated SQLite observation database")
+    _completed(case, reference=False)
+    case.monkeypatch.setattr(maintenance, "_clock", lambda: case.now)
+    case.task.refresh_from_db()
+    _quarantine(case.task)
+    _request(case.owner)
+    alias = "doctor_selected"
+    connections.databases[alias] = dict(
+        connection.settings_dict, NAME=str(tmp_path / "doctor.sqlite3")
+    )
+    try:
+        with django_db_blocker.unblock():
+            selected = connections[alias]
+            MigrationExecutor(selected).migrate([("django_ray", "0035_activate_current_cohort")])
+            with CaptureQueriesContext(connection) as other_queries:
+                report = doctor.build_doctor(using=alias, observed_at=case.now)
+        assert not other_queries.captured_queries
+        for section in ("claims", "quarantine", "worker_retirement", "job_cleanup"):
+            assert _cohort(report)[section]["total"] == 0
+        assert doctor.doctor_to_dict(report)["drain_status"] == "unverified"
+    finally:
+        connections[alias].close()
+        del connections[alias]
+        connections.databases.pop(alias)
+
+
+@pytest.mark.postgresql
+def test_postgresql_control_decisions_share_the_protocol_snapshot(case, monkeypatch):
+    if connection.vendor != "postgresql":
+        pytest.skip("requires the hosted PostgreSQL coordination database")
+    monkeypatch.setattr(maintenance, "_clock", lambda: case.now)
+    begin_write = Event()
+    original = doctor._cohort_observation
+
+    def writer():
+        close_old_connections()
+        try:
+            assert begin_write.wait(timeout=5)
+            _quarantine(case.task)
+            _request(case.owner)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        completed = pool.submit(writer)
+
+        def interleaved(**kwargs):
+            begin_write.set()
+            completed.result(timeout=10)
+            return original(**kwargs)
+
+        monkeypatch.setattr(doctor, "_cohort_observation", interleaved)
+        observed = _cohort(doctor.build_doctor(observed_at=case.now))
+        assert observed["quarantine"]["total"] == observed["worker_retirement"]["total"] == 0
+    monkeypatch.setattr(doctor, "_cohort_observation", original)
+    later = _cohort(doctor.build_doctor(observed_at=case.now))
+    assert later["quarantine"]["current_quarantined"] == 1
+    assert later["worker_retirement"]["requested_with_exact_live_lease"] == 1
 
 
 @pytest.mark.postgresql

@@ -1,4 +1,7 @@
-"""Integration tests for the django-ray worker."""
+"""Historical protocol-1 direct worker methods on the actual preactivation schema.
+
+Current production startup, admission and execution use the separate cohort worker suites.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +17,10 @@ import pytest
 from django_ray.execution_codec import (
     ExecutionCompletion,
     ExecutionIdentity,
-    encode_execution_completion,
+    _encode_execution_completion_for_protocols,
 )
-from django_ray.lifecycle import QUEUE_EXPIRED_ERROR
+from django_ray.execution_protocol import ExecutionProtocolRange
+from django_ray.lifecycle import QUEUE_EXPIRED_ERROR, _request_task_retry
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import (
     CancellationStatus,
@@ -31,7 +35,44 @@ from django_ray.runner.cancellation import CancellationOutcome, CancellationOutc
 from django_ray.runner.ray_core import RayCoreHandle
 from django_ray.runtime.runtime_env import normalize_runtime_env, runtime_env_for_storage
 from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
+
+LEGACY_PROTOCOLS = ExecutionProtocolRange(1, 1)
+
+
+class HistoricalCommand(Command):
+    """Keep released per-call ranges explicit without changing active defaults."""
+
+    def _handle_task_failure(self, *args, **kwargs):
+        kwargs.setdefault("supported_protocols", LEGACY_PROTOCOLS)
+        return super()._handle_task_failure(*args, **kwargs)
+
+    def _store_and_succeed_task(self, *args, **kwargs):
+        kwargs.setdefault("supported_protocols", LEGACY_PROTOCOLS)
+        return super()._store_and_succeed_task(*args, **kwargs)
+
+
+def _historical_retry(execution, **options):
+    return _request_task_retry(execution, supported_protocols=LEGACY_PROTOCOLS, **options)[1]
+
+
+@pytest.fixture(autouse=True)
+def historical_lifecycle_calls(monkeypatch, preactivation_protocol_schema):
+    """Bind only historical helper consumers to an explicit released range."""
+    from django_ray.lifecycle import record_failure, record_lost
+
+    def lost(execution, **options):
+        return record_lost(execution, supported_protocols=LEGACY_PROTOCOLS, **options)
+
+    def failed(execution, **options):
+        return record_failure(execution, supported_protocols=LEGACY_PROTOCOLS, **options)
+
+    monkeypatch.setattr("django_ray.runner.reconciliation.record_lost", lost)
+    monkeypatch.setattr("django_ray.runner.reconciliation.record_failure", failed)
+    monkeypatch.setattr(
+        "django_ray.management.commands.django_ray_worker.retry_task", _historical_retry
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -46,19 +87,87 @@ def setup_django_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.syspath_prepend(root_path)
 
 
+def _historical_task(**fields):
+    fields.setdefault("execution_protocol_version", 1)
+    return RayTaskExecution.objects.create(**fields)
+
+
+def _historical_input_fixture(backend, declaration, *, args, kwargs):
+    """Create a released producer row while retaining real input storage behavior."""
+    from uuid import uuid4
+
+    from django.db import transaction
+
+    from django_ray.input_storage import prepare_task_input, register_task_input
+    from django_ray.runtime.runtime_env import resolve_runtime_env_profile
+
+    backend.validate_task(declaration)
+    task_id = str(uuid4())
+    environment = resolve_runtime_env_profile(
+        backend.runtime_env_profile, inline_spec=backend.inline_runtime_env
+    )
+    stored = runtime_env_for_storage(environment, task_id=task_id)
+    prepared = prepare_task_input(list(args), kwargs)
+    with transaction.atomic():
+        register_task_input(prepared)
+        return _historical_task(
+            task_id=task_id,
+            callable_path=declaration.module_path,
+            queue_name=declaration.queue_name,
+            ray_target_address=backend.ray_target_address,
+            runtime_env_profile=stored.profile,
+            runtime_env_json=stored.serialized,
+            runtime_env_hash=stored.digest,
+            args_json=prepared.args_json,
+            kwargs_json=prepared.kwargs_json,
+            input_reference=prepared.input_reference,
+        )
+
+
+def _historical_lease(**fields):
+    fields.setdefault("capability_schema_version", 1)
+    fields.setdefault("min_supported_execution_protocol_version", 1)
+    fields.setdefault("max_supported_execution_protocol_version", 1)
+    fields.setdefault("legacy_admission_token", None)
+    return TaskWorkerLease.objects.create(**fields)
+
+
+def _historical_completion(value):
+    return _encode_execution_completion_for_protocols(value, LEGACY_PROTOCOLS)
+
+
 def _acquire_test_lease(command: Command, queue: str = "default") -> None:
-    """Mirror the production startup precondition for direct command tests."""
-    command._create_lease(queue)
+    """Retain one explicit historical incarnation for direct command methods."""
+    import os
+    import socket
+
+    from django_ray import __version__
+    from django_ray.runner.leasing import WorkerLeaseIdentity
+
+    now = datetime.now(UTC)
+    command.lease = _historical_lease(
+        worker_id=command.worker_id,
+        hostname=socket.gethostname(),
+        pid=os.getpid(),
+        queue_name=queue,
+        django_ray_version=__version__,
+        started_at=now,
+        last_heartbeat_at=now,
+    )
+    command.lease_identity = WorkerLeaseIdentity(
+        command.worker_id, command.lease.hostname, command.lease.pid, now
+    )
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 class TestWorkerSync:
     """Test the worker in synchronous mode."""
 
     def test_worker_processes_simple_task(self, setup_django_env):
         """Test that the worker processes a simple task correctly."""
         # Create a task
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -68,9 +177,8 @@ class TestWorkerSync:
         )
 
         # Run worker for one iteration (we'll simulate by calling the methods directly)
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style  # Use default style
         cmd.execution_mode = "sync"
@@ -104,7 +212,7 @@ class TestWorkerSync:
             "django_ray.management.commands.django_ray_worker.datetime",
             FrozenDateTime,
         )
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-expired-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -115,9 +223,8 @@ class TestWorkerSync:
             queue_timeout_seconds=60,
             queue_deadline_at=deadline,
         )
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "ray"
         cmd.worker_id = "saturated-worker"
@@ -139,7 +246,7 @@ class TestWorkerSync:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         deadline = datetime.now(UTC) + timedelta(minutes=1)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-expired-during-sweep-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -167,9 +274,8 @@ class TestWorkerSync:
             "django_ray.management.commands.django_ray_worker.datetime",
             AdvancingDateTime,
         )
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "local"
         cmd.worker_id = "deadline-race-worker"
@@ -194,6 +300,7 @@ class TestWorkerSync:
         RayTaskExecution.objects.bulk_create(
             [
                 RayTaskExecution(
+                    execution_protocol_version=1,
                     task_id=f"test-worker-expired-batch-{index:03d}",
                     callable_path="testproject.tasks.add_numbers",
                     queue_name="default",
@@ -206,7 +313,7 @@ class TestWorkerSync:
                 for index in range(101)
             ]
         )
-        eligible = RayTaskExecution.objects.create(
+        eligible = _historical_task(
             task_id="test-worker-expiry-batch-eligible",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -214,9 +321,8 @@ class TestWorkerSync:
             args_json="[5, 3]",
             kwargs_json="{}",
         )
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "local"
         cmd.worker_id = "bounded-expiry-worker"
@@ -258,7 +364,7 @@ class TestWorkerSync:
             task_id=task_id,
             config=encryption_config,
         )
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=task_id,
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -270,9 +376,7 @@ class TestWorkerSync:
             runtime_env_hash=stored.digest,
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "encrypted-sync-worker"
@@ -325,7 +429,7 @@ class TestWorkerSync:
         else:
             ciphertext = envelope["ciphertext"]
             envelope["ciphertext"] = ("A" if ciphertext[0] != "A" else "B") + ciphertext[1:]
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=task_id,
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -346,9 +450,7 @@ class TestWorkerSync:
             "RUNTIME_ENV_ENCRYPTION_KEYS": {"worker-key": key},
         }
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = execution_mode
         cmd.worker_id = "encrypted-snapshot-failure-worker"
@@ -381,7 +483,7 @@ class TestWorkerSync:
         execution_mode,
     ):
         """Every execution mode rejects a corrupt durable snapshot before submission."""
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id=f"test-worker-runtime-env-integrity-{execution_mode}",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -393,9 +495,7 @@ class TestWorkerSync:
             runtime_env_hash="0" * 64,
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = execution_mode
         cmd.worker_id = "runtime-env-integrity-worker"
@@ -423,7 +523,7 @@ class TestWorkerSync:
 
     def test_automatic_retry_integrity_failure_records_only_the_current_attempt(self):
         """A snapshot corrupted after submission blocks replacement without losing failure."""
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-auto-retry-runtime-env-integrity",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -435,9 +535,7 @@ class TestWorkerSync:
             runtime_env_hash="0" * 64,
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
 
         assert cmd._handle_task_failure(
@@ -464,7 +562,7 @@ class TestWorkerSync:
 
     def test_worker_claim_clears_stale_progress_summary(self, setup_django_env, monkeypatch):
         """A new execution generation never inherits the previous run summary."""
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-clear-summary-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -475,9 +573,8 @@ class TestWorkerSync:
             workflow_progress_summary_json="stale-summary",
             workflow_run_id="00000000-0000-0000-0000-000000000125",
         )
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -495,9 +592,8 @@ class TestWorkerSync:
 
     def test_worker_processes_async_task_with_normal_lifecycle(self, setup_django_env):
         """Sync mode awaits a coroutine before persisting its successful result."""
-        from django_ray.management.commands.django_ray_worker import Command
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-async-success-001",
             callable_path="testproject.tasks.async_add_numbers",
             queue_name="default",
@@ -505,7 +601,7 @@ class TestWorkerSync:
             args_json="[8, 13]",
             kwargs_json="{}",
         )
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -526,7 +622,6 @@ class TestWorkerSync:
         settings,
     ):
         """The coroutine's ValueError reaches the ordinary retry policy."""
-        from django_ray.management.commands.django_ray_worker import Command
         from django_ray.models import TaskAttempt
 
         settings.DJANGO_RAY = {
@@ -535,7 +630,7 @@ class TestWorkerSync:
             "RETRY_BACKOFF_SECONDS": 0,
             "RETRY_EXCEPTION_DENYLIST": ["testproject.tasks.NoRetryError"],
         }
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-async-retry-001",
             callable_path="testproject.tasks.async_failing_task",
             queue_name="default",
@@ -543,7 +638,7 @@ class TestWorkerSync:
             args_json="[]",
             kwargs_json="{}",
         )
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -565,7 +660,6 @@ class TestWorkerSync:
         settings,
     ):
         """The showcase archives two planned failures before one durable success."""
-        from django_ray.management.commands.django_ray_worker import Command
         from testproject.apps.cluster_tasks import tasks as cluster_tasks
         from testproject.apps.cluster_tasks import workflows
 
@@ -599,7 +693,7 @@ class TestWorkerSync:
             "run_order_fulfillment_recovery_showcase_workflow",
             run,
         )
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-workflow-recovery-001",
             callable_path=(
                 "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
@@ -609,7 +703,7 @@ class TestWorkerSync:
             args_json="[]",
             kwargs_json='{"item_count": 1, "work_seconds": 0}',
         )
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -671,7 +765,6 @@ class TestWorkerSync:
         settings,
     ):
         """A denylisted exception raised after await remains permanently failed."""
-        from django_ray.management.commands.django_ray_worker import Command
 
         settings.DJANGO_RAY = {
             **settings.DJANGO_RAY,
@@ -679,7 +772,7 @@ class TestWorkerSync:
             "RETRY_BACKOFF_SECONDS": 0,
             "RETRY_EXCEPTION_DENYLIST": ["testproject.tasks.NoRetryError"],
         }
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-async-no-retry-001",
             callable_path="testproject.tasks.async_failing_task",
             queue_name="default",
@@ -687,7 +780,7 @@ class TestWorkerSync:
             args_json="[]",
             kwargs_json='{"no_retry": true}',
         )
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -706,7 +799,6 @@ class TestWorkerSync:
         self, setup_django_env, settings, tmp_path
     ):
         from django_ray.backends import RayTaskBackend
-        from django_ray.management.commands.django_ray_worker import Command
         from django_ray.models import TaskInputPayload
         from testproject.tasks import echo_task
 
@@ -721,15 +813,16 @@ class TestWorkerSync:
             {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "auto"}},
         )
         large_value = "x" * 2048
-        result = backend.enqueue(echo_task, args=(large_value,), kwargs={"key": "value"})
-        task = RayTaskExecution.objects.get(task_id=result.id)
+        task = _historical_input_fixture(
+            backend, echo_task, args=(large_value,), kwargs={"key": "value"}
+        )
         reference = task.input_reference
 
         assert reference is not None
         assert task.args_json == task.kwargs_json == "null"
         assert TaskInputPayload.objects.filter(reference=reference).exists()
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -740,22 +833,21 @@ class TestWorkerSync:
         task.refresh_from_db()
         assert task.state == TaskState.SUCCEEDED
         assert task.input_reference == reference
-        assert backend.get_result(result.id).return_value == {
+        assert backend.get_result(str(task.task_id)).return_value == {
             "args": [large_value],
             "kwargs": {"key": "value"},
         }
 
     def test_worker_success_clears_previous_attempt_failure_metadata(self, setup_django_env):
         """A successful retry must not expose the previous attempt's diagnostics."""
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-success-after-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -779,13 +871,13 @@ class TestWorkerSync:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker-versioned-sync"
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-versioned-sync-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -797,7 +889,7 @@ class TestWorkerSync:
             execution_generation=7,
         )
         assert task.pk is not None
-        serialized = encode_execution_completion(
+        serialized = _historical_completion(
             ExecutionCompletion(
                 identity=ExecutionIdentity(
                     task_execution_pk=int(task.pk),
@@ -834,13 +926,13 @@ class TestWorkerSync:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker-legacy-nan-sync"
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-legacy-nan-sync-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -876,13 +968,13 @@ class TestWorkerSync:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker-legacy-long-failure-sync"
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-legacy-long-failure-sync-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -922,13 +1014,13 @@ class TestWorkerSync:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker-versioned-sync-mismatch"
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-versioned-sync-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -940,7 +1032,7 @@ class TestWorkerSync:
             execution_generation=7,
         )
         assert task.pk is not None
-        serialized = encode_execution_completion(
+        serialized = _historical_completion(
             ExecutionCompletion(
                 identity=ExecutionIdentity(
                     task_execution_pk=int(task.pk),
@@ -986,7 +1078,7 @@ class TestWorkerSync:
     def test_worker_processes_failing_task(self, setup_django_env):
         """Test that the worker handles failing tasks correctly."""
         # Create a failing task
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-worker-002",
             callable_path="testproject.tasks.failing_task",
             queue_name="default",
@@ -996,9 +1088,7 @@ class TestWorkerSync:
             attempt_number=3,  # Start at max attempts so it fails permanently
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1018,7 +1108,7 @@ class TestWorkerSync:
 
     def test_worker_retries_failing_task(self, setup_django_env):
         """Test that the worker schedules retry for a failing task."""
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-retry-001",
             callable_path="testproject.tasks.failing_task",
             queue_name="default",
@@ -1029,9 +1119,7 @@ class TestWorkerSync:
             priority=75,
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1054,9 +1142,7 @@ class TestWorkerSync:
         """Test that the worker detects and fails timed-out tasks."""
         from datetime import datetime, timedelta
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1068,7 +1154,7 @@ class TestWorkerSync:
 
         # Create a task that started 10 seconds ago with 5 second timeout
         started_at = datetime.now(UTC) - timedelta(seconds=10)
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-timeout-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -1091,7 +1177,7 @@ class TestWorkerSync:
     def test_worker_respects_queue_filter(self, setup_django_env):
         """Test that the worker only processes tasks from the specified queue."""
         # Create tasks in different queues
-        task_default = RayTaskExecution.objects.create(
+        task_default = _historical_task(
             task_id="test-queue-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1099,7 +1185,7 @@ class TestWorkerSync:
             args_json="[1, 1]",
             kwargs_json="{}",
         )
-        task_other = RayTaskExecution.objects.create(
+        task_other = _historical_task(
             task_id="test-queue-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="other",
@@ -1108,9 +1194,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1135,7 +1219,7 @@ class TestWorkerSync:
         tasks = []
         priorities = [0, 50, -10, 100, 25]
         for i, priority in enumerate(priorities):
-            task = RayTaskExecution.objects.create(
+            task = _historical_task(
                 task_id=f"test-concurrency-{i}",
                 callable_path="testproject.tasks.add_numbers",
                 queue_name="default",
@@ -1146,9 +1230,7 @@ class TestWorkerSync:
             )
             tasks.append(task)
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1170,7 +1252,7 @@ class TestWorkerSync:
 
     def test_worker_handles_task_with_kwargs(self, setup_django_env):
         """Test that the worker correctly passes kwargs to tasks."""
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-kwargs-001",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -1179,9 +1261,7 @@ class TestWorkerSync:
             kwargs_json='{"key": "value", "number": 42}',
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1203,7 +1283,7 @@ class TestWorkerSync:
     def test_worker_processes_multiple_queues(self, setup_django_env):
         """Test that the worker processes tasks from multiple queues."""
         # Create tasks in different queues
-        task_default = RayTaskExecution.objects.create(
+        task_default = _historical_task(
             task_id="test-multi-queue-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1211,7 +1291,7 @@ class TestWorkerSync:
             args_json="[1, 1]",
             kwargs_json="{}",
         )
-        task_high = RayTaskExecution.objects.create(
+        task_high = _historical_task(
             task_id="test-multi-queue-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="high-priority",
@@ -1219,7 +1299,7 @@ class TestWorkerSync:
             args_json="[2, 2]",
             kwargs_json="{}",
         )
-        task_other = RayTaskExecution.objects.create(
+        task_other = _historical_task(
             task_id="test-multi-queue-003",
             callable_path="testproject.tasks.add_numbers",
             queue_name="other",
@@ -1228,9 +1308,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1254,7 +1332,7 @@ class TestWorkerSync:
 
     def test_worker_processes_larger_numeric_priority_first_across_queues(self) -> None:
         """Queue names do not override Django's numeric task priority."""
-        task_low = RayTaskExecution.objects.create(
+        task_low = _historical_task(
             task_id="test-priority-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="high-priority",
@@ -1263,7 +1341,7 @@ class TestWorkerSync:
             args_json="[1, 1]",
             kwargs_json="{}",
         )
-        task_default = RayTaskExecution.objects.create(
+        task_default = _historical_task(
             task_id="test-priority-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1272,7 +1350,7 @@ class TestWorkerSync:
             args_json="[2, 2]",
             kwargs_json="{}",
         )
-        task_high = RayTaskExecution.objects.create(
+        task_high = _historical_task(
             task_id="test-priority-003",
             callable_path="testproject.tasks.add_numbers",
             queue_name="low-priority",
@@ -1284,7 +1362,7 @@ class TestWorkerSync:
 
         from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1332,7 +1410,7 @@ class TestWorkerSync:
     def test_worker_preserves_fifo_for_equal_priorities_across_queues(self) -> None:
         """Creation time breaks ties even when selected queues differ."""
         now = datetime.now(UTC)
-        older = RayTaskExecution.objects.create(
+        older = _historical_task(
             task_id="test-priority-fifo-older",
             callable_path="testproject.tasks.add_numbers",
             queue_name="batch",
@@ -1342,7 +1420,7 @@ class TestWorkerSync:
             kwargs_json="{}",
             created_at=now - timedelta(seconds=1),
         )
-        newer = RayTaskExecution.objects.create(
+        newer = _historical_task(
             task_id="test-priority-fifo-newer",
             callable_path="testproject.tasks.add_numbers",
             queue_name="urgent",
@@ -1353,9 +1431,7 @@ class TestWorkerSync:
             created_at=now,
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -1371,7 +1447,7 @@ class TestWorkerSync:
     def test_worker_orders_due_delayed_and_immediate_tasks_together(self) -> None:
         """Eligible delayed/retried work shares the numeric ordering contract."""
         now = datetime.now(UTC)
-        immediate = RayTaskExecution.objects.create(
+        immediate = _historical_task(
             task_id="test-priority-immediate",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1380,7 +1456,7 @@ class TestWorkerSync:
             args_json="[1, 1]",
             kwargs_json="{}",
         )
-        due = RayTaskExecution.objects.create(
+        due = _historical_task(
             task_id="test-priority-due",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1391,7 +1467,7 @@ class TestWorkerSync:
             run_after=now - timedelta(seconds=1),
             attempt_number=2,
         )
-        future = RayTaskExecution.objects.create(
+        future = _historical_task(
             task_id="test-priority-future",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1402,9 +1478,7 @@ class TestWorkerSync:
             run_after=now + timedelta(hours=1),
         )
 
-        from django_ray.management.commands.django_ray_worker import Command
-
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "sync"
         cmd.worker_id = "test-worker"
@@ -1420,7 +1494,8 @@ class TestWorkerSync:
         assert future.state == TaskState.QUEUED
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 class TestWorkerRayJobRouting:
     """Ray Job claims preserve the backend alias selected at enqueue time."""
 
@@ -1430,11 +1505,30 @@ class TestWorkerRayJobRouting:
         settings,
         tmp_path,
     ) -> None:
+        from functools import partial
+
         from django_ray.backends import RayTaskBackend
-        from django_ray.management.commands.django_ray_worker import Command
+        from django_ray.ray_job_request_storage import (
+            _prepare_ray_job_request,
+            _register_and_attach_ray_job_request,
+        )
         from django_ray.runner.ray_job import RayJobRunner
         from testproject.tasks import add_numbers
+        from tests.protocol_epochs import encode_legacy_execution_request
 
+        # Exercise released request routing locally; the activated remote entry
+        # continues to reject this historical envelope before application code.
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.encode_execution_request", encode_legacy_execution_request
+        )
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.prepare_ray_job_request",
+            partial(_prepare_ray_job_request, supported_protocols=LEGACY_PROTOCOLS),
+        )
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.register_and_attach_ray_job_request",
+            partial(_register_and_attach_ray_job_request, supported_protocols=LEGACY_PROTOCOLS),
+        )
         settings.DJANGO_RAY = {
             **settings.DJANGO_RAY,
             "INPUT_STORAGE_BACKEND": "filesystem",
@@ -1471,12 +1565,10 @@ class TestWorkerRayJobRouting:
             "cluster_b",
             {"QUEUES": ["default"], "OPTIONS": {"RAY_ADDRESS": "ray://b:10001"}},
         )
-        result_a = backend_a.enqueue(task, args=(1, 2), kwargs={})
-        result_b = backend_b.enqueue(task, args=(3, 4), kwargs={})
-        execution_a = RayTaskExecution.objects.get(task_id=result_a.id)
-        execution_b = RayTaskExecution.objects.get(task_id=result_b.id)
+        execution_a = _historical_input_fixture(backend_a, task, args=(1, 2), kwargs={})
+        execution_b = _historical_input_fixture(backend_b, task, args=(3, 4), kwargs={})
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.execution_mode = "ray"
         cmd.worker_id = "routing-worker"
@@ -1490,22 +1582,22 @@ class TestWorkerRayJobRouting:
         assert submissions == [
             ("ray://a:10001", RayJobRunner.submission_id(execution_a)),
             ("ray://b:10001", RayJobRunner.submission_id(execution_b)),
-        ]
+        ], cmd.stdout.getvalue()
         assert execution_a.ray_target_address == "ray://a:10001"
         assert execution_b.ray_target_address == "ray://b:10001"
         assert execution_a.ray_address == "ray://a:10001"
         assert execution_b.ray_address == "ray://b:10001"
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 class TestWorkerRayJobFailureHandling:
     """Test Ray Job mode failure paths use unified retry handling."""
 
     @staticmethod
     def _make_command():
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.worker_id = "test-worker"
@@ -1519,7 +1611,7 @@ class TestWorkerRayJobFailureHandling:
         from django_ray.runner.ray_job import RayJobRunner
 
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-ray-submit-retry-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1564,7 +1656,7 @@ class TestWorkerRayJobFailureHandling:
         from django_ray.workflow.plans import WorkflowPlanMismatchError
 
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-ray-submit-plan-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1600,7 +1692,7 @@ class TestWorkerRayJobFailureHandling:
     def test_reconcile_failed_job_retries_when_attempts_remain(self, monkeypatch):
         """Ray FAILED status should trigger retry path."""
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-ray-reconcile-retry-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1640,7 +1732,7 @@ class TestWorkerRayJobFailureHandling:
     def test_reconcile_succeeded_job_with_failure_payload_retries(self, monkeypatch):
         """A SUCCEEDED Ray job with success=false payload should use retry logic."""
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-ray-reconcile-retry-002",
             callable_path="testproject.tasks.failing_task",
             queue_name="default",
@@ -1686,7 +1778,7 @@ class TestWorkerRayJobFailureHandling:
     def test_reconcile_failed_job_marks_failed_at_max_attempts(self, monkeypatch):
         """Ray FAILED status should become terminal when max attempts is reached."""
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-ray-reconcile-failed-001",
             callable_path="testproject.tasks.failing_task",
             queue_name="default",
@@ -1742,15 +1834,15 @@ class TestWorkerRayJobFailureHandling:
         assert task.pk not in cmd.active_tasks
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 class TestWorkerOrphanRecovery:
     """Test recovery of tasks owned by expired/missing workers."""
 
     @staticmethod
     def _make_command(worker_id: str = "recovery-worker"):
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -1764,7 +1856,7 @@ class TestWorkerOrphanRecovery:
         """A task from an expired worker should be recovered by another worker."""
         from datetime import datetime, timedelta
 
-        TaskWorkerLease.objects.create(
+        _historical_lease(
             worker_id="dead-worker",
             hostname="host-a",
             pid=1111,
@@ -1773,7 +1865,7 @@ class TestWorkerOrphanRecovery:
             is_active=True,
         )
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-orphan-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1809,7 +1901,7 @@ class TestWorkerOrphanRecovery:
         """A task with no corresponding lease should also be recovered."""
         from datetime import datetime, timedelta
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-orphan-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1831,7 +1923,7 @@ class TestWorkerOrphanRecovery:
         assert task.claimed_by_worker is None
 
     def test_stuck_recovery_skips_retry_when_lost_transition_loses_race(self, monkeypatch):
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-orphan-lost-race-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1854,10 +1946,9 @@ class TestWorkerOrphanRecovery:
 
     def test_stuck_recovery_does_not_retry_a_newer_lost_attempt(self, monkeypatch):
         """An old retry decision cannot cross an attempt/generation boundary."""
-        from django_ray.lifecycle import retry_task
         from django_ray.runner.reconciliation import mark_task_lost as real_mark_task_lost
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-orphan-lost-aba-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1874,7 +1965,7 @@ class TestWorkerOrphanRecovery:
             assert real_mark_task_lost(stale) is True
             replacement = RayTaskExecution.objects.get(pk=stale.pk)
             assert (
-                retry_task(
+                _historical_retry(
                     replacement.pk,
                     allowed_states=(TaskState.LOST,),
                     expected_attempt_number=replacement.attempt_number,
@@ -1908,7 +1999,7 @@ class TestWorkerOrphanRecovery:
         """Tasks owned by healthy workers should not be recovered by this worker."""
         from datetime import datetime, timedelta
 
-        TaskWorkerLease.objects.create(
+        _historical_lease(
             worker_id="live-worker",
             hostname="host-b",
             pid=2222,
@@ -1917,7 +2008,7 @@ class TestWorkerOrphanRecovery:
             is_active=True,
         )
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-orphan-003",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1941,7 +2032,7 @@ class TestWorkerOrphanRecovery:
         """Timed-out tasks from inactive workers should be failed during recovery."""
         from datetime import datetime, timedelta
 
-        TaskWorkerLease.objects.create(
+        _historical_lease(
             worker_id="dead-worker-timeout",
             hostname="host-c",
             pid=3333,
@@ -1950,7 +2041,7 @@ class TestWorkerOrphanRecovery:
             is_active=True,
         )
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-orphan-004",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -1975,7 +2066,7 @@ class TestWorkerOrphanRecovery:
         from datetime import datetime, timedelta
 
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-timeout-ray-job-success-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -2009,7 +2100,7 @@ class TestWorkerOrphanRecovery:
         from datetime import datetime, timedelta
 
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-timeout-ray-job-failure-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -2041,7 +2132,7 @@ class TestWorkerOrphanRecovery:
         from datetime import datetime, timedelta
 
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-timeout-ray-job-race-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -2074,7 +2165,7 @@ class TestWorkerOrphanRecovery:
     def test_timeout_does_not_overwrite_running_completion_publication(self, monkeypatch):
         """Entrypoint publication fences timeout even before terminal consumption."""
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-timeout-ray-job-completion-publication-race-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -2107,7 +2198,7 @@ class TestWorkerOrphanRecovery:
         """A preexisting terminal envelope belongs to reconciliation, not timeout."""
         completion_data = '{"success": true, "result": 42}'
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-timeout-ray-job-preexisting-completion-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -2140,7 +2231,7 @@ class TestWorkerOrphanRecovery:
         from datetime import datetime, timedelta
 
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-timeout-ray-core-001",
             callable_path="testproject.tasks.slow_task",
             queue_name="default",
@@ -2192,15 +2283,15 @@ class TestWorkerOrphanRecovery:
         assert task.pk not in cmd.active_tasks
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 class TestWorkerResultStorage:
     """Test result size enforcement and reference fallback."""
 
     @staticmethod
     def _make_command():
-        from django_ray.management.commands.django_ray_worker import Command
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.execution_mode = "sync"
@@ -2220,7 +2311,7 @@ class TestWorkerResultStorage:
         )
 
         large_text = "x" * 256
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-result-001",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -2245,7 +2336,7 @@ class TestWorkerResultStorage:
             lambda: {"MAX_RESULT_SIZE_BYTES": 64},
         )
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-result-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2281,7 +2372,7 @@ class TestWorkerResultStorage:
         )
 
         large_text = "x" * 256
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-result-004",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -2319,7 +2410,7 @@ class TestWorkerResultStorage:
                 "RESULT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
             },
         )
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-result-diagnostic-failure-001",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -2365,7 +2456,7 @@ class TestWorkerResultStorage:
             },
         )
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-result-005",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -2392,7 +2483,7 @@ class TestWorkerResultStorage:
             lambda: {"MAX_RESULT_SIZE_BYTES": 64},
         )
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-result-003",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",

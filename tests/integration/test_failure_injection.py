@@ -1,28 +1,92 @@
-"""Failure-injection integration tests for worker reliability paths."""
+"""Released direct worker failure injection on the actual preactivation schema.
+
+Current-cohort failure/cleanup ownership has separate cohort worker coverage.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from io import StringIO
 from types import SimpleNamespace
 
 import pytest
 
+from django_ray import __version__ as django_ray_version
+from django_ray.execution_protocol import ExecutionProtocolRange
+from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.runner.leasing import WorkerLeaseIdentity
 from django_ray.runner.ray_core import RayCoreCompletion, RayCoreHandle
 from django_ray.workflow.progress.summary import serialize_workflow_progress_summary
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_summary_helpers import workflow_progress_summary
 
+LEGACY_PROTOCOLS = ExecutionProtocolRange(1, 1)
 
-@pytest.mark.django_db
+
+class HistoricalCommand(Command):
+    def _handle_task_failure(self, *args, **kwargs):
+        kwargs.setdefault("supported_protocols", LEGACY_PROTOCOLS)
+        return super()._handle_task_failure(*args, **kwargs)
+
+    def _store_and_succeed_task(self, *args, **kwargs):
+        kwargs.setdefault("supported_protocols", LEGACY_PROTOCOLS)
+        return super()._store_and_succeed_task(*args, **kwargs)
+
+
+@pytest.fixture
+def historical_worker(preactivation_protocol_schema, monkeypatch):
+    from django_ray import lifecycle
+    from django_ray.management.commands import django_ray_worker as worker
+    from django_ray.runner import reconciliation
+
+    for name in ("record_failure", "record_lost"):
+        monkeypatch.setattr(
+            reconciliation,
+            name,
+            partial(getattr(lifecycle, name), supported_protocols=LEGACY_PROTOCOLS),
+        )
+    for name in ("finalize_cancellation", "cancel_task"):
+        monkeypatch.setattr(
+            worker, name, partial(lifecycle.cancel_task, supported_protocols=LEGACY_PROTOCOLS)
+        )
+
+    def retry(execution, **options):
+        assert lifecycle.retry_task(execution, **options) is None
+        return lifecycle._request_task_retry(
+            execution, supported_protocols=LEGACY_PROTOCOLS, **options
+        )[1]
+
+    monkeypatch.setattr(worker, "retry_task", retry)
+
+
+def _historical_task(**fields):
+    return RayTaskExecution.objects.create(execution_protocol_version=1, **fields)
+
+
+def _historical_lease(**fields):
+    return TaskWorkerLease.objects.create(
+        capability_schema_version=1,
+        django_ray_version=django_ray_version,
+        min_supported_execution_protocol_version=1,
+        max_supported_execution_protocol_version=1,
+        legacy_admission_token=None,
+        **fields,
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("historical_worker")
 class TestFailureInjection:
     """Deterministic failure-injection scenarios for worker behavior."""
 
     @staticmethod
     def _make_command(worker_id: str = "failure-worker"):
-        from django_ray.management.commands.django_ray_worker import Command
+        import os
+        import socket
 
-        cmd = Command()
+        cmd = HistoricalCommand()
         cmd.stdout = StringIO()
         cmd.style = cmd.style
         cmd.worker_id = worker_id
@@ -30,13 +94,22 @@ class TestFailureInjection:
         cmd.sync_mode = False
         cmd.active_tasks = {}
         cmd.ray_core_runner = None
-        cmd._create_lease("default")
+        now = datetime.now(UTC)
+        cmd.lease = _historical_lease(
+            worker_id=worker_id,
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            queue_name="default",
+            started_at=now,
+            last_heartbeat_at=now,
+        )
+        cmd.lease_identity = WorkerLeaseIdentity(worker_id, cmd.lease.hostname, cmd.lease.pid, now)
         return cmd
 
     def test_ray_disconnect_retries_pending_ray_core_tasks(self, monkeypatch):
         """If Ray disconnects, pending Ray Core tasks should go through retry policy."""
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-fi-disconnect-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -87,7 +160,7 @@ class TestFailureInjection:
     def test_ray_job_stopped_marks_task_cancelled(self, monkeypatch):
         """A STOPPED Ray Job result should become CANCELLED in reconciliation."""
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-fi-stopped-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -133,7 +206,7 @@ class TestFailureInjection:
     def test_cancellation_race_prefers_cancelled_over_completed_result(self, monkeypatch):
         """If cancellation arrives before poll processing, task should finalize CANCELLED."""
         cmd = self._make_command()
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-fi-cancel-race-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -194,7 +267,7 @@ class TestFailureInjection:
 
     def test_expired_worker_heartbeat_recovers_orphaned_running_task(self):
         """Tasks owned by workers with expired heartbeats should be recovered."""
-        TaskWorkerLease.objects.create(
+        _historical_lease(
             worker_id="expired-worker",
             hostname="host-expired",
             pid=9999,
@@ -203,7 +276,7 @@ class TestFailureInjection:
             is_active=True,
         )
 
-        task = RayTaskExecution.objects.create(
+        task = _historical_task(
             task_id="test-fi-heartbeat-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",

@@ -44,8 +44,31 @@ from django_ray.protocol_status import (
     render_protocol_status_text,
 )
 from django_ray.runner.leasing import get_lease_duration
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
-pytestmark = pytest.mark.django_db(transaction=True)
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("preactivation_protocol_schema"),
+]
+
+
+@pytest.fixture(autouse=True)
+def restore_intentionally_corrupt_historical_policy(preactivation_protocol_schema):
+    """Restore only this stopped diagnostic fixture after corruption assertions."""
+    yield
+    # Some tests deliberately remove or contradict both rows. They cannot be
+    # presented as an upgrade-ready policy to the subsequent0035 migration.
+    TaskWorkerLease.objects.all().delete()
+    LegacyWorkerAdmissionToken.objects.all().delete()
+    TaskExecutionProtocolPolicy.objects.all().delete()
+    TaskExecutionProtocolPolicy.objects.create(
+        singleton_key=1,
+        schema_version=1,
+        active_write_protocol_version=1,
+        legacy_worker_admission_enabled=True,
+        revision=1,
+    )
+    LegacyWorkerAdmissionToken.objects.create(singleton_key=1)
 
 
 def _legacy_lease(
@@ -58,6 +81,11 @@ def _legacy_lease(
         worker_id=worker_id,
         hostname="legacy-status-host",
         pid=1001,
+        capability_schema_version=0,
+        django_ray_version=None,
+        min_supported_execution_protocol_version=None,
+        max_supported_execution_protocol_version=None,
+        legacy_admission_token_id=1,
         last_heartbeat_at=heartbeat_at,
         is_active=is_active,
         stopped_at=None if is_active else heartbeat_at,
@@ -504,6 +532,7 @@ def _assert_protocol_status_is_versioned_bounded_and_read_only() -> None:
 
     blockers = {blocker.code: (blocker.scope, blocker.count) for blocker in report.blockers}
     assert blockers == {
+        ProtocolStatusBlockerCode.HISTORICAL_WRITE_POLICY: ("package_execution_protocol_3", 1),
         ProtocolStatusBlockerCode.ACTIVE_UPGRADED_LEASES: ("code_rollback", 2),
         ProtocolStatusBlockerCode.LEGACY_PRODUCERS_UNATTESTED: ("legacy_close", None),
         ProtocolStatusBlockerCode.LEGACY_READERS_UNATTESTED: ("code_rollback", None),

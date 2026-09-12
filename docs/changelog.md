@@ -22,17 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Compiled Graph remains disabled, and its historical cleanup evidence is not promoted
   by this dependency update.
 
-### Current-cohort guard preparation
+### Current-cohort execution
 
-- Reserve protocol 3 for the coordinated Beta guard while ordinary producers and
-  workers continue using protocol 1. Private Core and Jobs probes check the exact
+- Activate protocol 3 for producers and workers through stopped-writer migration
+  `0035_activate_current_cohort`. Refuse active legacy work, incompatible leases,
+  unresolved claims and pending Jobs cleanup before migration; preserve historical
+  terminal results without replay. Core and Jobs probes check the exact
   package, Ray/Python tuple, session and schedulable membership before publishing
   proof under a fresh, exact manager lease and a single-use challenge.
 - Add a fixed Jobs probe entry point with an immutable submission reservation,
   independent Jobs-record checks and a pending driver receipt. The manager must
   corroborate successful completion before publishing capability; transport digests
   and package versions do not authenticate arbitrary RuntimeEnv source or setup hooks.
-- Allow private manager bootstrap to enable a newly created, verified target
+- Enable a newly created, verified target during worker bootstrap
   automatically while preserving existing drains. Activation appends a policy that
   needs fresh proof before claims; it never promotes the earlier draining proof.
   A verified session and runner family determine the target key, so changing an
@@ -56,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare a manager lifecycle with bounded alias state, observation deadlines and
   explicit cleanup ownership. Core observations are separated from database publication;
   Jobs control uses an owned Linux helper and binds the configured control profile to
-  the submitted mapping after upload. These adapters remain private and unactivated;
-  production worker integration and final qualification still need completion.
+  the submitted mapping after upload. The worker retains their ownership while
+  qualification, completion and cleanup progress independently.
 - Compose private Jobs qualification through one retained parent operation, with
   exact reservation before submission, independent receipt inspection, and explicit
   cleanup after ambiguous outcomes. Client address discovery uses a separate owned
@@ -71,8 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compose the private protocol-3 worker path with qualification before bounded
   claims, authenticated completion, completion-only Jobs recovery, and owned
   asynchronous cancellation. A stop acknowledgment cannot resolve uncertainty or
-  authorize another generation. Ordinary workers remain on protocol 1 while
-  activation and deployed qualification are completed.
+  authorize another generation. Legacy task entry points refuse before hydration
+  or application import; standalone workflow APIs retain their own contract.
+- Keep initial Core/Jobs preparation and submission responsive through owned
+  callbacks. The parent captures immutable inputs and commits exact SQL ownership;
+  callbacks own filesystem scans, snapshots, uploads and remote calls. Late Core
+  handles remain retained, and pending callbacks consume capacity until their actual
+  exit and required local cleanup. Database work and Sync execution can still block
+  the parent; these bounds do not certify remote cleanup or release qualification.
+- Preserve the declared local connection configuration when Ray normalizes its
+  nested startup arguments. SDK-added storage settings no longer trigger a false
+  configuration-change stop; actual configuration changes still stop new claims.
+- Keep the Core connection's creator thread alive through verified disconnect.
+  Local Ray subprocesses no longer lose their Linux parent thread immediately
+  after startup. Cleanup runs on that same thread and waits for owned processes
+  while the manager retains its bounded shutdown deadline.
 - Retain a separate Jobs cleanup obligation when an authenticated result arrives
   before its driver exits. Queued retries and retirement remain blocked until a
   fresh inspection confirms that exact Job is terminal. A qualified successor can
@@ -81,8 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains held until an authentic completion or verified terminal cancellation
   arrives; timeout cancellation records `FAILED` without automatic retry. A late
   authentic result retains precedence.
-- Activation and final production qualification remain required. See
-  [current-cohort guard preparation](compatibility.md#current-cohort-guard-preparation).
+- The integrated candidate still requires final production qualification. See
+  [current-cohort execution](compatibility.md#current-cohort-execution).
 
 ### Maintenance controls
 
@@ -97,9 +112,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `django_ray_doctor` with bounded text and versioned JSON views of connectivity,
   migrations, protocol rollout, recorded target/probe metadata, and held or orphaned
-  claims. The report uses one read-only snapshot and exposes blockers without reading
-  task payloads or contacting Ray. It keeps readiness, drain, upgrade and rollback
-  explicitly unverified; emitting a report does not certify those operations. See
+  claims. Include exact current quarantine, worker-incarnation retirement history,
+  and pending Jobs cleanup even after a task finishes or changes generation.
+  The report uses one read-only snapshot in the selected database and exposes
+  blockers without reading task payloads or contacting Ray. It keeps readiness,
+  drain, upgrade and rollback explicitly unverified; emitting a report does not
+  certify those operations. See
   the [command reference](reference/cli.md#django_ray_doctor).
 
 ### Bounded distributed preparation
@@ -128,6 +146,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recovery scan, without Jobs API polling or idle database queries. Existing lease, protocol,
   attempt, generation and cancellation fences still govern persistence and retry. Blocking
   database/storage work or recovery RPCs can still delay the single worker loop.
+- Update the polling benchmark to exercise current-cohort Sync claims and retain
+  exact ownership until its never-dispatched work is resolved and cleaned up.
+  Schema-2 predicate evidence measures the actual candidate selection query;
+  the comparison removes only its current-protocol predicate and never claims work.
 
 ### Platform validation
 
@@ -139,6 +161,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade from 0.4.0
 
+- Follow the [coordinated Beta procedure](stability.md#coordinated-beta-upgrades):
+  stop submissions, resolve and drain old work, verify remote cleanup, stop every
+  old writer, and preserve an independently restorable backup before migration.
+  Migration `0035` selects protocol `3`, closes legacy admission and refuses active
+  incompatible work, leases, unresolved claims or OPEN Jobs cleanup. Completed
+  history stays readable; old payloads are never converted or retried into protocol 3.
+  A downgrade after activation requires the rehearsed backup/restore procedure,
+  including artifacts and encryption keys; changing only the code is not a rollback.
 - Durable backend result reads no longer import stored callable paths. They remain
   readable after a callable or queue is removed and preserve matching-task checks
   using successfully validated application declarations. Fetched results now contain
@@ -169,21 +199,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1`, but cannot prove the contract of retained nonterminal work written directly by
   pre-0.4 code. Drain, cancel, or audit that work before applying `0019`; the migration
   number alone does not prove which writer created a row.
-- The seeded rollout policy remains dormant at active write protocol `1`, with legacy
-  worker admission open. A code-only rollback to exact 0.4.0 retains `0019`, `0020`,
-  and the legacy database defaults after upgraded task managers are stopped and
-  reconciled. Reverse `0020` and then `0019` only in a separate stopped-writer
-  maintenance window; reversal drops the protocol, provenance, capability, policy,
-  token, and database-fence metadata.
-- A preparatory private revision-checked coordination primitive now proves the database
-  transition needed by a later operator adapter. It accepts closure only after its
+- Migration `0019` initially seeds protocol `1` with legacy worker admission open.
+  That is an intermediate schema state, not the final 0.5 policy: `0035` closes it
+  and selects protocol `3`. Earlier schema-only rollback notes apply only before
+  activation. Reversing `0020` and `0019` drops protocol, provenance, capability,
+  policy, token and database-fence metadata and is not the 0.5 downgrade procedure.
+- The historical private revision-checked protocol-1 coordination primitive accepts closure only after its
   caller asserts that capability-unaware producers are retired and every legacy worker
   lease is durably inactive. Closing detaches inactive lease history before deleting
   the admission token; reopening never revives those identities and refuses while any
-  nonterminal execution uses a protocol other than `1`. Operators must keep legacy
-  admission open in this slice: it adds no supported command, mutable Admin action, or
-  protocol `2` activation surface.
-- Migration `0020` makes that rollback boundary persistent: while legacy admission is
+  nonterminal execution uses a protocol other than `1`. It cannot reopen protocol-3
+  admission after `0035`. Current operator controls are the separate audited
+  maintenance service; protocol `2` remains dormant.
+- Migration `0020` preserves that historical protocol-1 boundary: while legacy admission is
   open, PostgreSQL and SQLite reject non-protocol-`1` nonterminal inserts and
   terminal-to-nonterminal transitions. PostgreSQL reopening fences execution writers
   before policy evaluation; installation refuses an already-open policy containing
@@ -192,29 +220,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   types the shared payload registry as `task_input` or `ray_job_request`. Its Python and
   database default remains `task_input`, so released writers that omit the new column
   continue to register task inputs. Applying the migration alone does not activate rq2.
-  Before resuming reference-only submissions, configure shared retrievable storage,
-  deploy the exact final rq2 reader, retire released 0.4.0 and intermediate rq1 task
-  managers, and close legacy admission through its reviewed revision/producer-retirement
-  fence. Already submitted legacy/rq1 protocol-`1` jobs remain drainable; rq2 does not
-  activate protocol `2`.
+  Final 0.5 reference-only submissions require shared retrievable storage and the
+  current cohort-aware rq2 reader. Drain released 0.4.0 and intermediate rq1 Jobs
+  with their compatible old managers before stopping those writers and applying
+  `0035`; current workers do not adopt them. The rq2 carrier does not activate protocol `2`.
 - Migration `0022` adds only dormant Ray-target identity, immutable policy revisions,
   and verified attestation history. Published 0.4.0 code ignores the new tables, so a
-  code-only rollback retains `0022`; schema reversal is a separate stopped-writer
+  pre-activation schema-only rollback can retain `0022`; schema reversal is a separate stopped-writer
   operation that refuses while retained target history exists. After export or audit,
   deliberate maintenance deletion leaves the destructive reversal path available.
   Applying the migration does not assign a target to work, advertise worker capacity,
   or activate routing.
-- Migration `0023` adds an unseeded, create-once relationship from an execution to one
-  immutable target-policy revision. A future target-aware consumer must treat absence as
-  unbound and fail closed; current workers remain target-unaware and do not consult the
-  table. The row's creation time is not proof of enqueue-time selection. Current code has
-  no binding writer, reader, Admin, enqueue, claim, adoption, lifecycle, routing, or
-  backfill consumer, and published 0.4.0 code ignores the table. Legacy binding remains
-  forbidden until #381 supplies exact mapping lineage. Both foreign keys use `PROTECT`,
-  so a retained binding blocks deletion of its execution and policy revision. Activation
-  remains blocked until every task and policy retention or cleanup path defines and tests
-  explicit ordering; deleting a binding first is never an implicit cascade or ordinary
-  task-cleanup step. Reverse `0023` only in a stopped-writer maintenance window after
+- Migration `0023` introduced an unseeded, create-once execution-to-target-policy
+  relationship. Migration `0030` adds the schema-2 binding used by the current first
+  claim, including Sync without a Ray target; later generations preserve it. Neither
+  creation time nor an absent binding invents enqueue-time target selection. Published
+  0.4.0 history receives no inferred binding. Protected parents require explicit
+  retention ordering; reverse `0023` only in a stopped-writer maintenance window after
   exporting or auditing and deliberately deleting every retained binding.
 - Migration `0024` adds bounded backend-alias route history and a separate, initially
   empty binding-to-route-revision selection table. The private coordinator may register
@@ -235,14 +257,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker-ID reuse starts without inherited capacity. The private
   coordinator supports exact Ray Core capability for a fresh `active` or `draining`
   policy and proof; draining preserves only already-pinned work and never enables a new
-  route or enqueue. Ray Job remains unsupported. No production path creates, renews,
-  reads, or treats the row as capacity. Existing exact-lease deletion, including supported
+  route or first claim. That standalone coordinator remains Core-only; the current
+  verified publisher reuses the table for Core and Jobs eligibility under exact lease,
+  policy, proof and per-configuration Jobs qualification checks. Existing exact-lease deletion, including supported
   Admin inactive-lease cleanup, may only fail-closed cascade-withdraw an otherwise
   unreachable row. Presence alone is never authority. Policy and attestation revisions
   remain the audit history; future execution generations must archive their own
-  authenticated target evidence. KubeRay is not applicable to this dormant database-only
-  slice because no production producer can create a capability row; SQLite and PostgreSQL
-  migration and coordination evidence remain mandatory.
+  authenticated target evidence. SQLite and PostgreSQL migration and coordination
+  checks do not replace the deployed qualification required by the current consumer.
 - Migration `0026` adds unseeded, immutable per-generation target execution evidence and an
   optional immutable outcome. One claim binds the exact protocol-`2` execution generation and
   required route selection to its target, current same-target policy, claim attestation,
@@ -254,7 +276,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Transport, pre-claim or future-clock observations, and malformed uncertainty are never
   fabricated as remote compatibility rejection. No production writer or reader creates or
   consumes either table. Exact 0.4.0 ignores
-  them during a code-only rollback; reverse `0026` only in a stopped-writer maintenance window
+  them in the historical pre-activation schema state; reverse `0026` only in a stopped-writer maintenance window
   after deliberately deleting every outcome and generation claim.
 - A Django-free canonical evidence codec now covers every immutable per-generation claim snapshot
   with a domain-separated digest. The positive database evidence ID remains a separate control;
@@ -345,13 +367,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim time. Exact proof returns a `completion`; only a fully observed mismatch may return
   `compatibility_rejection` with `application_invoked=false`. Missing observation, malformed
   result, transport failure, and an observation outside the canonical claim-to-manager-receipt
-  interval remain runner uncertainty for future durable `UNCERTAIN` handling. Production remains
-  on active write protocol `1` with `1..1` package support and
-  worker leases: no backend enqueues protocol `2`, no worker claims it, no capability producer
+  interval remain runner uncertainty for future durable `UNCERTAIN` handling. Protocol `2`
+  remains dormant alongside the current protocol-3 path: no backend enqueues it,
+  no worker claims it, no capability producer
   creates its generation evidence, and Ray Job remains unsupported.
 - A Django-free, versioned target-attestation contract now defines bounded canonical
   target expectations, exact Ray/Python runtime tuples, per-node observations, and a
-  before/after resource-state boundary. Its dormant Ray 2.56.0 probe hard-pins one
+  before/after resource-state boundary. Its Ray 2.58.0 probe hard-pins one
   zero-CPU observation to every live schedulable node and requires the exact cluster
   session and node set to remain stable while resource-state counters do not regress.
   The counters are recorded as an observation interval because ordinary heartbeats
@@ -366,11 +388,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcomes never become fabricated negative history. The `retired` transition remains
   reserved for #368, and this slice adds no task, lease, claim, routing, status, renewal,
   or activation behavior.
-- A dormant task-target binding schema can retain one create-once execution-to-policy
-  selection relationship for a later enqueue writer. It is initially empty, has no
-  production consumer, and never turns a historical policy state into target capacity or
-  claim authorization. Its protected parent relationships require an explicit tested
-  audit and retention order before any writer or cleanup integration can activate it.
+- Task-target bindings retain one create-once execution-to-policy selection, with
+  schema-2 bindings supporting current-cohort claims. Protected parent relationships
+  require explicit retention ordering; historical policy state cannot grant capacity.
 - A dormant backend-alias route substrate retains immutable append-only route revisions
   selected through revision-checked database coordination. A separate create-once
   route-selection schema can preserve the exact route revision for an existing task
@@ -378,26 +398,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task provenance, and the route coordinator supplies intent only, not attestation,
   capacity, a worker capability, or runtime routing activation.
 
-- The guarded local KubeRay final gate now certifies the supported task-manager rolling
-  boundary with a manager built from the pinned released `v0.4.0` tree and the exact current
-  candidate. A released capability-schema-`0` manager submits one slow protocol-`1` Ray
-  Job; the current explicit schema-`1`, `1..1` manager must adopt the same persisted job,
-  attempt, and generation without resubmission. A second deferred protocol-`1` row must
-  remain byte-for-byte queued across that replacement and then complete through one current
-  request-reference submission. A separate protocol-`2` fixture is terminal-staged while
-  admission remains open, moved to `QUEUED` only after a revision-checked close, and required
-  to remain unchanged and visible as unsupported before a direct strict Ray Core executor
-  request rejects it prior to application invocation with its unique marker absent. Active
-  write protocol remains `1`; no protocol-`2` writer or live `1..2` capability is activated.
-  The same cold cluster separately proves the package-private protocol-`2` target boundary:
-  exact target evidence completes, while a fully observed mismatch produces an authenticated
-  compatibility rejection without invoking the marker callable.
-  Passing evidence waits for exact fixture cleanup, legacy admission reopened with a
-  consistent token at its next revision, removal of the ephemeral release Deployment, and
-  restoration of the rendered current-manager replica count. A later run may reclaim only
-  exact reserved, unambiguous interrupted gate residue. Missing ownership, foreign residue,
-  an orphan live lease, or ambiguity fails closed. Recovery runs before any live task layer
-  and repeats immediately before handoff certification.
+- Retain the earlier KubeRay handoff fixture as historical investigation code.
+  It does not certify the final 0.5 stopped-writer upgrade or permit released work
+  to execute under current managers. Current-cohort activation needs its own
+  complete affected application and preserved-data upgrade evidence.
 - External payload retention now distinguishes durable task-input envelopes from Ray
   Job execution requests, follows the kind's exact execution-reference column, and
   retains unknown, wrong-kind, or dual-column ambiguity. Explicit retry and fresh claim
@@ -413,9 +417,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and retains fixed-vocabulary `EXPLAIN ANALYZE` summaries plus signed p50/p95 deltas.
   Raw SQL and durable identifiers are omitted, existing polling result keys remain
   unchanged, and timings remain evidence rather than a flaky threshold. Portable and
-  PostgreSQL coordination tests also prove that a `1..1` worker excludes protocol `2`
-  claims and Ray Job reconciliation while a synthetic `1..2` worker processes both;
-  production still advertises only protocol `1`.
+  PostgreSQL coordination tests retain explicit historical ranges; current workers
+  advertise only `3..3` and do not turn historical range tests into execution support.
 
 - Bounded task-status, execution-list, execution-detail, and Django Admin reads now
   expose the immutable execution protocol, nullable creator/manager/executor package
@@ -424,8 +427,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provenance is guarded at 128 UTF-8 bytes before transfer and presentation-redacted.
   Every public example marks `queue_capacity_attested=false` because lease queue text,
   available concurrency, Ray/Python compatibility, Ray readiness, and cluster identity
-  remain unattested. Prometheus adds exactly 16 fixed
-  `django_ray_tasks_by_execution_protocol_total{protocol=1|other,state=...}` series,
+  remain unattested. Prometheus adds exactly 24 fixed
+  `django_ray_tasks_by_execution_protocol_total{protocol=1|3|other,state=...}` series,
   including zeros, without package-version labels.
 
 - New Ray Job submissions now use the rq2 request-reference carrier. The manager builds
@@ -439,18 +442,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   locator binding before storage I/O and the
   loaded canonical bytes before Django setup, input hydration, or application import or
   invocation. Deterministic preparation/validation failures use fixed diagnostics and
-  no automatic replay; definitely pre-submission storage outages may retry, while any
-  uncertain submission retains its exact job ID/address/reference tuple. Concurrent
-  public submissions share one durable reservation: only its owner may submit,
-  while contenders receive a fixed uncertain result for reconciliation. Compatible
+  no automatic replay; a current-cohort preparation or submission failure holds its
+  original claim, and uncertain submission retains its exact job ID/address/reference
+  tuple. The parent attaches the durable reservation before authorizing its owned
+  callback; unguarded public submission cannot bypass the cohort contract. Compatible
   managers selected for that execution's queue can adopt and reconcile the tuple;
   out-of-queue managers exclude it from orphan reconciliation, timeout recovery, and
   cancellation takeover before Ray status/stop I/O. Retention purges request objects
   only through the existing registry-first lock order; rq2 activation must first upgrade
   or disable older purge invocations that do not understand the request-reference
   column. Released
-  unversioned payloads and rq1 remain protocol-`1` drain adapters only. This does not
-  attest Ray/Python or cluster identity.
+  unversioned payloads and rq1 are refused by the current runtime before hydration.
+  Current execution separately requires the cohort guard and transport ownership.
 - Strict outer tasks now propagate one canonical bounded execution request through
   workflow steps, result-fold actors, and distributed map, starmap, and scatter leaves.
   Exact outer identity/protocol, boundary identity, primary and optional preview
@@ -462,9 +465,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traceback because sibling leaves may already have effects.
   Ray has already deserialized the bootstrap and ordinary arguments at that point, so
   exact Ray/Python and cluster-instance attestation remains a separate pre-submission
-  requirement. This completes the unreleased 0.5 explicit protocol-`1` contract;
-  intermediate development snapshots that advertised that protocol are not a supported
-  rolling cohort and must be drained before the exact final candidate.
+  requirement. Intermediate protocol-1 development snapshots must drain and stop
+  before the final protocol-3 candidate; they are not a supported rolling cohort.
 - A read-only `django_ray_protocol_status` command now emits bounded text or canonical
   versioned JSON for the rollout policy/token relationship, live and stale-active lease
   capability aggregates, nonterminal protocol groups, protocol-only unsupported work,
@@ -473,12 +475,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never mutates rollout state, and exposes no durable identities. Queue capacity, Ray
   readiness, Ray/Python or cluster identity, and capability-unaware process retirement
   remain explicitly unattested.
-- A schema-first durable execution-protocol boundary records immutable protocol `1` on
-  executions and attempts, advertises upgraded worker support as the bounded range
-  `1` through `1`, and installs a dormant ownership fence for future protocols and the
-  post-legacy boundary. Read-only Admin surfaces expose the singleton rollout policy,
+- A durable execution-protocol boundary preserves each execution and attempt's
+  original protocol. Current producers write `3`, current workers advertise `3..3`,
+  and database fences reject legacy reentry. Read-only Admin surfaces expose the rollout policy,
   execution and attempt provenance, and worker capability ranges. Integer protocol
-  versions are normative; package Semantic Versions remain diagnostic provenance only,
+  versions are normative; current-cohort admission additionally checks the exact package/runtime,
   and no protocol `2` writer or policy activation surface is enabled.
 - Upgraded task managers now filter queued expiry and claim selection by the inclusive
   range on their exact locked worker lease, then recheck the locked execution before
@@ -490,7 +491,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracking is retired locally before a status, log, or stop call, while the durable
   execution and its source lease remain available to a compatible worker cohort.
 - Package-owned producers now persist explicit metadata schema `1`, execution protocol
-  `1`, and creator provenance. Compatible claims/adoptions stamp attempt-scoped manager
+  `3`, and creator provenance. Compatible claims/adoptions stamp attempt-scoped manager
   provenance; terminal archival copies the exact protocol and manager/executor values,
   while retry preserves task-chain identity and clears those current attempt fields.
   Historical and unreported provenance remains null rather than being inferred.
@@ -505,9 +506,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monitor heartbeats include the protocol fence, and completions plus reconnect loss
   handling re-enter the lease-then-execution boundary before storage or lifecycle
   effects. This does not make driver-owned `ObjectRef` handles transferable.
-- Completion consumers now support both unversioned protocol-v1 records and a strict
-  flat versioned-v1 envelope carrying the exact task identity, protocol, and bounded
-  executor provenance. Any reserved versioned field disables legacy fallback. Schema,
+- Current completion consumers require their strict cohort transport and retained
+  ownership. The retained protocol-v1 codec describes historical unversioned records
+  and flat envelopes with exact identity, protocol and bounded executor provenance.
+  Any reserved versioned field disables legacy fallback. Schema,
   protocol, identity, or shape mismatch cannot reach result storage or automatic retry;
   accepted executor provenance is archived atomically with the terminal attempt. A
   fixed byte/depth/node budget rejects deterministic resource-limit violations without
@@ -518,7 +520,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   primitives. The by-value executor bootstrap rejects malformed, unsupported, and
   mismatched requests with a fixed non-retryable enriched completion before Django
   setup, input hydration, or application callable import/invocation. Released
-  positional submissions remain the protocol-v1 compatibility path. A strict handle
+  positional submissions are refused by the current runtime. A strict handle
   that returns no executor envelope becomes a fixed non-retryable transport failure
   without remote exception text or executor provenance. This does not attest Ray/Python
   or cluster identity.

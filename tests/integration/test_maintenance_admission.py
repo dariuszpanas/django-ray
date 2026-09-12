@@ -14,6 +14,7 @@ import pytest
 from django.apps import apps
 from django.db import DatabaseError, close_old_connections, connection, transaction
 
+from django_ray import lifecycle
 from django_ray import maintenance as maintenance
 from django_ray.models import (
     RayMaintenanceAudit,
@@ -42,6 +43,7 @@ from tests.integration.test_cohort_claim_storage import (
 from tests.integration.test_cohort_claim_storage import (
     isolated_sqlite_ledger_maintenance as isolated_sqlite_ledger_maintenance,
 )
+from tests.integration.test_cohort_completion import _apply, _started
 
 pytestmark = pytest.mark.django_db(transaction=True)
 cohort_case = _cohort_case
@@ -91,24 +93,39 @@ def _postgresql_maintenance_refusal(error):
 
 
 @pytest.mark.usefixtures("selected_database")
-def test_global_enqueue_pause_covers_unseen_queues_but_not_owned_completion():
-    running = _task(state="RUNNING")
-    queued = _task("already-queued")
+@pytest.mark.parametrize("cancelling", [False, True])
+def test_global_enqueue_pause_covers_unseen_queues_but_not_owned_completion(
+    cohort_case, cancelling
+):
+    # The queued producer intent predates the pause; current claim/dispatch is
+    # still admitted because this policy pauses enqueues only.
     _change(pause_enqueues=True)
     with pytest.raises(maintenance.MaintenanceAdmissionError, match="paused"):
         maintenance.check_maintenance_admission(
-            "never-seen", 1, operation="enqueue", preflight=True
+            "never-seen", 3, operation="enqueue", preflight=True
         )
     with pytest.raises(DatabaseError), transaction.atomic():
         _task("never-seen")
-    # A producer pause lets an admitted backlog run and complete.
-    _check("already-queued")
-    RayTaskExecution.objects.filter(pk=queued.pk).update(state="RUNNING", execution_generation=1)
-    RayTaskExecution.objects.filter(pk=running.pk).update(state="CANCELLING")
-    RayTaskExecution.objects.filter(pk=running.pk).update(state="CANCELLED")
-    RayTaskExecution.objects.filter(pk=queued.pk).update(state="SUCCEEDED")
+    _check(cohort_case.task.queue_name, protocol=3)
+    value = _started(cohort_case)
+    if cancelling:
+        RayTaskExecution.objects.filter(pk=cohort_case.task.pk).update(state="CANCELLING")
+
+    def complete(task, decoded, *, retry_admitted):
+        assert decoded.completion.success and not retry_admitted
+        return lifecycle.succeed_task(
+            task,
+            result_data="5",
+            result_reference=None,
+            _allow_cancelling_completion=True,
+        )
+
+    assert _apply(value, cohort_case, callback=complete).applied
+    cohort_case.task.refresh_from_db()
+    assert cohort_case.task.state == "SUCCEEDED"
+    assert cohort_case.task.attempts.get().state == "SUCCEEDED"
     with pytest.raises(DatabaseError), transaction.atomic():
-        RayTaskExecution.objects.filter(pk=queued.pk).update(state="QUEUED")
+        RayTaskExecution.objects.filter(pk=cohort_case.task.pk).update(state="QUEUED")
 
 
 @pytest.mark.usefixtures("selected_database")
@@ -184,14 +201,22 @@ def test_scope_is_immutable_and_missing_scope_fails_closed():
 
 
 @pytest.mark.usefixtures("selected_database")
-def test_missing_policy_fails_closed_but_completion_survives():
-    task = _task(state="RUNNING")
+def test_missing_policy_fails_closed_but_completion_survives(cohort_case):
+    value = _started(cohort_case)
     RayMaintenancePolicy.objects.all().delete()
     with pytest.raises(maintenance.MaintenanceAdmissionError, match="unavailable"):
-        _check()
+        _check(protocol=3)
     with pytest.raises(DatabaseError), transaction.atomic():
         _task()
-    RayTaskExecution.objects.filter(pk=task.pk).update(state="SUCCEEDED")
+
+    def complete(task, decoded, *, retry_admitted):
+        assert decoded.completion.success and not retry_admitted
+        return lifecycle.succeed_task(task, result_data="5", result_reference=None)
+
+    assert _apply(value, cohort_case, callback=complete).applied
+    cohort_case.task.refresh_from_db()
+    assert cohort_case.task.state == "SUCCEEDED"
+    assert cohort_case.task.attempts.get().state == "SUCCEEDED"
 
 
 @pytest.mark.usefixtures("selected_database")
@@ -537,9 +562,9 @@ def test_new_claim_rechecks_exact_selected_queue_under_lock(cohort_case, monkeyp
 
 @pytest.mark.usefixtures("selected_database")
 @pytest.mark.parametrize("bounds", [(1, 3), (3, 4)])
-def test_new_claim_refuses_preexisting_broad_range_lease(cohort_case, bounds):
+def test_activation_rejects_broad_range_lease_before_new_claim(cohort_case, bounds):
     original = TaskWorkerLease.objects.get(pk=cohort_case.owner.worker_id)
-    lease = TaskWorkerLease.objects.create(
+    lease = TaskWorkerLease(
         worker_id="broad-range",
         hostname=original.hostname,
         pid=101,
@@ -551,6 +576,9 @@ def test_new_claim_refuses_preexisting_broad_range_lease(cohort_case, bounds):
         max_supported_execution_protocol_version=bounds[1],
         legacy_admission_token=None,
     )
+    with pytest.raises(DatabaseError), transaction.atomic():
+        lease.save(force_insert=True)
+    assert not TaskWorkerLease.objects.filter(pk="broad-range").exists()
     cohort_case.owner = WorkerLeaseIdentity(
         lease.worker_id, lease.hostname, lease.pid, lease.started_at
     )

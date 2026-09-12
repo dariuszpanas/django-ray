@@ -34,6 +34,10 @@ from tests.integration.test_cohort_completion import (
     _started,
     _stored_request_reference,
 )
+from tests.migration_cleanup import (
+    closed_preactivation_protocol_schema as closed_preactivation_protocol_schema,
+)
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.usefixtures("ledger_database")]
 
@@ -501,6 +505,7 @@ def test_reverse_refuses_retained_cleanup_history_inside_outer_transaction(case)
 
 
 @pytest.mark.parametrize("family", ["ray_job", "ray_core", "sync"])
+@pytest.mark.usefixtures("closed_preactivation_protocol_schema")
 def test_historical0032_completed_jobs_refused_without_reinterpreting_other_history(case, family):
     value = _started(case, family)
     previous = [("django_ray", "0032_maintenance_controls")]
@@ -541,7 +546,7 @@ def test_historical0032_completed_jobs_refused_without_reinterpreting_other_hist
         historical.get_model("django_ray", "RayTaskCohortClaim").objects.filter(
             pk=value.claim.claim_id
         ).delete()
-        MigrationExecutor(connection).migrate([("django_ray", "0034_cohort_timeouts")])
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])
 
 
 def test_historical_protocol1_result_is_preserved_without_cleanup_backfill():
@@ -564,4 +569,4 @@ def test_historical_protocol1_result_is_preserved_without_cleanup_backfill():
         assert RayTaskExecution.objects.values().get(pk=value.pk) == before
         assert not RayCohortJobCleanup.objects.exists()
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0034_cohort_timeouts")])
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])

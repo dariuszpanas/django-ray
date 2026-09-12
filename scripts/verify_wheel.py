@@ -112,6 +112,7 @@ EXPECTED_FILES = {
     "django_ray/migrations/0032_maintenance_controls.py",
     "django_ray/migrations/0033_cohort_job_cleanup.py",
     "django_ray/migrations/0034_cohort_timeouts.py",
+    "django_ray/migrations/0035_activate_current_cohort.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_doctor.py",
     "django_ray/management/commands/django_ray_maintenance.py",
@@ -143,7 +144,7 @@ EXPECTED_FILES = {
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0034_cohort_timeouts",
+    "0035_activate_current_cohort",
 )
 
 

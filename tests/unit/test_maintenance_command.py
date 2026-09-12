@@ -26,6 +26,9 @@ from django_ray.models import (
     RayTaskQuarantine,
     RayWorkerRetirement,
 )
+from tests.integration.test_cohort_claim_storage import (
+    isolated_sqlite_ledger_maintenance as isolated_sqlite_ledger_maintenance,
+)
 from tests.integration.test_cohort_probe_challenges import _target
 from tests.integration.test_maintenance_controls import case_data as case_data
 from tests.integration.test_maintenance_controls import isolated_controls as isolated_controls

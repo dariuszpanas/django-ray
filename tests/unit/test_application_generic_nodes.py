@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import platform
 import sys
 from types import SimpleNamespace
 from zipfile import ZipFile
@@ -65,6 +66,8 @@ def test_probe_survives_by_value_serialization(archives, generic_imports):
     assert result == {
         "node_id": NODE_A,
         "python_minor": list(sys.version_info[:2]),
+        "python_implementation": platform.python_implementation(),
+        "python_version": list(sys.version_info[:3]),
         "ray_version": ray.__version__,
         "django_ray_preinstalled": False,
         "remote_sha256": digest,
@@ -192,6 +195,29 @@ def test_probe_pins_each_node_and_releases_only_owned_connection(archives, clien
     assert all(option["runtime_env"] == {} for option in client.options)
     assert client.cancelled == [0, 1]
     assert client.shutdowns == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("python_version", [3, 12, 99]),
+        ("python_implementation", "PyPy"),
+    ],
+)
+def test_generic_nodes_require_full_current_cohort_interpreter(
+    archives, client, monkeypatch, field, value
+):
+    original_get = ray.get
+
+    def get(*args, **kwargs):
+        result = original_get(*args, **kwargs)
+        result[-1][field] = value
+        return result
+
+    monkeypatch.setattr(ray, "get", get)
+    with pytest.raises(ValueError):
+        generic_nodes.verify_generic_nodes(address="ray://ray-head:10001", **archives)
+    assert client.shutdowns == 1 and client.cancelled == [0, 1]
 
 
 @pytest.mark.parametrize("failure", ["timeout", "membership", "result", "cold"])

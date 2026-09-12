@@ -64,9 +64,12 @@ Client address and sends a by-value function to every live node using hard node 
 logical CPUs, no task retries and an empty RuntimeEnv. The function imports only Python's standard
 library and Ray. A generic node must have no preinstalled `django_ray`, must see the exact bounded
 source and recovery archives, and must contain the application image's `remote.py` in both archive
-layouts. Required task modules, Ray version and Python major/minor must match. Python patch-level
-differences are allowed; this inspection does not prove native-extension ABI compatibility. The
-application's remote task assertions must establish that separately.
+layouts. Required task modules, Ray version, Python implementation and the full Python major/minor/patch
+tuple must match. The admitted hosted build first discovers CPython from the pinned stock Ray
+image in a fixed, bounded, network-disabled process, then passes that exact patch to the application
+build and verifies its interpreter. This matches the current cohort contract; it does not claim
+that a version string proves source bytes or native-extension ABI compatibility. The remote task
+assertions and exact locked archive checks supply their separate evidence.
 
 For example, with archives mounted read-only at the same paths in the assertion image and generic
 Ray nodes:
@@ -104,13 +107,28 @@ Its existence or resource-free unit tests do not establish a passing live generi
 
 ## Offline application core stage
 
-`core.yaml` is a native public Chainsaw Test. Its thirteen steps start disposable PostgreSQL 17,
+`core.yaml` is a native public Chainsaw Test. Its sixteen steps start disposable PostgreSQL 17,
 prepare the sample web application and locked recovery archives, and start one current core task
 manager with stock Ray 2.58.0 head/worker nodes. Two serial Jobs require authenticated API execution,
-exact durable task/attempt/current-manager ownership, authenticated encrypted RuntimeEnv snapshots
-and the remote decrypted canary. Between them Chainsaw foreground-deletes and recreates RayCluster.
-Both generic-node receipts require identical archives/runtime and disjoint node identities.
-The web and manager Deployments remain; this does not assert survival of one manager process.
+exact protocol-3 task/attempt/current-manager ownership and resolved claim history,
+authenticated encrypted RuntimeEnv snapshots
+and the remote decrypted canary. The manager is a finite Job with no restart or retry. Before cold
+replacement, `retire_manager.py` requests retirement of the exact successful manager incarnation
+while its original Ray session remains available. It requires the worker's independently owned
+cleanup confirmation, no owned live tasks, unresolved claims, OPEN Jobs cleanup or capabilities,
+and an inactive exact lease. SQL zero alone is insufficient. Chainsaw then requires successful
+manager Job exit and foreground deletion before deleting RayCluster and its dependents.
+
+The identical bounded manager Job is recreated against the new RayCluster. The second smoke must
+use a distinct later manager incarnation and verified cluster session; original terminal task,
+attempt, intent, binding and claim bytes must remain unchanged. The public collector independently
+checks the old manager Pod is absent and the current lease hostname belongs to the newly created
+Job's exact Pod and candidate image. Only the web and database remain through this transition.
+Both generic-node receipts require identical archives/runtime and disjoint node identities. This
+proves orderly manager replacement, not reconnection of the original pinned Core process or the
+broader coordinated release upgrade. All receipts retain `complete_application_gate: false`.
+The existing 600-second assertion Job and 1800-second outer deadlines, resource ceilings and
+namespace cleanup remain; each manager Job also has an 1800-second deadline.
 
 `settings_qualification` retains production validation and replaces the project RuntimeEnv with the
 locked recovery ZIP; `thin` inherits it. No pip download or `PYTHONPATH=src` is used in that profile.

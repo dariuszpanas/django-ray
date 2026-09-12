@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from datetime import timedelta
 from importlib.metadata import version
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ import pytest
 from django.utils import timezone
 
 from django_ray.conf import settings as ray_settings
-from django_ray.models import RayTaskExecution, TaskWorkerLease
+from django_ray.models import RayTaskCohortClaim, RayTaskExecution, TaskWorkerLease
 from django_ray.runtime.runtime_env_encryption import (
     RuntimeEnvEncryptionError,
     protect_runtime_env_snapshot,
@@ -49,7 +50,7 @@ def durable(monkeypatch):
         state="SUCCEEDED",
         attempt_number=1,
         execution_generation=1,
-        execution_protocol_version=1,
+        execution_protocol_version=3,
         runtime_env_profile="project",
         ray_target_address=config["RAY_ADDRESS"],
         ray_address=config["RAY_ADDRESS"],
@@ -70,6 +71,11 @@ def durable(monkeypatch):
         is_active=True,
         hostname="django-manager-owned",
         django_ray_version=package_version,
+        pid=100,
+        capability_schema_version=1,
+        legacy_admission_token_id=None,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
         started_at=now - timedelta(seconds=5),
         last_heartbeat_at=now - timedelta(seconds=1),
     )
@@ -90,9 +96,66 @@ def durable(monkeypatch):
         )
 
     seal()
+    from django_ray.execution_codec import ExecutionIdentity
+    from django_ray.target import cohort_intent_storage
+    from django_ray.target.cohort_claim import (
+        CohortCapabilitySnapshot,
+        CohortRunnerFamily,
+        cohort_claim_facts_digest,
+        cohort_task_runtime_env_snapshot_digest,
+        encode_cohort_claim_facts,
+    )
+    from django_ray.target.cohort_intent import decode_cohort_intent
+    from tests.unit.test_cohort_claim import facts
+
+    retained = replace(
+        facts(family=CohortRunnerFamily.RAY_CORE),
+        identity=ExecutionIdentity(row.pk, row.task_id, 1, 1),
+        binding_id=row.pk,
+        worker_lease_id=worker.worker_id,
+        worker_lease_hostname=worker.hostname,
+        worker_lease_pid=worker.pid,
+        worker_lease_started_at=worker.started_at,
+        runtime_env_profile=row.runtime_env_profile,
+        runtime_env_hash=row.runtime_env_hash,
+        runtime_env_snapshot_digest=cohort_task_runtime_env_snapshot_digest(
+            profile=row.runtime_env_profile,
+            serialized=row.runtime_env_json,
+            digest=row.runtime_env_hash,
+        ),
+        claimed_at=row.started_at,
+        capability=CohortCapabilitySnapshot(1, 1, 1, worker.started_at + timedelta(seconds=1)),
+    )
+    row.ray_target_binding = SimpleNamespace(
+        runner_family="ray_core", package_version=package_version, target_policy_id=1
+    )
+    claim = SimpleNamespace(
+        facts_json=encode_cohort_claim_facts(retained),
+        facts_digest=cohort_claim_facts_digest(retained),
+        owner_lease_id=worker.worker_id,
+        owner_lease_hostname=worker.hostname,
+        owner_lease_pid=worker.pid,
+        owner_lease_started_at=worker.started_at,
+        target_policy_id=1,
+        claim_attestation_id=1,
+        disposition="RESOLVED",
+        resolution_kind="application_completed",
+        prepared_request_digest="sha256:" + "a" * 64,
+        resolution_digest="sha256:" + "b" * 64,
+        dispatched_at=row.started_at + timedelta(milliseconds=100),
+        resolved_at=row.finished_at - timedelta(milliseconds=100),
+    )
+    monkeypatch.setattr(RayTaskCohortClaim.objects, "get", lambda **kwargs: claim)
+    monkeypatch.setattr(
+        cohort_intent_storage,
+        "read_cohort_intent",
+        lambda _: decode_cohort_intent(retained.intent_json),
+    )
     monkeypatch.setattr(RayTaskExecution.objects, "get", lambda **kwargs: row)
     monkeypatch.setattr(TaskWorkerLease.objects, "get", lambda **kwargs: worker)
-    return SimpleNamespace(row=row, worker=worker, attempt=attempt, runtime=runtime, seal=seal)
+    return SimpleNamespace(
+        row=row, worker=worker, attempt=attempt, claim=claim, runtime=runtime, seal=seal
+    )
 
 
 def test_durable_evidence_authenticates_snapshot_and_manager(durable):
@@ -100,10 +163,34 @@ def test_durable_evidence_authenticates_snapshot_and_manager(durable):
         TASK_ID, profile="project", manager_prefix="django-manager-"
     )
     assert result["encrypted_snapshot_authenticated"] is True
+    assert result["current_cohort_claim_correlated"] is True
     assert result["worker_id"] == "owned-worker"
     assert result["elapsed_seconds"] == 3
     assert MARKER not in json.dumps(result)
     assert "ciphertext" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("facts_digest", "sha256:" + "0" * 64),
+        ("owner_lease_id", "replacement"),
+        ("owner_lease_hostname", "replacement-host"),
+        ("owner_lease_pid", 200),
+        ("target_policy_id", 2),
+        ("claim_attestation_id", 2),
+        ("disposition", "HELD"),
+        ("resolution_kind", "verified_cancelled"),
+        ("prepared_request_digest", None),
+        ("resolution_digest", None),
+        ("dispatched_at", None),
+        ("resolved_at", None),
+    ],
+)
+def test_durable_evidence_rejects_uncorrelated_or_unresolved_claim(durable, field, value):
+    setattr(durable.claim, field, value)
+    with pytest.raises(ValueError):
+        run_core.verify_durable_task(TASK_ID, profile="project", manager_prefix="django-manager-")
 
 
 @pytest.mark.parametrize(
@@ -215,3 +302,36 @@ def test_core_failure_retains_safe_api_progress_without_private_response(
     assert failed["api_diagnostics"]["observations"]["task_id"] == TASK_ID
     assert failed["api_diagnostics"]["observations"]["task_state"] == "FAILED"
     assert not receipt.exists()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_core_receipt_file_and_collected_bytes_bind_same_retirement_input(
+    tmp_path, monkeypatch, capsys, replacement
+):
+    import django
+
+    from qualification.application import retire_manager
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setattr(django, "setup", lambda: None)
+    monkeypatch.setattr(
+        run_core, "verify_application_api", lambda *_a, **_k: run_core.ApiEvidence(task_id=TASK_ID)
+    )
+    monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *_a, **_k: TASK_ID)
+    monkeypatch.setattr(run_core, "read_token", lambda *_a: "unused")
+    monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {"task_id": TASK_ID})
+    seen = []
+
+    def verify(path, executions):
+        seen.append((path, executions))
+        return {"original_history_preserved": True}
+
+    monkeypatch.setattr(retire_manager, "verify_replacement", verify)
+    output = tmp_path / "core.json"
+    args = ["--token-file", str(tmp_path / "token"), "--receipt", str(output)]
+    if replacement:
+        args += ["--previous-retirement", str(tmp_path / "retired.json")]
+    assert run_core.main(args) == 0
+    assert output.read_bytes() == capsys.readouterr().out.strip().encode()
+    assert bool(seen) is replacement
+    assert json.loads(output.read_bytes())["complete_application_gate"] is False

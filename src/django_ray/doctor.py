@@ -23,6 +23,7 @@ from django.utils.connection import ConnectionDoesNotExist
 
 from django_ray import migrations, protocol_status
 from django_ray.models import (
+    RayCohortJobCleanup,
     RayTarget,
     RayTargetAttestationRevision,
     RayTargetPolicyRevision,
@@ -30,6 +31,8 @@ from django_ray.models import (
     RayTargetProbeJobReceipt,
     RayTaskCohortClaim,
     RayTaskExecution,
+    RayTaskQuarantine,
+    RayWorkerRetirement,
     RayWorkerTargetCapability,
     TaskWorkerLease,
 )
@@ -49,7 +52,7 @@ _UNVERIFIED = (
     "runtime_env_artifact_and_encryption_key_readiness",
     "result_progress_storage_pressure_and_cleanup",
     "producer_reader_and_purger_retirement",
-    "pause_drain_retirement_and_quarantine_controls",
+    "drain_completion_and_remote_retirement",
     "backup_restore_and_rollback_rehearsal",
 )
 
@@ -225,6 +228,8 @@ def _cohort_observation(*, using: str, observed: datetime, cutoff: datetime) -> 
         open=Q(disposition="OPEN"),
         held=Q(disposition="HELD"),
         resolved=Q(disposition="RESOLVED"),
+        unresolved=~Q(disposition="RESOLVED"),
+        unresolved_outside_current_nonterminal=~current_claim & ~Q(disposition="RESOLVED"),
         current_unresolved=current_claim & ~Q(disposition="RESOLVED"),
         current_held=current_claim & Q(disposition="HELD"),
         current_unresolved_without_exact_live_owner=current_claim
@@ -262,7 +267,106 @@ def _cohort_observation(*, using: str, observed: datetime, cutoff: datetime) -> 
         "job_receipts": receipts,
         "work": work_counts,
         "manager_packages": _package_groups(using=using, cutoff=cutoff, observed=observed),
+        "quarantine": _quarantine_observation(using=using, observed=observed),
+        "worker_retirement": _retirement_observation(using=using, observed=observed, cutoff=cutoff),
+        "job_cleanup": _cleanup_observation(using=using, observed=observed, cutoff=cutoff),
     }
+
+
+def _quarantine_observation(*, using: str, observed: datetime) -> dict[str, int]:
+    decisions = RayTaskQuarantine.objects.using(using)
+    latest = decisions.filter(task_execution_pk=OuterRef("task_execution_pk")).order_by("-revision")
+    current_task = RayTaskExecution.objects.using(using).filter(
+        pk=OuterRef("task_execution_pk"),
+        task_id=OuterRef("task_id"),
+        attempt_number=OuterRef("attempt_number"),
+        execution_generation=OuterRef("execution_generation"),
+    )
+    current = decisions.filter(pk=Subquery(latest.values("pk")[:1])).annotate(
+        exact_task=Exists(current_task),
+        nonterminal_task=Exists(current_task.filter(state__in=_NONTERMINAL)),
+    )
+    known_current = Q(exact_task=True, created_at__lte=observed)
+    return _counts(
+        current,
+        current_quarantined=known_current & Q(state="QUARANTINED"),
+        current_nonterminal_quarantined=known_current
+        & Q(state="QUARANTINED", nonterminal_task=True),
+        current_released=known_current & Q(state="RELEASED"),
+        retained_without_current_identity=Q(exact_task=False),
+        future_decisions=Q(created_at__gt=observed),
+    )
+
+
+def _retirement_observation(*, using: str, observed: datetime, cutoff: datetime) -> dict[str, int]:
+    decisions = RayWorkerRetirement.objects.using(using)
+    incarnation = {
+        "worker_id": OuterRef("worker_id"),
+        "hostname": OuterRef("hostname"),
+        "pid": OuterRef("pid"),
+        "started_at": OuterRef("started_at"),
+    }
+    latest = decisions.filter(**incarnation).order_by("-revision")
+    exact_lease = TaskWorkerLease.objects.using(using).filter(**incarnation)
+    current = decisions.filter(pk=Subquery(latest.values("pk")[:1])).annotate(
+        exact_lease=Exists(exact_lease),
+        live_lease=Exists(
+            exact_lease.filter(
+                is_active=True,
+                started_at__lte=observed,
+                last_heartbeat_at__gte=cutoff,
+                last_heartbeat_at__lte=observed,
+            )
+        ),
+        inactive_lease=Exists(
+            exact_lease.filter(
+                is_active=False, started_at__lte=observed, last_heartbeat_at__lte=observed
+            )
+        ),
+    )
+    requested = Q(state="REQUESTED", created_at__lte=observed)
+    retired = Q(state="RETIRED", created_at__lte=observed, cleanup_confirmed_at__lte=observed)
+    return _counts(
+        current,
+        requested=requested,
+        requested_with_exact_live_lease=requested & Q(live_lease=True),
+        requested_without_exact_live_lease=requested & Q(live_lease=False),
+        retired_records=retired,
+        retired_with_exact_inactive_lease=retired & Q(inactive_lease=True),
+        retired_without_exact_inactive_lease=retired & Q(inactive_lease=False),
+        retained_without_exact_lease=Q(exact_lease=False),
+        future_decisions=Q(created_at__gt=observed) | Q(cleanup_confirmed_at__gt=observed),
+    )
+
+
+def _cleanup_observation(*, using: str, observed: datetime, cutoff: datetime) -> dict[str, int]:
+    exact_owner = TaskWorkerLease.objects.using(using).filter(
+        worker_id=OuterRef("owner_lease_id"),
+        hostname=OuterRef("owner_lease_hostname"),
+        pid=OuterRef("owner_lease_pid"),
+        started_at=OuterRef("owner_lease_started_at"),
+        is_active=True,
+        started_at__lte=observed,
+        last_heartbeat_at__gte=cutoff,
+        last_heartbeat_at__lte=observed,
+    )
+    rows = RayCohortJobCleanup.objects.using(using).annotate(owner_live=Exists(exact_owner))
+    pending = Q(state="OPEN")
+    return _counts(
+        rows,
+        open=pending,
+        closed_records=Q(state="CLOSED"),
+        open_uninspectable=pending
+        & (Q(expectation_digest__isnull=True) | Q(missing_expectation_reason__isnull=False)),
+        open_without_exact_live_owner=pending & Q(owner_live=False),
+        open_for_terminal_task=pending & ~Q(execution__state__in=_NONTERMINAL),
+        open_for_prior_attempt_or_generation=pending
+        & ~Q(
+            claim__attempt_number=F("execution__attempt_number"),
+            claim__execution_generation=F("execution__execution_generation"),
+        ),
+        future_records=Q(updated_at__gt=observed),
+    )
 
 
 def _observation_blockers(cohort: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -270,6 +374,24 @@ def _observation_blockers(cohort: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         ("nonterminal_work", "work", "total"),
         ("current_unresolved_claims", "claims", "current_unresolved"),
         ("current_held_claims", "claims", "current_held"),
+        (
+            "unresolved_claims_outside_current_nonterminal",
+            "claims",
+            "unresolved_outside_current_nonterminal",
+        ),
+        ("current_quarantined_work", "quarantine", "current_quarantined"),
+        ("quarantine_decision_future", "quarantine", "future_decisions"),
+        ("worker_retirement_requested", "worker_retirement", "requested"),
+        (
+            "retirement_record_without_exact_inactive_lease",
+            "worker_retirement",
+            "retired_without_exact_inactive_lease",
+        ),
+        ("retirement_decision_future", "worker_retirement", "future_decisions"),
+        ("open_jobs_cleanup", "job_cleanup", "open"),
+        ("uninspectable_jobs_cleanup", "job_cleanup", "open_uninspectable"),
+        ("jobs_cleanup_owner_unavailable", "job_cleanup", "open_without_exact_live_owner"),
+        ("jobs_cleanup_record_future", "job_cleanup", "future_records"),
         (
             "current_claim_owner_unavailable",
             "claims",
@@ -293,6 +415,7 @@ def doctor_to_dict(report: DoctorReport) -> dict[str, Any]:
         "schema": DOCTOR_SCHEMA,
         "schema_version": DOCTOR_SCHEMA_VERSION,
         "observed_at": protocol_status._iso_datetime(report.observed_at),
+        "scope": "selected_database",
         "database": report.database,
         "protocol": protocol_status.protocol_status_to_dict(report.protocol)
         if report.protocol

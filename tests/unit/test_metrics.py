@@ -39,31 +39,31 @@ def test_queue_allowlist_requires_string_sequence(db, queue_names) -> None:
         render_prometheus_metrics(queue_names=queue_names)
 
 
-def test_protocol_state_metrics_have_fixed_buckets_and_ignore_corrupt_states(db) -> None:
-    RayTaskExecution.objects.create(
-        task_id="metrics-protocol-v1",
-        callable_path="tasks.echo",
-        execution_protocol_version=1,
-        state=TaskState.QUEUED,
-    )
-    RayTaskExecution.objects.create(
-        task_id="metrics-protocol-v2",
-        callable_path="tasks.echo",
-        execution_protocol_version=2,
-        state=TaskState.SUCCEEDED,
-    )
-    RayTaskExecution.objects.create(
-        task_id="metrics-protocol-v99",
-        callable_path="tasks.echo",
-        execution_protocol_version=99,
-        state=TaskState.LOST,
-    )
-    RayTaskExecution.objects.create(
-        task_id="metrics-corrupt-state",
-        callable_path="tasks.echo",
-        execution_protocol_version=99,
-        state="UNBOUNDED-CORRUPT-STATE",
-    )
+@pytest.mark.django_db(transaction=True)
+def test_protocol_state_metrics_have_fixed_buckets_and_ignore_corrupt_states() -> None:
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    previous = [("django_ray", "0034_cohort_timeouts")]
+    executor = MigrationExecutor(connection)
+    executor.migrate(previous)
+    old = executor.loader.project_state(previous).apps.get_model("django_ray", "RayTaskExecution")
+    try:
+        for protocol, state in (
+            (1, TaskState.SUCCEEDED),
+            (2, TaskState.FAILED),
+            (99, TaskState.LOST),
+            (99, "UNBOUNDED-CORRUPT-STATE"),
+        ):
+            old.objects.create(
+                task_id=f"metrics-protocol-{protocol}-{state}",
+                callable_path="tasks.echo",
+                execution_protocol_version=protocol,
+                state=state,
+            )
+    finally:
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])
+    RayTaskExecution.objects.create(task_id="metrics-current-queued", callable_path="tasks.echo")
 
     metrics = render_prometheus_metrics()
     protocol_samples = [
@@ -73,8 +73,8 @@ def test_protocol_state_metrics_have_fixed_buckets_and_ignore_corrupt_states(db)
         if sample.name == "django_ray_tasks_by_execution_protocol_total"
     ]
 
-    assert len(protocol_samples) == 2 * len(TaskState)
-    assert {sample.labels["protocol"] for sample in protocol_samples} == {"1", "other"}
+    assert len(protocol_samples) == 3 * len(TaskState)
+    assert {sample.labels["protocol"] for sample in protocol_samples} == {"1", "3", "other"}
     assert {sample.labels["state"] for sample in protocol_samples} == {
         str(state) for state in TaskState
     }
@@ -82,8 +82,9 @@ def test_protocol_state_metrics_have_fixed_buckets_and_ignore_corrupt_states(db)
         (sample.labels["protocol"], sample.labels["state"]): sample.value
         for sample in protocol_samples
     }
-    assert values[("1", TaskState.QUEUED)] == 1
-    assert values[("other", TaskState.SUCCEEDED)] == 1
+    assert values[("1", TaskState.SUCCEEDED)] == 1
+    assert values[("3", TaskState.QUEUED)] == 1
+    assert values[("other", TaskState.FAILED)] == 1
     assert values[("other", TaskState.LOST)] == 1
     assert "UNBOUNDED-CORRUPT-STATE" not in metrics
 
@@ -194,12 +195,20 @@ def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
         hostname="host",
         pid=1,
         last_heartbeat_at=now,
+        capability_schema_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
+        legacy_admission_token=None,
     )
     TaskWorkerLease.objects.create(
         worker_id="stale",
         hostname="host",
         pid=2,
         last_heartbeat_at=now - timedelta(seconds=61),
+        capability_schema_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
+        legacy_admission_token=None,
     )
     TaskWorkerLease.objects.create(
         worker_id="inactive",
@@ -207,6 +216,7 @@ def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
         pid=3,
         last_heartbeat_at=now,
         is_active=False,
+        legacy_admission_token=None,
         stopped_at=now,
     )
 

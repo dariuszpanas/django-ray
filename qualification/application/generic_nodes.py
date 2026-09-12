@@ -44,6 +44,7 @@ def make_node_probe():
     def inspect_node(source_path, recovery_path, expected, remote_sha256):
         import hashlib
         import importlib.util
+        import platform
         import sys
         from zipfile import ZipFile
 
@@ -94,6 +95,8 @@ def make_node_probe():
         return {
             "node_id": ray.get_runtime_context().get_node_id(),
             "python_minor": list(sys.version_info[:2]),
+            "python_implementation": platform.python_implementation(),
+            "python_version": list(sys.version_info[:3]),
             "ray_version": ray.__version__,
             "django_ray_preinstalled": False,
             "remote_sha256": remote_sha256,
@@ -139,6 +142,7 @@ def verify_generic_nodes(
     must enforce a Job deadline as Ray Client connection/shutdown calls are not
     covered by the task-result timeout.
     """
+    import platform
     import sys
 
     parsed = urlsplit(address)
@@ -209,6 +213,8 @@ def verify_generic_nodes(
             if result != {
                 "node_id": node_id,
                 "python_minor": list(sys.version_info[:2]),
+                "python_implementation": platform.python_implementation(),
+                "python_version": list(sys.version_info[:3]),
                 "ray_version": ray.__version__,
                 "django_ray_preinstalled": False,
                 "remote_sha256": remote_sha256,

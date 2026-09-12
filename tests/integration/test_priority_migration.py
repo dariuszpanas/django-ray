@@ -10,6 +10,8 @@ import pytest
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 
 def test_postgresql_constraint_uses_resumable_staged_sql() -> None:
     migration = import_module("django_ray.migrations.0008_raytaskexecution_priority_constraint")
@@ -162,7 +164,8 @@ def _assert_priority_migration_round_trip() -> None:
             .values_list("task_id", flat=True)
         ) == ["priority-migration-older", "priority-migration-newer"]
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0034_cohort_timeouts")])
+        clear_historical_admission_fixtures()
+        MigrationExecutor(connection).migrate([("django_ray", "0035_activate_current_cohort")])
 
 
 @pytest.mark.django_db(transaction=True)

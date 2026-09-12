@@ -10,12 +10,14 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.db.models.deletion import RESTRICT
 
+from tests.migration_cleanup import clear_historical_admission_fixtures
+
 
 @pytest.mark.django_db(transaction=True)
 def test_detail_storage_tables_are_additive_reversible_and_rolling_safe() -> None:
     migrate_from = [("django_ray", "0012_workflow_progress_summary")]
     migrate_to = [("django_ray", "0013_workflow_progress_detail_storage")]
-    latest = [("django_ray", "0034_cohort_timeouts")]
+    latest = [("django_ray", "0035_activate_current_cohort")]
     executor = MigrationExecutor(connection)
     executor.migrate(migrate_from)
     try:
@@ -184,4 +186,5 @@ def test_detail_storage_tables_are_additive_reversible_and_rolling_safe() -> Non
         assert reverted.workflow_progress_summary_json == '{"schema_version":3}'
         assert reverted_execution.objects.filter(pk=rolling.pk).exists()
     finally:
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(latest)

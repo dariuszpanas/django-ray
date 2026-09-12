@@ -530,6 +530,9 @@ def _strict_request_rejection(
 
 def _execute_legacy_payload(payload_json: str) -> str:
     """Retain the released unversioned protocol-v1 payload adapter."""
+    rejection = _inactive_legacy_entrypoint_rejection()
+    if rejection is not None:
+        return rejection
     from django_ray.input_storage import InputPayloadValidationError
 
     try:
@@ -560,8 +563,23 @@ def _execute_legacy_payload(payload_json: str) -> str:
         return _serialize_error(error)
 
 
+def _inactive_legacy_entrypoint_rejection() -> _StrictRequestRejectionResult | None:
+    from django_ray.execution_codec import ExecutionRequestRejection
+    from django_ray.execution_protocol import (
+        EXECUTION_PROTOCOL_VERSION,
+        LEGACY_EXECUTION_PROTOCOL_VERSION,
+    )
+
+    if EXECUTION_PROTOCOL_VERSION != LEGACY_EXECUTION_PROTOCOL_VERSION:
+        return _strict_request_rejection(None, ExecutionRequestRejection.UNSUPPORTED_PROTOCOL)
+    return None
+
+
 def execute_task_from_payload(payload_b64: str) -> str:
     """Fence a strict request or execute the released protocol-v1 payload."""
+    rejection = _inactive_legacy_entrypoint_rejection()
+    if rejection is not None:
+        return rejection
     from django_ray.execution_codec import (
         ExecutionRequestDecodeError,
         ExecutionRequestRejection,
@@ -656,6 +674,9 @@ def execute_task_from_payload(payload_b64: str) -> str:
 
 def execute_task_from_reference(encoded_locator: str) -> str:
     """Load and bind one rq2 request before crossing the Django boundary."""
+    rejection = _inactive_legacy_entrypoint_rejection()
+    if rejection is not None:
+        return rejection
     from django_ray.execution_codec import ExecutionRequestRejection
     from django_ray.ray_job_request_storage import (
         RayJobRequestStorageError,

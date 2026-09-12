@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import sqlite3
 import tarfile
 from pathlib import Path
 from unittest.mock import Mock
@@ -21,6 +22,15 @@ def receipt(backend="sqlite"):
     values = [
         {"tasks": 8, "fixture_kind": "synthetic-released-models"},
         {"blocked_tasks": 2, "active_leases": 1, "read_only": True},
+        {
+            "blocked_tasks": 2,
+            "active_leases": 1,
+            "activation_refused": True,
+            "activation_recorded": False,
+            "active_write_protocol_version": 1,
+            "legacy_token_present": True,
+            "original_fields_unchanged": True,
+        },
         {"nonterminal_tasks": 0, "active_leases": 0, "settlement": "synthetic-only"},
         {
             "historical_sha256": "a" * 64,
@@ -35,7 +45,12 @@ def receipt(backend="sqlite"):
             "input_and_result_artifacts_read": True,
             "missing_and_corrupt_result_rejected": True,
         },
-        {"current_enqueue": True, "candidate_only_rows": 1},
+        {
+            "current_enqueue": True,
+            "candidate_only_rows": 1,
+            "execution_protocol_version": 3,
+            "persisted_intent_matches": True,
+        },
         {
             "historical_sha256": "a" * 64,
             "tasks": 8,
@@ -60,6 +75,7 @@ def receipt(backend="sqlite"):
             for index, phase in enumerate(contract.PHASES)
         ],
         "backup_sha256": "b" * 64,
+        "blocked_backup_sha256": "e" * 64,
         "artifacts_sha256": "c" * 64,
         "fixture_cleanup": True,
         "server_stopped": True,
@@ -87,10 +103,16 @@ def receipt(backend="sqlite"):
         "lost-new-write",
         "ignored-missing-artifact",
         "boolean-row-count",
+        "activation-not-refused",
+        "activation-recorded",
+        "missing-intent",
+        "old-new-write",
+        "bad-blocker-backup",
     ],
 )
 def test_incomplete_upgrade_cannot_pass(mutation):
     value = receipt()
+    phases = {item["phase"]: item for item in value["phases"]}
     if mutation == "missing-phase":
         value["phases"].pop()
     elif mutation == "reordered":
@@ -98,7 +120,7 @@ def test_incomplete_upgrade_cannot_pass(mutation):
     elif mutation == "same-process":
         value["phases"][1]["pid"] = value["phases"][0]["pid"]
     elif mutation == "wrong-version":
-        value["phases"][4]["version"] = "0.4.0"
+        phases["candidate-migrate-read"]["version"] = "0.4.0"
     elif mutation == "failed-phase":
         value["phases"][2]["status"] = "skipped"
     elif mutation == "bad-backup":
@@ -112,26 +134,38 @@ def test_incomplete_upgrade_cannot_pass(mutation):
     elif mutation == "missing-gaps":
         value["missing_acceptance"].clear()
     elif mutation == "changed-history":
-        value["phases"][4]["observations"]["historical_sha256"] = "d" * 64
+        phases["candidate-migrate-read"]["observations"]["historical_sha256"] = "d" * 64
     elif mutation == "no-blockers":
         value["phases"][1]["observations"]["blocked_tasks"] = 0
     elif mutation == "executable-history":
-        value["phases"][4]["observations"]["inert_execution_refusals"] = 0
+        phases["candidate-migrate-read"]["observations"]["inert_execution_refusals"] = 0
     elif mutation == "lost-new-write":
-        value["phases"][5]["observations"]["candidate_only_rows"] = 0
+        phases["candidate-new-write"]["observations"]["candidate_only_rows"] = 0
     elif mutation == "ignored-missing-artifact":
-        value["phases"][4]["observations"]["missing_and_corrupt_result_rejected"] = False
+        phases["candidate-migrate-read"]["observations"]["missing_and_corrupt_result_rejected"] = (
+            False
+        )
+    elif mutation == "activation-not-refused":
+        phases["candidate-blocked-activation"]["observations"]["activation_refused"] = False
+    elif mutation == "activation-recorded":
+        phases["candidate-blocked-activation"]["observations"]["activation_recorded"] = True
+    elif mutation == "missing-intent":
+        phases["candidate-new-write"]["observations"]["persisted_intent_matches"] = False
+    elif mutation == "old-new-write":
+        phases["candidate-new-write"]["observations"]["execution_protocol_version"] = 1
+    elif mutation == "bad-blocker-backup":
+        value["blocked_backup_sha256"] = "invalid"
     else:
-        value["phases"][5]["observations"]["candidate_only_rows"] = True
+        phases["candidate-new-write"]["observations"]["candidate_only_rows"] = True
     with pytest.raises(QualificationError):
         contract.validate_backend(value, backend="sqlite")
 
 
-def test_complete_stage_emits_fourteen_phases_but_no_complete_upgrade_claim():
+def test_complete_stage_emits_sixteen_phases_but_no_complete_upgrade_claim():
     values = [receipt(backend) for backend in contract.BACKENDS]
     before = copy.deepcopy(values)
     suite = ElementTree.fromstring(contract.junit(values, failure=None))
-    assert len(suite) == 14 and suite.attrib["failures"] == "0"
+    assert len(suite) == 16 and suite.attrib["failures"] == "0"
     assert values == before and all(value["complete_upgrade_gate"] is False for value in values)
     with pytest.raises(QualificationError, match="missing-upgrade-backend"):
         contract.junit(values[:1], failure=None)
@@ -179,6 +213,28 @@ def test_postgres_restore_uses_only_owned_socket_and_fixed_database(tmp_path, mo
     assert args[2] == tmp_path / "socket"
     assert args[6] == "rollback"
     assert "--exit-on-error" in args and args[-1] == tmp_path / "backup"
+
+
+def test_blocker_snapshot_cannot_replace_the_settled_backup_or_original_database(tmp_path):
+    baseline = tmp_path / "baseline.sqlite3"
+    with sqlite3.connect(baseline) as connection:
+        connection.execute("CREATE TABLE owned_task (state TEXT)")
+        connection.execute("INSERT INTO owned_task VALUES ('RUNNING')")
+    digest = scenario._backup(tmp_path, "sqlite", backup_name="blocked-backup")
+    scenario._restore(tmp_path, "sqlite", "blocked", backup_name="blocked-backup")
+    with sqlite3.connect(tmp_path / "blocked.sqlite3") as connection:
+        assert connection.execute("SELECT state FROM owned_task").fetchone() == ("RUNNING",)
+        connection.execute("UPDATE owned_task SET state='clone-only'")
+    with sqlite3.connect(baseline) as connection:
+        assert connection.execute("SELECT state FROM owned_task").fetchone() == ("RUNNING",)
+        connection.execute("UPDATE owned_task SET state='SUCCEEDED'")
+    scenario._backup(tmp_path, "sqlite")
+    scenario._restore(tmp_path, "sqlite", "restored")
+    with sqlite3.connect(tmp_path / "restored.sqlite3") as connection:
+        assert connection.execute("SELECT state FROM owned_task").fetchone() == ("SUCCEEDED",)
+    assert scenario.wheel._sha256(tmp_path / "blocked-backup") == digest
+    with pytest.raises(QualificationError, match="restore-destination"):
+        scenario._restore(tmp_path, "sqlite", "restored", backup_name="blocked-backup")
 
 
 def test_compose_has_no_runtime_network_and_requires_explicit_source_and_evidence():

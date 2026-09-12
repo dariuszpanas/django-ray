@@ -16,10 +16,11 @@ from django_ray.workflow.progress.runs import (
     allocate_workflow_run,
     reclaim_workflow_run,
 )
+from tests.migration_cleanup import clear_historical_admission_fixtures
 
 MIGRATE_FROM = [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
 MIGRATE_TO = [("django_ray", "0018_workflow_run_allocation")]
-LATEST = [("django_ray", "0034_cohort_timeouts")]
+LATEST = [("django_ray", "0035_activate_current_cohort")]
 
 
 def _assert_workflow_run_allocation_migration_round_trip() -> None:
@@ -72,9 +73,9 @@ def _assert_workflow_run_allocation_migration_round_trip() -> None:
         assert constraints["ray_task_wf_run_ns_range"]["check"] is True
         assert set(constraints["ray_task_wf_run_ns_range"]["columns"]) == {"workflow_run_namespace"}
 
-        # Restore the current schema before using the imported current model.
-        # The historical assertions above deliberately run at the 0018 boundary.
-        MigrationExecutor(connection).migrate(LATEST)
+        # Allocation/reclaim here exercise the historical epoch1 contract,
+        # before the stopped-writer activation refuses old active work.
+        MigrationExecutor(connection).migrate([("django_ray", "0034_cohort_timeouts")])
         current = RayTaskExecution.objects.get(pk=legacy.pk)
         legacy_identity = WorkflowRunIdentity(
             task_execution_pk=current.pk,
@@ -116,6 +117,7 @@ def _assert_workflow_run_allocation_migration_round_trip() -> None:
         with pytest.raises(FieldDoesNotExist):
             reverted_execution._meta.get_field("workflow_run_sequence")
     finally:
+        clear_historical_admission_fixtures()
         MigrationExecutor(connection).migrate(LATEST)
 
 

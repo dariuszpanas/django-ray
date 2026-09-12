@@ -212,11 +212,13 @@ class TestRayTaskBackend:
         observed = []
 
         observed_task_ids = []
+        observed_configs = []
 
-        def record_storage(runtime_env, *, task_id):
+        def record_storage(runtime_env, *, task_id, config):
             observed.append(runtime_env)
             observed_task_ids.append(task_id)
-            return runtime_env_for_storage(runtime_env, task_id=task_id)
+            observed_configs.append(config)
+            return runtime_env_for_storage(runtime_env, task_id=task_id, config=config)
 
         monkeypatch.setattr("django_ray.backends.runtime_env_for_storage", record_storage)
 
@@ -229,6 +231,7 @@ class TestRayTaskBackend:
         execution = RayTaskExecution.objects.get(task_id=result.id)
         assert len(observed) == 1
         assert observed_task_ids == [result.id]
+        assert len(observed_configs) == 1 and observed_configs[0] is not None
         assert execution.runtime_env_json == observed[0].serialized
         assert execution.runtime_env_hash == observed[0].digest
 
@@ -271,10 +274,12 @@ class TestRayTaskBackend:
         )
 
         observed_task_ids: list[str] = []
+        observed_configs = []
 
-        def record_storage(runtime_env, *, task_id):
+        def record_storage(runtime_env, *, task_id, config):
             observed_task_ids.append(task_id)
-            return runtime_env_for_storage(runtime_env, task_id=task_id)
+            observed_configs.append(config)
+            return runtime_env_for_storage(runtime_env, task_id=task_id, config=config)
 
         prepared_inputs = 0
         original_prepare = prepare_task_input
@@ -298,6 +303,8 @@ class TestRayTaskBackend:
         assert result.id == replacement_id
         assert RayTaskExecution.objects.filter(task_id=collided_id).count() == 1
         assert observed_task_ids == [collided_id, replacement_id]
+        assert len(observed_configs) == 2 and observed_configs[0] is observed_configs[1]
+        assert observed_configs[0]["RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY"] == "backend-key"
         assert prepared_inputs == 1
         assert execution.queue_timeout_seconds == 90
         assert execution.queue_deadline_at == run_after + timedelta(seconds=90)
@@ -427,8 +434,8 @@ class TestRayTaskBackend:
     def test_runtime_env_storage_failure_creates_no_execution(self, monkeypatch) -> None:
         from testproject.tasks import add_numbers
 
-        def reject_storage(_runtime_env, *, task_id):
-            assert task_id
+        def reject_storage(_runtime_env, *, task_id, config):
+            assert task_id and config is not None
             raise RuntimeEnvSnapshotError(
                 "django-ray: Resolved RuntimeEnv storage snapshot is invalid"
             )
@@ -942,15 +949,12 @@ class TestRayTaskBackend:
 @pytest.mark.django_db(transaction=True)
 class TestCohortEnqueue:
     @pytest.fixture(autouse=True)
-    def cohort_protocol(self, monkeypatch, _restore_execution_protocol_rollout_seed):
+    def cohort_protocol(self, _restore_execution_protocol_rollout_seed):
         from django_ray.models import TaskExecutionProtocolPolicy
-        from django_ray.protocol_coordination import close_legacy_worker_admission
 
         policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
-        close_legacy_worker_admission(
-            expected_revision=policy.revision, legacy_producers_retired=True
-        )
-        monkeypatch.setattr("django_ray.backends.EXECUTION_PROTOCOL_VERSION", 3)
+        assert policy.active_write_protocol_version == EXECUTION_PROTOCOL_VERSION == 3
+        assert not policy.legacy_worker_admission_enabled
 
     @staticmethod
     def enqueue(backend):

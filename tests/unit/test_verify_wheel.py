@@ -117,9 +117,10 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/migrations/0032_maintenance_controls.py" in EXPECTED_FILES
     assert "django_ray/migrations/0033_cohort_job_cleanup.py" in EXPECTED_FILES
     assert "django_ray/migrations/0034_cohort_timeouts.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0035_activate_current_cohort.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0034_cohort_timeouts",
+        "0035_activate_current_cohort",
     )
 
 

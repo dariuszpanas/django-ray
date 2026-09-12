@@ -118,19 +118,19 @@ def test_nested_round_trip_fences_operation_and_compact_parent_claim():
     ) == (request, claim)
 
 
-def test_ordinary_codecs_and_worker_range_do_not_activate_cohort_execution():
-    assert EXECUTION_PROTOCOL_VERSION == 1
-    assert not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(COHORT_EXECUTION_PROTOCOL_VERSION)
+def test_ordinary_codecs_support_current_cohort_carriers_without_legacy_fallback():
+    assert EXECUTION_PROTOCOL_VERSION == COHORT_EXECUTION_PROTOCOL_VERSION
+    assert SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(COHORT_EXECUTION_PROTOCOL_VERSION)
+    assert not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(1)
+    assert not SUPPORTED_EXECUTION_PROTOCOL_RANGE.supports(2)
     request, _claim = outer_request()
     nested, _leaf = nested_request()
-    with pytest.raises(ExecutionRequestEncodeError):
-        encode_execution_request(request)
-    with pytest.raises(ExecutionRequestDecodeError):
-        decode_execution_request(encode_cohort_execution_request(request))
-    with pytest.raises(NestedExecutionRequestEncodeError):
-        encode_nested_execution_request(nested)
-    with pytest.raises(NestedExecutionRequestRejected):
-        decode_nested_execution_request(encode_cohort_nested_execution_request(nested))
+    # These are structural codecs. Runtime entrypoints still require the
+    # independently bound cohort wrappers exercised elsewhere in this module.
+    assert encode_execution_request(request) == encode_cohort_execution_request(request)
+    assert decode_execution_request(encode_cohort_execution_request(request)) == request
+    assert encode_nested_execution_request(nested) == encode_cohort_nested_execution_request(nested)
+    assert decode_nested_execution_request(encode_cohort_nested_execution_request(nested)) == nested
 
 
 @pytest.mark.parametrize("value", [None, "", "{}", "not-json"])

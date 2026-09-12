@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from contextlib import contextmanager
@@ -19,7 +18,6 @@ from django_ray.execution_codec import (
     NestedExecutionRequestRejected,
     NestedExecutionRequestRejection,
     NestedWorkflowBoundaryIdentity,
-    encode_nested_execution_request,
 )
 from django_ray.runtime.result_fold import (
     RESULT_FOLD_ACTOR_MAX_PENDING_CALLS,
@@ -176,6 +174,7 @@ def _strict_fold_request(
     callable_path: str,
     workflow_run_id: str = "00000000-0000-4000-8000-000000000611",
     node_id: str = "0.reducer",
+    contract=None,
 ) -> tuple[str, dict[str, object], dict[str, object]]:
     from django_ray.runtime.runtime_env import normalize_runtime_env
     from django_ray.workflow.plans import runtime_env_plan_identity
@@ -189,10 +188,26 @@ def _strict_fold_request(
     runtime_identity = runtime_env_plan_identity(
         normalize_runtime_env({"env_vars": {"FOLD_TEST": "1"}})
     ).as_transport_dict()
-    serialized = encode_nested_execution_request(
+    from dataclasses import replace
+
+    from django_ray.target.cohort_contract import (
+        cohort_leaf_contract_digest,
+        derive_cohort_leaf_contract,
+        encode_cohort_leaf_contract,
+    )
+    from django_ray.target.cohort_transport import encode_cohort_nested_execution_request
+
+    if contract is None:
+        from tests.unit.test_cohort_contract import contract as synthetic_contract
+
+        contract = replace(synthetic_contract(), identity=outer_identity)
+    assert contract.identity == outer_identity
+    leaf = derive_cohort_leaf_contract(contract)
+    serialized = encode_cohort_nested_execution_request(
         NestedExecutionRequest(
             outer_identity=outer_identity,
-            execution_protocol_version=1,
+            execution_protocol_version=3,
+            cohort_leaf_contract_json=encode_cohort_leaf_contract(leaf),
             boundary_kind=NestedExecutionBoundaryKind.RESULT_FOLD,
             boundary_identity=NestedWorkflowBoundaryIdentity(
                 workflow_run_id=workflow_run_id,
@@ -211,7 +226,9 @@ def _strict_fold_request(
         "expected_outer_task_id": outer_identity.task_id,
         "expected_outer_attempt_number": outer_identity.attempt_number,
         "expected_outer_execution_generation": outer_identity.execution_generation,
-        "expected_execution_protocol_version": 1,
+        "expected_execution_protocol_version": 3,
+        "expected_cohort_leaf_digest": cohort_leaf_contract_digest(leaf),
+        "expected_outer_contract_digest": leaf.outer_contract_digest,
         "expected_workflow_run_id": workflow_run_id,
         "expected_node_id": node_id,
         "expected_runtime_env_plan_digest": runtime_identity["digest"],
@@ -646,6 +663,10 @@ def test_strict_fold_installs_context_for_later_reducer_and_finalize_calls(
 
     from django_ray.runtime.context import get_current_task_context
 
+    # Resource-free actor unit: native tests below exercise actual membership.
+    verified = []
+    monkeypatch.setattr("django_ray.runtime.cohort_nested.verify_cohort_runtime", verified.append)
+    monkeypatch.setattr("django_ray.target.cohort_runtime.verify_cohort_runtime", verified.append)
     callable_path = f"{__name__}.strict_context_reducer"
     _, runtime_identity, request_kwargs = _strict_fold_request(callable_path=callable_path)
     actor = WorkflowMapResultFold(
@@ -682,7 +703,7 @@ def test_strict_fold_installs_context_for_later_reducer_and_finalize_calls(
         "task_id": "00000000-0000-4000-8000-000000000611",
         "attempt_number": 3,
         "execution_generation": 7,
-        "execution_protocol_version": 1,
+        "execution_protocol_version": 3,
         "strict_execution_request": True,
         "compiled_graph_submission_transport": "direct-ray-core",
         "runtime_env_hash": "",
@@ -690,6 +711,7 @@ def test_strict_fold_installs_context_for_later_reducer_and_finalize_calls(
     }
     assert observed_unpickle_contexts
     assert all(observed_unpickle_contexts)
+    assert len(verified) >= 4
 
 
 def test_strict_fold_reports_fixed_ready_rejection_before_initialization(
@@ -729,6 +751,30 @@ def test_strict_fold_reports_fixed_ready_rejection_before_initialization(
     assert "secret-mixed-node" not in str(captured.value)
     assert captured.value.retryable is False
     assert bootstrapped == []
+
+
+def test_native_fold_protocol_mismatch_fixture_rejects_before_initialization(monkeypatch) -> None:
+    from tests.unit.test_distributed import _mismatched_protocol_request
+
+    callable_path = f"{__name__}.sum_items"
+    serialized, _, kwargs = _strict_fold_request(callable_path=callable_path)
+    kwargs["nested_execution_request"] = _mismatched_protocol_request(serialized)
+    assert kwargs["expected_execution_protocol_version"] == 3
+    events = []
+    monkeypatch.setattr(
+        "django_ray.runtime.entrypoint.bootstrap_django", lambda: events.append("setup")
+    )
+    monkeypatch.setattr(
+        "django_ray.runtime.result_fold.import_callable", lambda _path: events.append("import")
+    )
+    actor = WorkflowMapResultFold(
+        1, 1, 4096, callable_path, True, (), {}, _UnserializableInitial(), **kwargs
+    )
+    with pytest.raises(NestedExecutionRequestRejected) as caught:
+        actor.ready()
+    assert caught.value.classification is NestedExecutionRequestRejection.PROTOCOL_MISMATCH
+    assert caught.value.retryable is False
+    assert events == []
 
 
 def test_actor_rejects_invalid_append_and_finalize_transitions() -> None:
@@ -999,17 +1045,99 @@ def test_fold_plan_fingerprint_changes_for_effective_semantics() -> None:
 
 @pytest.mark.django_db
 def test_retry_rejects_fold_resource_drift_before_leaf_effects() -> None:
+    import hashlib
+    import platform
+    import sys
+    from datetime import UTC, datetime
+
+    from django.db import transaction
+
+    from django_ray import __version__
     from django_ray.lifecycle import record_failure
-    from django_ray.models import RayTaskExecution, TaskState
+    from django_ray.maintenance import maintenance_admission_barrier
+    from django_ray.models import RayTaskExecution, TaskWorkerLease
+    from django_ray.runner.leasing import WorkerLeaseIdentity
     from django_ray.runtime.context import DurableTaskContext
+    from django_ray.target.cohort_claim import (
+        CohortBindingSpec,
+        CohortManagerRuntime,
+        CohortPythonVersion,
+        CohortResolutionKind,
+        CohortRunnerFamily,
+        cohort_task_runtime_env_snapshot_digest,
+    )
+    from django_ray.target.cohort_claim_storage import claim_cohort_execution, resolve_cohort_claim
+    from django_ray.target.cohort_intent import (
+        CohortExecutionDeclaration,
+        build_cohort_intent,
+        cohort_intent_digest,
+    )
+    from django_ray.target.cohort_intent_storage import persist_cohort_intent
     from django_ray.workflow.progress.runs import allocate_workflow_run
 
-    execution = RayTaskExecution.objects.create(
-        task_id="workflow-result-fold-plan-retry",
-        callable_path=f"{__name__}.record_side_effect",
-        state=TaskState.RUNNING,
-        execution_generation=3,
+    now = datetime.now(UTC)
+    digest = hashlib.sha256(b"{}").hexdigest()
+    intent = build_cohort_intent(
+        package_version=__version__,
+        declaration=CohortExecutionDeclaration("default", "auto", False, {}),
+        runtime_env_identity_digest="sha256:" + digest,
     )
+    with transaction.atomic():
+        execution = RayTaskExecution.objects.create(
+            task_id="workflow-result-fold-plan-retry",
+            callable_path=f"{__name__}.record_side_effect",
+            runtime_env_json="{}",
+            runtime_env_hash=digest,
+        )
+        persist_cohort_intent(execution.pk, intent, now=datetime.now(UTC))
+    lease = TaskWorkerLease.objects.create(
+        worker_id="fold-retry-manager",
+        hostname="test-owned",
+        pid=os.getpid(),
+        started_at=now,
+        last_heartbeat_at=now,
+        capability_schema_version=1,
+        django_ray_version=__version__,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
+        legacy_admission_token=None,
+    )
+    owner = WorkerLeaseIdentity(lease.pk, lease.hostname, lease.pid, lease.started_at)
+    python = CohortPythonVersion(
+        platform.python_implementation().lower(),
+        sys.version_info.major,
+        sys.version_info.minor,
+        sys.version_info.micro,
+    )
+
+    def claim():
+        execution.refresh_from_db()
+        with transaction.atomic(), maintenance_admission_barrier() as barrier:
+            retained = claim_cohort_execution(
+                owner,
+                admission_barrier=barrier,
+                expected_identity=ExecutionIdentity(
+                    execution.pk,
+                    str(execution.task_id),
+                    execution.attempt_number,
+                    execution.execution_generation,
+                ),
+                binding_spec=CohortBindingSpec(
+                    CohortRunnerFamily.SYNC, __version__, sync_python=python
+                ),
+                manager_runtime=CohortManagerRuntime(__version__, python),
+                expected_intent_digest=cohort_intent_digest(intent),
+                expected_runtime_env_snapshot_digest=cohort_task_runtime_env_snapshot_digest(
+                    profile=execution.runtime_env_profile,
+                    serialized=execution.runtime_env_json,
+                    digest=execution.runtime_env_hash,
+                ),
+                now=datetime.now(UTC),
+            )
+        execution.refresh_from_db()
+        return retained
+
+    first_claim = claim()
 
     def folded(memory: int):
         return (
@@ -1041,9 +1169,29 @@ def test_retry_rejects_fold_resource_drift_before_leaf_effects() -> None:
         selection=first_selection,
     )
     assert first_identity is not None
-    assert record_failure(execution, error_message="retry", retry=True)
-    RayTaskExecution.objects.filter(pk=execution.pk).update(state=TaskState.RUNNING)
-    execution.refresh_from_db()
+    # The test owns this claim and has never prepared or dispatched it: no
+    # Ray operation, application invocation, or unresolved callback exists.
+    assert first_claim.prepared_request_digest is None and first_claim.dispatched_at is None
+    with transaction.atomic():
+        resolve_cohort_claim(
+            owner,
+            first_claim.claim_id,
+            expected_identity=first_claim.facts.identity,
+            expected_revision=first_claim.revision,
+            now=datetime.now(UTC),
+            kind=CohortResolutionKind.VERIFIED_NOT_INVOKED,
+            evidence_digest="sha256:"
+            + hashlib.sha256(b"owned-fold-test-never-dispatched").hexdigest(),
+        )
+        assert record_failure(execution, error_message="retry", retry=True)
+    second_claim = claim()
+    assert (
+        second_claim.facts.identity.execution_generation
+        > first_claim.facts.identity.execution_generation
+    )
+    assert (
+        second_claim.facts.identity.attempt_number == first_claim.facts.identity.attempt_number + 1
+    )
 
     replacement = materialize_workflow_plan(
         folded(16384),
@@ -1601,20 +1749,20 @@ def test_real_ray_strict_fold_ready_rejection_is_typed_and_has_no_effects(
 ) -> None:
     from ray.exceptions import RayTaskError
 
+    from tests.unit.test_distributed import _mismatched_protocol_request
+
     callable_path = f"{__name__}.counted_strict_reducer"
+    from tests.native_cohort import observed_contract
+
     serialized, _runtime_identity, kwargs = _strict_fold_request(
         callable_path=callable_path,
         workflow_run_id="00000000-0000-4000-8000-000000000612",
         node_id="0.reducer-real-ray",
+        contract=observed_contract(
+            ray_cluster, ExecutionIdentity(611, "00000000-0000-4000-8000-000000000611", 3, 7)
+        ),
     )
-    protocol_payload = json.loads(serialized)
-    protocol_payload["execution_protocol_version"] += 1
-    tampered_protocol = json.dumps(
-        protocol_payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    tampered_protocol = _mismatched_protocol_request(serialized)
     counter = ray_cluster.remote(num_cpus=0)(_RealInvocationCounter).remote()
     cases = (
         (

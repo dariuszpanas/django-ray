@@ -14,6 +14,11 @@ Status is the default and performs no writes. It reports the current policy revi
 deployment-wide flags, and at most 64 exact scopes. `--database` selects the Django database alias.
 A missing or inconsistent policy is an error; the command never recreates it automatically.
 
+`django_ray_protocol_status` can also inspect a coherent preactivation protocol-1 policy.
+It reports that policy verbatim with a `historical_write_policy` blocker for the current
+package's protocol 3. This read-only diagnostic does not permit legacy execution or reopen
+admission. A current protocol-3 policy must have legacy admission closed and no legacy token.
+
 ## Review and apply a pause
 
 Choose an explicit scope and a pause or resume action. Mutation requires `--expected-revision`,
@@ -124,6 +129,17 @@ a fresh inspection corroborates terminal cleanup of that exact original Job. A q
 may take over cleanup without changing the original result or claim. If the retained request
 reference is unavailable, the result stays truthful and the obligation stays openly uninspectable.
 Neither a terminal task nor an unavailable Job record closes it automatically.
+
+Manual retry starts a new generation, so both enqueue and claim admission must allow it,
+including any pause for the original bound target. A paused policy, active quarantine or
+pending cleanup refuses retry before reading the stored RuntimeEnv. Historical protocol-1/2
+terminal results remain readable, but retry does not translate them into current work.
+
+Retention protects the exact request reference retained by an open cleanup obligation,
+even after a retry clears the task's mutable request fields. An uninspectable open obligation
+blocks request-payload purge throughout that database because its request cannot be attributed
+safely. Resolve that cleanup uncertainty before retrying request-payload purge; it does not
+prevent unrelated task-input retention.
 
 ## Quarantine or release one task generation
 

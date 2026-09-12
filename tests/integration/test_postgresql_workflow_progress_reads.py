@@ -13,6 +13,7 @@ import pytest
 from django.db import close_old_connections, connection, transaction
 from django.test.utils import CaptureQueriesContext
 
+from django_ray.execution_protocol import ExecutionProtocolRange
 from django_ray.lifecycle import succeed_task
 from django_ray.models import (
     TaskState,
@@ -36,6 +37,7 @@ from django_ray.workflow.progress.storage import (
     prepare_workflow_progress_node_detail,
     stage_workflow_progress_topology,
 )
+from tests.migration_cleanup import preactivation_protocol_schema as preactivation_protocol_schema
 from tests.workflow_progress_storage_helpers import (
     PublishedWorkflow,
     workflow_detail,
@@ -76,6 +78,7 @@ def _publish_workflow(
     *,
     edge_count: int = 0,
     case_id: int,
+    execution_protocol_version: int = 3,
 ) -> PublishedWorkflow:
     run_value = node_count * 100_000 + edge_count + case_id
     run_id = f"00000000-0000-0000-0000-{run_value:012d}"
@@ -85,6 +88,7 @@ def _publish_workflow(
         task_id=f"workflow-read-{node_count}-{edge_count}-{case_id}",
         callable_path="tests.integration.sync_resource",
         state=TaskState.RUNNING,
+        execution_protocol_version=execution_protocol_version,
         attempt_number=1,
         execution_generation=1,
         workflow_run_id=run_id,
@@ -251,12 +255,15 @@ def test_read_query_shape_and_response_bounds_are_independent_of_retained_size(
     record_property(f"retained_{node_count}_detail_bytes", len(_canonical_bytes(detail)))
 
 
+@pytest.mark.usefixtures("preactivation_protocol_schema")
 def test_terminal_attempt_reads_use_the_archived_epoch_without_scanning_current_payloads() -> None:
-    workflow = _publish_workflow(100, case_id=127_050)
+    """Retained protocol1 attempt reads use the actual preactivation schema."""
+    workflow = _publish_workflow(100, case_id=127_050, execution_protocol_version=1)
     assert succeed_task(
         workflow.execution,
         result_data='{"ok":true}',
         result_reference=None,
+        supported_protocols=ExecutionProtocolRange(1, 1),
     )
     workflow.execution.refresh_from_db()
     workflow.execution.attempt_number = 2

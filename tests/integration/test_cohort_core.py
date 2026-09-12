@@ -411,8 +411,8 @@ def test_native_core_manager_requires_fresh_active_policy_proof(
         last_heartbeat_at=now,
         capability_schema_version=1,
         django_ray_version=package,
-        min_supported_execution_protocol_version=1,
-        max_supported_execution_protocol_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
         legacy_admission_token=None,
     )
     lifecycle = CohortQualificationLifecycle(

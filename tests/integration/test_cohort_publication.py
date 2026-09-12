@@ -591,8 +591,8 @@ def test_another_manager_cannot_escape_existing_drain_by_changing_configuration(
         last_heartbeat_at=NOW,
         capability_schema_version=1,
         django_ray_version=package,
-        min_supported_execution_protocol_version=1,
-        max_supported_execution_protocol_version=1,
+        min_supported_execution_protocol_version=3,
+        max_supported_execution_protocol_version=3,
         legacy_admission_token=None,
     )
     identity = replace(core_case.identity, worker_id=lease.pk)

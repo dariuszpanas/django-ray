@@ -1,8 +1,7 @@
 """Private protocol-3 request adapters with independent cohort digest bindings.
 
-The ordinary producer and worker still advertise protocol 1. These adapters
-reuse its bounded application and nested codecs while requiring a canonical
-cohort claim for protocol 3; they cannot execute an application or grant a
+These adapters reuse the bounded application and nested codecs while requiring
+a canonical cohort claim for active protocol 3; they cannot execute an application or grant a
 claim. A remote adapter must obtain expected identity/digests independently of
 the serialized request, and run the point guard before any application entry.
 """
