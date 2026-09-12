@@ -33,6 +33,9 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ("upgrade-qualification.yml", "data"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
+    ("upgrade-qualification.yml", "runtime-images"): (
+        "Path-selected runtime image proof is reviewed before the native upgrade gate"
+    ),
     (
         "application-qualification.yml",
         "application-core",

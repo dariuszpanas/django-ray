@@ -153,6 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Platform validation
 
+- Add installed-version upgrade-fixture preparation for the released 0.4 and
+  candidate 0.5 runtimes, with fixed observer commands, independent artifact
+  copies, bounded PostgreSQL backup/restore helpers, and inert historical reads.
+  This prepares the coordinated rehearsal; it does not claim completed drain,
+  native recovery, deployed cleanup, or release qualification.
 - Linux is the supported execution target. Broad Make test commands and direct pytest selections
   containing native-Ray cases reject non-Linux execution before launching work. Windows compatibility
   is observed through a small advisory GitHub Actions packaging/import lane. Focused resource-free

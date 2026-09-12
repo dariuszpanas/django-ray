@@ -1,0 +1,172 @@
+# syntax=docker/dockerfile:1
+# One image per epoch, shared by its manager, Ray nodes and observer Jobs.
+# The admitted builder supplies two Git archives through named build contexts.
+# This recipe neither runs Ray nor migrates a database. No floating image default.
+ARG PYTHON_IMAGE
+FROM ${PYTHON_IMAGE} AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
+ARG PYTHON_IMAGE
+ARG RUNTIME_BUILD
+ARG EXPECTED_PYTHON_VERSION
+ARG EPOCH_SOURCE_COMMIT
+ARG EPOCH_SOURCE_SHA256
+ARG QUALIFIER_SOURCE_COMMIT
+ARG QUALIFIER_SOURCE_SHA256
+ENV UV_PROJECT_ENVIRONMENT=/opt/runtime/venv UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=0 UV_PYTHON_DOWNLOADS=never
+COPY --from=epoch-source source.tar /build-input/epoch.tar
+COPY --from=qualifier-source source.tar /build-input/qualifier.tar
+RUN python - <<'VERIFY_ARCHIVES'
+import hashlib
+import json
+import os
+import platform
+import re
+import tarfile
+import tomllib
+from pathlib import Path
+
+def require(condition):
+    if not condition:
+        raise SystemExit("runtime-image-source-refused")
+
+def unpack(archive_path, destination, commit, digest):
+    require(re.fullmatch(r"[0-9a-f]{40}", commit) is not None)
+    require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None)
+    require(0 < archive_path.stat().st_size <= 128 * 1024 * 1024)
+    with archive_path.open("rb") as stream:
+        require(hashlib.file_digest(stream, "sha256").hexdigest() == digest)
+    with tarfile.open(archive_path) as archive:
+        require(archive.pax_headers.get("comment") == commit)
+        members = archive.getmembers()
+        require(0 < len(members) <= 10000)
+        require(sum(member.size for member in members) <= 256 * 1024 * 1024)
+        require(all(
+            not member.name.startswith("/")
+            and ".." not in Path(member.name).parts
+            and (member.isfile() or member.isdir())
+            for member in members
+        ))
+        archive.extractall(destination, filter="data")
+
+require(re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", os.environ["PYTHON_IMAGE"]) is not None)
+require(platform.python_implementation() == "CPython")
+require(re.fullmatch(r"3\.(12|13|14)\.(0|[1-9][0-9]{0,2})", os.environ["EXPECTED_PYTHON_VERSION"]) is not None)
+require(platform.python_version() == os.environ["EXPECTED_PYTHON_VERSION"])
+build = os.environ["RUNTIME_BUILD"]
+require(build in {"baseline", "candidate"})
+package, ray = ("0.4.0", "2.56.0") if build == "baseline" else ("0.5.0", "2.58.0")
+baseline = "95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485"
+require((os.environ["EPOCH_SOURCE_COMMIT"] == baseline) == (build == "baseline"))
+require(os.environ["QUALIFIER_SOURCE_COMMIT"] != baseline)
+require(build == "baseline" or os.environ["EPOCH_SOURCE_COMMIT"] == os.environ["QUALIFIER_SOURCE_COMMIT"])
+for name in ("epoch", "qualifier"):
+    prefix = name.upper() + "_SOURCE_"
+    unpack(Path("/build-input") / (name + ".tar"), Path("/build") / name,
+           os.environ[prefix + "COMMIT"], os.environ[prefix + "SHA256"])
+source = Path("/build/epoch")
+require(tomllib.loads((source / "pyproject.toml").read_text())["project"]["version"] == package)
+require(tomllib.loads(Path("/build/qualifier/pyproject.toml").read_text())["project"]["version"] == "0.5.0")
+lock = tomllib.loads((source / "uv.lock").read_text())
+require([entry["version"] for entry in lock["package"] if entry["name"] == "ray"] == [ray])
+Path("/build/identity.json").write_text(json.dumps({
+    "schema": 1, "build": build, "package_version": package, "ray_version": ray,
+    "python_version": platform.python_version(), "python_image": os.environ["PYTHON_IMAGE"],
+    "source_commit": os.environ["EPOCH_SOURCE_COMMIT"],
+    "source_archive_sha256": os.environ["EPOCH_SOURCE_SHA256"],
+    "qualifier_commit": os.environ["QUALIFIER_SOURCE_COMMIT"],
+    "qualifier_archive_sha256": os.environ["QUALIFIER_SOURCE_SHA256"],
+    "lock_sha256": hashlib.sha256((source / "uv.lock").read_bytes()).hexdigest(),
+}, sort_keys=True))
+VERIFY_ARCHIVES
+WORKDIR /build/epoch
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev --extra postgres \
+    && uv build --wheel --out-dir /build/wheels \
+    && uv pip install --python /opt/runtime/venv/bin/python \
+        --offline --no-index --no-deps /build/wheels/django_ray-*.whl
+# Verify the installed wheel against the epoch archive, independently of labels.
+RUN /opt/runtime/venv/bin/python - <<'VERIFY_INSTALL'
+import hashlib
+import importlib.metadata
+import json
+import platform
+import sys
+from pathlib import Path
+
+def require(condition):
+    if not condition:
+        raise SystemExit("runtime-image-install-refused")
+
+def package_digest(root):
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        require(not path.is_symlink())
+        if "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"} or not path.is_file():
+            continue
+        name, content = relative.as_posix().encode(), path.read_bytes()
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+import django_ray
+identity = json.loads(Path("/build/identity.json").read_text())
+installed = Path(django_ray.__file__).resolve().parent
+require(installed.is_relative_to(Path(sys.prefix).resolve()))
+require(importlib.metadata.version("django-ray") == django_ray.__version__ == identity["package_version"])
+require(importlib.metadata.version("ray") == identity["ray_version"])
+require(platform.python_version() == identity["python_version"])
+require(package_digest(installed) == package_digest(Path("/build/epoch/src/django_ray")))
+require(hashlib.sha256(Path("/build/epoch/uv.lock").read_bytes()).hexdigest() == identity["lock_sha256"])
+direct = json.loads(importlib.metadata.distribution("django-ray").read_text("direct_url.json"))
+require("archive_info" in direct and "dir_info" not in direct)
+wheels = list(Path("/build/wheels").glob("*.whl"))
+require(len(wheels) == 1)
+identity["wheel_sha256"] = hashlib.sha256(wheels[0].read_bytes()).hexdigest()
+identity["installed_package_tree_sha256"] = package_digest(installed)
+Path("/build/identity.json").write_text(json.dumps(identity, sort_keys=True))
+VERIFY_INSTALL
+
+FROM ${PYTHON_IMAGE} AS runtime
+# The supplied Python image must be the reviewed Debian trixie variant.
+# Only client tools are installed; PostgreSQL runs in its separate owned Pod.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-17=17.11-0+deb13u1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 runtime \
+    && useradd --uid 1000 --gid runtime --no-log-init --create-home runtime
+RUN for client in psql pg_dump pg_restore createdb; do \
+        /usr/lib/postgresql/17/bin/"$client" --version || exit 1; \
+    done
+ENV PATH=/opt/runtime/venv/bin:$PATH PYTHONPATH=/opt/qualifier \
+    HOME=/tmp PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    UV_PYTHON_DOWNLOADS=never RAY_USAGE_STATS_ENABLED=0 \
+    OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+COPY --from=builder /opt/runtime/venv /opt/runtime/venv
+COPY --from=builder /build/identity.json /opt/runtime/identity.json
+COPY --from=builder /build/wheels /opt/runtime/wheels
+# Curated assertion overlay: no epoch src tree, editable package, synthetic
+# phase entrypoint, sample settings, or generic-node proof in runtime imports.
+COPY --from=builder /build/qualifier/qualification/__init__.py /opt/qualifier/qualification/__init__.py
+COPY --from=builder /build/qualifier/qualification/docker/__init__.py /opt/qualifier/qualification/docker/__init__.py
+COPY --from=builder /build/qualifier/qualification/docker/scenario.py /opt/qualifier/qualification/docker/scenario.py
+COPY --from=builder /build/qualifier/qualification/upgrade/__init__.py /opt/qualifier/qualification/upgrade/__init__.py
+COPY --from=builder /build/qualifier/qualification/upgrade/contract.py /opt/qualifier/qualification/upgrade/contract.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_contract.py /opt/qualifier/qualification/upgrade/runtime_contract.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_tasks.py /opt/qualifier/qualification/upgrade/runtime_tasks.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_settings.py /opt/qualifier/qualification/upgrade/runtime_settings.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_steps.py /opt/qualifier/qualification/upgrade/runtime_steps.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_history.py /opt/qualifier/qualification/upgrade/runtime_history.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_history_settings.py /opt/qualifier/qualification/upgrade/runtime_history_settings.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_artifacts.py /opt/qualifier/qualification/upgrade/runtime_artifacts.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_database.py /opt/qualifier/qualification/upgrade/runtime_database.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_restore.py /opt/qualifier/qualification/upgrade/runtime_restore.py
+COPY --from=builder /build/qualifier/qualification/upgrade/runtime_scratch.py /opt/qualifier/qualification/upgrade/runtime_scratch.py
+WORKDIR /opt/qualifier
+USER 1000:1000
+# The fixed orchestrator overrides this for Ray, manager or observer. Missing
+# role prints help rather than starting a service or applying migrations.
+CMD ["python", "-m", "qualification.upgrade.runtime_steps", "--help"]

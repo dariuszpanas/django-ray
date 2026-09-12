@@ -1,0 +1,279 @@
+# Finite source templates, NOT a manifest to apply as a whole. The owned runner
+# selects one resource at a time, validates exact placeholders, and supplies only
+# its fixed manager/observer argv. It owns namespace/Secret creation, scratch DB,
+# artifact directories, phase ordering, observed cleanup and receipt collection.
+schema: 1
+requirements:
+  maxLiveRayGenerations: 1
+  maxLiveManagers: 1
+  maxLiveObservers: 1
+  # Verify a finite per-Pod PID ceiling in the admitted kubelet/runtime. Kubernetes
+  # has no portable Pod-spec pids_limit; this is admission evidence, not a limit
+  # that this YAML applies or permission to change the node configuration.
+  maxAdmittedPodPids: 1024
+  completeUpgradeGate: false
+templates:
+  postgres_pvc:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata: {name: postgres-data, namespace: '${namespace}'}
+    spec:
+      storageClassName: '${storageClass}'
+      accessModes: [ReadWriteOnce]
+      resources: {requests: {storage: 1Gi}}
+  artifact_pvc:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata: {name: runtime-artifacts, namespace: '${namespace}'}
+    spec:
+      storageClassName: '${storageClass}'
+      accessModes: [ReadWriteOnce]
+      resources: {requests: {storage: 1Gi}}
+  postgres_service:
+    apiVersion: v1
+    kind: Service
+    metadata: {name: postgres, namespace: '${namespace}'}
+    spec:
+      type: ClusterIP
+      selector: {app: upgrade-postgres}
+      ports: [{name: postgres, port: 5432, targetPort: 5432}]
+  postgres:
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata: {name: postgres, namespace: '${namespace}'}
+    spec:
+      replicas: 1
+      strategy: {type: Recreate}
+      selector: {matchLabels: {app: upgrade-postgres}}
+      template:
+        metadata: {labels: {app: upgrade-postgres}}
+        spec:
+          # This is the independently observed node's hostname label. Pin every
+          # PVC consumer identically, while retaining volume-aware scheduling.
+          nodeSelector: &node {kubernetes.io/hostname: '${admittedNode}'}
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 30
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+          - name: postgres
+            image: '${postgresImage}'
+            imagePullPolicy: IfNotPresent
+            args: [postgres, -c, max_connections=10, -c, shared_buffers=16MB,
+                   -c, work_mem=1MB, -c, temp_file_limit=32768,
+                   -c, max_wal_size=64MB, -c, min_wal_size=32MB]
+            resources:
+              requests: {cpu: 200m, memory: 512Mi, ephemeral-storage: 128Mi}
+              limits: {cpu: 200m, memory: 512Mi, ephemeral-storage: 128Mi}
+            securityContext: &containerSecurity
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities: {drop: [ALL]}
+            env:
+            - {name: POSTGRES_USER, value: '${postgresUser}'}
+            - {name: POSTGRES_DB, value: '${primaryDatabase}'}
+            - {name: POSTGRES_PASSWORD_FILE, value: /run/upgrade-secrets/postgres-password}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            ports: [{containerPort: 5432}]
+            readinessProbe:
+              exec: {command: [pg_isready, -h, 127.0.0.1, -p, '5432']}
+              periodSeconds: 3
+              timeoutSeconds: 2
+              failureThreshold: 20
+            volumeMounts:
+            - {name: postgres-data, mountPath: /var/lib/postgresql/data}
+            - {name: postgres-run, mountPath: /var/run/postgresql}
+            - {name: tmp, mountPath: /tmp}
+            - &secretMount {name: credentials, mountPath: /run/upgrade-secrets, readOnly: true}
+          volumes:
+          - {name: postgres-data, persistentVolumeClaim: {claimName: postgres-data}}
+          - {name: postgres-run, emptyDir: {sizeLimit: 16Mi}}
+          - {name: tmp, emptyDir: {sizeLimit: 32Mi}}
+          - &credentials
+            name: credentials
+            secret:
+              secretName: runtime-credentials
+              defaultMode: 0440
+              items:
+              - {key: postgres-password, path: postgres-password}
+              - {key: runtime-env-key, path: runtime-env-key}
+              - {key: django-secret-key, path: django-secret-key}
+  ray_service:
+    apiVersion: v1
+    kind: Service
+    metadata: {name: ray-head, namespace: '${namespace}'}
+    spec:
+      type: ClusterIP
+      selector: {app: upgrade-ray-head}
+      ports:
+      - {name: gcs, port: 6379, targetPort: 6379}
+      - {name: dashboard, port: 8265, targetPort: 8265}
+      - {name: client, port: 10001, targetPort: 10001}
+  ray:
+    apiVersion: ray.io/v1
+    kind: RayCluster
+    metadata:
+      name: ray
+      namespace: '${namespace}'
+      labels: {runtime-build: '${runtimeBuild}'}
+    spec:
+      rayVersion: '${epochRayVersion}'
+      enableInTreeAutoscaling: false
+      headGroupSpec:
+        serviceType: ClusterIP
+        rayStartParams:
+          num-cpus: '1'
+          num-gpus: '0'
+          object-store-memory: '134217728'
+          dashboard-host: 0.0.0.0
+          dashboard-port: '8265'
+          include-dashboard: 'true'
+        template:
+          metadata: {labels: {app: upgrade-ray-head}}
+          spec:
+            nodeSelector: *node
+            automountServiceAccountToken: false
+            terminationGracePeriodSeconds: 30
+            securityContext: &runtimeSecurity
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+              fsGroup: 1000
+              seccompProfile: {type: RuntimeDefault}
+            containers:
+            - name: ray-head
+              image: '${epochImage}'
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests: {cpu: 750m, memory: 5120Mi, ephemeral-storage: 1Gi}
+                limits: {cpu: 750m, memory: 5120Mi, ephemeral-storage: 1Gi}
+              securityContext: *containerSecurity
+              env: &runtimeEnv
+              - {name: DJANGO_SETTINGS_MODULE, value: '${settingsModule}'}
+              - {name: DJANGO_RAY_UPGRADE_BUILD, value: '${runtimeBuild}'}
+              - {name: DJANGO_RAY_UPGRADE_PYTHON_VERSION, value: '${epochPythonVersion}'}
+              - {name: DJANGO_RAY_UPGRADE_DATABASE, value: '${database}'}
+              - {name: DJANGO_RAY_UPGRADE_PRIMARY_DATABASE, value: '${primaryDatabase}'}
+              - {name: DJANGO_RAY_UPGRADE_SCRATCH_DATABASE, value: '${scratchDatabase}'}
+              - {name: DJANGO_RAY_UPGRADE_POSTGRES_HOST, value: postgres}
+              - {name: DJANGO_RAY_UPGRADE_POSTGRES_PORT, value: '5432'}
+              - {name: DJANGO_RAY_UPGRADE_POSTGRES_USER, value: '${postgresUser}'}
+              - {name: DJANGO_RAY_UPGRADE_POSTGRES_PASSWORD_FILE, value: /run/upgrade-secrets/postgres-password}
+              - {name: DJANGO_RAY_UPGRADE_ENCRYPTION_KEY_FILE, value: /run/upgrade-secrets/runtime-env-key}
+              - {name: DJANGO_SECRET_KEY_FILE, value: /run/upgrade-secrets/django-secret-key}
+              - {name: DJANGO_RAY_UPGRADE_CORE_ADDRESS, value: 'ray-head:6379'}
+              - {name: DJANGO_RAY_UPGRADE_JOBS_ADDRESS, value: 'http://ray-head:8265'}
+              - {name: DJANGO_RAY_UPGRADE_ARTIFACT_ROOT, value: /artifacts}
+              - {name: HOME, value: /tmp}
+              - {name: PYTHONDONTWRITEBYTECODE, value: '1'}
+              - {name: PYTHONUNBUFFERED, value: '1'}
+              - {name: RAY_USAGE_STATS_ENABLED, value: '0'}
+              - {name: OPENBLAS_NUM_THREADS, value: '1'}
+              - {name: OMP_NUM_THREADS, value: '1'}
+              - {name: MKL_NUM_THREADS, value: '1'}
+              volumeMounts: &rayMounts
+              - &artifactsMount {name: artifacts, mountPath: /artifacts}
+              - *secretMount
+              - {name: tmp, mountPath: /tmp}
+              - {name: shm, mountPath: /dev/shm}
+              ports: [{containerPort: 6379}, {containerPort: 8265}, {containerPort: 10001}]
+            volumes: &rayVolumes
+            - &artifacts {name: artifacts, persistentVolumeClaim: {claimName: runtime-artifacts}}
+            - *credentials
+            - {name: tmp, emptyDir: {sizeLimit: 1Gi}}
+            - {name: shm, emptyDir: {medium: Memory, sizeLimit: 128Mi}}
+      workerGroupSpecs:
+      - groupName: worker
+        replicas: 1
+        minReplicas: 1
+        maxReplicas: 1
+        rayStartParams: {num-cpus: '1', num-gpus: '0', object-store-memory: '134217728'}
+        template:
+          metadata: {labels: {app: upgrade-ray-worker}}
+          spec:
+            nodeSelector: *node
+            automountServiceAccountToken: false
+            terminationGracePeriodSeconds: 30
+            securityContext: *runtimeSecurity
+            containers:
+            - name: ray-worker
+              image: '${epochImage}'
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests: {cpu: 750m, memory: 1536Mi, ephemeral-storage: 1Gi}
+                limits: {cpu: 750m, memory: 1536Mi, ephemeral-storage: 1Gi}
+              securityContext: *containerSecurity
+              env: *runtimeEnv
+              volumeMounts: *rayMounts
+            volumes: *rayVolumes
+  manager:
+    apiVersion: batch/v1
+    kind: Job
+    metadata: {name: '${jobName}', namespace: '${namespace}'}
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1800
+      parallelism: 1
+      completions: 1
+      template:
+        metadata: {labels: {app: upgrade-manager, runtime-build: '${runtimeBuild}'}}
+        spec:
+          nodeSelector: *node
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 30
+          securityContext: *runtimeSecurity
+          containers:
+          - name: manager
+            image: '${epochImage}'
+            imagePullPolicy: IfNotPresent
+            command: [python, -m, django, django_ray_worker]
+            # Renderer chooses Core/Jobs only, exact queue/concurrency/connection.
+            args: '${managerArgs}'
+            resources:
+              requests: {cpu: 250m, memory: 768Mi, ephemeral-storage: 256Mi}
+              limits: {cpu: 250m, memory: 768Mi, ephemeral-storage: 256Mi}
+            securityContext: *containerSecurity
+            env: *runtimeEnv
+            volumeMounts: &jobMounts
+            - *artifactsMount
+            - *secretMount
+            - {name: tmp, mountPath: /tmp}
+          volumes: &jobVolumes
+          - *artifacts
+          - *credentials
+          - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+  observer:
+    apiVersion: batch/v1
+    kind: Job
+    metadata: {name: '${jobName}', namespace: '${namespace}'}
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      parallelism: 1
+      completions: 1
+      template:
+        metadata: {labels: {app: upgrade-observer, runtime-build: '${runtimeBuild}'}}
+        spec:
+          nodeSelector: *node
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 30
+          securityContext: *runtimeSecurity
+          containers:
+          - name: observer
+            image: '${epochImage}'
+            imagePullPolicy: IfNotPresent
+            command: [python, -m, qualification.upgrade.runtime_steps]
+            args: '${observerArgs}'
+            resources:
+              requests: {cpu: 200m, memory: 512Mi, ephemeral-storage: 256Mi}
+              limits: {cpu: 200m, memory: 512Mi, ephemeral-storage: 256Mi}
+            securityContext: *containerSecurity
+            env: *runtimeEnv
+            volumeMounts: *jobMounts
+          volumes: *jobVolumes

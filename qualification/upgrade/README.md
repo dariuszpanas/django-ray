@@ -139,6 +139,105 @@ Linux CI checkpoint and exact-source application/release evidence remain require
 Mixed-version running cohorts, live ObjectRef migration and two-cluster handoff
 are outside the coordinated Beta commitment.
 
+## Native runtime fixture preparation
+
+The `runtime_*` modules, `RuntimeDockerfile`, and `runtime.yaml` prepare the
+separate real-execution stage. They do **not yet provide an end-to-end runner**.
+Do not apply the entire template document or treat its unit tests as a passing
+upgrade rehearsal.
+
+The image recipe installs the exact released 0.4.0/Ray 2.56.0 or candidate
+0.5.0/Ray 2.58.0 environment, then adds only the reviewed qualification modules.
+`runtime_source.prepare_runtime_sources` exports clean committed Git sources and
+returns build arguments; it does not run Docker. Installed package bytes must
+match the corresponding archive, and candidate source must not shadow the
+released wheel in baseline observers.
+
+The `Upgrade Runtime Images` hosted job builds those two recipes sequentially,
+checks the PostgreSQL client executables during build, and probes installed
+identities in bounded containers with networking disabled. It retains source
+and image receipts separately from database preservation. A passing image job
+does not execute scratch creation, backup/restore, Ray, or the native rehearsal.
+
+`runtime_tasks` supplies finite success, failure, cancellation, retry, gated
+recovery, and two-leaf workflow cases. `runtime_steps` uses real public enqueue
+and cancellation APIs and compares actual stored model fields. Its blocked
+migration check runs against the restored scratch database: a released observer
+captures that clone before the candidate attempts activation. Sampling primary
+before a backup would race with the old manager's heartbeat timestamps.
+
+`runtime_history` reads retained payloads and encrypted RuntimeEnv through the
+installed version. Candidate history reads also reject callable imports,
+historical task re-enqueue, and unsupported-protocol retry. Legacy workflow
+presentation remains `LEGACY_ONLY`; it does not establish schema-v3 graph or
+HTML rendering support. The admin page loads workflow diagnostics lazily through
+JavaScript, so rendering its initial template alone cannot prove that the retained
+legacy state is visible to an operator.
+
+The resource template requires one admitted node, one PostgreSQL server, one
+live Ray generation, one manager, and one observer at a time. Two 1 GiB PVCs hold
+the database and artifacts. The declared peak is 2.15 CPU and 8448 MiB memory,
+excluding operator and build resources. Those declarations are admission inputs;
+rendering a manifest does not reserve capacity or establish a Pod PID limit.
+
+Before writers start, `runtime_artifacts.bind_artifact_store` binds the empty
+prepared artifact root to the orchestrator's observed run digest. Artifact
+backups copy only `inputs`, `results`, `runtime-effects`, and `observations`.
+The blocked and final copies are distinct; rollback always restores the original
+final copy. Each restore uses new files and an exact bounded inventory, refuses
+existing or incomplete destinations, and publishes its completion record last.
+This proves copied bytes only. It does not authenticate the PVC, snapshot the
+database, retire a writer, or establish database/artifact consistency.
+
+Scratch observers mount only the fixed `.upgrade-restores/blocked`, `final`, or
+`rollback` subPath at `/artifacts`. Primary managers and Ray nodes keep the root
+mount, so persisted paths and encrypted profiles stay unchanged. The renderer
+requires the appropriate restore point; it never creates or verifies a copy.
+The caller must finish and verify both the database and artifact restoration
+before launching a scratch reader. A kubelet-created empty subPath is not proof.
+
+`runtime_database.backup_database` uses fixed PostgreSQL 17 client commands to
+corroborate the observed primary database identity and produce a bounded custom
+dump alongside its matching artifact backup. `runtime_restore.restore_database`
+accepts only an already created, empty scratch database with the expected OID.
+It restores in one transaction and retains failed attempt reservations. Neither
+helper creates or drops databases, stops foreign sessions, or proves that the
+previous scratch observer has exited. The host must establish that ownership
+and sequencing before calling the helper. A successful restore still needs the
+fresh released-history reader; mock client tests are not native SQL evidence.
+
+The fixed `runtime_steps` commands are `bind-store`, `backup-artifacts`,
+`restore-artifacts`, `backup-database`, `restore-database`, and `create-scratch`.
+Each accepts only
+its exact `RuntimeStoreArguments` fields: a run digest, a fixed restore point,
+the relevant artifact/dump digests, and observed PostgreSQL identifiers where
+needed. Missing and unused arguments are refused. The manifest renderer accepts
+that same typed argument object as `store_arguments`, so its generated command
+and the runtime parser share the same validation. These commands use the
+baseline image, primary settings, and PVC-root mount; the database restore
+helper internally selects only the validated scratch target. They never run
+Django setup or a manager. Subsequent scratch readers use the separate restored
+subPath selection described above.
+
+`create-scratch` corroborates the primary PostgreSQL identity, refuses an
+existing scratch database, and reserves the attempt before calling the fixed
+PostgreSQL 17 `createdb` client. It uses `template0`, then checks the new OID,
+owner, empty schema, and absence of other sessions before publishing its receipt.
+An interrupted or failed attempt cannot be retried or adopted automatically.
+The host still has to own the server and serialize observers; these checks do
+not fence an external administrator. Scratch reset/drop and host sequencing
+remain unimplemented. No native creation has been executed by the local tests.
+
+Still required: Linux backup/restore execution with exact scratch ownership,
+scratch reset and the source-owned host orchestrator, real phase
+observations, old-writer and Ray retirement, manager-loss recovery without
+resubmission, current Core/Jobs
+completion, rendered historical reads, rollback refusal and data-loss evidence,
+and verified cleanup. `runtime_contract` validates receipt structure and
+consistency; it cannot authenticate observations. These helpers always retain
+`complete_upgrade_gate: false`; the full release acceptance requires its own
+independent assessment.
+
 ## Separate runtime preservation boundaries
 
 The current runtime closes the old generic execution entries when protocol 3 is

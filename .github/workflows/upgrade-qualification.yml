@@ -25,6 +25,110 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  runtime-images:
+    name: Upgrade Runtime Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Export and build the two committed runtime images
+        timeout-minutes: 21
+        run: |
+          set -euo pipefail
+          # The disposable hosted VM bounds sequential builds. No shared cluster
+          # or database is used, and this is not deployed upgrade acceptance.
+          python -m qualification.upgrade.runtime_source "$RUNNER_TEMP/runtime-images" \
+            --python-image python@sha256:2fe5997d249a808b8eeea52c58a1dbffbba28754dc11699ef5c029f2d818ce79 \
+            --python-version 3.12.14
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "runtime-images"
+          plan = json.loads((root / "source-plan.json").read_text())
+          for epoch in ("baseline", "candidate"):
+              command = plan["build_argv"][epoch]
+              expected = f"type=oci,dest={root / (epoch + '.oci.tar')}"
+              assert command.count("--output") == 1
+              index = command.index("--output") + 1
+              assert command[index] == expected
+              command[index] = f"type=docker,name=django-ray-upgrade-{epoch}:local"
+              command[3:3] = ["--platform", "linux/amd64", "--provenance=false"]
+              subprocess.run(command, check=True, timeout=600)
+          PY
+
+      - name: Verify installed image identities without networking or Ray startup
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "runtime-images"
+          plan = json.loads((root / "source-plan.json").read_text())
+          probe = '''import importlib.metadata as m, json, platform
+          from pathlib import Path
+          import django_ray
+          identity = json.loads(Path('/opt/runtime/identity.json').read_text())
+          assert django_ray.__version__ == m.version('django-ray') == identity['package_version']
+          assert m.version('ray') == identity['ray_version']
+          assert platform.python_version() == identity['python_version']
+          assert Path(django_ray.__file__).resolve().is_relative_to('/opt/runtime/venv')
+          print(json.dumps(identity))
+          '''
+          for epoch in ("baseline", "candidate"):
+              result = subprocess.run([
+                  "docker", "run", "--rm", f"--name=upgrade-image-{epoch}",
+                  "--network=none", "--read-only",
+                  "--cpus=0.5", "--memory=512m", "--memory-swap=512m", "--pids-limit=128",
+                  "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                  "--tmpfs=/tmp:rw,nosuid,nodev,size=32m,mode=1777",
+                  f"django-ray-upgrade-{epoch}:local", "python", "-c", probe,
+              ], check=True, capture_output=True, text=True, timeout=30)
+              assert not result.stderr and len(result.stdout) < 16384
+              identity = json.loads(result.stdout)
+              source = plan["sources"][epoch]
+              assert identity["build"] == epoch
+              assert identity["source_commit"] == source["commit"]
+              assert identity["source_archive_sha256"] == source["archive_sha256"]
+              assert identity["qualifier_commit"] == plan["sources"]["candidate"]["commit"]
+              assert identity["lock_sha256"] == source["lock_sha256"]
+              assert identity["python_image"] == plan["python_image"]
+              receipt = {"identity": identity, "complete_upgrade_gate": False}
+              (root / f"{epoch}-image-identity.json").write_text(json.dumps(receipt, indent=2))
+          PY
+
+      - name: Remove owned image probes after success or timeout
+        if: always()
+        run: |
+          set -euo pipefail
+          for epoch in baseline candidate; do
+            if docker container inspect "upgrade-image-$epoch" >/dev/null 2>&1; then
+              docker container rm --force "upgrade-image-$epoch"
+            fi
+          done
+
+      - name: Retain source and image evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upgrade-runtime-images
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/runtime-images/source-plan.json
+            ${{ runner.temp }}/runtime-images/*-image-identity.json
+
   data:
     name: Upgrade Data Qualification
     runs-on: ubuntu-latest
