@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 import textwrap
 import tomllib
 from pathlib import Path
@@ -45,6 +47,38 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
 
 def _workflow_paths() -> list[Path]:
     return sorted(path for path in WORKFLOWS.iterdir() if path.suffix in {".yml", ".yaml"})
+
+
+@pytest.mark.parametrize(
+    "limit,accepted",
+    [(1024, True), (-1, False), (0, False), (2048, False), (True, False), ("1024", False)],
+)
+def test_hosted_kind_pid_ceiling_is_configured_and_effectively_verified(limit, accepted):
+    configuration = yaml.safe_load(
+        (PROJECT_ROOT / "qualification/application/kind.yaml").read_text()
+    )
+    (node,) = configuration["nodes"]
+    (patch,) = node["kubeadmConfigPatches"]
+    assert yaml.safe_load(patch)["podPidsLimit"] == 1024
+    workflow = _workflow(WORKFLOWS / "application-qualification.yml")
+    step = next(
+        step
+        for step in workflow["jobs"]["application-core"]["steps"]
+        if step.get("name") == "Create a bounded disposable Kind cluster"
+    )
+    command = step["run"]
+    assert "--config qualification/application/kind.yaml" in command
+    assert command.index("proxy/configz") < command.index("helm install")
+    program = re.search(r"python -c '([^']+)'", command).group(1)
+    result = subprocess.run(
+        [sys.executable, "-I", "-O", "-c", program],
+        input=json.dumps({"kubeletconfig": {"podPidsLimit": limit}}),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert (result.returncode == 0) is accepted
 
 
 def _workflow(path: Path = CI_WORKFLOW) -> dict[str, Any]:

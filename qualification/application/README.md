@@ -107,6 +107,12 @@ Its existence or resource-free unit tests do not establish a passing live generi
 
 ## Offline application core stage
 
+The hosted workflow creates its disposable Kind node with `kind.yaml`, setting
+`podPidsLimit: 1024`. It reads the effective kubelet configuration and refuses a
+missing, unlimited, or different limit before installing workload resources.
+This complements the existing 3-CPU, 12-GiB node bound. It does not configure or
+authorize changes to the shared local Docker Desktop cluster.
+
 `core.yaml` is a native public Chainsaw Test. Its sixteen steps start disposable PostgreSQL 17,
 prepare the sample web application and locked recovery archives, and start one current core task
 manager with stock Ray 2.58.0 head/worker nodes. Two serial Jobs require authenticated API execution,

@@ -126,8 +126,12 @@ jobs:
         timeout-minutes: 10
         run: |
           kind create cluster --name application-core --wait 180s \
+            --config qualification/application/kind.yaml \
             --image kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
           docker update --cpus=3 --memory=12g --memory-swap=12g application-core-control-plane
+          kubectl --context kind-application-core --request-timeout=15s \
+            get --raw /api/v1/nodes/application-core-control-plane/proxy/configz | \
+            python -c 'import json,sys; raw=sys.stdin.buffer.read(65537); value=json.loads(raw)["kubeletconfig"]["podPidsLimit"] if len(raw)<=65536 else None; sys.exit("Hosted pod PID ceiling refused") if type(value) is not int or value!=1024 else print("Verified hosted pod PID ceiling:",value)'
           # Public Kind local-registry configuration; the registry stays loopback-only on the host.
           docker network connect kind application-registry
           docker exec application-core-control-plane mkdir -p /etc/containerd/certs.d/localhost:5001
