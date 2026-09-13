@@ -11,6 +11,11 @@ from django.tasks import task
 
 @task
 def controlled(case, payload):
+    import ray
+
+    import django_ray
+
+    assert ray.__version__ == ("2.56.0" if django_ray.__version__ == "0.4.0" else "2.58.0")
     if settings.RUNNER == "ray_job":
         assert os.environ.get("QUALIFICATION_RUNTIME_MARKER") == "delivered"
         bundle = importlib.import_module("upgrade_bundle")
@@ -28,4 +33,8 @@ def controlled(case, payload):
         time.sleep(0.05)
     if case == "failure" or (case == "retry" and not (settings.ROOT / "retry-again").exists()):
         raise ValueError("expected qualification failure")
+    if case == "success":
+        from qualification.upgrade.native_workflow import run
+
+        return run(payload)
     return {"value": 42, "payload": payload}

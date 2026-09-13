@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import signal
 import subprocess
@@ -13,20 +14,36 @@ TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"}
 PAYLOAD = "native-upgrade:" + "x" * 2048
 
 
-def snapshot(fields=None, identities=None):
+def snapshot(fields=None, expected=None):
+    from django.apps import apps
     from django.core.serializers.json import DjangoJSONEncoder
 
     from django_ray.models import RayTaskExecution, TaskAttempt
 
+    class Encoder(DjangoJSONEncoder):
+        def default(self, o):
+            if isinstance(o, (bytes, memoryview)):
+                return {"base64": base64.b64encode(o).decode()}
+            return super().default(o)
+
+    models = [RayTaskExecution, TaskAttempt]
+    models.extend(
+        model
+        for model in apps.get_app_config("django_ray").get_models()
+        if model.__name__.startswith("WorkflowProgress")
+    )
     result = {}
-    for model in (RayTaskExecution, TaskAttempt):
+    for model in models:
+        if fields is not None and model.__name__ not in fields:
+            continue
         names = fields[model.__name__] if fields else [f.attname for f in model._meta.fields]
         query = model.objects.order_by("pk")
-        if identities is not None:
-            key = "task_id" if model is RayTaskExecution else "execution__task_id"
-            query = query.filter(**{key + "__in": identities})
+        if expected is not None:
+            query = query.filter(
+                pk__in=[row[model._meta.pk.attname] for row in expected[model.__name__]["rows"]]
+            )
         result[model.__name__] = {"fields": names, "rows": list(query.values(*names))}
-    return json.loads(json.dumps(result, cls=DjangoJSONEncoder))
+    return json.loads(json.dumps(result, cls=Encoder))
 
 
 def read_history(root, history_file="history.json"):
@@ -40,7 +57,7 @@ def read_history(root, history_file="history.json"):
     expected = json.loads((root / history_file).read_text())
     ids = [r["task_id"] for r in expected["RayTaskExecution"]["rows"]]
     fields = {name: value["fields"] for name, value in expected.items()}
-    assert snapshot(fields, ids) == expected, "historical rows changed"
+    assert snapshot(fields, expected) == expected, "historical rows changed"
     for identity in ids:
         row = RayTaskExecution.objects.get(task_id=identity)
         if settings.RUNNER == "ray_job":
@@ -71,6 +88,11 @@ def read_history(root, history_file="history.json"):
             input_reference=row.input_reference,
         )
         assert args[1] == PAYLOAD and kwargs == {}
+        if args[0] == "success":
+            from qualification.upgrade.native_workflow import read_graph
+
+            assert row.workflow_run_id is not None
+            read_graph(row)
         result = task_backends["default"].get_result(identity)
         assert result.id == identity
         if row.state == "SUCCEEDED":
@@ -79,6 +101,7 @@ def read_history(root, history_file="history.json"):
                 "value": 42,
                 "payload": PAYLOAD,
             }
+    assert snapshot(fields, expected) == expected, "history reads changed stored records"
     return len(ids)
 
 
@@ -86,7 +109,7 @@ def run_work(root):
     import ray
     from django.conf import settings
     from django.core.management import call_command
-    from django.db import connections
+    from django.db import connection, connections
 
     from django_ray.lifecycle import request_task_cancellation, retry_task
     from django_ray.models import RayTaskExecution, TaskWorkerLease
@@ -102,6 +125,10 @@ def run_work(root):
     ):
         (root / name).unlink(missing_ok=True)
     call_command("migrate", verbosity=0)
+    if connection.vendor == "sqlite":
+        with connection.cursor() as cursor:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            assert cursor.fetchone() == ("wal",)
     tasks = {
         case: controlled.enqueue(case, PAYLOAD)
         for case in ("success", "failure", "retry", "cancelled")
@@ -295,6 +322,13 @@ def main():
     if settings.RUNNER == "ray_job":
         observations["encrypted_runtime_env_preserved"] = True
         observations["missing_and_wrong_keys_rejected"] = True
+    from django.db import connection
+
+    graph_refused = phase == "baseline-post-write" and connection.vendor == "postgresql"
+    observations["workflow_graphs_read"] = (
+        0 if graph_refused else (2 if phase == "baseline-post-write" else 1)
+    )
+    observations["read_only_graph_lock_refused"] = graph_refused
     Path(receipt).write_text(
         json.dumps(
             {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
 import secrets
 import shutil
 import sys
@@ -25,7 +26,10 @@ def phase(root, backend, name, target, *, database, artifacts, runner):
         {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": str(root / f"{database}.sqlite3"),
-            "OPTIONS": {"timeout": 20},
+            "OPTIONS": {
+                "timeout": 20,
+                **({"transaction_mode": "IMMEDIATE"} if name.endswith("-run") else {}),
+            },
         }
         if backend == "sqlite"
         else {
@@ -39,6 +43,7 @@ def phase(root, backend, name, target, *, database, artifacts, runner):
     )
     env = wheel._subprocess_environment(install_target=target, source_root=data.ROOT)
     env.update(
+        PATH=str(python.parent) + os.pathsep + env.get("PATH", ""),
         DJANGO_SETTINGS_MODULE="qualification.upgrade.native_settings",
         DJANGO_RAY_UPGRADE_ROOT=str(root),
         DJANGO_RAY_UPGRADE_CONFIG=json.dumps(

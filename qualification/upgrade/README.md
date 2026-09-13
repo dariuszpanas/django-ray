@@ -152,6 +152,8 @@ all eight old/current task records, attempts and input/result artifacts. This
 extends the enqueue-only rollback fixture with actual completed work. It does
 not restart old managers or qualify old execution of current request carriers.
 
+Python executable selection follows each phase's installed environment through
+`PATH`, and remote tasks assert the corresponding Ray version.
 The Jobs recipe stores its RuntimeEnv as an encrypted snapshot and ships a tiny
 Python module in a local ZIP. Successful remote work must import that module from
 the delivered working directory. A temporary key stays separately in the owned
@@ -160,6 +162,19 @@ Old and current readers decrypt retained snapshots after restore, while missing
 or incorrect keys must fail before application invocation. The archive is covered
 by the existing artifact backup/digest checks. This does not qualify key rotation
 or replace the separate manager-crash recovery requirement.
+
+The success task also executes a two-step Ray workflow with schema-v3 reporting
+explicitly enabled. The snapshot includes its run, topology and node-detail rows,
+including binary page content. Each version's own authorized progress readers and
+admin graph projection must produce a complete two-node, one-edge successful graph
+after restore. Old read-only SQLite code checks both old and candidate-created
+graphs. On PostgreSQL, the released reader requests row locks; the final read-only
+phase verifies its SQLSTATE 25006 refusal instead of claiming graph access. Stored
+workflow rows still match, and earlier restored old/current graph reads pass.
+This exercises the admin's graph data, not a browser-rendering test.
+SQLite execution phases use WAL and immediate transactions for the concurrent
+manager/progress writers; read-only phases retain ordinary read transactions.
+PostgreSQL remains the multi-connection coordination evidence.
 
 Every receipt always contains `complete_upgrade_gate: false` and the remaining
 acceptance list. A successful database stage does not close #381. Before release:

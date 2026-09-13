@@ -23,6 +23,7 @@ DJANGO_RAY = {
     "DEFAULT_CONCURRENCY": 1,
     "MAX_TASK_ATTEMPTS": 1,
     "WORKER_HEARTBEAT_SECONDS": 2,
+    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     "MAX_INLINE_INPUT_SIZE_BYTES": 1024,
     "INPUT_STORAGE_BACKEND": "filesystem",
     "INPUT_STORAGE_FILESYSTEM_PATH": str(Path(CONFIG["artifacts"]) / "inputs"),
@@ -39,6 +40,7 @@ if RUNNER == "ray_job":
     DJANGO_RAY["RAY_RUNTIME_ENV"] = {
         "working_dir": str(Path(CONFIG["artifacts"]) / "runtime.zip"),
         "env_vars": {
+            "PATH": os.environ["PATH"],
             "DJANGO_SETTINGS_MODULE": "qualification.upgrade.native_settings",
             "DJANGO_RAY_UPGRADE_ROOT": str(ROOT),
             "DJANGO_RAY_UPGRADE_CONFIG": os.environ["DJANGO_RAY_UPGRADE_CONFIG"],
