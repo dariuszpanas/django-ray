@@ -72,6 +72,11 @@ absent there. These are separate checks:
 
 ## Qualification still required
 
+The released 0.4.0 workflow topology reader uses `SELECT FOR UPDATE`. PostgreSQL
+rejects that operation in a read-only transaction, so read-only code rollback
+does not provide full workflow graph access. Retain the database fence; use the
+qualified current reader for graph access rather than enabling old writers.
+
 The [database recipe](https://github.com/dariuszpanas/django-ray/blob/main/qualification/upgrade/README.md) is bounded to SQLite
 and PostgreSQL with no Ray process or manager. Its receipt deliberately retains
 `complete_upgrade_gate: false`. Complete the deployed old-manager drain,
