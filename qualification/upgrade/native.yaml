@@ -1,0 +1,18 @@
+# Opt-in only; this does not add a routine hosted test matrix.
+services:
+  tools:
+    extends:
+      file: data.yaml
+      service: tools
+  native:
+    extends:
+      file: data.yaml
+      service: data
+    command: [python, -m, qualification.upgrade.native_scenario]
+    cpus: 2.0
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 1024
+    shm_size: 512m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=3g,mode=1777

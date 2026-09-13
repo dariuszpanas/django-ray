@@ -117,6 +117,29 @@ stage. The caller's Compose trap removes the container after failure or cancella
 
 ## Remaining release acceptance
 
+### Opt-in native Core rehearsal
+
+`native.yaml` adds a sequential real-manager rehearsal on the same exact released
+and candidate wheels. It is not part of the routine hosted matrix. Use the source
+export and baseline preparation above, select `qualification/upgrade/native.yaml`,
+and build/run service `native` under an outer 1,200-second timeout. The native
+service requires two CPUs, 8 GiB RAM without swap, 1,024 PIDs, 512 MiB shared
+memory and 3 GiB temporary storage. The container has no external network.
+
+For each of SQLite and PostgreSQL it observes queued and running blockers, runs
+success/failure/retry work with the old manager, cancels queued work through the
+old lifecycle, and requires terminal rows and inactive leases after the manager
+stops. Ray itself is shut down before backup. The database and external input/result
+artifacts are independently restored; old code reads that restore before candidate
+migrations and current Core execution. Original task/attempt fields and artifacts
+are checked through the installed versions' APIs.
+
+This opt-in stage is under qualification. Its receipt keeps
+`complete_upgrade_gate: false`: Core task preservation does not supply Jobs,
+workflow rendering, encrypted RuntimeEnv, uncertain-outcome reconciliation,
+manager-crash recovery or execution-retirement proof. Keep the database-only
+recipe's independent rollback evidence alongside this additional runtime stage.
+
 Every receipt always contains `complete_upgrade_gate: false` and the remaining
 acceptance list. A successful database stage does not close #381. Before release:
 
