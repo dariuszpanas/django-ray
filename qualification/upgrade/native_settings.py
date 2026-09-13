@@ -10,10 +10,16 @@ SECRET_KEY = "disposable-native-upgrade"
 USE_TZ = True
 INSTALLED_APPS = ["django_ray"]
 DATABASES = {"default": CONFIG["database"]}
-TASKS = {"default": {"BACKEND": "django_ray.backends.RayTaskBackend"}}
+RUNNER = CONFIG.get("runner", "ray_core")
+TASKS = {
+    "default": {
+        "BACKEND": "django_ray.backends.RayTaskBackend",
+        "OPTIONS": {"RAY_JOB_ONLY": RUNNER == "ray_job"},
+    }
+}
 DJANGO_RAY = {
-    "RUNNER": "ray_core",
-    "RAY_ADDRESS": "auto",
+    "RUNNER": RUNNER,
+    "RAY_ADDRESS": "http://127.0.0.1:8265" if RUNNER == "ray_job" else "auto",
     "DEFAULT_CONCURRENCY": 1,
     "MAX_TASK_ATTEMPTS": 1,
     "WORKER_HEARTBEAT_SECONDS": 2,
@@ -24,3 +30,13 @@ DJANGO_RAY = {
     "RESULT_STORAGE_BACKEND": "filesystem",
     "RESULT_STORAGE_FILESYSTEM_PATH": str(Path(CONFIG["artifacts"]) / "results"),
 }
+if RUNNER == "ray_job":
+    DJANGO_RAY["RAY_RUNTIME_ENV"] = {
+        "env_vars": {
+            "DJANGO_SETTINGS_MODULE": "qualification.upgrade.native_settings",
+            "DJANGO_RAY_UPGRADE_ROOT": str(ROOT),
+            "DJANGO_RAY_UPGRADE_CONFIG": os.environ["DJANGO_RAY_UPGRADE_CONFIG"],
+            "PYTHONPATH": os.environ["PYTHONPATH"],
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    }

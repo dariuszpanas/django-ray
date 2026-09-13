@@ -1,0 +1,11 @@
+# Separate opt-in Jobs run; preserves the native recipe's resource bounds.
+services:
+  tools:
+    extends:
+      file: data.yaml
+      service: tools
+  jobs:
+    extends:
+      file: native.yaml
+      service: native
+    command: [python, -m, qualification.upgrade.native_scenario, --runner, ray_job]

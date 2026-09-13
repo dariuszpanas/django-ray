@@ -15,7 +15,7 @@ from qualification.upgrade.contract import BACKENDS, BASELINE_COMMIT, MISSING
 from qualification.upgrade.prepare import verify_archive
 
 
-def phase(root, backend, name, target, *, database, artifacts):
+def phase(root, backend, name, target, *, database, artifacts, runner):
     released = name.startswith("baseline")
     python = data.RELEASED_PYTHON if released else Path(sys.executable)
     db = (
@@ -38,7 +38,9 @@ def phase(root, backend, name, target, *, database, artifacts):
     env.update(
         DJANGO_SETTINGS_MODULE="qualification.upgrade.native_settings",
         DJANGO_RAY_UPGRADE_ROOT=str(root),
-        DJANGO_RAY_UPGRADE_CONFIG=json.dumps({"database": db, "artifacts": str(artifacts)}),
+        DJANGO_RAY_UPGRADE_CONFIG=json.dumps(
+            {"database": db, "artifacts": str(artifacts), "runner": runner}
+        ),
         RAY_USAGE_STATS_ENABLED="0",
     )
     receipt = root / f"{name}.json"
@@ -56,7 +58,7 @@ def phase(root, backend, name, target, *, database, artifacts):
     return value
 
 
-def backend(parent, name, targets):
+def backend(parent, name, targets, runner):
     with tempfile.TemporaryDirectory(prefix=f"native-{name}-", dir=parent) as directory:
         root = Path(directory)
         artifacts = root / "artifacts"
@@ -70,6 +72,7 @@ def backend(parent, name, targets):
                     targets["released"],
                     database="baseline",
                     artifacts=artifacts,
+                    runner=runner,
                 )
             ]
             backup_digest = data._backup(root, name)
@@ -82,10 +85,17 @@ def backend(parent, name, targets):
                 ("baseline-read", "released"),
                 ("candidate-read", "candidate"),
                 ("candidate-run", "candidate"),
+                ("baseline-post-write", "released"),
             ):
                 phases.append(
                     phase(
-                        root, name, step, targets[version], database="restored", artifacts=restored
+                        root,
+                        name,
+                        step,
+                        targets[version],
+                        database="restored",
+                        artifacts=restored,
+                        runner=runner,
                     )
                 )
             assert wheel._sha256(root / "backup") == backup_digest
@@ -99,7 +109,9 @@ def backend(parent, name, targets):
     }
 
 
-def execute():
+def execute(runner="ray_core"):
+    if runner not in {"ray_core", "ray_job"}:
+        raise ValueError("unsupported qualification runner")
     evidence = Path("/evidence")
     wheel._ensure_evidence_root(evidence)
     wheel._require_non_root()
@@ -122,7 +134,7 @@ def execute():
                 identities[name] = data._identity(python, selected, target, source)
                 targets[name] = target
             for name in BACKENDS:
-                results.append(backend(fixture, name, targets))
+                results.append(backend(fixture, name, targets, runner))
             for name, target in targets.items():
                 assert (
                     wheel._package_tree_digest(target / "django_ray")
@@ -136,6 +148,7 @@ def execute():
     manifest = {
         "schema": "django-ray.coordinated-beta-native-upgrade",
         "schema_version": 1,
+        "runner": runner,
         "outcome": "passed" if failure is None else "failed",
         "failure": failure,
         "baseline_commit": BASELINE_COMMIT,
@@ -153,6 +166,6 @@ def execute():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 1:
-        raise SystemExit("native upgrade qualification accepts no arguments")
-    raise SystemExit(execute())
+    if sys.argv[1:] not in ([], ["--runner", "ray_job"]):
+        raise SystemExit("expected no arguments or --runner ray_job")
+    raise SystemExit(execute("ray_job" if sys.argv[1:] else "ray_core"))

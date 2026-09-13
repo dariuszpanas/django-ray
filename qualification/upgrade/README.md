@@ -140,6 +140,18 @@ workflow rendering, encrypted RuntimeEnv, uncertain-outcome reconciliation,
 manager-crash recovery or execution-retirement proof. Keep the database-only
 recipe's independent rollback evidence alongside this additional runtime stage.
 
+`jobs.yaml` selects service `jobs` for the same sequence using real Ray Jobs
+instead of Core. The owned Ray dashboard listens only inside the no-network
+container, and each Job receives the selected installed package and disposable
+settings through its RuntimeEnv. Jobs run serially through the actual manager;
+the receipt identifies the runner. No Ray Client connection is used.
+
+Both runtime recipes finish with a fresh 0.4.0 reader after candidate execution.
+Database-enforced read-only mode retains migrations through `0026` and checks
+all eight old/current task records, attempts and input/result artifacts. This
+extends the enqueue-only rollback fixture with actual completed work. It does
+not restart old managers or qualify old execution of current request carriers.
+
 Every receipt always contains `complete_upgrade_gate: false` and the remaining
 acceptance list. A successful database stage does not close #381. Before release:
 
