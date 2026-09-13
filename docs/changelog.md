@@ -82,6 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade from 0.4.0
 
+- Add the [0.4-to-0.5 upgrade procedure](deployment/upgrading-0.5.md) and opt-in
+  SQLite/PostgreSQL rehearsals for backup/restore, old-code reads after candidate
+  writes, workflow graph data and encrypted RuntimeEnv artifacts. Jobs crash recovery
+  preserves the same Job identity; Core manager-plus-Ray loss requires a visible
+  `LOST` outcome before an explicit fixture retry. These checks do not certify the
+  complete coordinated upgrade or safe replay of unknown external effects.
+- Document the released 0.4 PostgreSQL workflow reader's read-only rollback limit:
+  its topology query requires row locks and is rejected by a read-only transaction.
+  Preserve the database fence instead of enabling old writers to display a graph.
 - Durable backend result reads no longer import stored callable paths. They remain
   readable after a callable or queue is removed and preserve matching-task checks
   using successfully validated application declarations. Fetched results now contain
