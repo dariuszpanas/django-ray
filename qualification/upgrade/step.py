@@ -261,6 +261,48 @@ def _historical(root, artifacts, *, inert):
     return observations
 
 
+def _code_rollback_read(root, artifacts):
+    """Read migrated history and a current enqueue with the exact old wheel."""
+    from django.db import connection
+    from django.db.migrations.recorder import MigrationRecorder
+    from django.tasks import TaskResultStatus, task_backends
+
+    from django_ray.models import RayTaskExecution
+
+    # Enforce read-only access in the database, not just by comparing selected
+    # old-model fields. No reverse migration or old writer is admitted here.
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "PRAGMA query_only = ON"
+            if connection.vendor == "sqlite"
+            else "SET default_transaction_read_only = on"
+        )
+        cursor.execute(
+            "PRAGMA query_only"
+            if connection.vendor == "sqlite"
+            else "SHOW default_transaction_read_only"
+        )
+        assert cursor.fetchone() == ((1,) if connection.vendor == "sqlite" else ("on",))
+    migrations = set(MigrationRecorder(connection).applied_migrations())
+    assert ("django_ray", "0026_ray_task_target_execution_evidence") in migrations
+    observations = _historical(root, artifacts, inert=False)
+    task_id = (root / "candidate-task-id").read_text(encoding="utf-8")
+    assert RayTaskExecution.objects.count() == len(FIXTURE_IDS) + 1
+    candidate = RayTaskExecution.objects.get(task_id=task_id)
+    assert candidate.state == "QUEUED" and json.loads(candidate.args_json) == [7]
+    result = task_backends["default"].get_result(task_id)
+    assert result.id == task_id and result.status == TaskResultStatus.READY
+    assert tuple(result.args) == (7,) and result.kwargs == {}
+    assert set(MigrationRecorder(connection).applied_migrations()) == migrations
+    observations.update(
+        candidate_writes_preserved=True,
+        candidate_result_read=True,
+        migrations_retained=True,
+        read_only=True,
+    )
+    return observations
+
+
 def main():
     if len(sys.argv) != 7 or sys.argv[4] not in PHASES or not __debug__:
         raise SystemExit(
@@ -274,7 +316,11 @@ def main():
     import django_ray
 
     assert str(Path(django_ray.__file__).resolve()) == module
-    if phase.startswith("baseline-") or phase in ("restored-baseline-read", "backup-rollback-read"):
+    if phase.startswith("baseline-") or phase in (
+        "restored-baseline-read",
+        "code-rollback-read",
+        "backup-rollback-read",
+    ):
         assert django_ray.__version__ == BASELINE_VERSION
     else:
         assert django_ray.__version__ == CANDIDATE_VERSION
@@ -326,7 +372,10 @@ def main():
         result = current_task.enqueue(7)
         assert RayTaskExecution.objects.count() == len(FIXTURE_IDS) + 1
         assert result.task is current_task
+        (root / "candidate-task-id").write_text(result.id, encoding="utf-8")
         observations = {"current_enqueue": True, "candidate_only_rows": 1}
+    elif phase == "code-rollback-read":
+        observations = _code_rollback_read(root, artifacts)
     else:
         if phase == "candidate-migrate-read":
             call_command("migrate", verbosity=0)

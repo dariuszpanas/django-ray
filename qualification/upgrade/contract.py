@@ -18,6 +18,7 @@ PHASES = (
     "restored-baseline-read",
     "candidate-migrate-read",
     "candidate-new-write",
+    "code-rollback-read",
     "backup-rollback-read",
 )
 MISSING = (
@@ -105,6 +106,13 @@ def validate_backend(value: object, *, backend: str) -> dict:
             }
             if phase["phase"] == "candidate-migrate-read":
                 expected["missing_and_corrupt_result_rejected"] = True
+            if phase["phase"] == "code-rollback-read":
+                expected.update(
+                    candidate_writes_preserved=True,
+                    candidate_result_read=True,
+                    migrations_retained=True,
+                    read_only=True,
+                )
             if phase["phase"] == "backup-rollback-read":
                 expected["candidate_writes_absent_from_old_backup"] = True
             digest = expected["historical_sha256"]
