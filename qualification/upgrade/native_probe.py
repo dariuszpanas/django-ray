@@ -29,14 +29,14 @@ def snapshot(fields=None, identities=None):
     return json.loads(json.dumps(result, cls=DjangoJSONEncoder))
 
 
-def read_history(root):
+def read_history(root, history_file="history.json"):
     from django.tasks import task_backends
 
     from django_ray.input_storage import load_task_input
     from django_ray.models import RayTaskExecution
     from django_ray.result_storage import load_result_reference
 
-    expected = json.loads((root / "history.json").read_text())
+    expected = json.loads((root / history_file).read_text())
     ids = [r["task_id"] for r in expected["RayTaskExecution"]["rows"]]
     fields = {name: value["fields"] for name, value in expected.items()}
     assert snapshot(fields, ids) == expected, "historical rows changed"
@@ -62,6 +62,7 @@ def read_history(root):
 
 def run_work(root):
     import ray
+    from django.conf import settings
     from django.core.management import call_command
     from django.db import connections
 
@@ -104,7 +105,7 @@ def run_work(root):
             num_cpus=1,
             num_gpus=0,
             object_store_memory=128 * 1024 * 1024,
-            include_dashboard=False,
+            include_dashboard=settings.RUNNER == "ray_job",
         )
         manager = subprocess.Popen(
             [
@@ -112,8 +113,7 @@ def run_work(root):
                 "-m",
                 "django",
                 "django_ray_worker",
-                "--cluster",
-                "auto",
+                *(["--cluster", "auto"] if settings.RUNNER == "ray_core" else []),
                 "--concurrency",
                 "1",
             ],
@@ -168,20 +168,24 @@ def run_work(root):
             "cancelled": "CANCELLED",
         }
         assert not (root / "started-cancelled").exists()
+        if settings.RUNNER == "ray_job":
+            for case in ("success", "failure", "retry"):
+                assert RayTaskExecution.objects.get(task_id=tasks[case].id).ray_job_id
     finally:
         try:
             if manager is not None:
+                stop_signal = signal.SIGINT if settings.RUNNER == "ray_core" else signal.SIGTERM
                 if manager.poll() is None:
-                    manager.send_signal(signal.SIGTERM)
+                    manager.send_signal(stop_signal)
                 try:
                     manager.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     manager.kill()
                     manager.wait(timeout=5)
                     raise
-                # Ray's native SIGTERM handler uses sys.exit(signum); the Django
-                # CLI uses 128+signum when its own handler receives the signal.
-                assert manager.returncode in (15, 143), manager.returncode
+                # Native Ray replaces the SIGTERM handler. SIGINT retains the
+                # manager's graceful drain/shutdown handler on both versions.
+                assert manager.returncode == 128 + stop_signal, manager.returncode
         finally:
             import psutil
 
@@ -202,6 +206,7 @@ def run_work(root):
         "manager_exit": manager.returncode,
         "active_leases": 0,
         "nonterminal": 0,
+        "runner": settings.RUNNER,
     }
 
 
@@ -209,7 +214,13 @@ def main():
     if len(sys.argv) != 4 or not __debug__:
         raise SystemExit("expected phase, installed module and receipt")
     phase, expected_module, receipt = sys.argv[1:]
-    if phase not in {"baseline-run", "baseline-read", "candidate-read", "candidate-run"}:
+    if phase not in {
+        "baseline-run",
+        "baseline-read",
+        "candidate-read",
+        "candidate-run",
+        "baseline-post-write",
+    }:
         raise SystemExit("invalid native upgrade phase")
     import django_ray
 
@@ -223,6 +234,29 @@ def main():
 
     root = settings.ROOT
     observations = {}
+    if phase == "baseline-post-write":
+        from django.db import connection
+        from django.db.migrations.recorder import MigrationRecorder
+
+        with connection.cursor() as cursor:
+            if connection.vendor == "sqlite":
+                cursor.execute("PRAGMA query_only=ON")
+                cursor.execute("PRAGMA query_only")
+                assert cursor.fetchone() == (1,)
+            else:
+                cursor.execute("SET default_transaction_read_only=on")
+                cursor.execute("SHOW default_transaction_read_only")
+                assert cursor.fetchone() == ("on",)
+        assert (
+            MigrationRecorder.Migration.objects.filter(
+                app="django_ray", name__startswith="0026_"
+            ).count()
+            == 1
+        )
+        observations["post_write_tasks_read"] = read_history(root, "candidate-history.json")
+        assert observations["post_write_tasks_read"] == 8
+        observations["database_read_only"] = True
+        observations["migrations_retained"] = True
     if phase == "candidate-read":
         call_command("migrate", verbosity=0)
     if phase != "baseline-run":
@@ -232,6 +266,10 @@ def main():
         if phase == "baseline-run":
             (root / "history.json").write_text(json.dumps(snapshot()))
             observations["historical_tasks"] = read_history(root)
+        else:
+            original = json.loads((root / "history.json").read_text())
+            fields = {name: value["fields"] for name, value in original.items()}
+            (root / "candidate-history.json").write_text(json.dumps(snapshot(fields)))
     Path(receipt).write_text(
         json.dumps(
             {
