@@ -152,6 +152,15 @@ all eight old/current task records, attempts and input/result artifacts. This
 extends the enqueue-only rollback fixture with actual completed work. It does
 not restart old managers or qualify old execution of current request carriers.
 
+The Jobs recipe stores its RuntimeEnv as an encrypted snapshot and ships a tiny
+Python module in a local ZIP. Successful remote work must import that module from
+the delivered working directory. A temporary key stays separately in the owned
+fixture; it is not included in the database/artifact backup or execution manifest.
+Old and current readers decrypt retained snapshots after restore, while missing
+or incorrect keys must fail before application invocation. The archive is covered
+by the existing artifact backup/digest checks. This does not qualify key rotation
+or replace the separate manager-crash recovery requirement.
+
 Every receipt always contains `complete_upgrade_gate: false` and the remaining
 acceptance list. A successful database stage does not close #381. Before release:
 

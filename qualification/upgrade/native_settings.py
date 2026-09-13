@@ -31,12 +31,19 @@ DJANGO_RAY = {
     "RESULT_STORAGE_FILESYSTEM_PATH": str(Path(CONFIG["artifacts"]) / "results"),
 }
 if RUNNER == "ray_job":
+    DJANGO_RAY.update(
+        RUNTIME_ENV_STORAGE_MODE="encrypted",
+        RUNTIME_ENV_ENCRYPTION_KEYS={"fixture": (ROOT / "runtime-key").read_text()},
+        RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY="fixture",
+    )
     DJANGO_RAY["RAY_RUNTIME_ENV"] = {
+        "working_dir": str(Path(CONFIG["artifacts"]) / "runtime.zip"),
         "env_vars": {
             "DJANGO_SETTINGS_MODULE": "qualification.upgrade.native_settings",
             "DJANGO_RAY_UPGRADE_ROOT": str(ROOT),
             "DJANGO_RAY_UPGRADE_CONFIG": os.environ["DJANGO_RAY_UPGRADE_CONFIG"],
             "PYTHONPATH": os.environ["PYTHONPATH"],
             "PYTHONDONTWRITEBYTECODE": "1",
-        }
+            "QUALIFICATION_RUNTIME_MARKER": "delivered",
+        },
     }

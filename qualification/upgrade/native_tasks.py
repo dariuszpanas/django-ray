@@ -1,6 +1,9 @@
 """Real remote work with bounded, observable release and failure controls."""
 
+import importlib
+import os
 import time
+from pathlib import Path
 
 from django.conf import settings
 from django.tasks import task
@@ -8,6 +11,11 @@ from django.tasks import task
 
 @task
 def controlled(case, payload):
+    if settings.RUNNER == "ray_job":
+        assert os.environ.get("QUALIFICATION_RUNTIME_MARKER") == "delivered"
+        bundle = importlib.import_module("upgrade_bundle")
+        assert Path(bundle.__file__).resolve().is_relative_to(Path.cwd())
+        assert bundle.marker() == "delivered-upgrade-artifact"
     if case not in {"success", "failure", "retry", "cancelled"}:
         raise ValueError("unknown qualification case")
     if case == "cancelled":
