@@ -117,6 +117,7 @@ def run_work(root):
 
     for name in (
         "retry-again",
+        "success-invocations",
         *(
             f"{prefix}-{case}"
             for prefix in ("started", "release")
@@ -147,16 +148,11 @@ def run_work(root):
     )
     assert outcome.state == "CANCELLED"
     manager = None
+    crash = {}
     log = (root / "manager.log").open("wb")
-    try:
-        ray.init(
-            address="local",
-            num_cpus=1,
-            num_gpus=0,
-            object_store_memory=128 * 1024 * 1024,
-            include_dashboard=settings.RUNNER == "ray_job",
-        )
-        manager = subprocess.Popen(
+
+    def start_manager():
+        return subprocess.Popen(
             [
                 sys.executable,
                 "-m",
@@ -169,6 +165,16 @@ def run_work(root):
             stdout=log,
             stderr=subprocess.STDOUT,
         )
+
+    try:
+        ray.init(
+            address="local",
+            num_cpus=1,
+            num_gpus=0,
+            object_store_memory=128 * 1024 * 1024,
+            include_dashboard=settings.RUNNER == "ray_job",
+        )
+        manager = start_manager()
 
         def wait(predicate):
             deadline = time.monotonic() + 90
@@ -184,6 +190,39 @@ def run_work(root):
         before = snapshot()
         assert RayTaskExecution.objects.get(task_id=tasks["success"].id).state == "RUNNING"
         assert snapshot() == before
+        if settings.CRASH_MANAGER:
+            assert settings.RUNNER == "ray_job"
+            original = RayTaskExecution.objects.get(task_id=tasks["success"].id)
+            identity = (original.ray_job_id, original.attempt_number, original.execution_generation)
+            assert identity[0] and original.claimed_by_worker
+            manager.kill()
+            assert manager.wait(timeout=10) == -signal.SIGKILL
+            stopped = RayTaskExecution.objects.get(pk=original.pk)
+            assert (
+                stopped.state == "RUNNING"
+                and stopped.claimed_by_worker == original.claimed_by_worker
+            )
+            assert (root / "success-invocations").read_text() == "x"
+            manager = start_manager()
+            adopted = wait(
+                lambda: (
+                    RayTaskExecution.objects.filter(pk=original.pk, state="RUNNING")
+                    .exclude(claimed_by_worker=original.claimed_by_worker)
+                    .exclude(claimed_by_worker__isnull=True)
+                    .first()
+                )
+            )
+            assert (
+                adopted.ray_job_id,
+                adopted.attempt_number,
+                adopted.execution_generation,
+            ) == identity
+            crash = {
+                "signal": "SIGKILL",
+                "running_blocker_preserved": True,
+                "owner_changed": True,
+                "same_job_attempt_generation": True,
+            }
         for case in ("success", "failure", "retry"):
             (root / f"release-{case}").touch()
         wait(
@@ -217,6 +256,15 @@ def run_work(root):
             "cancelled": "CANCELLED",
         }
         assert not (root / "started-cancelled").exists()
+        if settings.CRASH_MANAGER:
+            completed = RayTaskExecution.objects.get(task_id=tasks["success"].id)
+            assert (
+                completed.ray_job_id,
+                completed.attempt_number,
+                completed.execution_generation,
+            ) == identity
+            assert (root / "success-invocations").read_text() == "x"
+            crash["application_invocations"] = 1
         if settings.RUNNER == "ray_job":
             for case in ("success", "failure", "retry"):
                 assert RayTaskExecution.objects.get(task_id=tasks[case].id).ray_job_id
@@ -256,6 +304,7 @@ def run_work(root):
         "active_leases": 0,
         "nonterminal": 0,
         "runner": settings.RUNNER,
+        "manager_crash": crash,
     }
 
 

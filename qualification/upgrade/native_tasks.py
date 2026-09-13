@@ -25,6 +25,9 @@ def controlled(case, payload):
         raise ValueError("unknown qualification case")
     if case == "cancelled":
         raise AssertionError("cancelled queued task was invoked")
+    if settings.CRASH_MANAGER and case == "success":
+        with (settings.ROOT / "success-invocations").open("a") as marker:
+            marker.write("x")
     (settings.ROOT / f"started-{case}").touch()
     deadline = time.monotonic() + 90
     while not (settings.ROOT / f"release-{case}").exists():

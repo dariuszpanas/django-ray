@@ -176,6 +176,16 @@ SQLite execution phases use WAL and immediate transactions for the concurrent
 manager/progress writers; read-only phases retain ordinary read transactions.
 PostgreSQL remains the multi-connection coordination evidence.
 
+The opt-in `jobs-crash.yaml` recipe uses the same bounds and historical sequence,
+then sends SIGKILL to the candidate manager while its success Job is running.
+The task stays a visible running blocker until a replacement manager adopts it
+after lease expiry. Job ID, attempt and execution generation must remain equal;
+an invocation marker must remain exactly one after successful completion. This
+checks abrupt Jobs manager loss after restoration, including encrypted RuntimeEnv
+and workflow preservation. It does not qualify Core manager loss or reconcile an
+unknown external side effect. Only candidate crash phases shorten the lease to six
+seconds, retaining two-second heartbeats. The default recipes remain unchanged.
+
 Every receipt always contains `complete_upgrade_gate: false` and the remaining
 acceptance list. A successful database stage does not close #381. Before release:
 

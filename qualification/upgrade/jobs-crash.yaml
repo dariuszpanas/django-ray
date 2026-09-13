@@ -1,0 +1,11 @@
+# Opt-in abrupt candidate-manager loss after old drain and restore.
+services:
+  tools:
+    extends:
+      file: data.yaml
+      service: tools
+  jobs:
+    extends:
+      file: jobs.yaml
+      service: jobs
+    command: [python, -m, qualification.upgrade.native_scenario, --runner, ray_job, --crash-manager]

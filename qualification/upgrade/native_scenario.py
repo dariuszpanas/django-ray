@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import base64
 import contextlib
 import json
@@ -19,7 +20,7 @@ from qualification.upgrade.contract import BACKENDS, BASELINE_COMMIT, MISSING
 from qualification.upgrade.prepare import verify_archive
 
 
-def phase(root, backend, name, target, *, database, artifacts, runner):
+def phase(root, backend, name, target, *, database, artifacts, runner, crash_manager=False):
     released = name.startswith("baseline")
     python = data.RELEASED_PYTHON if released else Path(sys.executable)
     db = (
@@ -47,7 +48,12 @@ def phase(root, backend, name, target, *, database, artifacts, runner):
         DJANGO_SETTINGS_MODULE="qualification.upgrade.native_settings",
         DJANGO_RAY_UPGRADE_ROOT=str(root),
         DJANGO_RAY_UPGRADE_CONFIG=json.dumps(
-            {"database": db, "artifacts": str(artifacts), "runner": runner}
+            {
+                "database": db,
+                "artifacts": str(artifacts),
+                "runner": runner,
+                "crash_manager": crash_manager and name == "candidate-run",
+            }
         ),
         RAY_USAGE_STATS_ENABLED="0",
     )
@@ -66,7 +72,7 @@ def phase(root, backend, name, target, *, database, artifacts, runner):
     return value
 
 
-def backend(parent, name, targets, runner):
+def backend(parent, name, targets, runner, crash_manager=False):
     with tempfile.TemporaryDirectory(prefix=f"native-{name}-", dir=parent) as directory:
         root = Path(directory)
         artifacts = root / "artifacts"
@@ -115,6 +121,7 @@ def backend(parent, name, targets, runner):
                         database="restored",
                         artifacts=restored,
                         runner=runner,
+                        crash_manager=crash_manager,
                     )
                 )
             assert wheel._sha256(root / "backup") == backup_digest
@@ -128,9 +135,11 @@ def backend(parent, name, targets, runner):
     }
 
 
-def execute(runner="ray_core"):
+def execute(runner="ray_core", *, crash_manager=False):
     if runner not in {"ray_core", "ray_job"}:
         raise ValueError("unsupported qualification runner")
+    if crash_manager and runner != "ray_job":
+        raise ValueError("manager crash qualification requires Ray Jobs")
     evidence = Path("/evidence")
     wheel._ensure_evidence_root(evidence)
     wheel._require_non_root()
@@ -153,7 +162,7 @@ def execute(runner="ray_core"):
                 identities[name] = data._identity(python, selected, target, source)
                 targets[name] = target
             for name in BACKENDS:
-                results.append(backend(fixture, name, targets, runner))
+                results.append(backend(fixture, name, targets, runner, crash_manager))
             for name, target in targets.items():
                 assert (
                     wheel._package_tree_digest(target / "django_ray")
@@ -168,6 +177,7 @@ def execute(runner="ray_core"):
         "schema": "django-ray.coordinated-beta-native-upgrade",
         "schema_version": 1,
         "runner": runner,
+        "crash_manager": crash_manager,
         "outcome": "passed" if failure is None else "failed",
         "failure": failure,
         "baseline_commit": BASELINE_COMMIT,
@@ -185,6 +195,8 @@ def execute(runner="ray_core"):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] not in ([], ["--runner", "ray_job"]):
-        raise SystemExit("expected no arguments or --runner ray_job")
-    raise SystemExit(execute("ray_job" if sys.argv[1:] else "ray_core"))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runner", choices=("ray_core", "ray_job"), default="ray_core")
+    parser.add_argument("--crash-manager", action="store_true")
+    args = parser.parse_args()
+    raise SystemExit(execute(args.runner, crash_manager=args.crash_manager))

@@ -11,6 +11,7 @@ USE_TZ = True
 INSTALLED_APPS = ["django_ray"]
 DATABASES = {"default": CONFIG["database"]}
 RUNNER = CONFIG.get("runner", "ray_core")
+CRASH_MANAGER = CONFIG.get("crash_manager", False)
 TASKS = {
     "default": {
         "BACKEND": "django_ray.backends.RayTaskBackend",
@@ -31,6 +32,8 @@ DJANGO_RAY = {
     "RESULT_STORAGE_BACKEND": "filesystem",
     "RESULT_STORAGE_FILESYSTEM_PATH": str(Path(CONFIG["artifacts"]) / "results"),
 }
+if CRASH_MANAGER:
+    DJANGO_RAY["WORKER_LEASE_SECONDS"] = 6
 if RUNNER == "ray_job":
     DJANGO_RAY.update(
         RUNTIME_ENV_STORAGE_MODE="encrypted",
