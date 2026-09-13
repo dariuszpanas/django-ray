@@ -166,7 +166,7 @@ def run_work(root):
             stderr=subprocess.STDOUT,
         )
 
-    try:
+    def start_ray():
         ray.init(
             address="local",
             num_cpus=1,
@@ -174,6 +174,17 @@ def run_work(root):
             object_store_memory=128 * 1024 * 1024,
             include_dashboard=settings.RUNNER == "ray_job",
         )
+
+    def stop_ray():
+        import psutil
+
+        children = psutil.Process().children(recursive=True)
+        ray.shutdown()
+        _, alive = psutil.wait_procs(children, timeout=15)
+        assert not [p for p in alive if p.status() != psutil.STATUS_ZOMBIE]
+
+    try:
+        start_ray()
         manager = start_manager()
 
         def wait(predicate):
@@ -191,10 +202,11 @@ def run_work(root):
         assert RayTaskExecution.objects.get(task_id=tasks["success"].id).state == "RUNNING"
         assert snapshot() == before
         if settings.CRASH_MANAGER:
-            assert settings.RUNNER == "ray_job"
             original = RayTaskExecution.objects.get(task_id=tasks["success"].id)
             identity = (original.ray_job_id, original.attempt_number, original.execution_generation)
-            assert identity[0] and original.claimed_by_worker
+            assert original.claimed_by_worker
+            if settings.RUNNER == "ray_job":
+                assert identity[0]
             manager.kill()
             assert manager.wait(timeout=10) == -signal.SIGKILL
             stopped = RayTaskExecution.objects.get(pk=original.pk)
@@ -203,26 +215,56 @@ def run_work(root):
                 and stopped.claimed_by_worker == original.claimed_by_worker
             )
             assert (root / "success-invocations").read_text() == "x"
+            if settings.RUNNER == "ray_core":
+                # A Core ObjectRef is not an adoptable Job capability. Retire
+                # every old Ray child before an explicit side-effect-free retry.
+                stop_ray()
+                start_ray()
             manager = start_manager()
-            adopted = wait(
-                lambda: (
-                    RayTaskExecution.objects.filter(pk=original.pk, state="RUNNING")
-                    .exclude(claimed_by_worker=original.claimed_by_worker)
-                    .exclude(claimed_by_worker__isnull=True)
-                    .first()
+            if settings.RUNNER == "ray_job":
+                adopted = wait(
+                    lambda: (
+                        RayTaskExecution.objects.filter(pk=original.pk, state="RUNNING")
+                        .exclude(claimed_by_worker=original.claimed_by_worker)
+                        .exclude(claimed_by_worker__isnull=True)
+                        .first()
+                    )
                 )
-            )
-            assert (
-                adopted.ray_job_id,
-                adopted.attempt_number,
-                adopted.execution_generation,
-            ) == identity
-            crash = {
-                "signal": "SIGKILL",
-                "running_blocker_preserved": True,
-                "owner_changed": True,
-                "same_job_attempt_generation": True,
-            }
+                assert (
+                    adopted.ray_job_id,
+                    adopted.attempt_number,
+                    adopted.execution_generation,
+                ) == identity
+                crash = {
+                    "signal": "SIGKILL",
+                    "running_blocker_preserved": True,
+                    "owner_changed": True,
+                    "same_job_attempt_generation": True,
+                }
+            else:
+                lost = wait(
+                    lambda: RayTaskExecution.objects.filter(pk=original.pk, state="LOST").first()
+                )
+                assert (lost.attempt_number, lost.execution_generation) == identity[1:]
+                assert (root / "success-invocations").read_text() == "x"
+                assert not (root / "release-success").exists()
+                retried = retry_task(
+                    lost.pk,
+                    allowed_states=("LOST",),
+                    expected_attempt_number=lost.attempt_number,
+                    expected_execution_generation=lost.execution_generation,
+                )
+                assert retried is not None
+                assert retried.attempt_number == lost.attempt_number + 1
+                assert retried.execution_generation == lost.execution_generation + 1
+                crash = {
+                    "signal": "SIGKILL",
+                    "running_blocker_preserved": True,
+                    "old_ray_children_retired": True,
+                    "lost_without_automatic_retry": True,
+                    "explicit_retry_new_attempt_generation": True,
+                    "retry_then_claim_generation_advances": 2,
+                }
         for case in ("success", "failure", "retry"):
             (root / f"release-{case}").touch()
         wait(
@@ -258,13 +300,21 @@ def run_work(root):
         assert not (root / "started-cancelled").exists()
         if settings.CRASH_MANAGER:
             completed = RayTaskExecution.objects.get(task_id=tasks["success"].id)
-            assert (
-                completed.ray_job_id,
-                completed.attempt_number,
-                completed.execution_generation,
-            ) == identity
-            assert (root / "success-invocations").read_text() == "x"
-            crash["application_invocations"] = 1
+            if settings.RUNNER == "ray_job":
+                assert (
+                    completed.ray_job_id,
+                    completed.attempt_number,
+                    completed.execution_generation,
+                ) == identity
+                invocations = 1
+            else:
+                assert (completed.attempt_number, completed.execution_generation) == (
+                    identity[1] + 1,
+                    identity[2] + 2,
+                )
+                invocations = 2
+            assert (root / "success-invocations").read_text() == "x" * invocations
+            crash["application_invocations"] = invocations
         if settings.RUNNER == "ray_job":
             for case in ("success", "failure", "retry"):
                 assert RayTaskExecution.objects.get(task_id=tasks[case].id).ray_job_id
@@ -284,14 +334,9 @@ def run_work(root):
                 # manager's graceful drain/shutdown handler on both versions.
                 assert manager.returncode == 128 + stop_signal, manager.returncode
         finally:
-            import psutil
-
-            children = psutil.Process().children(recursive=True)
             # Ray 2.56 has no wait_for_processes argument. Observe the owned
             # descendants explicitly so old Ray cannot overlap the next phase.
-            ray.shutdown()
-            _, alive = psutil.wait_procs(children, timeout=15)
-            assert not [p for p in alive if p.status() != psutil.STATUS_ZOMBIE]
+            stop_ray()
             log.close()
     assert not TaskWorkerLease.objects.filter(is_active=True).exists()
     assert not RayTaskExecution.objects.exclude(state__in=TERMINAL).exists()
