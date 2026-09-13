@@ -300,6 +300,18 @@ def _backend(parent, backend, released_target, candidate_target):
                     artifacts=restored,
                 )
             )
+            phases.append(
+                _phase(
+                    root,
+                    backend,
+                    "code-rollback-read",
+                    released_target,
+                    released=True,
+                    database="restored",
+                    artifacts=restored,
+                )
+            )
+            assert wheel._package_tree_digest(restored) == artifacts_digest
             # An independent second restore proves what reverting to this backup
             # would lose; it never replaces the database receiving candidate writes.
             _restore(root, backend, "rollback")

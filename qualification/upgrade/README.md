@@ -31,7 +31,11 @@ outcomes were produced by real remote execution.
    Temporarily missing and corrupt result files are rejected by the storage API;
    the original bytes are restored and the complete artifact digest must match.
 6. Enqueue one current task without starting a worker.
-7. Restore the original backup into a second independent database and read it
+7. Open the migrated database with a fresh exact 0.4.0 process in database-enforced
+   read-only mode. Retain migrations through `0026`, compare the original history,
+   read the original artifacts, and fetch the candidate's queued task through the
+   released backend. No reverse migration, old writer, or task execution runs.
+8. Restore the original backup into a second independent database and read it
    with the old version. The candidate-only write is absent: restoring this
    backup after new writes would lose those writes. The rehearsal never replaces
    the database that received the candidate write.
@@ -40,6 +44,10 @@ The runtime ZIP and progress JSON are preservation fixtures. This stage compares
 their retained bytes; it does not claim a supported workflow detail rendering,
 encrypted RuntimeEnv delivery or execution from that archive. The installed
 package bytes and the backup are checked again after all child processes exit.
+The read-only code rollback proves this fixture's data readability after an enqueue;
+it does not qualify restarting old managers or reading every result produced by
+current execution. See the [0.5 upgrade procedure](../../docs/deployment/upgrading-0.5.md)
+for the migration and rollback boundaries that still need deployed rehearsal.
 
 ## Public Linux invocation
 

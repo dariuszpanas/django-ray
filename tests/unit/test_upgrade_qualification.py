@@ -41,6 +41,16 @@ def receipt(backend="sqlite"):
             "tasks": 8,
             "inert_execution_refusals": 0,
             "input_and_result_artifacts_read": True,
+            "candidate_writes_preserved": True,
+            "candidate_result_read": True,
+            "migrations_retained": True,
+            "read_only": True,
+        },
+        {
+            "historical_sha256": "a" * 64,
+            "tasks": 8,
+            "inert_execution_refusals": 0,
+            "input_and_result_artifacts_read": True,
             "candidate_writes_absent_from_old_backup": True,
         },
     ]
@@ -87,6 +97,9 @@ def receipt(backend="sqlite"):
         "lost-new-write",
         "ignored-missing-artifact",
         "boolean-row-count",
+        "rollback-lost-write",
+        "rollback-downgraded-schema",
+        "rollback-not-read-only",
     ],
 )
 def test_incomplete_upgrade_cannot_pass(mutation):
@@ -121,17 +134,24 @@ def test_incomplete_upgrade_cannot_pass(mutation):
         value["phases"][5]["observations"]["candidate_only_rows"] = 0
     elif mutation == "ignored-missing-artifact":
         value["phases"][4]["observations"]["missing_and_corrupt_result_rejected"] = False
+    elif mutation.startswith("rollback-"):
+        field = {
+            "rollback-lost-write": "candidate_writes_preserved",
+            "rollback-downgraded-schema": "migrations_retained",
+            "rollback-not-read-only": "read_only",
+        }[mutation]
+        value["phases"][6]["observations"][field] = False
     else:
         value["phases"][5]["observations"]["candidate_only_rows"] = True
     with pytest.raises(QualificationError):
         contract.validate_backend(value, backend="sqlite")
 
 
-def test_complete_stage_emits_fourteen_phases_but_no_complete_upgrade_claim():
+def test_complete_stage_emits_sixteen_phases_but_no_complete_upgrade_claim():
     values = [receipt(backend) for backend in contract.BACKENDS]
     before = copy.deepcopy(values)
     suite = ElementTree.fromstring(contract.junit(values, failure=None))
-    assert len(suite) == 14 and suite.attrib["failures"] == "0"
+    assert len(suite) == 16 and suite.attrib["failures"] == "0"
     assert values == before and all(value["complete_upgrade_gate"] is False for value in values)
     with pytest.raises(QualificationError, match="missing-upgrade-backend"):
         contract.junit(values[:1], failure=None)

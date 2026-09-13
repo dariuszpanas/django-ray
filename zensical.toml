@@ -35,6 +35,7 @@ nav = [
   { "Deployment" = [
     { "Kubernetes" = "deployment/kubernetes.md" },
     { "Local Credentials" = "deployment/local-credentials.md" },
+    { "Upgrade to 0.5" = "deployment/upgrading-0.5.md" },
     { "Local KubeRay Final Gate" = "deployment/local-kuberay-gate.md" },
     { "Docker" = "deployment/docker.md" },
     { "TLS" = "deployment/tls.md" },
