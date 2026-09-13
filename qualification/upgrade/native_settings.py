@@ -34,6 +34,9 @@ DJANGO_RAY = {
 }
 if CRASH_MANAGER:
     DJANGO_RAY["WORKER_LEASE_SECONDS"] = 6
+    if RUNNER == "ray_core":
+        DJANGO_RAY["STUCK_TASK_TIMEOUT_SECONDS"] = 30
+        DJANGO_RAY["TASK_MONITOR_HEARTBEAT_SECONDS"] = 2
 if RUNNER == "ray_job":
     DJANGO_RAY.update(
         RUNTIME_ENV_STORAGE_MODE="encrypted",

@@ -1,0 +1,11 @@
+# Opt-in candidate Core manager/Ray loss and explicit operator retry.
+services:
+  tools:
+    extends:
+      file: data.yaml
+      service: tools
+  native:
+    extends:
+      file: native.yaml
+      service: native
+    command: [python, -m, qualification.upgrade.native_scenario, --crash-manager]

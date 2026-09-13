@@ -186,6 +186,18 @@ and workflow preservation. It does not qualify Core manager loss or reconcile an
 unknown external side effect. Only candidate crash phases shorten the lease to six
 seconds, retaining two-second heartbeats. The default recipes remain unchanged.
 
+The separate opt-in `core-loss.yaml` recipe kills the candidate Core manager and
+retires all old local Ray child processes. A fresh Ray instance and replacement
+manager must preserve the task identity as `LOST` without automatic replay under
+the fixture's one-attempt policy. Only after old processes are gone does the probe
+explicitly retry its side-effect-free task. Retry advances the attempt and
+generation once; claiming that retry advances generation again. Completion must
+retain those exact identities and the original historical data. The
+invocation marker records the interrupted invocation plus the explicit retry.
+The crash phase uses a thirty-second stuck timeout and two-second task heartbeats.
+This proves manager-plus-Ray loss, not adoption of a surviving Core ObjectRef or
+safe retry of an unknown external side effect.
+
 Every receipt always contains `complete_upgrade_gate: false` and the remaining
 acceptance list. A successful database stage does not close #381. Before release:
 

@@ -138,8 +138,6 @@ def backend(parent, name, targets, runner, crash_manager=False):
 def execute(runner="ray_core", *, crash_manager=False):
     if runner not in {"ray_core", "ray_job"}:
         raise ValueError("unsupported qualification runner")
-    if crash_manager and runner != "ray_job":
-        raise ValueError("manager crash qualification requires Ray Jobs")
     evidence = Path("/evidence")
     wheel._ensure_evidence_root(evidence)
     wheel._require_non_root()
