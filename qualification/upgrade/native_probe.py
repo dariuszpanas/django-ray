@@ -30,6 +30,7 @@ def snapshot(fields=None, identities=None):
 
 
 def read_history(root, history_file="history.json"):
+    from django.conf import settings
     from django.tasks import task_backends
 
     from django_ray.input_storage import load_task_input
@@ -42,6 +43,27 @@ def read_history(root, history_file="history.json"):
     assert snapshot(fields, ids) == expected, "historical rows changed"
     for identity in ids:
         row = RayTaskExecution.objects.get(task_id=identity)
+        if settings.RUNNER == "ray_job":
+            from django_ray.conf.settings import get_settings
+            from django_ray.runtime.runtime_env import (
+                RuntimeEnvSnapshotError,
+                runtime_env_for_execution,
+            )
+
+            envelope = json.loads(row.runtime_env_json)
+            assert envelope["format"] == "django-ray.runtime-env.encrypted"
+            resolved = runtime_env_for_execution(row)
+            assert resolved.spec["env_vars"]["QUALIFICATION_RUNTIME_MARKER"] == "delivered"
+            assert Path(resolved.spec["working_dir"]).name == "runtime.zip"
+            # Missing and wrong retained keys must reject before invocation.
+            for keys in ({}, {"fixture": "A" * 43}):
+                config = dict(get_settings(), RUNTIME_ENV_ENCRYPTION_KEYS=keys)
+                try:
+                    runtime_env_for_execution(row, config=config)
+                except RuntimeEnvSnapshotError:
+                    pass
+                else:
+                    raise AssertionError("invalid RuntimeEnv key was accepted")
         assert row.input_reference
         args, kwargs = load_task_input(
             args_json=row.args_json,
@@ -270,6 +292,9 @@ def main():
             original = json.loads((root / "history.json").read_text())
             fields = {name: value["fields"] for name, value in original.items()}
             (root / "candidate-history.json").write_text(json.dumps(snapshot(fields)))
+    if settings.RUNNER == "ray_job":
+        observations["encrypted_runtime_env_preserved"] = True
+        observations["missing_and_wrong_keys_rejected"] = True
     Path(receipt).write_text(
         json.dumps(
             {

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
+import secrets
 import shutil
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 from qualification.docker import scenario as wheel
@@ -63,6 +66,17 @@ def backend(parent, name, targets, runner):
         root = Path(directory)
         artifacts = root / "artifacts"
         artifacts.mkdir()
+        if runner == "ray_job":
+            # Retain the key separately from the database/artifact backup. It
+            # remains inside this owned fixture and never enters the receipt.
+            (root / "runtime-key").write_text(
+                base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
+            )
+            with zipfile.ZipFile(artifacts / "runtime.zip", "x") as archive:
+                archive.writestr(
+                    "upgrade_bundle.py",
+                    'def marker():\n    return "delivered-upgrade-artifact"\n',
+                )
         with data._postgres(root) if name == "postgresql" else contextlib.nullcontext():
             phases = [
                 phase(
