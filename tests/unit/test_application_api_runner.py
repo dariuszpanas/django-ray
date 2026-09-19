@@ -52,6 +52,32 @@ def server():
         assert not thread.is_alive()
 
 
+@pytest.mark.parametrize(
+    ("cache_control", "accepted"),
+    [
+        ("max-age=0, no-cache, no-store, must-revalidate, private", True),
+        ("private, NO-STORE", True),
+        ("private, no-cache", False),
+        ("not-no-store", False),
+        ("no-store=false", False),
+        ("", False),
+    ],
+)
+def test_http_transport_requires_exact_cache_directives(server, cache_control, accepted):
+    origin, _, replies = server
+    replies.append((200, {"Cache-Control": cache_control}, b"{}"))
+    transport = run_api.ApplicationHttp(origin)
+    if accepted:
+        assert transport(
+            "/admin/example/", method="GET", required_cache_directives=frozenset({"no-store"})
+        ) == (200, b"{}")
+    else:
+        with pytest.raises(ValueError, match="cache directives"):
+            transport(
+                "/admin/example/", method="GET", required_cache_directives=frozenset({"no-store"})
+            )
+
+
 def test_http_transport_ignores_proxies_and_does_not_follow_redirects(server, monkeypatch):
     origin, requests, replies = server
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
