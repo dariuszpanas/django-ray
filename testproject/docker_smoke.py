@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -393,10 +394,11 @@ def _request_admin_json(
     headers: dict[str, str],
     deadline: float,
     expected_status: int = 200,
+    read_text: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
     """Read one authenticated, byte-bounded admin JSON response."""
 
-    body = _request_text(
+    body = (read_text or _request_text)(
         base_url,
         path,
         headers={"Accept": "application/json", **headers},
@@ -439,8 +441,10 @@ def _verify_database_contract() -> None:
         raise DockerSmokeError("the one-shot migration service left unapplied migrations")
 
 
-def _validate_existing_workflow_mode(*, base_url: str, task_id: str) -> str:
-    """Require a canonical task identity and an actual loopback web endpoint."""
+def _validate_existing_workflow_mode(
+    *, base_url: str, task_id: str, qualified_transport: bool = False
+) -> str:
+    """Require loopback, or the fixed qualification service with an explicit transport."""
 
     parsed_url = urlsplit(base_url)
     try:
@@ -455,7 +459,14 @@ def _validate_existing_workflow_mode(*, base_url: str, task_id: str) -> str:
         parsed_task_id.version != 4
         or str(parsed_task_id) != task_id
         or parsed_url.scheme != "http"
-        or parsed_url.hostname not in _LOOPBACK_HOSTS
+        or not (
+            parsed_url.hostname in _LOOPBACK_HOSTS
+            or (
+                qualified_transport
+                and os.environ.get("DJANGO_SETTINGS_MODULE") == "testproject.settings_qualification"
+                and base_url == "http://django-web:8000"
+            )
+        )
         or parsed_url.username is not None
         or parsed_url.password is not None
         or port is None
@@ -507,9 +518,15 @@ def _disposable_admin_headers() -> Iterator[dict[str, str]]:
     finally:
         try:
             if session is not None and session.session_key is not None:
-                session.delete(session.session_key)
+                key = session.session_key
+                session.delete(key)
+                if session.exists(key):
+                    raise DockerSmokeError("disposable admin session cleanup was not observed")
         finally:
+            user_pk = user.pk
             user.delete()
+            if user_model.objects.filter(pk=user_pk).exists():
+                raise DockerSmokeError("disposable admin user cleanup was not observed")
 
 
 def _verify_unfold_admin_contract(
@@ -1189,8 +1206,15 @@ def _verify_existing_workflow_admin_contract(
     deadline: float,
     execution: Any,
     change_attempt_number: int | None = None,
+    read_text: Callable[..., str] | None = None,
 ) -> dict[str, str | int]:
     """Exercise every advertised admin workflow reader for one existing run."""
+    request_text = read_text or _request_text
+    request_json = (
+        _request_admin_json
+        if read_text is None
+        else partial(_request_admin_json, read_text=read_text)
+    )
 
     task_id = str(execution.task_id)
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
@@ -1272,14 +1296,14 @@ def _verify_existing_workflow_admin_contract(
             attempt_detail_path = f"/admin/django_ray/taskattempt/{attempt_pk}/change/"
         elif diagnostic_attempt is not None:
             attempt_detail_path = f"/admin/django_ray/taskattempt/{diagnostic_attempt.pk}/change/"
-        change_html = _request_text(
+        change_html = request_text(
             base_url,
             change_path,
             headers=headers,
             deadline=deadline,
         )
         attempt_detail_html = (
-            _request_text(
+            request_text(
                 base_url,
                 attempt_detail_path,
                 headers=headers,
@@ -1362,7 +1386,7 @@ def _verify_existing_workflow_admin_contract(
                     "current successful attempt was duplicated as an archived graph panel"
                 )
 
-        diagnostics = _request_admin_json(
+        diagnostics = request_json(
             base_url,
             diagnostics_read_path,
             headers=headers,
@@ -1392,7 +1416,7 @@ def _verify_existing_workflow_admin_contract(
             )
 
         pages = {
-            collection: _request_admin_json(
+            collection: request_json(
                 base_url,
                 f"{path}&limit={_WORKFLOW_PAGE_LIMIT}",
                 headers=headers,
@@ -1400,7 +1424,7 @@ def _verify_existing_workflow_admin_contract(
             )
             for collection, path in collection_read_paths.items()
         }
-        graph = _request_admin_json(
+        graph = request_json(
             base_url,
             graph_read_path,
             headers=headers,
@@ -1442,7 +1466,7 @@ def _verify_existing_workflow_admin_contract(
         stylesheet_match = _DIAGNOSTICS_STYLESHEET_RE.search(change_html)
         if stylesheet_match is None:  # pragma: no cover - checked above
             raise DockerSmokeError("workflow diagnostic stylesheet was not advertised")
-        stylesheet = _request_text(
+        stylesheet = request_text(
             base_url,
             html.unescape(stylesheet_match.group("path")),
             expected_content_type="text/css",
@@ -1687,8 +1711,15 @@ def _verify_existing_terminal_only_admin_contract(
     base_url: str,
     deadline: float,
     execution: Any,
+    read_text: Callable[..., str] | None = None,
 ) -> dict[str, bool | int | str]:
     """Prove admin presents the summary without advertising detail actions."""
+    request_text = read_text or _request_text
+    request_json = (
+        _request_admin_json
+        if read_text is None
+        else partial(_request_admin_json, read_text=read_text)
+    )
 
     root = f"/admin/django_ray/raytaskexecution/{execution.pk}"
     diagnostics_path = f"{root}/workflow/diagnostics/"
@@ -1705,7 +1736,7 @@ def _verify_existing_terminal_only_admin_contract(
     )
 
     with _disposable_admin_headers() as headers:
-        change_html = _request_text(
+        change_html = request_text(
             base_url,
             f"{root}/change/",
             headers=headers,
@@ -1719,13 +1750,13 @@ def _verify_existing_terminal_only_admin_contract(
             raise DockerSmokeError(
                 "terminal-only workflow admin advertised a visible detail action"
             )
-        diagnostics = _request_admin_json(
+        diagnostics = request_json(
             base_url,
             diagnostics_read_path,
             headers=headers,
             deadline=deadline,
         )
-        graph = _request_admin_json(
+        graph = request_json(
             base_url,
             graph_read_path,
             headers=headers,
@@ -1779,12 +1810,15 @@ def _run_existing_workflow_admin_smoke(
     timeout_seconds: float,
     expected_reporting_policy: str = "full",
     attempt_number: int | None = None,
+    read_text: Callable[..., str] | None = None,
 ) -> dict[str, bool | int | str]:
     """Verify one already-terminal workflow through loopback admin and PostgreSQL."""
 
     import django
 
-    task_id = _validate_existing_workflow_mode(base_url=base_url, task_id=task_id)
+    task_id = _validate_existing_workflow_mode(
+        base_url=base_url, task_id=task_id, qualified_transport=read_text is not None
+    )
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "testproject.settings")
     django.setup()
     _verify_database_contract()
@@ -1855,6 +1889,7 @@ def _run_existing_workflow_admin_smoke(
             deadline=deadline,
             execution=selected_execution,
             change_attempt_number=attempt_number,
+            **({"read_text": read_text} if read_text is not None else {}),
         )
     if expected_reporting_policy == "terminal_only":
         if attempt_number is not None:
@@ -1865,6 +1900,7 @@ def _run_existing_workflow_admin_smoke(
             base_url=base_url,
             deadline=deadline,
             execution=execution,
+            **({"read_text": read_text} if read_text is not None else {}),
         )
     raise DockerSmokeError("unsupported expected workflow reporting policy")
 

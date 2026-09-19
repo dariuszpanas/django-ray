@@ -11,7 +11,8 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 
 import testproject
-from django_ray.runtime.runtime_env import resolve_runtime_env_profile
+from django_ray.runtime.runtime_env import normalize_runtime_env, resolve_runtime_env_profile
+from django_ray.workflow.plans import runtime_env_plan_identity
 
 
 @pytest.fixture
@@ -100,7 +101,7 @@ def test_qualification_rejects_implicit_or_weakened_configuration(
         load_settings()
 
 
-@pytest.mark.parametrize("profile", ["project", "thin"])
+@pytest.mark.parametrize("profile", ["project", "thin", "recovery-showcase"])
 def test_remote_profile_preserves_explicit_target_and_mounted_settings(
     environment, monkeypatch, profile
 ):
@@ -129,8 +130,27 @@ def test_remote_profile_preserves_explicit_target_and_mounted_settings(
         load_settings()
 
 
+def test_recovery_environment_has_retry_safe_nonsecret_identity(environment, tmp_path, monkeypatch):
+    config = load_settings()
+    runtime = resolve_runtime_env_profile("recovery-showcase", config=config["DJANGO_RAY"])
+    archive = tmp_path / "recovery.zip"
+    archive.write_bytes(b"bounded-unit-fixture")
+    runtime = normalize_runtime_env({**runtime.spec, "working_dir": str(archive)})
+    trust = config["DJANGO_RAY"].get("WORKFLOW_PLAN_TRUST_IDENTITY", {})
+    assert runtime_env_plan_identity(runtime, trust_identity=trust).retry_safe
+    assert not runtime_env_plan_identity(runtime).retry_safe
+    monkeypatch.setenv("DJANGO_API_TOKEN", "DifferentQualificationToken01234567890123456789")
+    monkeypatch.setenv(
+        "DJANGO_RAY_QUALIFICATION_ENCRYPTION_KEY",
+        base64.urlsafe_b64encode(bytes(reversed(range(32)))).rstrip(b"=").decode(),
+    )
+    assert load_settings()["DJANGO_RAY"]["WORKFLOW_PLAN_TRUST_IDENTITY"] == trust
+    monkeypatch.setenv("RAY_ADDRESS", "ray://replacement-head:10001")
+    assert load_settings()["DJANGO_RAY"]["WORKFLOW_PLAN_TRUST_IDENTITY"] != trust
+
+
 @pytest.mark.postgresql
-@pytest.mark.parametrize("profile", [None, "project", "thin"])
+@pytest.mark.parametrize("profile", [None, "project", "thin", "recovery-showcase"])
 def test_qualification_settings_bootstrap_without_database_or_ray_start(environment, profile):
     # The ordinary dependency lanes intentionally omit the PostgreSQL extra.
     # make test-postgres requires this bootstrap in its no-skip evidence lane.

@@ -89,11 +89,13 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
         assert job["spec"]["activeDeadlineSeconds"] == 600
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
         assert command[:2] == ["/bin/sh", "-ec"]
-        node_command, core_command = command[2].split(" && ")
+        node_command, core_command, workflow_command = command[2].split(" && ")
         assert node_command.startswith("python -m qualification.application.generic_nodes ")
         assert core_command.startswith("python -m qualification.application.run_core ")
         assert f"--receipt /receipts/{generation}-nodes.json" in node_command
         assert f"--receipt /receipts/{generation}-core.json" in core_command
+        assert workflow_command.startswith("python -m qualification.application.run_workflows ")
+        assert f"--receipt /receipts/{generation}-workflows.json" in workflow_command
         assert ("--previous-receipt /receipts/before-nodes.json" in node_command) == (
             generation == "after"
         )
@@ -155,7 +157,7 @@ def test_profile_credentials_precede_the_composed_secret():
         for template, _ in templates(resource):
             spec = template["spec"]
             for container in spec["containers"] + spec.get("initContainers", []):
-                if container["name"] == "postgres":
+                if container["name"] in {"postgres", "ray-tmp"}:
                     continue
                 env = container["env"]
                 names = [item["name"] for item in env]
@@ -190,7 +192,7 @@ def test_profile_mounts_same_archive_read_only_outside_setup():
                 assert container["securityContext"]["readOnlyRootFilesystem"] is True
                 assert container["securityContext"]["allowPrivilegeEscalation"] is False
                 assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
-                if container["name"] != "postgres":
+                if container["name"] not in {"postgres", "ray-tmp"}:
                     runtime = next(
                         mount for mount in container["volumeMounts"] if mount["name"] == "runtime"
                     )
@@ -198,6 +200,28 @@ def test_profile_mounts_same_archive_read_only_outside_setup():
                     assert runtime["readOnly"] is (container["name"] != "setup")
             for volume in spec["volumes"]:
                 assert not set(volume) & {"hostPath", "projected"}
+
+
+def test_ray_workers_use_private_temporary_storage_without_new_credentials():
+    for template, _ in templates(resources()["RayCluster", "ray"]):
+        spec = template["spec"]
+        initializer = spec["initContainers"][0]
+        worker = spec["containers"][0]
+        assert initializer["name"] == "ray-tmp"
+        assert initializer["image"] == worker["image"]
+        assert not {"env", "envFrom"} & initializer.keys()
+        assert initializer["volumeMounts"] == [
+            {"name": "tmp", "mountPath": "/tmp", "readOnly": False}
+        ]
+        assert {"name": "TMPDIR", "value": "/tmp/workflow"} in worker["env"]
+        command = initializer["command"]
+        assert command[:2] == ["python", "-c"]
+        assert "os.mkdir(path, 0o700)" in command[2]
+        # mkdir beneath an fsGroup directory can inherit setgid. Clear it and
+        # prove ownership/mode before any Ray process starts using this path.
+        assert "os.chmod(path, 0o700)" in command[2]
+        assert "info.st_uid == os.geteuid()" in command[2]
+        assert "stat.S_IMODE(info.st_mode) == 0o700" in command[2]
 
 
 def test_profile_uses_fixed_generic_ray_and_postgresql_images():

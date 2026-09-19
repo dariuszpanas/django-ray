@@ -23,10 +23,15 @@ CREDENTIAL_KEYS = (
 )
 RECEIPTS = {
     "django-web": ("setup", ("setup",)),
-    "assert-before": ("assertions", ("before-nodes", "before-core")),
-    "assert-after": ("assertions", ("after-nodes", "after-core")),
+    "assert-before": ("assertions", ("before-nodes", "before-core", "before-workflows")),
+    "assert-after": ("assertions", ("after-nodes", "after-core", "after-workflows")),
 }
-LAYERS = {"setup": "application_setup", "nodes": "generic_ray_nodes", "core": "application_core"}
+LAYERS = {
+    "setup": "application_setup",
+    "nodes": "generic_ray_nodes",
+    "core": "application_core",
+    "workflows": "workflow_api_admin",
+}
 
 
 def checked(argv, *, data=None, timeout=40):

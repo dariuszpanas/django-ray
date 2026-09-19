@@ -2117,6 +2117,7 @@ def test_admin_smoke_cleanup_attempts_user_delete_when_session_delete_fails(
 
     class FakeUser:
         pk = 1
+        objects = SimpleNamespace(filter=lambda **_kwargs: SimpleNamespace(exists=lambda: False))
 
         def __init__(self, **_kwargs: object) -> None:
             pass

@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from qualification.application.api import ApiEvidence, verify_application_api
 
 MAX_RESPONSE_BYTES = 256 * 1024
+MAX_EXPLICIT_RESPONSE_BYTES = 1024 * 1024
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+={0,2}\Z")
 
 
@@ -59,6 +60,8 @@ class ApplicationHttp:
         headers: dict[str, str] | None = None,
         response_limit: int = MAX_RESPONSE_BYTES,
         required_response_headers: dict[str, str] | None = None,
+        required_cache_directives: frozenset[str] = frozenset(),
+        required_media_types: frozenset[str] = frozenset(),
     ) -> tuple[int, bytes]:
         parsed = urlsplit(path)
         if (
@@ -74,7 +77,7 @@ class ApplicationHttp:
             raise ValueError("The application request must use an origin-relative path")
         if method not in {"GET", "POST", "DELETE"}:
             raise ValueError("Unsupported application assertion method")
-        if type(response_limit) is not int or not 0 < response_limit <= MAX_RESPONSE_BYTES:
+        if type(response_limit) is not int or not 0 < response_limit <= MAX_EXPLICIT_RESPONSE_BYTES:
             raise ValueError("The application response limit is invalid")
         connection_type = http.client.HTTPSConnection if self.secure else http.client.HTTPConnection
         connection = connection_type(self.hostname, self.port, timeout=self.request_timeout)
@@ -91,6 +94,16 @@ class ApplicationHttp:
                 for name, value in (required_response_headers or {}).items()
             ):
                 failure = "Application HTTP response headers did not match"
+            elif not required_cache_directives.issubset(
+                part.strip().lower()
+                for part in (response.getheader("Cache-Control") or "").split(",")
+            ):
+                failure = "Application HTTP response cache directives did not match"
+            elif required_media_types and (
+                (response.getheader("Content-Type") or "").partition(";")[0].strip().lower()
+                not in required_media_types
+            ):
+                failure = "Application HTTP response media type did not match"
             else:
                 body = response.read(response_limit + 1)
                 if len(body) > response_limit:

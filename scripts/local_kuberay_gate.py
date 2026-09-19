@@ -40,6 +40,10 @@ import yaml
 
 from qualification.application import api as api_assertions
 from qualification.application.workflow_envelopes import validate_workflow_envelope
+from qualification.application.workflow_fixtures import (
+    WORKFLOW_SHOWCASE_EDGES,
+    WORKFLOW_SHOWCASE_NODE_LAYERS,
+)
 from scripts.check_prometheus_targets import (
     EXPECTED_JOBS,
     fetch_active_targets,
@@ -299,66 +303,6 @@ WORKFLOW_SHOWCASE_FAILURE_MESSAGE = (
 )
 WORKFLOW_SHOWCASE_CALLABLE = "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task"
 WORKFLOW_SHOWCASE_PAGE_LIMIT = 64
-WORKFLOW_SHOWCASE_NODE_LAYERS = (
-    frozenset({"0.0"}),
-    frozenset(
-        {
-            "0.1.g0.0",
-            "0.1.g1.0.g0",
-            "0.1.g1.0.g1",
-            "0.1.g2",
-        }
-    ),
-    frozenset({"0.1.g0.1", "0.1.g1.1"}),
-    frozenset({"0.2"}),
-    frozenset(
-        {
-            "0.3.g0",
-            "0.3.g1.0.g0",
-            "0.3.g1.0.g1.0.g0",
-            "0.3.g1.0.g1.0.g1",
-        }
-    ),
-    frozenset({"0.3.g1.0.g1.1"}),
-    frozenset({"0.3.g1.1"}),
-    frozenset({"0.4"}),
-    frozenset({"0.5"}),
-    frozenset({"0.6"}),
-    frozenset({"0.7.g0", "0.7.g1", "0.7.g2"}),
-    frozenset({"0.8"}),
-)
-WORKFLOW_SHOWCASE_EDGES = frozenset(
-    {
-        ("0.0", "0.1.g0.0"),
-        ("0.1.g0.0", "0.1.g0.1"),
-        ("0.0", "0.1.g1.0.g0"),
-        ("0.0", "0.1.g1.0.g1"),
-        ("0.1.g1.0.g0", "0.1.g1.1"),
-        ("0.1.g1.0.g1", "0.1.g1.1"),
-        ("0.0", "0.1.g2"),
-        ("0.1.g0.1", "0.2"),
-        ("0.1.g1.1", "0.2"),
-        ("0.1.g2", "0.2"),
-        ("0.2", "0.3.g0"),
-        ("0.2", "0.3.g1.0.g0"),
-        ("0.2", "0.3.g1.0.g1.0.g0"),
-        ("0.2", "0.3.g1.0.g1.0.g1"),
-        ("0.3.g1.0.g1.0.g0", "0.3.g1.0.g1.1"),
-        ("0.3.g1.0.g1.0.g1", "0.3.g1.0.g1.1"),
-        ("0.3.g1.0.g0", "0.3.g1.1"),
-        ("0.3.g1.0.g1.1", "0.3.g1.1"),
-        ("0.3.g0", "0.4"),
-        ("0.3.g1.1", "0.4"),
-        ("0.4", "0.5"),
-        ("0.5", "0.6"),
-        ("0.6", "0.7.g0"),
-        ("0.6", "0.7.g1"),
-        ("0.6", "0.7.g2"),
-        ("0.7.g0", "0.8"),
-        ("0.7.g1", "0.8"),
-        ("0.7.g2", "0.8"),
-    }
-)
 WORKFLOW_SHOWCASE_FAILURE_NODE_ID = "0.5"
 WORKFLOW_SHOWCASE_VALIDATION_NODE_ID = "0.1.g0.1"
 WORKFLOW_SHOWCASE_INPUT_PREVIEW_NODE_ID = "0.4"
