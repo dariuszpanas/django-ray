@@ -61,6 +61,12 @@ includes the task manager's client connection. See the
 [worker execution modes](worker-modes.md#cluster-ray-core) before choosing it for
 production work.
 
+This walkthrough uses local Ray for development. For ordinary durable background
+jobs on Kubernetes, begin with the [Ray Job execution mode](worker-modes.md#ray-job)
+and its required retrievable input storage. Configure how the Ray environment gets
+your application code and dependencies before submitting work. A remote address
+alone does not deliver the application or expose its dashboard to your browser.
+
 Apply the database migrations:
 
 ```bash
