@@ -883,7 +883,8 @@ def test_monthly_workflow_and_make_target_preserve_coverage_policy() -> None:
 
     assert cron.split()[2] == "1"
     assert "workflow_dispatch" in events
-    assert permissions == {"contents": "read", "issues": "write"}
+    assert permissions == {"contents": "read"}
+    assert job["permissions"] == {"contents": "read", "issues": "write"}
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == "45"
     assert job["env"]["COVERAGE_DEBT_SOURCE_COMMIT"] == "${{ github.sha }}"

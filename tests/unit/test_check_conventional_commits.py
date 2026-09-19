@@ -145,7 +145,7 @@ def test_workflow_uses_trusted_code_and_pinned_node_installation() -> None:
     assert "pull-requests: write" not in workflow
     assert re.search(r"uses: actions/checkout@[0-9a-f]{40}(?:\s|#)", workflow)
     assert "fetch-depth: 0" in workflow
-    assert "ref: ${{ github.event.repository.default_branch }}" in workflow
+    assert "ref: main" in workflow
     assert re.search(r"uses: actions/setup-node@[0-9a-f]{40}(?:\s|#)", workflow)
     assert "node-version-file: .node-version" in workflow
     assert "cache: npm" in workflow

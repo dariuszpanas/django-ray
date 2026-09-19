@@ -38,6 +38,27 @@ make install
 make test
 ```
 
+### Workflow checks with YAGA
+
+Run `make workflow-check` to check immutable Actions/container references and the
+YAGA `recommended-v3` workflow security profile. This uses the pinned released
+`yaga-cli==0.1.1` through uvx; it does not add a package runtime dependency.
+The same explicit `.yaga/checks/workflows.toml` plan runs in the required CI lint job.
+Both findings (exit 1) and operational errors (exit 2) fail the check.
+
+To try the global installation instead, run `make workflow-check YAGA=yaga` or
+`yaga repo check --plan .yaga/checks/workflows.toml`. Compare its `yaga --version`
+with the repository pin before relying on equivalent results. Review release notes,
+update the Makefile pin, and rerun the baseline and CI when upgrading YAGA.
+
+These deterministic checks require no Docker, model credentials, or GitHub write
+access. They inspect the selected workflow files; they do not replace actionlint,
+behavior tests, commitlint, or trusted GitHub rules. Commit Messages explicitly
+checks out `main` for its trusted policy; update that literal if the default branch
+is renamed. PostgreSQL service images retain their major-version tag for readability
+and pin the registry manifest digest; refresh all three pins together after review.
+See the [YAGA adoption guide](https://dariuszpanas.github.io/yaga/ci-adoption/).
+
 ## Development Workflow
 
 ### Repository Conventions

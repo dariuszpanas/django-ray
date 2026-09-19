@@ -8,7 +8,7 @@
 .PHONY: all install configure-git commit-check commit-title-check commit-policy-test format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
-.PHONY: docs-build docs-build-strict docs-serve
+.PHONY: docs-build docs-build-strict docs-serve workflow-check
 .PHONY: linux-test-catalogue linux-test-stage linux-test-aggregate
 
 # Include optional modules (comment out if not needed)
@@ -83,6 +83,12 @@ commit-title-check:
 # Exercise the repository-owned commit policy fixtures.
 commit-policy-test:
 	npm test --silent
+
+# Pure Python workflow checks; override YAGA=yaga to use a global installation.
+YAGA ?= uvx --from yaga-cli==0.1.1 yaga
+YAGA_FORMAT ?= text
+workflow-check:
+	$(YAGA) repo check --plan .yaga/checks/workflows.toml --format $(YAGA_FORMAT)
 
 # Format code with Ruff
 format:
