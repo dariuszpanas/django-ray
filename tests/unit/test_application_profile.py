@@ -89,11 +89,13 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
         assert job["spec"]["activeDeadlineSeconds"] == 600
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
         assert command[:2] == ["/bin/sh", "-ec"]
-        node_command, core_command = command[2].split(" && ")
+        node_command, core_command, workflow_command = command[2].split(" && ")
         assert node_command.startswith("python -m qualification.application.generic_nodes ")
         assert core_command.startswith("python -m qualification.application.run_core ")
         assert f"--receipt /receipts/{generation}-nodes.json" in node_command
         assert f"--receipt /receipts/{generation}-core.json" in core_command
+        assert workflow_command.startswith("python -m qualification.application.run_workflows ")
+        assert f"--receipt /receipts/{generation}-workflows.json" in workflow_command
         assert ("--previous-receipt /receipts/before-nodes.json" in node_command) == (
             generation == "after"
         )
