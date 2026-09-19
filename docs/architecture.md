@@ -282,7 +282,7 @@ Application administrators and database writers remain trusted not to forge
 worker-managed state.
 
 Graceful handoff is an ownership mutation, not an exception to the protocol. Before
-requeueing a claimed-but-unsubmitted task, cancelling a Ray Core handle, or releasing
+requeuing a claimed-but-unsubmitted task, cancelling a Ray Core handle, or releasing
 a Ray Job for another monitor, shutdown revalidates the complete live lease and holds
 the lease-to-execution lock order through the effect and durable update. A process
 whose lease expired while paused or before a signal arrived leaves task rows untouched

@@ -52,6 +52,9 @@ jobs:
       - name: Check workflows with YAGA
         run: make workflow-check YAGA_FORMAT=github
 
+      - name: Check repository spelling
+        run: uv run make spelling-check
+
       - name: Check formatting
         run: uv run ruff format --check .
 

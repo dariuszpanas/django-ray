@@ -297,3 +297,14 @@ The candidate policy explicitly skips title, commit-message and optional spellin
 rules for trusted same-repository Dependabot PRs on `dependabot/` branches. Event
 and fetched-head verification still apply; ordinary PRs cannot opt out by using
 a bot-like branch name. The required `Commit Messages` exemption is unchanged.
+
+### Repository spelling
+
+Run `make spelling-check` to check docs, source, tests and configuration with
+Typos 1.50.2. The command uses `uvx` to obtain the pinned tool without a manual
+installation and also runs in `make check`, `make ci`, and the required lint job.
+It includes tracked files and new non-ignored files, uses only `_typos.toml`, and
+returns a failure for spelling findings or tool errors. Binary PNG/ICO assets are
+excluded. File-specific exceptions preserve deliberately malformed test data and
+published command syntax; do not add broad dictionary exceptions to hide mistakes.
+Commit spelling through YAGA is qualified separately under issue #521.

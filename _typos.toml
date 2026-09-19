@@ -1,0 +1,35 @@
+# Explicit file lists include binary assets; they are not spelling input.
+[files]
+extend-exclude = ["*.png", "*.ico"]
+
+# PowerShell case-insensitive inequality operator in the published recipe.
+[type.powershell-example]
+extend-glob = ["README.md", "test_docker_qualification.py"]
+[type.powershell-example.extend-words]
+ine = "ine"
+
+# Deliberately malformed redaction inputs and finite-alphabet regex fixtures.
+[type.redaction-fixtures]
+extend-glob = ["test_lifecycle.py", "test_redaction.py", "test_redaction_patterns.py"]
+[type.redaction-fixtures.extend-words]
+passord = "passord"
+emai = "emai"
+ba = "ba"
+
+# Byte-boundary truncation of the redaction marker.
+[type.log-fixtures]
+extend-glob = ["test_observability.py"]
+[type.log-fixtures.extend-words]
+TRU = "TRU"
+
+# Prefix of an explicitly escaped accented Unicode test string.
+[type.unicode-fixtures]
+extend-glob = ["test_workflow_plans.py"]
+[type.unicode-fixtures.extend-words]
+caf = "caf"
+
+# Typos splits the SQL acronym plural SELECTs at the uppercase boundary.
+[type.sql-benchmark]
+extend-glob = ["workflow-progress-reads-postgresql17-windows-2026-07-21.md"]
+[type.sql-benchmark.extend-identifiers]
+SELECTs = "SELECTs"
