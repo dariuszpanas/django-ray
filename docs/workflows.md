@@ -136,6 +136,11 @@ If a graph is missing, check these conditions in order:
 A successful task with no graph is possible: observability publication is
 best-effort and does not replace the task result. Do not rerun a side-effecting
 task solely to recover a visualization without checking its idempotency.
+If the worker reports `publication_failed`, also check the publisher's
+[temporary-storage requirements](reference/settings.md#temporary-storage-for-full-workflow-publication).
+In particular, a non-root Kubernetes worker may be able to execute tasks while its
+shared `/tmp` permissions prevent terminal graph preparation. Fixing storage affects
+future publications; it does not reconstruct a missing historical graph.
 
 The [progress contract](#graph-and-progress-schema) describes the stored formats and
 diagnostic availability in detail. Making the default graph path supported and
@@ -881,7 +886,8 @@ The outer Django task is the durability and retry boundary:
   diagnostic evidence, not checkpoints, reusable results, selective-resume records, or
   authorization to skip an external side effect. Normalized node detail does not retain
   leaf return values.
-- `TaskAttempt` archives terminal task diagnostics, not workflow graphs. If a run has
+- `TaskAttempt` archives terminal task diagnostics and a bounded workflow summary;
+  graph topology and node detail remain in the separately retained run storage. If a run has
   already published a canonical terminal schema-v3 summary, the same bounded value is
   archived with its attempt before retry cleanup. Otherwise, lifecycle reconciliation
   derives a terminal envelope from the last accepted running summary under the row

@@ -532,6 +532,36 @@ documented profile and the deployment has been validated.
 "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True
 ```
 
+#### Temporary storage for full workflow publication
+
+The current full-detail publisher prepares topology in a private SQLite workspace,
+including for small graphs. Its temporary parent must be writable and have safe
+ownership and permissions. A worker-owned private directory with mode `0700` satisfies
+that check; a root-owned shared directory needs the sticky bit, as with a conventional
+mode-`1777` `/tmp`.
+
+A Kubernetes `emptyDir` mounted at `/tmp` with `fsGroup` can instead be root-owned and
+mode `2777`. That is not sticky storage, and the publisher refuses it. The workflow can
+still succeed while its terminal graph is missing. A `publication_failed` warning can
+have other causes too; it does not by itself identify a permissions failure.
+
+For a non-root Ray deployment, initialize a private directory on the existing writable
+scratch volume before Ray starts. Run the init container as the same UID as the Ray
+container, with the same scratch mount, on both head and worker Pod templates. For a
+fresh volume, its initialization commands can be:
+
+```sh
+mkdir -m 0700 /tmp/django-ray-workflow
+chmod 0700 /tmp/django-ray-workflow
+```
+
+The explicit `chmod` clears any setgid bit inherited from the volume directory. Set
+`TMPDIR=/tmp/django-ray-workflow` in the **Ray containers' environment**, before their
+Python processes start. Exporting it only inside an init container does not configure
+the Ray containers. Keep the directory writable by the Ray UID and account for its
+storage within the Pod's existing scratch limit. This prepares storage; it does not
+enable the publisher, backfill history, or qualify concurrent publication.
+
 ### WORKFLOW_PROGRESS_FLUSH_SECONDS
 
 - **Type**: `int`
