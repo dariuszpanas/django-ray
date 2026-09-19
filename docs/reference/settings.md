@@ -953,9 +953,29 @@ These settings are configured directly in Django settings, not in `DJANGO_RAY`:
 ### RAY_DASHBOARD_URL
 
 - **Type**: `str`
-- **Default**: `"http://localhost:8265"`
+- **Default**: unset (Admin shows a configuration message instead of a link)
 
-URL of the Ray Dashboard. Used by Django Admin to generate deep links to tasks in the Ray Dashboard.
+Browser-facing HTTP(S) URL of the Ray Dashboard. Used by Django Admin to generate deep links
+to tasks. This must be reachable from the operator's browser, independently of the internal
+Ray Client or Jobs API address used by workers. Credentials, query strings and fragments are
+not accepted; use an authenticated proxy for remote access. A base path and trailing slash
+are supported, provided the proxy serves the dashboard correctly at that path.
+
+The installed package reads this Django setting, not the environment directly. Wire an
+environment variable explicitly in your application's settings:
+
+```python
+import os
+
+RAY_DASHBOARD_URL = os.environ.get("RAY_DASHBOARD_URL")
+```
+
+Missing, empty or invalid values leave job identifiers visible without clickable links.
+For local development with a port-forward, explicitly set `http://localhost:8265`.
+Upgrading from 0.5.0: the implicit localhost fallback has been removed. Set this
+value explicitly to retain local links; the bundled sample already supplies it.
+See [Kubernetes dashboard access](../deployment/kubernetes.md#ray-dashboard-links-from-django-admin).
+
 In the sample Kubernetes manifests this is set explicitly via environment/config:
 
 - base NodePort manifests: `http://localhost:30265`

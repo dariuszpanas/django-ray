@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime
 from types import MethodType
 from typing import Any, cast
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from django.apps import apps
 from django.contrib import admin, messages
@@ -107,8 +107,34 @@ else:
 DjangoRayModelAdmin = cast(Any, _ConfiguredModelAdmin)
 DjangoRayTabularInline = cast(Any, _ConfiguredTabularInline)
 
-# Ray Dashboard URL fallback for local Ray.
-RAY_DASHBOARD_URL = "http://localhost:8265"
+
+def _ray_dashboard_url() -> str | None:
+    """Return an explicitly configured browser-facing HTTP(S) base URL."""
+    from django.conf import settings
+
+    value = getattr(settings, "RAY_DASHBOARD_URL", None)
+    if not isinstance(value, str) or not value or any(char.isspace() for char in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        # Accessing port also validates malformed and out-of-range ports.
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or "\\" in value
+    ):
+        return None
+    return value.rstrip("/")
+
+
+_DASHBOARD_NOT_CONFIGURED = "Dashboard unavailable: configure RAY_DASHBOARD_URL."
 ADMIN_DIAGNOSTIC_MAX_CHARS = 4096
 ADMIN_ATTEMPT_INLINE_MAX_CHARS = 512
 ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES = ADMIN_DIAGNOSTIC_MAX_CHARS * 4
@@ -2957,14 +2983,14 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     @admin.display(description="Ray Job ID")
     def ray_job_id_display(self, obj: RayTaskExecution) -> str:
         """Display Ray Job ID with link to Ray Dashboard."""
-        from django.conf import settings
-
         ray_job_id = obj.ray_job_id
         if not ray_job_id:
             return "Not yet submitted"
 
         job_id = str(ray_job_id)
-        dashboard_url = getattr(settings, "RAY_DASHBOARD_URL", RAY_DASHBOARD_URL)
+        dashboard_url = _ray_dashboard_url()
+        if dashboard_url is None:
+            return format_html("{} ({})", job_id, _DASHBOARD_NOT_CONFIGURED)
 
         # Old format: ray_core:pk
         if job_id.startswith("ray_core:"):
@@ -2975,7 +3001,9 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             parts = job_id.split(":", 1)
             ray_job = parts[0]
             ray_task = parts[1]
-            url = f"{dashboard_url}/#/jobs/{ray_job}/tasks/{ray_task}"
+            url = (
+                f"{dashboard_url}/#/jobs/{quote(ray_job, safe='')}/tasks/{quote(ray_task, safe='')}"
+            )
             return format_html(
                 'Job: {}, Task: {}... <a href="{}" target="_blank" '
                 'rel="noopener noreferrer">[Open in Dashboard]</a>',
@@ -2985,7 +3013,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             )
 
         # Ray Job API format
-        url = f"{dashboard_url}/#/jobs/{job_id}"
+        url = f"{dashboard_url}/#/jobs/{quote(job_id, safe='')}"
         return format_html(
             '{} <a href="{}" target="_blank" rel="noopener noreferrer">[Open in Dashboard]</a>',
             job_id,
@@ -3091,16 +3119,15 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     @admin.display(description="Ray")
     def ray_dashboard_link(self, obj: RayTaskExecution) -> str:
         """Display link to Ray Dashboard for the job/task."""
-        from django.conf import settings
-
         ray_job_id = obj.ray_job_id
         if not ray_job_id:
             return "-"
 
         job_id = str(ray_job_id)
 
-        # Get dashboard URL from settings or use default
-        dashboard_url = getattr(settings, "RAY_DASHBOARD_URL", RAY_DASHBOARD_URL)
+        dashboard_url = _ray_dashboard_url()
+        if dashboard_url is None:
+            return _DASHBOARD_NOT_CONFIGURED
 
         # Old format: ray_core:pk - no useful link
         if job_id.startswith("ray_core:"):
@@ -3116,14 +3143,16 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             ray_job = parts[0]
             ray_task = parts[1]
             # Link directly to the task in the Ray Dashboard
-            url = f"{dashboard_url}/#/jobs/{ray_job}/tasks/{ray_task}"
+            url = (
+                f"{dashboard_url}/#/jobs/{quote(ray_job, safe='')}/tasks/{quote(ray_task, safe='')}"
+            )
             return format_html(
                 '<a href="{}" target="_blank" rel="noopener noreferrer">Task</a>',
                 url,
             )
 
         # Ray Job API - link to the job
-        url = f"{dashboard_url}/#/jobs/{job_id}"
+        url = f"{dashboard_url}/#/jobs/{quote(job_id, safe='')}"
         return format_html(
             '<a href="{}" target="_blank" rel="noopener noreferrer">{}...</a>',
             url,
