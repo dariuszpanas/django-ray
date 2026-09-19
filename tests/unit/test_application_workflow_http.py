@@ -121,6 +121,10 @@ def terminal_only(observation):
                 nodes=[],
                 edges=[],
                 counts={"nodes": 0, "edges": 0},
+                message=(
+                    "This attempt used terminal-only reporting, which saves a summary without "
+                    "graph details. Use supported full reporting for future runs if you need a graph."
+                ),
             )
             continue
         value.update(availability="OMITTED_BY_POLICY", complete=False)
@@ -153,6 +157,24 @@ def test_terminal_only_requires_empty_api_and_admin_detail(observation):
     assert receipt["reporting_policy"] == "terminal_only"
     assert receipt["counts"] == {"nodes": 0, "edges": 0}
     assert request.call_count == 5
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Graph details are unavailable for this attempt.",
+        "This workflow has not finished. Check again after it finishes.",
+        "Workflow reporting was disabled for this attempt, so no graph was saved.",
+        None,
+    ],
+)
+def test_terminal_only_rejects_missing_or_incorrect_policy_explanation(observation, message):
+    request, arguments, values = terminal_only(observation)
+    values["/admin/django_ray/raytaskexecution/7/workflow/graph/?attempt_number=1"]["message"] = (
+        message
+    )
+    with pytest.raises(ValueError, match="did not explain the observed reporting policy"):
+        read_full_workflow_graph(request, **arguments)
 
 
 @pytest.mark.parametrize("surface", ["nodes", "admin"])

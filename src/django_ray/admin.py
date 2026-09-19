@@ -2715,7 +2715,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
     def _workflow_graph_issue_response(issue: AdminWorkflowGraphError) -> HttpResponse:
         """Return one fixed-shape graph degradation without partial records."""
         return _admin_json_response(
-            degraded_admin_workflow_graph(issue.status),
+            degraded_admin_workflow_graph(issue.status, reason=issue.reason),
             status=issue.http_status,
             max_bytes=ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES,
         )
