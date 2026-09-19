@@ -16,6 +16,44 @@ before an independently designed production deployment.
 - kubectl configured to access your cluster
 - Docker for building images
 
+## Ray dashboard links from Django Admin
+
+Task execution and browser dashboard access use separate addresses. Keep the workers'
+internal Ray connection settings; set the top-level Django `RAY_DASHBOARD_URL` to a URL
+the operator's browser can reach. Kubernetes service DNS typically only resolves inside
+the cluster. Installing django-ray does not automatically read an environment variable
+with this name:
+
+```python
+# Your application's settings.py; outside DJANGO_RAY.
+import os
+
+RAY_DASHBOARD_URL = os.environ.get("RAY_DASHBOARD_URL")
+```
+
+For a local session, discover the Ray head service in your namespace, then forward its
+dashboard port (replace the placeholders with your own namespace and service):
+
+```bash
+kubectl -n <namespace> get services
+kubectl -n <namespace> port-forward service/<ray-head-service> 8265:8265
+```
+
+Set `RAY_DASHBOARD_URL=http://localhost:8265` in the Django application's environment
+and restart its web processes. Keep the forward running on the computer with the browser.
+Open that URL directly before testing an Admin deep link. Each operator needs their own
+forward when using localhost.
+
+For shared access, use a protected HTTPS ingress or authenticated proxy to the Ray head
+service's dashboard port, and configure its browser-facing URL, for example
+`https://ray.example.com`. Django Admin authentication does not protect that separate
+endpoint. Follow [Ray's ingress guidance](https://docs.ray.io/en/latest/cluster/kubernetes/k8s-ecosystem/ingress.html).
+First verify the dashboard root loads, then open a submitted task's Admin link. An expired
+Ray job may no longer be visible even while its durable Django history remains available.
+
+Without a valid explicit URL, Admin displays a configuration message. The bundled sample
+still supplies explicit local URLs; adapt those when deploying your own application.
+
 ## Local Evaluation Quick Start
 
 ### 1. Build Images

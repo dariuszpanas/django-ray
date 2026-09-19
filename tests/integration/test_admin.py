@@ -408,6 +408,7 @@ class TestRayTaskExecutionAdmin:
         assert admin_obj.attempt_display(task) == 3
         assert admin_obj.finished_display(task) == "-"
 
+    @override_settings(RAY_DASHBOARD_URL="http://localhost:8265")
     def test_ray_job_display_variants(self) -> None:
         admin_obj = _task_admin()
 
@@ -779,6 +780,7 @@ class TestRayTaskExecutionAdmin:
         assert 'href="http://ray.localhost:30080/#/jobs/02000000/tasks/abcdef1234567890"' in display
         assert 'href="http://ray.localhost:30080/#/jobs/02000000/tasks/abcdef1234567890"' in link
 
+    @override_settings(RAY_DASHBOARD_URL="https://ray.example.com")
     def test_dashboard_links_escape_untrusted_ray_identifiers(self) -> None:
         task = RayTaskExecution.objects.create(
             task_id="admin-display-escaped",
@@ -792,7 +794,7 @@ class TestRayTaskExecutionAdmin:
         assert "<img" not in rendered
         assert "<img" not in link
         assert "&lt;img" in rendered
-        assert "%3Cimg" not in link
+        assert "%3Cimg" in link
 
     def test_observability_endpoint_requires_admin_access(self) -> None:
         execution = RayTaskExecution.objects.create(
