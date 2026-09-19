@@ -83,27 +83,80 @@ _PUBLIC_IDENTITY_FIELDS = frozenset(
 _PUBLICATION_FIELDS = frozenset({"summary_revision", "topology_version", "detail_revision"})
 _STATUS_MESSAGES = {
     "AVAILABLE": "Bounded terminal workflow graph is available.",
-    "NOT_REPORTED": "A terminal schema-v3 workflow publication is not available yet.",
-    "UNSUPPORTED": "Only an unsupported or legacy workflow publication is available.",
-    "TRUNCATED": "Workflow detail is incomplete, so no partial graph is shown.",
-    "UNAVAILABLE": "Bounded workflow detail is unavailable, so no graph is shown.",
-    "LIMIT_EXCEEDED": (
-        "Workflow graph exceeds the admin display limits, so no partial graph is shown."
+    "NOT_REPORTED": (
+        "No graph is available for this attempt. Graphs require a completed workflow with "
+        "supported full reporting. Check its reporting and publication configuration; "
+        "changing settings cannot reconstruct past runs."
     ),
-    "CORRUPT": "Workflow graph data failed validation, so no graph is shown.",
+    "UNSUPPORTED": (
+        "This attempt used reporting that cannot produce an Admin graph. Its existing history "
+        "is preserved. Use supported full reporting for future workflow runs."
+    ),
+    "TRUNCATED": (
+        "Only part of this workflow's detail was retained, so a complete graph cannot be drawn. "
+        "Inspect the paginated workflow API and its truncation reasons."
+    ),
+    "UNAVAILABLE": (
+        "Graph details are unavailable for this attempt. Check its retained workflow diagnostics "
+        "and reporting configuration before starting future work."
+    ),
+    "LIMIT_EXCEEDED": (
+        "This workflow exceeds Admin's display limits (100 nodes, 256 edges or 128 KiB). "
+        "Inspect the paginated workflow API for retained details."
+    ),
+    "CORRUPT": (
+        "Saved workflow detail failed validation. Inspect diagnostics for this attempt; "
+        "changing reporting settings will not repair its saved data."
+    ),
 }
 _DEGRADED_STATUSES = frozenset(_STATUS_MESSAGES) - {"AVAILABLE"}
+_REASON_MESSAGES = {
+    ("NOT_REPORTED", "RUNNING"): (
+        "This workflow has not finished. Admin graphs are available only after completion; "
+        "check again after it finishes."
+    ),
+    ("UNAVAILABLE", "DISABLED"): (
+        "Workflow reporting was disabled for this attempt, so no graph was saved. "
+        "Use supported full reporting for future runs if you need a graph."
+    ),
+    ("UNAVAILABLE", "OMITTED_BY_POLICY"): (
+        "This attempt used terminal-only reporting, which saves a summary without graph details. "
+        "Use supported full reporting for future runs if you need a graph."
+    ),
+    ("UNAVAILABLE", "EXPIRED"): (
+        "Graph details for this attempt have expired. Its retained summary remains available. "
+        "Review workflow detail retention for future runs."
+    ),
+    ("UNAVAILABLE", "MISSING"): (
+        "Graph details for this attempt are missing. Inspect its publication and cleanup "
+        "diagnostics; changing reporting settings cannot reconstruct this graph."
+    ),
+}
+
+
+def _graph_message(status: str, reason: str | None) -> str:
+    if reason is None:
+        message = _STATUS_MESSAGES[status]
+    else:
+        try:
+            message = _REASON_MESSAGES[status, reason]
+        except KeyError as error:
+            raise ValueError("Unsupported admin workflow graph reason") from error
+    if len(message.encode("utf-8")) > ADMIN_WORKFLOW_GRAPH_ROOT_MESSAGE_MAX_BYTES:
+        raise AssertionError("Admin workflow graph status message exceeds its fixed bound")
+    return message
 
 
 class AdminWorkflowGraphError(ValueError):
     """A fixed-shape graph degradation that is safe to expose to operators."""
 
-    def __init__(self, status: str, *, http_status: int = 200) -> None:
+    def __init__(self, status: str, *, http_status: int = 200, reason: str | None = None) -> None:
         if status not in _DEGRADED_STATUSES:
             raise ValueError("Unsupported admin workflow graph status")
         self.status = status
         self.http_status = http_status
-        super().__init__(_STATUS_MESSAGES[status])
+        self.reason = reason
+        super().__init__(_graph_message(status, reason))
 
 
 @dataclass(frozen=True)
@@ -128,13 +181,11 @@ def _limits() -> dict[str, int]:
     }
 
 
-def degraded_admin_workflow_graph(status: str) -> dict[str, Any]:
+def degraded_admin_workflow_graph(status: str, *, reason: str | None = None) -> dict[str, Any]:
     """Return one explicit empty graph instead of any partially verified data."""
     if status not in _DEGRADED_STATUSES:
         raise ValueError("Unsupported degraded admin workflow graph status")
-    message = _STATUS_MESSAGES[status]
-    if len(message.encode("utf-8")) > ADMIN_WORKFLOW_GRAPH_ROOT_MESSAGE_MAX_BYTES:
-        raise AssertionError("Admin workflow graph status message exceeds its fixed bound")
+    message = _graph_message(status, reason)
     return {
         "schema": ADMIN_WORKFLOW_GRAPH_SCHEMA,
         "schema_version": ADMIN_WORKFLOW_GRAPH_SCHEMA_VERSION,
@@ -220,7 +271,7 @@ def inspect_admin_workflow_graph_summary(
     if not isinstance(workflow_state, str) or workflow_state not in WORKFLOW_PROGRESS_STATES:
         _corrupt()
     if workflow_state not in WORKFLOW_PROGRESS_TERMINAL_STATES:
-        raise AdminWorkflowGraphError("NOT_REPORTED")
+        raise AdminWorkflowGraphError("NOT_REPORTED", reason="RUNNING")
 
     availability = envelope.get("availability")
     if availability == "TRUNCATED":
@@ -235,7 +286,7 @@ def inspect_admin_workflow_graph_summary(
         "EXPIRED",
         "MISSING",
     }:
-        raise AdminWorkflowGraphError("UNAVAILABLE")
+        raise AdminWorkflowGraphError("UNAVAILABLE", reason=availability)
     if availability != "AVAILABLE":
         _corrupt()
 
