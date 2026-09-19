@@ -15,6 +15,34 @@ import pytest
 from qualification.application import run_api
 
 
+@pytest.mark.parametrize(
+    "media_type,accepted",
+    [("application/json; charset=utf-8", True), ("text/html", False), ("", False)],
+)
+def test_http_transport_checks_media_type_before_returning_body(server, media_type, accepted):
+    url, requests, replies = server
+    replies.append((200, {"Content-Type": media_type}, b"{}"))
+    transport = run_api.ApplicationHttp(url)
+    if accepted:
+        assert transport(
+            "/admin/graph", method="GET", required_media_types=frozenset({"application/json"})
+        ) == (200, b"{}")
+    else:
+        with pytest.raises(ValueError, match="media type"):
+            transport(
+                "/admin/graph", method="GET", required_media_types=frozenset({"application/json"})
+            )
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1024 * 1024 + 1])
+def test_http_transport_refuses_invalid_explicit_body_limit_before_request(server, limit):
+    url, requests, _replies = server
+    with pytest.raises(ValueError, match="response limit"):
+        run_api.ApplicationHttp(url)("/admin/", method="GET", response_limit=limit)
+    assert requests == []
+
+
 @pytest.fixture
 def server():
     requests = []
@@ -50,6 +78,32 @@ def server():
         service.server_close()
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("cache_control", "accepted"),
+    [
+        ("max-age=0, no-cache, no-store, must-revalidate, private", True),
+        ("private, NO-STORE", True),
+        ("private, no-cache", False),
+        ("not-no-store", False),
+        ("no-store=false", False),
+        ("", False),
+    ],
+)
+def test_http_transport_requires_exact_cache_directives(server, cache_control, accepted):
+    origin, _, replies = server
+    replies.append((200, {"Cache-Control": cache_control}, b"{}"))
+    transport = run_api.ApplicationHttp(origin)
+    if accepted:
+        assert transport(
+            "/admin/example/", method="GET", required_cache_directives=frozenset({"no-store"})
+        ) == (200, b"{}")
+    else:
+        with pytest.raises(ValueError, match="cache directives"):
+            transport(
+                "/admin/example/", method="GET", required_cache_directives=frozenset({"no-store"})
+            )
 
 
 def test_http_transport_ignores_proxies_and_does_not_follow_redirects(server, monkeypatch):

@@ -5,6 +5,8 @@ This module must travel inside the locked recovery archive to generic Ray nodes.
 """
 
 import copy
+import hashlib
+import json
 import os
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
@@ -51,6 +53,7 @@ if (
     raise ImproperlyConfigured("Application qualification requires an absolute Linux archive path.")
 
 DJANGO_RAY = copy.deepcopy(_base.DJANGO_RAY)
+_storage_probe = "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
 DJANGO_RAY["RUNTIME_ENV_PROFILES"]["project"] = {
     "working_dir": _archive,
     "env_vars": {
@@ -58,10 +61,23 @@ DJANGO_RAY["RUNTIME_ENV_PROFILES"]["project"] = {
         # Ray Pod supplies a different node-local RAY_ADDRESS to its workers.
         "RAY_ADDRESS": _address,
         "DJANGO_RAY_RUNTIME_ENV": "project",
-        "DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE": (
-            "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
-        ),
+        "DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE": _storage_probe,
     },
+}
+DJANGO_RAY["RUNTIME_ENV_PROFILES"]["recovery-showcase"] = {
+    "extends": "project",
+    "runtime_env": {"env_vars": {"DJANGO_RAY_RUNTIME_ENV": "recovery-showcase"}},
+}
+# The fixed fixture owns these non-secret values across all retry attempts.
+# Never include inherited credentials or the encrypted runtime snapshot here.
+_environment_contract = {
+    "ray_address": _address,
+    "profile_labels": ["project", "thin", "recovery-showcase"],
+    "storage_probe": _storage_probe,
+}
+DJANGO_RAY["WORKFLOW_PLAN_TRUST_IDENTITY"] = {
+    "environment_revision": "qualification-v1-"
+    + hashlib.sha256(json.dumps(_environment_contract, sort_keys=True).encode()).hexdigest()
 }
 # The recovery bundle puts django_ray at its root. There is no src/ PYTHONPATH
 # and no pip installer or implicit package-index egress in this profile.

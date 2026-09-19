@@ -458,6 +458,38 @@ spec:
                     fsGroup: 1000
                     seccompProfile:
                       type: RuntimeDefault
+                  initContainers:
+                  - name: ray-tmp
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    command:
+                    - python
+                    - -c
+                    - >-
+                      import os, stat;
+                      path = '/tmp/workflow';
+                      os.mkdir(path, 0o700);
+                      os.chmod(path, 0o700);
+                      info = os.stat(path, follow_symlinks=False);
+                      assert info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                      limits:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    volumeMounts:
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
                   containers:
                   - name: ray-head
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
@@ -482,6 +514,8 @@ spec:
                     - secretRef:
                         name: application-credentials
                     env:
+                    - name: TMPDIR
+                      value: /tmp/workflow
                     - name: DJANGO_SECRET_KEY_PART_ONE
                       valueFrom:
                         secretKeyRef:
@@ -544,6 +578,38 @@ spec:
                     fsGroup: 1000
                     seccompProfile:
                       type: RuntimeDefault
+                  initContainers:
+                  - name: ray-tmp
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    command:
+                    - python
+                    - -c
+                    - >-
+                      import os, stat;
+                      path = '/tmp/workflow';
+                      os.mkdir(path, 0o700);
+                      os.chmod(path, 0o700);
+                      info = os.stat(path, follow_symlinks=False);
+                      assert info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                      limits:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    volumeMounts:
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
                   containers:
                   - name: ray-worker
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
@@ -568,6 +634,8 @@ spec:
                     - secretRef:
                         name: application-credentials
                     env:
+                    - name: TMPDIR
+                      value: /tmp/workflow
                     - name: DJANGO_SECRET_KEY_PART_ONE
                       valueFrom:
                         secretKeyRef:
@@ -785,7 +853,7 @@ spec:
                   command:
                   - /bin/sh
                   - -ec
-                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/before-core.json
+                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/before-core.json && python -m qualification.application.run_workflows --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/before-workflows.json
                   volumeMounts:
                   - name: runtime
                     mountPath: /runtime
@@ -866,6 +934,38 @@ spec:
                     fsGroup: 1000
                     seccompProfile:
                       type: RuntimeDefault
+                  initContainers:
+                  - name: ray-tmp
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    command:
+                    - python
+                    - -c
+                    - >-
+                      import os, stat;
+                      path = '/tmp/workflow';
+                      os.mkdir(path, 0o700);
+                      os.chmod(path, 0o700);
+                      info = os.stat(path, follow_symlinks=False);
+                      assert info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                      limits:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    volumeMounts:
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
                   containers:
                   - name: ray-head
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
@@ -890,6 +990,8 @@ spec:
                     - secretRef:
                         name: application-credentials
                     env:
+                    - name: TMPDIR
+                      value: /tmp/workflow
                     - name: DJANGO_SECRET_KEY_PART_ONE
                       valueFrom:
                         secretKeyRef:
@@ -952,6 +1054,38 @@ spec:
                     fsGroup: 1000
                     seccompProfile:
                       type: RuntimeDefault
+                  initContainers:
+                  - name: ray-tmp
+                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    command:
+                    - python
+                    - -c
+                    - >-
+                      import os, stat;
+                      path = '/tmp/workflow';
+                      os.mkdir(path, 0o700);
+                      os.chmod(path, 0o700);
+                      info = os.stat(path, follow_symlinks=False);
+                      assert info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                      limits:
+                        cpu: 50m
+                        memory: 64Mi
+                        ephemeral-storage: 16Mi
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop:
+                        - ALL
+                    volumeMounts:
+                    - name: tmp
+                      mountPath: /tmp
+                      readOnly: false
                   containers:
                   - name: ray-worker
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
@@ -976,6 +1110,8 @@ spec:
                     - secretRef:
                         name: application-credentials
                     env:
+                    - name: TMPDIR
+                      value: /tmp/workflow
                     - name: DJANGO_SECRET_KEY_PART_ONE
                       valueFrom:
                         secretKeyRef:
@@ -1088,7 +1224,7 @@ spec:
                   command:
                   - /bin/sh
                   - -ec
-                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/after-nodes.json --previous-receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/after-core.json
+                  - python -m qualification.application.generic_nodes --address ray://ray-head:10001 --source-archive /runtime/project.zip --recovery-archive /runtime/recovery.zip --remote-source /app/src/django_ray/runtime/remote.py --receipt /receipts/after-nodes.json --previous-receipt /receipts/before-nodes.json && python -m qualification.application.run_core --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/after-core.json && python -m qualification.application.run_workflows --base-url http://django-web:8000 --token-file /credentials/DJANGO_API_TOKEN --receipt /receipts/after-workflows.json
                   volumeMounts:
                   - name: runtime
                     mountPath: /runtime

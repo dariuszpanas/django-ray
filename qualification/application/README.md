@@ -23,8 +23,8 @@ partial flags do not establish a passing layer. Credentials and raw response bod
 in that evidence object.
 
 The API function proves one layer. The namespace workload below adds generic-node, manager and
-encrypted RuntimeEnv assertions. Workflow recovery and the remaining deployment stages stay
-tracked in django-ray issue #455. Source/image identity and bounded run evidence must be established
+encrypted RuntimeEnv assertions, followed by the separate workflow observations described below.
+Remaining deployment stages stay tracked in django-ray issue #455. Source/image identity and bounded run evidence must be established
 by the workload and its executor before a test result can serve as application proof.
 
 ## Running the API layer
@@ -113,12 +113,18 @@ Both generic-node receipts require identical archives/runtime and disjoint node 
 The web and manager Deployments remain; this does not assert survival of one manager process.
 
 `settings_qualification` retains production validation and replaces the project RuntimeEnv with the
-locked recovery ZIP; `thin` inherits it. No pip download or `PYTHONPATH=src` is used in that profile.
+locked recovery ZIP; `thin` and `recovery-showcase` inherit it and retain their own profile labels.
+No pip download or `PYTHONPATH=src` is used in those profiles.
 The task environment pins the validated Ray Client target so generic workers retain the same
 application configuration when their Pod supplies a node-local Ray address. Database and encryption
 settings remain inherited from the disposable Pod's configuration and Secret.
-Ordinary sample settings remain unchanged. The stage does not certify their dependency-download
-behavior, workflow recovery, negative encryption cases, or a complete release upgrade.
+The fixture declares a retry environment revision derived only from its validated Ray address,
+fixed profile labels and non-secret storage probe. Credentials are excluded. The recovery endpoint
+requires this identity for the explicit environment variables; the locked archive retains its
+separate content identity. This fixture declaration is not a general trust default for consumers.
+Ordinary sample settings remain unchanged. The core task assertions do not certify their
+dependency-download behavior, workflow recovery, negative encryption cases, or a complete release
+upgrade. Workflow evidence requires the separate workflow receipts below.
 
 ### Shared workflow assertions
 
@@ -200,6 +206,13 @@ KubeRay, Kubernetes, image builds and the host-side Chainsaw process are additio
 Storage requests do not prove physical disk enforcement. The caller admits total capacity and
 network reachability/isolation; this test does not install or qualify a network-policy provider.
 
+Each Ray Pod initializes `/tmp/workflow` as a worker-owned mode-0700 directory and sets `TMPDIR`
+to it before Ray starts. The non-root initializer mounts only the existing scratch volume and
+receives no credentials. Its resources fit beneath the regular container's reservation, so the
+inventory above is unchanged. An fsGroup-backed emptyDir can expose a root-owned, non-sticky
+mode-2777 `/tmp`; the workflow publisher correctly refuses that shared parent for SQLite preparation.
+Creating a private child and explicitly clearing inherited setgid preserves the ownership checks.
+
 The test has a 1800-second outer deadline, each assertion Job a 600-second deadline, and owned
 namespace deletion a 180-second allowance. These are ceilings, not expected durations.
 
@@ -207,12 +220,43 @@ The runner retrieves at most 64 KiB from each exact setup/assertion container's 
 zero successful-container restarts, exit zero, the requested immutable image with its manifest
 digest in the observed container image ID, and every expected
 passing JSON receipt at no more than 16 KiB. It retains `setup.json`, `before-nodes.json`,
-`before-core.json`, `after-nodes.json`, `after-core.json`, producer Pod/image identities, Chainsaw's
+`before-core.json`, `before-workflows.json`, `after-nodes.json`, `after-core.json`,
+`after-workflows.json`, producer Pod/image identities, Chainsaw's
 XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
 in the public Actions job log. Receipts are transported from the modules' existing stdout; they are
 not inferred from Job status. The cold receipt's predecessor digest must match the retained first
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
+
+The workflow observation stage runs five fixed tasks serially in each Ray generation: complex
+workflow success and failure under `full` and `terminal_only`, followed by the recovery showcase's
+two failed attempts and successful third attempt. Production settings disable the complex-workflow
+demo HTTP route, so those four cases use the bounded Django task enqueue API inside the fixture.
+The recovery case uses its production HTTP endpoint. All cases use authenticated HTTP polling and
+attempt-pinned workflow reads, and compare those publications with authenticated Admin graph JSON.
+Temporary database-backed Admin sessions and the HTML checker's disposable user are deleted and
+their absence checked after observation. The retained Admin smoke checker uses the same fixed-origin,
+no-redirect transport with an explicit 1 MiB HTML response ceiling; ordinary API reads keep their
+256 KiB default and graph JSON keeps its smaller limit. It checks current and archived HTML,
+graph routes, terminal controls, diagnostic presentation and retained storage. Server-side
+fingerprints verify that viewing these surfaces preserves stored diagnostics and task history;
+neither raw diagnostics nor their fingerprints enter receipts.
+Anonymous API and graph requests must be denied. Credentials and workflow contents are omitted
+from receipts. The existing Job deadlines and resource limits also bound this stage.
+Terminal-only runs must have no stored detail rows, topology manifests or topology pages, including
+staged data that public readers could hide. Their summaries must report zero observed/retained
+counts and one publication without a manifest.
+Failure receipts include only the last qualification or retained Admin checker module, function
+and line, rather than raw
+exception messages, response bodies or traceback contents. This identifies assertion failures
+against the recorded source without exposing application diagnostics or credentials.
+
+This is explicitly a pilot-publication baseline, not proof that the package's default publisher
+supports Admin graphs. The reader checks publication identity, API/Admin agreement and independent
+fixture topology and state expectations. The reused HTML checker verifies escaped and redacted
+diagnostic presentation, but does not execute browser JavaScript or establish exhaustive redaction
+coverage. Receipts also report
+`complete_workflow_gate: false`; issue #512 tracks the remaining assertions.
 Before failure cleanup, the runner also retains at most 100 RayCluster, Pod and Event records
 per resource, capped at 64 KiB per file. These include status and event messages, never resource
 specs or Secrets. It captures current and previous logs from at most six Ray, web or manager Pods,
