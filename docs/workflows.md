@@ -137,6 +137,12 @@ A successful task with no graph is possible: observability publication is
 best-effort and does not replace the task result. Do not rerun a side-effecting
 task solely to recover a visualization without checking its idempotency.
 
+When the saved summary identifies the reason, Admin explains whether the workflow
+is unfinished, reporting was disabled or terminal-only, or detail expired or went
+missing. If no supported summary exists, Admin cannot infer which reporting settings
+were active for that attempt. It shows the general publication checklist instead of
+promising that waiting or changing today's settings will recover an old graph.
+
 The [progress contract](#graph-and-progress-schema) describes the stored formats and
 diagnostic availability in detail. Making the default graph path supported and
 removing schema/pilot choices from ordinary setup is tracked in
