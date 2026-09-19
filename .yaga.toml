@@ -1,0 +1,19 @@
+# Qualified with pinned YAGA Action revision; released 0.1.1 lacks these options.
+config-version = 1
+[commit]
+# Preserve the trusted same-repository Dependabot exemption.
+dependabot-pull-requests = "skip"
+allowed-types = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "style", "test"]
+type-case = "lower"
+header-max-length = 72
+description-min-length = 10
+description-case = "forbid-initial-uppercase"
+length-unit = "utf16"
+footer-syntax = "colon-whitespace"
+description-ending = "forbid-period"
+body-policy = "required"
+body-min-length = 100
+body-max-line-length = 72
+footer-max-line-length = 100
+line-length-urls = "exempt"
+required-colon-footer-tokens = ["Validation"]

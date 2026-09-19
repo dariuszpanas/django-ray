@@ -1,0 +1,37 @@
+name: YAGA Commit Qualification
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yaga-commit-qualification-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    name: YAGA Commit Candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch and verify PR commits
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          pr_ref="refs/remotes/pull/${PR_NUMBER}/head"
+          git fetch --no-tags --force origin \
+            "refs/pull/${PR_NUMBER}/head:${pr_ref}"
+          test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"
+          git cat-file -e "${PR_BASE_SHA}^{commit}"
+      - uses: dariuszpanas/yaga/actions/commit-check@84ee59391cc6a670c34d81babdce39090a69e7a0 # merged consumer parity
+        with:
+          trusted-config: .yaga.toml
