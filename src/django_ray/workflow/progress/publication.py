@@ -1220,6 +1220,37 @@ def prepare_terminal_only_workflow_progress_summary(
     return summary
 
 
+def _diagnose_qualification_publication(error: BaseException) -> None:
+    """Temporary diagnostic branch: emit no values, messages or traceback text."""
+    import os
+    import stat
+    import tempfile
+
+    if os.environ.get("DJANGO_SETTINGS_MODULE") != "testproject.settings_qualification":
+        return
+    diagnostic: dict[str, Any] = {"layer": "publication_diagnostic", "type": type(error).__name__}
+    traceback = error.__traceback__
+    while traceback is not None:
+        module = traceback.tb_frame.f_globals.get("__name__", "")
+        if module.startswith("django_ray."):
+            diagnostic["location"] = {
+                "module": module,
+                "function": traceback.tb_frame.f_code.co_name,
+                "line": traceback.tb_lineno,
+            }
+        traceback = traceback.tb_next
+    try:
+        parent = os.stat(tempfile.gettempdir())
+        diagnostic["temporary_parent"] = {
+            "mode": oct(stat.S_IMODE(parent.st_mode)),
+            "owner_is_worker": parent.st_uid == os.geteuid(),
+            "owner_is_root": parent.st_uid == 0,
+        }
+    except OSError:
+        diagnostic["temporary_parent"] = "unavailable"
+    print(json.dumps(diagnostic, sort_keys=True), flush=True)
+
+
 def publish_terminal_workflow_progress(
     identity: WorkflowRunIdentity,
     snapshot: Any,
@@ -1273,12 +1304,14 @@ def publish_terminal_workflow_progress(
             accepted=False,
             reason=error.reason,
         )
-    except (WorkflowProgressStorageError, WorkflowProgressSummaryError):
+    except (WorkflowProgressStorageError, WorkflowProgressSummaryError) as error:
+        _diagnose_qualification_publication(error)
         result = WorkflowProgressPilotPublicationResult(
             accepted=False,
             reason=WorkflowProgressPilotReason.PUBLICATION_FAILED,
         )
-    except BaseException:
+    except BaseException as error:
+        _diagnose_qualification_publication(error)
         result = WorkflowProgressPilotPublicationResult(
             accepted=False,
             reason=WorkflowProgressPilotReason.PUBLICATION_FAILED,
