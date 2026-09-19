@@ -20,6 +20,12 @@ execution strategies while preserving this public API.
 
 ## Requirements
 
+For a first Kubernetes integration of ordinary durable background work, start with
+[Ray Job](worker-modes.md#ray-job), including its retrievable input storage and
+application dependency delivery requirements. The following Ray Core example is
+the alternative for bounded work where lower submission latency justifies a
+connection-owned lifetime. Changing transport does not enable workflow graphs.
+
 Cluster Ray Core is the lowest-latency remote path for bounded workflows while the
 task-manager Ray Client connection remains part of the workload lifetime. A disconnect
 beyond Ray's reconnect grace period terminates its in-flight work; an outer retry
@@ -95,6 +101,47 @@ For a Kubernetes sync, the same shape is typically `list_namespaces → map(sync
 namespace) → summarize`. Keep client creation or discovery outside the smallest inner
 resource loop where possible, and batch resources when each API operation is shorter
 than Ray submission overhead.
+
+## What to expect in Django Admin
+
+`calculate_batch.enqueue(20)` creates one durable task row. The workflow's leaf
+steps run within that task; they do not each create a Django task row with a
+separate retry or result lifecycle. Inspect the outer task for its durable state,
+attempt and final result. Open **Workflow execution** for workflow diagnostics.
+
+In the current release, the execution graph is a **terminal** view, not a live
+graph of a running workflow. Default full reporting alone does not produce that
+view. The sample application enables an experimental publisher that ordinary
+package installations leave disabled, so reproducing the sample's settings is a
+separate deployment decision.
+
+If a graph is missing, check these conditions in order:
+
+1. The task ran a django-ray workflow in Ray. Sync/local-fallback execution does
+   not publish the Ray workflow graph, and an ordinary task is not a workflow.
+2. The workflow has finished. During execution, task status and available progress
+   diagnostics are the current observation surfaces.
+3. The run used `full` reporting. `terminal_only` intentionally provides a summary
+   without node detail; `disabled` provides no workflow progress publication.
+4. Full-detail terminal publication was enabled **for that run** through
+   `DJANGO_RAY["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"]`. This is an experimental,
+   bounded opt-in: review its [admission profile and deployment requirements](reference/settings.md#workflow_progress_schema_v3_pilot)
+   before enabling it. Turning it on later does not backfill earlier runs.
+5. Publication completed and retained complete detail within the Admin limits:
+   100 nodes, 256 edges, 100 detail records and a 128 KiB response. Missing,
+   expired, truncated or oversized data does not produce a partial graph.
+6. You are viewing the intended attempt. After a retry starts, reload the page;
+   historical graphs require a retained terminal publication for that attempt.
+
+A successful task with no graph is possible: observability publication is
+best-effort and does not replace the task result. Do not rerun a side-effecting
+task solely to recover a visualization without checking its idempotency.
+
+The [progress contract](#graph-and-progress-schema) describes the stored formats and
+diagnostic availability in detail. Making the default graph path supported and
+removing schema/pilot choices from ordinary setup is tracked in
+[#507](https://github.com/dariuszpanas/django-ray/issues/507); this limitation has
+not been resolved by a documentation or transport change.
 
 ## Bound Dynamic Fan-Out
 

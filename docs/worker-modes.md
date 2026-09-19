@@ -8,6 +8,20 @@ Graph, see the [Ray Ecosystem Support and Install Matrix](ray-ecosystem.md).
 
 ## Comparison
 
+For a new Kubernetes integration running ordinary durable background jobs, start
+with **Ray Job**. Its isolated driver can continue independently of the submitting
+task-manager connection. Configure retrievable input storage and deliver your
+application dependencies to the Ray driver and workers as described below and in
+the [Kubernetes guide](deployment/kubernetes.md). Start with one queue and one
+task manager, verify a small task end to end, then set concurrency for the available
+cluster capacity.
+
+Choose Cluster Ray Core when measured startup overhead warrants it and your bounded
+work can accept the connection-owned lifetime described below. Sync and Local Ray
+Core remain useful development modes. These choices do not change the Django task
+enqueue API, and none automatically enables the Admin workflow graph. See
+[workflow visibility](workflows.md#what-to-expect-in-django-admin).
+
 | Mode | Command | Best fit | Relative startup cost |
 |---|---|---|---|
 | Sync | `--sync` | Tests and debugging | Lowest |
