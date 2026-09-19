@@ -207,6 +207,11 @@ def read_full_workflow_graph(
         or graph.get("counts") != {"nodes": 0, "edges": 0}
     ):
         raise ValueError("Terminal-only Admin exposed a graph")
+    if not full and graph.get("message") != (
+        "This attempt used terminal-only reporting, which saves a summary without graph details. "
+        "Use supported full reporting for future runs if you need a graph."
+    ):
+        raise ValueError("Terminal-only Admin did not explain the observed reporting policy")
     return {
         "task_id": task_id,
         "run_identity": dict(run_identity),

@@ -142,6 +142,12 @@ In particular, a non-root Kubernetes worker may be able to execute tasks while i
 shared `/tmp` permissions prevent terminal graph preparation. Fixing storage affects
 future publications; it does not reconstruct a missing historical graph.
 
+When the saved summary identifies the reason, Admin explains whether the workflow
+is unfinished, reporting was disabled or terminal-only, or detail expired or went
+missing. If no supported summary exists, Admin cannot infer which reporting settings
+were active for that attempt. It shows the general publication checklist instead of
+promising that waiting or changing today's settings will recover an old graph.
+
 The [progress contract](#graph-and-progress-schema) describes the stored formats and
 diagnostic availability in detail. Making the default graph path supported and
 removing schema/pilot choices from ordinary setup is tracked in
