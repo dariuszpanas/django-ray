@@ -26,6 +26,10 @@ REQUIRED_CHECK_JOBS = {
 }
 REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate"}
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
+    (
+        "yaga-commit-qualification.yml",
+        "candidate",
+    ): "YAGA Commit Candidate is advisory during parity qualification",
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
@@ -1053,3 +1057,27 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
     for reason in EXPLICIT_NONBLOCKING_PR_JOBS.values():
         assert reason.strip()
         assert all(reason in " ".join(documentation.split()) for documentation in documents)
+
+
+def test_yaga_candidate_reads_trusted_policy_without_pr_checkout() -> None:
+    path = WORKFLOWS / "yaga-commit-qualification.yml"
+    workflow = _workflow(path)
+    assert set(workflow["on"]) == {"pull_request_target"}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "github.event.pull_request.head.sha" in workflow["concurrency"]["group"]
+    steps = _jobs(path)["candidate"]["steps"]
+    checkout = steps[0]
+    assert "ref" not in checkout["with"]
+    assert checkout["with"]["persist-credentials"] == "false"
+    fetch = steps[1]
+    assert "refs/pull/${PR_NUMBER}/head:${pr_ref}" in fetch["run"]
+    assert 'test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"' in fetch["run"]
+    assert steps[2]["with"] == {"trusted-config": ".yaga.toml"}
+    assert steps[2]["uses"] == (
+        "dariuszpanas/yaga/actions/commit-check@84ee59391cc6a670c34d81babdce39090a69e7a0"
+    )
+
+
+def test_yaga_candidate_explicitly_skips_trusted_dependabot_policy() -> None:
+    config = tomllib.loads((PROJECT_ROOT / ".yaga.toml").read_text(encoding="utf-8"))
+    assert config["commit"]["dependabot-pull-requests"] == "skip"

@@ -273,3 +273,27 @@ If an ignored repository-local Obsidian vault is available, agents should use it
 retrieval and handoffs. Start from its entry point and current-workspace note, verify its source commit,
 search only for relevant concepts, and write one task-local handoff. The vault never overrides source
 or tests and must not contain secrets. Work must continue normally when Obsidian is unavailable.
+
+
+### YAGA commit-policy qualification
+
+YAGA Commit Candidate is advisory during parity qualification. The required
+`Commit Messages` check, local hook and commitlint configuration remain authoritative.
+The candidate Action is pinned to the merged upstream consumer-parity revision and
+reads `.yaga.toml` from the committed trusted event checkout, never the PR working
+tree. The released YAGA 0.1.1 CLI does not support these new commit-policy options;
+its separately configured workflow checks continue using the existing released pin.
+
+The candidate runs on `pull_request_target` after this workflow reaches main.
+Checkout deliberately omits `ref` to use the exact trusted runner commit, avoiding
+a moving-main race. Fetching a PR ref does not check out or execute its files.
+The fetched head must match the event head before the Action checks the title and
+base-to-head commit range. Read-only permissions and PR/head-specific concurrency
+match the required check's boundaries. Qualification must cover actual GitHub events,
+valid and invalid messages and titles, and policy changes in a PR before cutover.
+Synthetic upstream controls alone are insufficient evidence for replacement.
+
+The candidate policy explicitly skips title, commit-message and optional spelling
+rules for trusted same-repository Dependabot PRs on `dependabot/` branches. Event
+and fetched-head verification still apply; ordinary PRs cannot opt out by using
+a bot-like branch name. The required `Commit Messages` exemption is unchanged.
