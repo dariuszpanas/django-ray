@@ -207,12 +207,34 @@ The runner retrieves at most 64 KiB from each exact setup/assertion container's 
 zero successful-container restarts, exit zero, the requested immutable image with its manifest
 digest in the observed container image ID, and every expected
 passing JSON receipt at no more than 16 KiB. It retains `setup.json`, `before-nodes.json`,
-`before-core.json`, `after-nodes.json`, `after-core.json`, producer Pod/image identities, Chainsaw's
+`before-core.json`, `before-workflows.json`, `after-nodes.json`, `after-core.json`,
+`after-workflows.json`, producer Pod/image identities, Chainsaw's
 XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
 in the public Actions job log. Receipts are transported from the modules' existing stdout; they are
 not inferred from Job status. The cold receipt's predecessor digest must match the retained first
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
+
+The workflow observation stage runs five fixed tasks serially in each Ray generation: complex
+workflow success and failure under `full` and `terminal_only`, followed by the recovery showcase's
+two failed attempts and successful third attempt. Production settings disable the complex-workflow
+demo HTTP route, so those four cases use the bounded Django task enqueue API inside the fixture.
+The recovery case uses its production HTTP endpoint. All cases use authenticated HTTP polling and
+attempt-pinned workflow reads, and compare those publications with authenticated Admin graph JSON.
+Temporary database-backed Admin sessions are deleted and their absence checked after observation.
+Anonymous API and graph requests must be denied. Credentials and workflow contents are omitted
+from receipts. The existing Job deadlines and resource limits also bound this stage.
+Terminal-only runs must have no stored detail rows, topology manifests or topology pages, including
+staged data that public readers could hide. Their summaries must report zero observed/retained
+counts and one publication without a manifest.
+Failure receipts include only the last qualification module, function and line, rather than raw
+exception messages, response bodies or traceback contents. This identifies assertion failures
+against the recorded source without exposing application diagnostics or credentials.
+
+This is explicitly a pilot-publication baseline, not proof that the package's default publisher
+supports Admin graphs. The reader checks publication identity and API/Admin agreement; it does not
+independently establish expected fixture topology, browser interaction or redaction. Receipts also report
+`complete_workflow_gate: false`; issue #512 tracks the remaining assertions.
 Before failure cleanup, the runner also retains at most 100 RayCluster, Pod and Event records
 per resource, capped at 64 KiB per file. These include status and event messages, never resource
 specs or Secrets. It captures current and previous logs from at most six Ray, web or manager Pods,

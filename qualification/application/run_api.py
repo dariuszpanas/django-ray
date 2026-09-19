@@ -59,6 +59,7 @@ class ApplicationHttp:
         headers: dict[str, str] | None = None,
         response_limit: int = MAX_RESPONSE_BYTES,
         required_response_headers: dict[str, str] | None = None,
+        required_cache_directives: frozenset[str] = frozenset(),
     ) -> tuple[int, bytes]:
         parsed = urlsplit(path)
         if (
@@ -91,6 +92,11 @@ class ApplicationHttp:
                 for name, value in (required_response_headers or {}).items()
             ):
                 failure = "Application HTTP response headers did not match"
+            elif not required_cache_directives.issubset(
+                part.strip().lower()
+                for part in (response.getheader("Cache-Control") or "").split(",")
+            ):
+                failure = "Application HTTP response cache directives did not match"
             else:
                 body = response.read(response_limit + 1)
                 if len(body) > response_limit:
