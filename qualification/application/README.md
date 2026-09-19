@@ -120,6 +120,21 @@ settings remain inherited from the disposable Pod's configuration and Secret.
 Ordinary sample settings remain unchanged. The stage does not certify their dependency-download
 behavior, workflow recovery, negative encryption cases, or a complete release upgrade.
 
+### Shared workflow assertions
+
+`workflow_envelopes.validate_workflow_envelope()` is the shared workflow response
+identity assertion used by the retained local gate. It rejects mismatched tasks,
+runs, attempts, execution generations, publication revisions and completeness,
+including detail revisions on a summary-only response. Schema epochs and counters
+must be integers, not JSON booleans or floating-point lookalikes.
+
+This helper consumes an already bounded, decoded mapping. Its caller must enforce
+HTTP byte limits, authentication, trusted expected identities, source/image binding,
+execution and cleanup. It does not itself perform requests or prove graph contents.
+The public workflow runner and its native success/failure/retry/history evidence
+remain [#512](https://github.com/dariuszpanas/django-ray/issues/512); importing this
+helper does not qualify workflow visualization or change publisher defaults.
+
 ### Public prerequisites and invocation
 
 Use an explicitly admitted Linux Kubernetes environment with public KubeRay 1.6.2 already installed,
