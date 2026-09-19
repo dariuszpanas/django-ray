@@ -689,7 +689,7 @@ Treat the following as design-review inputs, not as instructions to promote `k8s
 8. **Observability and operations:** define metrics, logs, traces, alerting, retention, audit access,
    on-call ownership, capacity signals, and tested backup restoration.
 9. **Change safety:** make database migrations, application/Ray upgrades, compatibility checks,
-   rollbacks, and disaster recovery explicit, separately invokable operations.
+   rollbacks, and disaster recovery explicit, separately invocable operations.
 
 A future production reference requires its own threat model, least-privilege review, upgrade and
 rollback contract, and clean-checkout evidence. That work is intentionally outside these samples.

@@ -313,7 +313,7 @@ production topology must address at least:
    tenant isolation.
 8. **Backups, observability, alerting, audit access, and operational ownership** with explicit
    retention and recovery targets.
-9. **Separately invokable migration and rollback operations** for database, application, Ray, and
+9. **Separately invocable migration and rollback operations** for database, application, Ray, and
    configuration changes.
 
 A real reference implementation requires its own threat model, least-privilege design, upgrade and

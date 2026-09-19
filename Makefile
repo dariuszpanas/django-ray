@@ -8,7 +8,7 @@
 .PHONY: all install configure-git commit-check commit-title-check commit-policy-test format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
-.PHONY: docs-build docs-build-strict docs-serve workflow-check
+.PHONY: docs-build docs-build-strict docs-serve workflow-check spelling-check
 .PHONY: linux-test-catalogue linux-test-stage linux-test-aggregate
 
 # Include optional modules (comment out if not needed)
@@ -89,6 +89,10 @@ YAGA ?= uvx --from yaga-cli==0.1.1 yaga
 YAGA_FORMAT ?= text
 workflow-check:
 	$(YAGA) repo check --plan .yaga/checks/workflows.toml --format $(YAGA_FORMAT)
+
+# The same isolated, pinned spelling check runs locally and in CI.
+spelling-check:
+	python scripts/check_spelling.py
 
 # Format code with Ruff
 format:
@@ -217,6 +221,7 @@ coverage-debt:
 
 # Run formatting, lint, and type checks without modifying files
 check:
+	$(MAKE) spelling-check
 	$(MAKE) commit-policy-test
 	ruff format --check .
 	ruff check .
@@ -226,6 +231,7 @@ check:
 # Invoke as `uv run make ci` so Ray inherits one uv-managed environment.
 ci:
 	python scripts/require_linux.py
+	$(MAKE) spelling-check
 	$(MAKE) commit-policy-test
 	ruff format --check .
 	ruff check .
