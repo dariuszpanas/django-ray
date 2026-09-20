@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 from typing import Any
 
 import pytest
@@ -184,6 +186,65 @@ def test_ready_acknowledgements_preserve_full_mode_emission_rate() -> None:
     assert report["acknowledged"] == 3
     assert report["pending_acknowledgements"] == 0
     assert report["terminal_handoff"] == "not_needed"
+
+
+@pytest.mark.parametrize("finish_concurrently", [False, True])
+def test_shared_session_serializes_submission_and_terminal_report(
+    finish_concurrently: bool,
+) -> None:
+    entered = Event()
+    release = Event()
+    second_started = Event()
+    actor = _Actor()
+    original_remote = actor.ingest.remote
+
+    def blocked_remote(wire: bytes) -> Any:
+        reference = original_remote(wire)
+        if len(actor.ingest.calls) == 1:
+            entered.set()
+            assert release.wait(timeout=5)
+        return reference
+
+    actor.ingest.remote = blocked_remote
+    session = WorkflowProgressProducerSession(
+        actor,
+        _RUN_IDENTITY,
+        "leaf",
+        ack_poller=lambda _reference: WorkflowProgressProducerAck.PENDING,
+    )
+
+    def second_operation() -> bool | dict[str, Any]:
+        second_started.set()
+        return session.finish() if finish_concurrently else session.offer(2, 2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(session.offer, 1, 2)
+        try:
+            assert entered.wait(timeout=5)
+            second = executor.submit(second_operation)
+            assert second_started.wait(timeout=5)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.1)
+            assert len(actor.ingest.calls) == 1
+        finally:
+            release.set()
+        assert first.result(timeout=5)
+        result = second.result(timeout=5)
+
+    # A second offer occupies the replaceable slot until terminal handoff.
+    assert len(actor.ingest.calls) == 1
+    report = session.finish()
+    expected = 1 if finish_concurrently else 2
+    assert report["offered"] == expected
+    assert report["submitted"] == expected
+    assert report["pending_acknowledgements"] == expected
+    assert report["terminal_handoff"] == ("not_needed" if finish_concurrently else "submitted")
+    assert [event.payload["current"] for event in _decoded(actor)] == (
+        [1.0] if finish_concurrently else [1.0, 2.0]
+    )
+    assert result == (report if finish_concurrently else True)
+    assert not session.offer(2, 2)
+    assert session.finish() == report
 
 
 def test_synchronous_adapter_counts_immediate_acknowledgement() -> None:
