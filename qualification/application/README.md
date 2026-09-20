@@ -228,11 +228,15 @@ not inferred from Job status. The cold receipt's predecessor digest must match t
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
 
-The workflow observation stage runs seven fixed tasks serially in each Ray generation: complex
+The workflow observation stage runs eight fixed tasks serially in each Ray generation: complex
 workflow success and failure under `full`, `terminal_only` and `disabled`, followed by the recovery showcase's
 two failed attempts and successful third attempt. Production settings disable the complex-workflow
-demo HTTP route, so those four cases use the bounded Django task enqueue API inside the fixture.
-The recovery case uses its production HTTP endpoint. All cases use authenticated HTTP polling and
+demo HTTP route, so those six cases use the bounded Django task enqueue API inside the fixture.
+The recovery case uses its production HTTP endpoint. A final fixed 65-leaf serial chain uses
+full reporting and the bounded task enqueue API. Its saved plan crosses the real 64-node limit;
+the durable result must remain exactly `42`, and the graph must retain all 65 successful nodes
+and 64 serial dependencies. This covers plan overflow, not the separate 100-node Admin graph ceiling. No fixture inputs, fanout, sleeps or
+resource limits are increased. All cases use authenticated HTTP polling and
 attempt-pinned workflow reads, and compare those publications with authenticated Admin graph JSON.
 Temporary database-backed Admin sessions and the HTML checker's disposable user are deleted and
 their absence checked after observation. The retained Admin smoke checker uses the same fixed-origin,

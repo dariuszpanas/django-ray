@@ -271,6 +271,7 @@ _WORKFLOW_OBSERVABILITY_CALLABLES = frozenset(
         "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
         "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
         "testproject.apps.cluster_tasks.tasks.workflow_fanout_benchmark",
+        "testproject.apps.cluster_tasks.tasks.plan_overflow_workflow_qualification",
         "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task",
     }
 )

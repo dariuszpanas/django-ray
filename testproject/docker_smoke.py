@@ -46,9 +46,9 @@ _TASK_STATUS_REQUIRED_HEADERS = {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
 }
-# One complete smoke page covers the 25-node/36-edge showcase while
-# remaining below the Admin graph's package-enforced limits.
-_WORKFLOW_PAGE_LIMIT = 64
+# One complete smoke page covers the showcase and the 65-node serial
+# plan-overflow fixture, up to the Admin graph's 100-node ceiling.
+_WORKFLOW_PAGE_LIMIT = 100
 _WORKFLOW_GRAPH_LIMITS = {
     "nodes": 100,
     "edges": 256,

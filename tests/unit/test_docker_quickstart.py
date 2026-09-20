@@ -467,8 +467,9 @@ def test_existing_workflow_smoke_selects_archived_attempt_identity(
     assert observed[0]["change_attempt_number"] == 1
 
 
-def test_workflow_admin_page_limit_covers_the_showcase_topology() -> None:
-    items = [{"node_id": f"0.{index}"} for index in range(21)]
+@pytest.mark.parametrize("count", [21, 64, 65, 100])
+def test_workflow_admin_page_limit_covers_supported_node_counts(count: int) -> None:
+    items = [{"node_id": f"0.{index}"} for index in range(count)]
     payload = {
         "schema": "django-ray.workflow-progress-page",
         "schema_version": 1,
@@ -481,15 +482,35 @@ def test_workflow_admin_page_limit_covers_the_showcase_topology() -> None:
         "next_cursor": None,
     }
 
-    assert docker_smoke._WORKFLOW_PAGE_LIMIT == 64
     assert (
         docker_smoke._workflow_admin_page_count(
             payload,
             task_id=WORKFLOW_TASK_ID,
             collection="topology_nodes",
         )
-        == 21
+        == count
     )
+
+
+@pytest.mark.parametrize("count,next_cursor", [(101, None), (100, "more")])
+def test_workflow_admin_page_rejects_overflow_or_more_pages(
+    count: int, next_cursor: str | None
+) -> None:
+    payload = {
+        "schema": "django-ray.workflow-progress-page",
+        "schema_version": 1,
+        "task_id": WORKFLOW_TASK_ID,
+        "collection": "topology_nodes",
+        "availability": "AVAILABLE",
+        "complete": True,
+        "returned_count": count,
+        "items": [{"node_id": f"0.{index}"} for index in range(count)],
+        "next_cursor": next_cursor,
+    }
+    with pytest.raises(docker_smoke.DockerSmokeError, match="one complete"):
+        docker_smoke._workflow_admin_page_count(
+            payload, task_id=WORKFLOW_TASK_ID, collection="topology_nodes"
+        )
 
 
 def _admin_workflow_responses(
@@ -704,9 +725,9 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     expected_paths.extend(
         [
             f"{root}/workflow/diagnostics/?attempt_number=1",
-            f"{root}/workflow/topology/nodes/?attempt_number=1&limit=64",
-            f"{root}/workflow/topology/edges/?attempt_number=1&limit=64",
-            f"{root}/workflow/nodes/?attempt_number=1&limit=64",
+            f"{root}/workflow/topology/nodes/?attempt_number=1&limit=100",
+            f"{root}/workflow/topology/edges/?attempt_number=1&limit=100",
+            f"{root}/workflow/nodes/?attempt_number=1&limit=100",
             f"{root}/workflow/graph/?attempt_number=1",
         ]
     )
