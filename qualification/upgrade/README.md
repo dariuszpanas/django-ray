@@ -267,12 +267,21 @@ are outside the coordinated Beta commitment.
 
 ## Remaining execution-retirement inventory
 
-The database fixture deliberately does not remove these current paths:
+The native candidate-read phase checks retired durable-task carriers before
+Django setup, after verifying the installed package location and version. Four
+unversioned Job payload variants and two positional Core variants must return
+fixed non-retryable refusals without crossing application setup/import, input,
+completion or callable boundaries. The Job CLI must exit 78 without exposing
+payloads; malformed input must also refuse. Current Core/Jobs execution and
+preserved history are still checked by the remaining native phases on SQLite
+and PostgreSQL. Resource-free tests do not establish that hosted evidence.
+
+Keep these execution and historical-data boundaries separate:
 
 | Boundary | Current source to audit in the retirement change |
 | --- | --- |
-| Old Ray Job payload execution | `src/django_ray/runtime/entrypoint.py`, `_execute_legacy_payload` |
-| Positional unversioned remote invocation | `src/django_ray/runtime/remote.py` |
+| Old Ray Job payload execution | Removed; `src/django_ray/runtime/entrypoint.py` returns fixed refusal before setup |
+| Positional unversioned remote invocation | Refused in `src/django_ray/runtime/remote.py`; standalone nested workflows remain supported |
 | Non-strict Job failure fallback | Retired log retrieval and automatic replay in `django_ray_worker.py`; unknown effects retain `LOST`. The diagnostic runner API remains separate from completion authority. |
 | Strict request-family discrimination | `src/django_ray/ray_job_protocol.py`, rq1/rq2 classification |
 | Input artifact purgers and reference readers | `src/django_ray/input_storage.py`, `src/django_ray/ray_job_request_storage.py` and their cleanup commands |

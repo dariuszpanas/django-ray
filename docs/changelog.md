@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Refuse unversioned Ray Job payloads and positional Core
+  durable-task submissions before application setup. Current independently
+  bound requests remain supported. Drain old work and stop old writers before
+  upgrading; rejected or uncertain work is never silently replayed. Historical
+  data readers and standalone nested workflow execution are preserved.
 - Bound small terminal workflow graph preparation to finite input bytes, values,
   depth, nodes and edges, and use the canonical in-memory preparer instead of
   acquiring SQLite spill storage. Preserve stored topology/detail, redaction and

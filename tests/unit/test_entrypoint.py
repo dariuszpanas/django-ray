@@ -142,45 +142,16 @@ def _booby_trap_application_seams(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestEntrypointPayload:
     """Tests for payload-based task execution path."""
 
-    def test_execute_task_from_payload_decodes_and_dispatches(self, monkeypatch) -> None:
-        """Payload decoding should forward values to execute_task unchanged."""
-        payload = {
-            "callable_path": "myapp.tasks.run",
-            "serialized_args": '["arg"]',
-            "serialized_kwargs": '{"key":"value"}',
-            "task_id": "00000000-0000-4000-8000-000000000123",
-        }
-        payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
-
-        captured: dict[str, object] = {}
-
-        def fake_execute_task(
-            callable_path: str,
-            serialized_args: str,
-            serialized_kwargs: str,
-            **kwargs,
-        ) -> str:
-            captured["callable_path"] = callable_path
-            captured["serialized_args"] = serialized_args
-            captured["serialized_kwargs"] = serialized_kwargs
-            captured.update(kwargs)
-            return '{"success": true}'
-
-        monkeypatch.setattr(entrypoint, "execute_task", fake_execute_task)
-
-        result = entrypoint.execute_task_from_payload(payload_b64)
-
-        assert result == '{"success": true}'
-        assert captured == {
-            **payload,
-            "task_execution_pk": None,
-            "attempt_number": None,
-            "execution_generation": None,
-            "runtime_env_profile": None,
-            "runtime_env_hash": "",
-            "runtime_env_plan_identity": None,
-            "input_reference": None,
-        }
+    def test_execute_task_from_payload_refuses_unversioned_dispatch(self, monkeypatch) -> None:
+        """Retired payload values never reach the application adapter."""
+        _booby_trap_application_seams(monkeypatch)
+        monkeypatch.delenv(RAY_JOB_CONFIG_JSON_ENV_VAR, raising=False)
+        payload = {"callable_path": "private.callback", "serialized_args": "[]"}
+        result = entrypoint.execute_task_from_payload(_payload_b64(json.dumps(payload)))
+        assert isinstance(result, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(result)["error"] == "execution request rejected: legacy_request"
+        assert json.loads(result)["retryable"] is False
+        assert "private" not in result
 
     @pytest.mark.parametrize("transport_version", [1, 2])
     def test_strict_payload_validates_before_dispatch_and_enriches_completion(
@@ -712,7 +683,7 @@ class TestEntrypointPayload:
         assert isinstance(encoded, entrypoint._StrictRequestRejectionResult)
         assert json.loads(encoded)["error"] == ("execution request rejected: unsupported_transport")
 
-    def test_legacy_payload_accepts_released_ray_job_metadata(self, monkeypatch) -> None:
+    def test_legacy_payload_rejects_released_ray_job_metadata(self, monkeypatch) -> None:
         payload = {
             "callable_path": "myapp.tasks.legacy",
             "serialized_args": "[]",
@@ -734,13 +705,15 @@ class TestEntrypointPayload:
             RAY_JOB_CONFIG_JSON_ENV_VAR,
             json.dumps({"runtime_env": {}, "metadata": legacy_metadata}),
         )
-        monkeypatch.setattr(entrypoint, "execute_task", lambda **_kwargs: '{"success":true}')
+        _booby_trap_application_seams(monkeypatch)
 
         result = entrypoint.execute_task_from_payload(
             _payload_b64(json.dumps(payload, separators=(",", ":")))
         )
 
-        assert result == '{"success":true}'
+        assert isinstance(result, entrypoint._StrictRequestRejectionResult)
+        assert json.loads(result)["error"] == "execution request rejected: legacy_request"
+        assert json.loads(result)["retryable"] is False
 
     @pytest.mark.parametrize(
         ("mismatch", "classification"),
@@ -862,11 +835,6 @@ class TestEntrypointPayload:
 
         monkeypatch.delenv(RAY_JOB_CONFIG_JSON_ENV_VAR, raising=False)
         monkeypatch.setattr(execution_codec, "EXECUTION_REQUEST_MAX_BYTES", 2)
-        monkeypatch.setattr(
-            entrypoint,
-            "_execute_legacy_payload",
-            lambda _value: pytest.fail("resource-limited JSON must not enter the legacy adapter"),
-        )
         _booby_trap_application_seams(monkeypatch)
 
         encoded = entrypoint.execute_task_from_payload(_payload_b64("abc"))
@@ -887,7 +855,6 @@ class TestEntrypointPayload:
         monkeypatch.setattr(entrypoint, "_MAX_RAY_JOB_PAYLOAD_B64_BYTES", 8)
         monkeypatch.setattr(entrypoint.base64, "b64decode", forbidden)
         monkeypatch.setattr(execution_codec, "decode_execution_request", forbidden)
-        monkeypatch.setattr(entrypoint, "_execute_legacy_payload", forbidden)
         _booby_trap_application_seams(monkeypatch)
 
         encoded = entrypoint.execute_task_from_payload("A" * 9)
@@ -1003,7 +970,7 @@ class TestEntrypointPayload:
 
         assert result["success"] is False
         assert result["retryable"] is False
-        assert "transport" in result["error"]
+        assert result["error"] == "execution request rejected: legacy_request"
 
     def test_main_does_not_print_payload_execution_result(self, monkeypatch, capsys) -> None:
         """CLI main should keep the completion envelope out of Ray logs."""
@@ -1814,5 +1781,28 @@ class TestEntrypointPayload:
         monkeypatch.setattr(sys, "argv", ["entrypoint", "--payload-b64", "abc"])
         monkeypatch.delitem(sys.modules, "django_ray.runtime.entrypoint")
 
-        with pytest.raises(SystemExit, match="0"):
+        with pytest.raises(SystemExit, match="78"):
             runpy.run_module("django_ray.runtime.entrypoint", run_name="__main__")
+
+
+@pytest.mark.parametrize("transport_version", [1, 2])
+def test_unversioned_durable_job_carrier_is_inert(monkeypatch, transport_version):
+    monkeypatch.delenv(RAY_JOB_CONFIG_JSON_ENV_VAR, raising=False)
+    _booby_trap_application_seams(monkeypatch)
+    payload = {
+        "callable_path": "private.application.callback",
+        "serialized_args": "[]",
+        "serialized_kwargs": "{}",
+        "task_execution_pk": 44,
+        "task_id": "old-task",
+        "attempt_number": 1,
+        "execution_generation": 1,
+        "transport_version": transport_version,
+        "input_reference": "private-input-reference" if transport_version == 2 else None,
+    }
+    result = entrypoint.execute_task_from_payload(_payload_b64(json.dumps(payload)))
+    assert isinstance(result, entrypoint._StrictRequestRejectionResult)
+    rejected = json.loads(result)
+    assert rejected["error"] == "execution request rejected: legacy_request"
+    assert rejected["retryable"] is False
+    assert "private" not in result

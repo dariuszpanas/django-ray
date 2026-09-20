@@ -376,6 +376,11 @@ def main():
     )
     import django
 
+    carrier_refusal = None
+    if phase == "candidate-read":
+        from qualification.upgrade.carriers import verify_retired_carriers
+
+        carrier_refusal = verify_retired_carriers()
     django.setup()
     from django.conf import settings
     from django.core.management import call_command
@@ -396,6 +401,9 @@ def main():
             )
         )
         return
+
+    if carrier_refusal is not None:
+        observations["retired_carriers"] = carrier_refusal
     if phase == "baseline-post-write":
         from django.db import connection
         from django.db.migrations.recorder import MigrationRecorder

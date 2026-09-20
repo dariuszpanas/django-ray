@@ -352,46 +352,9 @@ def execute_django_task_remote(
             )
         return result
 
-    # Positional calls are the released, unversioned protocol-v1 adapter. New
-    # managers never select it by inspecting request contents.
-    if task_id is None:
-        return _fixed_legacy_request_rejection("legacy_request")
-    from django_ray.redaction import redact_text
-    from django_ray.runtime.context import durable_task_execution
-    from django_ray.runtime.entrypoint import execute_task
-
-    print(f"[Task {task_id}] Starting: {request_or_callable_path}", flush=True)
-    with durable_task_execution(
-        task_id,
-        execution_protocol_version=1,
-        attempt_number=attempt_number,
-        execution_generation=execution_generation,
-        runtime_env_profile=runtime_env_profile,
-        runtime_env_hash=runtime_env_hash,
-        runtime_env_plan_identity=runtime_env_plan_identity,
-        compiled_graph_submission_transport=compiled_graph_submission_transport,
-    ):
-        if input_reference is None:
-            result = execute_task(request_or_callable_path, args_json, kwargs_json)
-        else:
-            result = execute_task(
-                request_or_callable_path,
-                args_json,
-                kwargs_json,
-                input_reference=input_reference,
-            )
-
-    parsed = json.loads(result)
-    if parsed.get("success"):
-        print(f"[Task {task_id}] SUCCESS", flush=True)
-    else:
-        print(
-            f"[Task {task_id}] FAILED: {redact_text(parsed.get('error'))}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    return result
+    # Old positional durable-task carriers are outside the coordinated Beta
+    # execution boundary. Never bootstrap or trust their submitted identity.
+    return _fixed_legacy_request_rejection("legacy_request")
 
 
 def _nested_task_execution(request: Any | None) -> Any:
