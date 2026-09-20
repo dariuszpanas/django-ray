@@ -2659,7 +2659,7 @@ def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
     assert kwargs["expected_node_id"] == "0"
 
 
-@pytest.mark.parametrize("strict_marker", [True, None, 1])
+@pytest.mark.parametrize("strict_marker", [True, False, None, 1])
 def test_incomplete_or_malformed_strict_context_never_submits_legacy_work(
     strict_marker: Any,
 ) -> None:
@@ -3143,6 +3143,7 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
                 execution.pk,
                 attempt_number=execution.attempt_number,
                 execution_generation=execution.execution_generation,
+                **_strict_workflow_fixture_identity(execution),
             ):
                 results[policy] = (
                     step(report_and_increment).with_progress_reporting(policy).run(5, use_ray=True)
@@ -3328,6 +3329,7 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
             execution_generation=execution.execution_generation,
             runtime_env_profile="test",
             runtime_env_hash="abc123",
+            **_strict_workflow_fixture_identity(execution, profile="test"),
         ):
             assert workflow.run(2, use_ray=True) == 6
     finally:
@@ -3406,6 +3408,7 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
             execution.pk,
             attempt_number=execution.attempt_number,
             execution_generation=execution.execution_generation,
+            **_strict_workflow_fixture_identity(execution),
         ):
             assert workflow.run(6, use_ray=True) == [1, 2, 3, 4, 5, 6]
     finally:
@@ -3707,6 +3710,7 @@ def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None
             execution.pk,
             attempt_number=execution.attempt_number,
             execution_generation=execution.execution_generation,
+            **_strict_workflow_fixture_identity(execution),
         ):
             with pytest.raises(RayTaskError, match="intentional workflow failure"):
                 workflow.run(1, use_ray=True)
@@ -4034,3 +4038,28 @@ def test_get_executor_uses_local_executor_when_ray_is_unavailable(monkeypatch) -
     monkeypatch.setattr(builtins, "__import__", fail_ray_import)
 
     assert isinstance(_get_executor(None), _LocalExecutor)
+
+
+def _strict_workflow_fixture_identity(execution, *, profile=None):
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+    from django_ray.workflow.plans import runtime_env_plan_identity
+
+    return {
+        "task_id": execution.task_id,
+        "execution_protocol_version": 1,
+        "strict_execution_request": True,
+        "runtime_env_plan_identity": runtime_env_plan_identity(
+            normalize_runtime_env({}, profile=profile)
+        ).as_transport_dict(),
+    }
+
+
+def test_non_strict_durable_executor_refuses_before_creating_remotes(monkeypatch):
+    from django_ray.execution_codec import NestedExecutionRequestRejected
+
+    monkeypatch.setattr(
+        "django_ray.workflows._get_cached_workflow_remotes",
+        lambda: pytest.fail("unbound durable executor created remotes"),
+    )
+    with durable_task_execution(9), pytest.raises(NestedExecutionRequestRejected):
+        _RayExecutor()

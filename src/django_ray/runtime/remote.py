@@ -358,7 +358,7 @@ def execute_django_task_remote(
 
 
 def _nested_task_execution(request: Any | None) -> Any:
-    """Install one decoded strict leaf context, or preserve a legacy call."""
+    """Install a strict leaf context, or preserve a standalone call."""
     if request is None:
         return nullcontext()
 
@@ -397,7 +397,7 @@ def _decode_workflow_step_request(
     expected_runtime_env_plan_digest: str | None,
     expected_runtime_env_transport_digest: str | None,
 ) -> Any | None:
-    """Fence a strict workflow leaf before setup/import, or admit legacy."""
+    """Fence a strict workflow leaf before setup/import, or return no context."""
     from django_ray.execution_codec import (
         ExecutionIdentity,
         NestedCallableBindingKind,
@@ -535,7 +535,7 @@ def execute_workflow_step_remote(
     expected_runtime_env_plan_digest: str | None = None,
     expected_runtime_env_transport_digest: str | None = None,
 ) -> Any:
-    """Execute one strict nested workflow step or a released direct call."""
+    """Execute one strict durable leaf or a standalone workflow call."""
     request = _decode_workflow_step_request(
         nested_execution_request,
         callable_path=callable_path,
@@ -550,6 +550,15 @@ def execute_workflow_step_remote(
         expected_runtime_env_plan_digest=expected_runtime_env_plan_digest,
         expected_runtime_env_transport_digest=expected_runtime_env_transport_digest,
     )
+    if request is None and (task_execution_pk is not None or workflow_run_identity is not None):
+        from django_ray.execution_codec import (
+            NestedExecutionRequestRejected,
+            NestedExecutionRequestRejection,
+        )
+
+        raise NestedExecutionRequestRejected(
+            NestedExecutionRequestRejection.MISSING_CONTEXT
+        ) from None
     if request is not None:
         _assert_workflow_step_transport(
             request,

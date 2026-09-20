@@ -14,6 +14,10 @@ def verify_retired_carriers() -> dict[str, object]:
     import django
     from django.apps import apps
 
+    from django_ray.execution_codec import (
+        NestedExecutionRequestRejected,
+        NestedExecutionRequestRejection,
+    )
     from django_ray.ray_job_protocol import RAY_JOB_CONFIG_JSON_ENV_VAR
     from django_ray.runtime import context, entrypoint, import_utils, remote
 
@@ -44,6 +48,7 @@ def verify_retired_carriers() -> dict[str, object]:
             (entrypoint, "_persist_task_completion"),
             (import_utils, "import_callable"),
             (context, "durable_task_execution"),
+            (remote, "_execute_workflow_step"),
         ):
             stack.enter_context(patch.object(owner, name, forbidden))
         stack.enter_context(patch.dict(os.environ))
@@ -85,11 +90,30 @@ def verify_retired_carriers() -> dict[str, object]:
                     input_reference=reference,
                 )
             )
+        for task_pk, run_identity in ((44, None), (None, {}), (44, {})):
+            try:
+                remote.execute_workflow_step_remote(
+                    "carrier-private-canary.callback",
+                    True,
+                    (),
+                    {},
+                    {},
+                    task_pk,
+                    None,
+                    "0",
+                    workflow_run_identity=run_identity,
+                )
+            except NestedExecutionRequestRejected as error:
+                assert error.classification is NestedExecutionRequestRejection.MISSING_CONTEXT
+                assert str(error) == "nested execution request rejected: missing_context"
+            else:
+                raise AssertionError("unbound durable workflow leaf was accepted")
     assert calls == 0
     assert not apps.ready
     return {
         "job_carriers_refused": 4,
         "core_carriers_refused": 2,
+        "workflow_carriers_refused": 3,
         "malformed_job_refused": True,
         "cli_refusal_exit": 78,
         "application_boundary_calls": 0,

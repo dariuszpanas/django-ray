@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Reject durable workflow leaves that carry a task or workflow
+  identity without a bound nested request, before application setup or progress
+  publication. Current strict requests and standalone workflows remain supported;
+  drain old producers before the coordinated Beta upgrade.
+
 - **Breaking:** Refuse unversioned Ray Job payloads and positional Core
   durable-task submissions before application setup. Current independently
   bound requests remain supported. Drain old work and stop old writers before

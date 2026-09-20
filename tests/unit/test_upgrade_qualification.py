@@ -400,6 +400,7 @@ def test_retired_carriers_are_refused_in_a_fresh_process_before_setup():
     assert json.loads(result.stdout) == {
         "job_carriers_refused": 4,
         "core_carriers_refused": 2,
+        "workflow_carriers_refused": 3,
         "malformed_job_refused": True,
         "cli_refusal_exit": 78,
         "application_boundary_calls": 0,

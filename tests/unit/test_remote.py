@@ -123,6 +123,7 @@ def _strict_nested_workflow_request(
     workflow_run_id: str,
     node_id: str,
     output_preview_path: str | None = None,
+    identity: ExecutionIdentity = _STRICT_IDENTITY,
 ) -> tuple[str, dict[str, object]]:
     from django_ray.runtime.runtime_env import normalize_runtime_env
     from django_ray.workflow.plans import runtime_env_plan_identity
@@ -132,7 +133,7 @@ def _strict_nested_workflow_request(
     ).as_transport_dict()
     serialized = encode_nested_execution_request(
         NestedExecutionRequest(
-            outer_identity=_STRICT_IDENTITY,
+            outer_identity=identity,
             execution_protocol_version=1,
             boundary_kind=NestedExecutionBoundaryKind.WORKFLOW_STEP,
             boundary_identity=NestedWorkflowBoundaryIdentity(
@@ -156,19 +157,49 @@ def _strict_nested_workflow_kwargs(
     *,
     workflow_run_id: str,
     node_id: str,
+    identity: ExecutionIdentity = _STRICT_IDENTITY,
 ) -> dict[str, object]:
     return {
         "nested_execution_request": serialized,
-        "expected_outer_task_execution_pk": _STRICT_IDENTITY.task_execution_pk,
-        "expected_outer_task_id": _STRICT_IDENTITY.task_id,
-        "expected_outer_attempt_number": _STRICT_IDENTITY.attempt_number,
-        "expected_outer_execution_generation": _STRICT_IDENTITY.execution_generation,
+        "expected_outer_task_execution_pk": identity.task_execution_pk,
+        "expected_outer_task_id": identity.task_id,
+        "expected_outer_attempt_number": identity.attempt_number,
+        "expected_outer_execution_generation": identity.execution_generation,
         "expected_execution_protocol_version": 1,
         "expected_workflow_run_id": workflow_run_id,
         "expected_node_id": node_id,
         "expected_runtime_env_plan_digest": runtime_identity["digest"],
         "expected_runtime_env_transport_digest": runtime_identity["transport_digest"],
     }
+
+
+def _execute_bound_workflow_step(*args, **kwargs):
+    run = kwargs.get("workflow_run_identity") or {}
+    identity = ExecutionIdentity(
+        task_execution_pk=args[5],
+        task_id=f"workflow-fixture-{args[5]}",
+        attempt_number=run.get("attempt_number", 1),
+        execution_generation=run.get("execution_generation", 1),
+    )
+    run_id = run.get("run_id", "00000000-0000-4000-8000-000000000555")
+    serialized, runtime = _strict_nested_workflow_request(
+        callable_path=args[0],
+        workflow_run_id=run_id,
+        node_id=args[7],
+        output_preview_path=kwargs.get("output_preview_path"),
+        identity=identity,
+    )
+    return execute_workflow_step_remote(
+        *args,
+        **kwargs,
+        **_strict_nested_workflow_kwargs(
+            serialized,
+            runtime,
+            workflow_run_id=run_id,
+            node_id=args[7],
+            identity=identity,
+        ),
+    )
 
 
 def _progress_wire(
@@ -598,7 +629,7 @@ def test_execute_workflow_step_bootstraps_and_reports_completion(monkeypatch) ->
     )
     run_identity = dict(_WORKFLOW_RUN_IDENTITY)
 
-    result = execute_workflow_step_remote(
+    result = _execute_bound_workflow_step(
         "tests.unit.test_remote.workflow_target",
         True,
         (),
@@ -658,7 +689,7 @@ def test_execute_workflow_step_exposes_run_identity_to_leaf(monkeypatch) -> None
         "execution_generation": 8,
     }
 
-    result = execute_workflow_step_remote(
+    result = _execute_bound_workflow_step(
         "tests.unit.test_remote.workflow_context_target",
         False,
         (),
@@ -915,13 +946,13 @@ def test_execute_workflow_step_reports_failure() -> None:
     run_identity = dict(_WORKFLOW_RUN_IDENTITY)
 
     with pytest.raises(RuntimeError, match="failed:3"):
-        execute_workflow_step_remote(
+        _execute_bound_workflow_step(
             "tests.unit.test_remote.failing_workflow_target",
             False,
             (),
             {},
             {},
-            None,
+            run_identity["task_execution_pk"],
             actor,
             "0.1",
             3,
@@ -986,13 +1017,13 @@ def test_workflow_step_sanitizes_nested_rejection_before_progress_and_logging(
     run_identity = dict(_WORKFLOW_RUN_IDENTITY)
 
     with pytest.raises(NestedExecutionRequestRejected) as caught:
-        execute_workflow_step_remote(
+        _execute_bound_workflow_step(
             "tests.unit.test_remote.nested_rejection_target",
             False,
             (),
             {},
             {},
-            None,
+            run_identity["task_execution_pk"],
             actor,
             "0.nested",
             workflow_run_identity=run_identity,
@@ -1023,7 +1054,7 @@ def test_execute_workflow_step_ignores_progress_reporting_failures() -> None:
 
     actor.ingest.remote = reject_wire
 
-    result = execute_workflow_step_remote(
+    result = _execute_bound_workflow_step(
         "tests.unit.test_remote.workflow_target",
         False,
         (),
@@ -1044,7 +1075,7 @@ def test_execute_workflow_step_reports_explicit_output_preview(monkeypatch) -> N
     run_identity = dict(_WORKFLOW_RUN_IDENTITY)
     monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
 
-    result = execute_workflow_step_remote(
+    result = _execute_bound_workflow_step(
         "tests.unit.test_remote.workflow_target",
         False,
         (),
@@ -1098,7 +1129,7 @@ def test_output_preview_failure_cannot_replace_workflow_success(monkeypatch) -> 
 
     monkeypatch.setattr("django_ray.logging.get_logger", lambda *_args, **_kwargs: _Logger())
 
-    result = execute_workflow_step_remote(
+    result = _execute_bound_workflow_step(
         "tests.unit.test_remote.workflow_target",
         False,
         (),
@@ -1153,7 +1184,7 @@ def test_output_preview_import_obeys_exception_boundary(
 
     if failure_type is KeyboardInterrupt:
         with pytest.raises(KeyboardInterrupt, match="preview import boundary"):
-            execute_workflow_step_remote(
+            _execute_bound_workflow_step(
                 "tests.unit.test_remote.workflow_target",
                 False,
                 (),
@@ -1169,7 +1200,7 @@ def test_output_preview_import_obeys_exception_boundary(
         return
 
     assert (
-        execute_workflow_step_remote(
+        _execute_bound_workflow_step(
             "tests.unit.test_remote.workflow_target",
             False,
             (),
@@ -1214,7 +1245,7 @@ def test_output_preview_logging_interrupt_propagates(
     monkeypatch.setattr("django_ray.logging.get_logger", lambda *_args, **_kwargs: _Logger())
 
     with pytest.raises(KeyboardInterrupt, match="diagnostic logging cancelled"):
-        execute_workflow_step_remote(
+        _execute_bound_workflow_step(
             "tests.unit.test_remote.workflow_target",
             False,
             (),
@@ -1256,7 +1287,7 @@ def test_execute_workflow_step_orders_terminal_latest_value_before_terminal_even
 
     if fail:
         with pytest.raises(RuntimeError, match="progress-failed:3"):
-            execute_workflow_step_remote(
+            _execute_bound_workflow_step(
                 "tests.unit.test_remote.workflow_progress_target",
                 False,
                 (),
@@ -1270,7 +1301,7 @@ def test_execute_workflow_step_orders_terminal_latest_value_before_terminal_even
             )
     else:
         assert (
-            execute_workflow_step_remote(
+            _execute_bound_workflow_step(
                 "tests.unit.test_remote.workflow_progress_target",
                 False,
                 (),
@@ -1325,7 +1356,7 @@ def test_execute_workflow_step_preserves_outcome_when_producer_report_fails(
 
     if fail:
         with pytest.raises(RuntimeError, match="progress-failed:3"):
-            execute_workflow_step_remote(
+            _execute_bound_workflow_step(
                 "tests.unit.test_remote.workflow_progress_target",
                 False,
                 (),
@@ -1340,7 +1371,7 @@ def test_execute_workflow_step_preserves_outcome_when_producer_report_fails(
         terminal_kind = WorkflowProgressEventKind.FAILED
     else:
         assert (
-            execute_workflow_step_remote(
+            _execute_bound_workflow_step(
                 "tests.unit.test_remote.workflow_progress_target",
                 False,
                 (),
@@ -2623,3 +2654,44 @@ def test_unversioned_durable_core_carrier_is_inert(monkeypatch, input_reference)
     assert rejected["error"] == "execution request rejected: legacy_request"
     assert rejected["retryable"] is False
     assert "private" not in result
+
+
+@pytest.mark.parametrize("task_pk,run_identity", [(9, None), (None, {}), (9, {})])
+def test_unbound_durable_workflow_leaf_refuses_before_application(
+    monkeypatch, task_pk, run_identity
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("unbound durable leaf reached application or progress handling")
+
+    monkeypatch.setattr(remote_module, "_execute_workflow_step", forbidden)
+    with pytest.raises(NestedExecutionRequestRejected) as raised:
+        execute_workflow_step_remote(
+            "private.canary",
+            True,
+            (),
+            {},
+            {},
+            task_pk,
+            object(),
+            "0",
+            workflow_run_identity=run_identity,
+        )
+    assert raised.value.classification is NestedExecutionRequestRejection.MISSING_CONTEXT
+
+
+def test_standalone_workflow_leaf_remains_supported(monkeypatch):
+    monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
+    assert (
+        execute_workflow_step_remote(
+            "tests.unit.test_remote.workflow_target",
+            False,
+            (),
+            {"increment": 2},
+            {},
+            None,
+            None,
+            "0",
+            3,
+        )
+        == 5
+    )
