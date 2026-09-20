@@ -15,6 +15,7 @@ import yaml
 from qualification.docker import scenario as wheel
 from qualification.latency import contract, scenario
 from qualification.latency.cost import completion_window_cost
+from qualification.latency.phases import phase_durations
 
 
 @pytest.mark.parametrize("mutation", ["missing", "manager", "http", "cost", "reset"])
@@ -49,6 +50,7 @@ def receipt(module):
             task_pk += 1
             start = task_pk * 100_000_000_000
             elapsed = 12 if name == "recovery-only" else 0.25
+            terminal_ns = start + 2_000_000_000 + int(elapsed * 1e9)
             tasks.append(
                 {
                     "task_pk": task_pk,
@@ -60,7 +62,7 @@ def receipt(module):
                     "job_started_ns": start,
                     "released_ns": start + 1_000_000_000,
                     "committed_ns": start + 2_000_000_000,
-                    "terminal_ns": start + 2_000_000_000 + int(elapsed * 1e9),
+                    "terminal_ns": terminal_ns,
                     "receipt_to_terminal_seconds": elapsed,
                     "release_to_terminal_seconds": elapsed + 1,
                     "cost_window": None,
@@ -94,6 +96,22 @@ def receipt(module):
                         "api_requests": 0,
                     },
                 }
+            stamps = {
+                "enqueue_started_ns": start - 5,
+                "enqueue_returned_ns": start - 4,
+                "claim_observed_ns": start - 3,
+                "submission_started_ns": start - 2,
+                "submission_acknowledged_ns": start - 1,
+                "callable_started_ns": start,
+                "released_ns": tasks[-1]["released_ns"],
+                "callable_finished_ns": start + 1_500_000_000,
+                "receipt_write_started_ns": start + 1_600_000_000,
+                "receipt_committed_ns": tasks[-1]["committed_ns"],
+                "persistence_started_ns": terminal_ns - 2,
+                "persistence_committed_ns": terminal_ns - 1,
+                "terminal_observed_ns": terminal_ns,
+            }
+            tasks[-1]["phases"] = {"stamps": stamps, "durations": phase_durations(stamps)}
         managers = []
         for index in range(2 if name == "manager-replacement" else 1):
             completed = (
@@ -136,7 +154,7 @@ def receipt(module):
             }
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "module": module,
         "cases": cases,
         "failure": None,

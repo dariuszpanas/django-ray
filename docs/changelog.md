@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Separate enqueue, claim observation, submission acknowledgement, callable
+  execution, receipt waiting and persistence observations in the bounded Job
+  latency fixture. Preserve raw phase timestamps, deliberate hold time and the
+  distinction between observed boundaries and internal Ray/database timings.
 - **Breaking:** Reject durable workflow leaves that carry a task or workflow
   identity without a bound nested request, before application setup or progress
   publication. Current strict requests and standalone workflows remain supported;

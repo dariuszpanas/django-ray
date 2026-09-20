@@ -70,7 +70,7 @@ runtime measurement and current-head hosted Linux CI.
 
 ## Matched completion-window costs
 
-Receipt schema 2 uses three successful tasks in both the recovery-only control
+Receipt schema 3 uses three successful tasks in both the recovery-only control
 and the fast capacity-one case. Each task obtains a manager counter snapshot after
 its callable has started and immediately before fixture release, then another
 after terminal state is observed. Recovery-only tasks are released after a scan
@@ -87,8 +87,44 @@ Fixed-shape receipts reject manager replacement, cumulative counter resets,
 overlapping windows and HTTP totals inconsistent with the proxy log.
 
 These are same-binary, matched finite completion-window observations. They do not
-provide a previous-release benchmark or yet isolate every enqueue, submission,
-remote execution and persistence phase required by issue #467. The original
+provide a previous-release benchmark. The original
 300-second driver and 420-second workload budgets remain unchanged; a timeout
 fails qualification rather than yielding a partial passing comparison. The updated
 nine-Job workload still requires clean-source Linux qualification before acceptance.
+
+## Phase baseline
+
+Each of the same nine tasks now retains thirteen monotonic timestamps and thirteen
+derived intervals. All processes run on the same Linux host and clock. Creation,
+claim and finish database timestamps remain a separate wall-clock measurement;
+the existing capacity-one successor-claim observations use only that clock.
+
+The driver observes entry/return from enqueue. The manager observes entry to
+`process_task` after the claim transaction and entry/return of the real
+`JobSubmissionClient.submit_job` call. The wrapper forwards unchanged arguments
+and results; it never substitutes a submission response. Remote callable entry,
+fixture release, the callable's final exit marker and its autocommitted completion
+receipt separate startup and deliberate hold from released execution and receipt
+writing. Submission acknowledgement and remote start can overlap; the contract
+does not impose a false order between them.
+
+The manager records entry to the actual success/failure persistence helper and an
+`on_commit` callback after its enclosing transaction commits. Receipt-to-helper
+time includes polling, validation and any earlier ownership-lock acquisition.
+The actual receipt commit is bracketed by entry/return from its autocommitted
+write. A manager may read the committed row before the producer records return;
+receipt waiting is therefore reported as lower/upper bounds, including zero when
+those observations overlap, rather than assuming a false timestamp order.
+Helper-to-callback time includes result handling, transition and transaction
+completion; it is not isolated SQL execution time. The parent waits for both a
+terminal row and the callback receipt before recording terminal observation.
+These observer boundaries include small instrumentation/scheduling costs and
+must not be presented as exact internal Ray or database timings.
+
+Four create-only observation files per task contain fixed timestamps and the
+existing submission identity, never callable arguments, results, SQL, RuntimeEnv
+or HTTP bodies. Duplicate, missing, malformed, misordered or inconsistent evidence
+fails the fixture. Phase durations are recomputed from raw timestamps and checked
+against the existing completion observations. No extra task, retry, resource or
+time budget is introduced. Native source-matched proof of the phase instrumented
+candidate is still required before issue #467 can accept this baseline.

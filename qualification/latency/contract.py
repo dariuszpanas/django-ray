@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 
 from qualification.docker.scenario import QualificationError
 from qualification.latency.cost import completion_window_cost
+from qualification.latency.phases import phase_durations
 
 CASES = ("recovery-only", "capacity-one", "failure", "api-outage", "manager-replacement")
 WORKLOAD = "ray-job-completion-latency"
@@ -37,7 +38,7 @@ def validate_probe(value, *, expected_module):
             "managers_stopped",
         }
     )
-    require(type(value["schema_version"]) is int and value["schema_version"] == 2)
+    require(type(value["schema_version"]) is int and value["schema_version"] == 3)
     require(value["module"] == expected_module and value["failure"] is None)
     require(value["ray_shutdown"] is True and value["managers_stopped"] is True)
     require(isinstance(value["cases"], list) and len(value["cases"]) == len(CASES))
@@ -81,6 +82,7 @@ def validate_probe(value, *, expected_module):
                     "receipt_to_terminal_seconds",
                     "release_to_terminal_seconds",
                     "cost_window",
+                    "phases",
                 }
             )
             require(type(task["task_pk"]) is int and task["task_pk"] > 0)
@@ -97,6 +99,20 @@ def validate_probe(value, *, expected_module):
             require(type(task["generation"]) is int and task["generation"] >= 0)
             require(task["module"] == expected_module)
             require(task["state"] == ("FAILED" if name == "failure" else "SUCCEEDED"))
+            phases = task["phases"]
+            require(isinstance(phases, dict) and set(phases) == {"stamps", "durations"})
+            stamps = phases["stamps"]
+            require(isinstance(phases["durations"], dict))
+            for duration in phases["durations"].values():
+                number(duration)
+            require(phases["durations"] == phase_durations(stamps))
+            for phase_field, task_field in (
+                ("callable_started_ns", "job_started_ns"),
+                ("released_ns", "released_ns"),
+                ("receipt_committed_ns", "committed_ns"),
+                ("terminal_observed_ns", "terminal_ns"),
+            ):
+                require(stamps[phase_field] == task[task_field])
             for field in ("job_started_ns", "released_ns", "committed_ns", "terminal_ns"):
                 require(type(task[field]) is int and task[field] > 0)
             require(
