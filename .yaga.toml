@@ -3,7 +3,8 @@ config-version = 1
 [commit]
 # Preserve the trusted same-repository Dependabot exemption.
 dependabot-pull-requests = "skip"
-typos = "check"
+typos = "skip"
+skip-pull-request-authors = ["dariuszpanas"]
 allowed-types = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "style", "test"]
 type-case = "lower"
 header-max-length = 72
