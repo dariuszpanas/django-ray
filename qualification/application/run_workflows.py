@@ -1,4 +1,4 @@
-"""Observe five serial workflow fixtures through their API and Admin surfaces.
+"""Observe seven serial workflow fixtures through their API and Admin surfaces.
 
 Run only inside the disposable application fixture. The outer workload owns the
 hard deadline, source/cold-Ray proof, cancellation and namespace cleanup.
@@ -18,7 +18,11 @@ from uuid import UUID
 from qualification.application.api import TASK_FAILURE_STATES, validate_task_status_payload
 from qualification.application.run_api import ApplicationHttp, read_token
 from qualification.application.workflow_admin import observe_admin_contract
-from qualification.application.workflow_http import decode_workflow_object, read_full_workflow_graph
+from qualification.application.workflow_http import (
+    decode_workflow_object,
+    read_disabled_workflow_graph,
+    read_full_workflow_graph,
+)
 from qualification.application.workflow_session import qualification_admin_session
 
 
@@ -35,7 +39,7 @@ class WorkflowCase:
 def workflow_cases() -> tuple[WorkflowCase, ...]:
     """Use tiny existing public fixtures, not caller-selected application code."""
     cases = []
-    for policy in ("full", "terminal_only"):
+    for policy in ("full", "terminal_only", "disabled"):
         for fail in (False, True):
             options: dict[str, object] = {
                 "fast_items": 2,
@@ -43,7 +47,7 @@ def workflow_cases() -> tuple[WorkflowCase, ...]:
                 "fast_seconds": 0.01,
                 "slow_seconds": 0.05 if fail else 0.02,
             }
-            if policy == "terminal_only":
+            if policy != "full":
                 options["reporting_policy"] = policy
             if fail:
                 options.update(failure_branch="slow", failure_item=0)
@@ -72,6 +76,7 @@ def workflow_cases() -> tuple[WorkflowCase, ...]:
 
 def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) -> list[dict]:
     """Submit once, fail fast and inspect each retained attempt without replay."""
+    from django.db.models import Q
     from django.db.models.functions import Length
 
     from django_ray.models import RayTaskExecution
@@ -142,14 +147,16 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
         raise ValueError("Durable workflow differs from the requested fixture")
     attempts = list(
         row.attempts.annotate(summary_size=Length("workflow_progress_summary_json"))
-        .filter(summary_size__lte=65536)
+        .filter(Q(summary_size__lte=65536) | Q(workflow_progress_summary_json__isnull=True))
         .order_by("attempt_number")
         .values("attempt_number", "state", "workflow_progress_summary_json")[:4]
     )
     if [item["state"] for item in attempts] != list(case.states):
         raise ValueError("Workflow history is missing, oversized or has unexpected outcomes")
-    if case.policy == "terminal_only":
+    if case.policy in {"terminal_only", "disabled"}:
         verify_no_workflow_detail(row.pk)
+    if case.policy == "disabled":
+        verify_no_disabled_publication(row.pk)
     admin_path = f"/admin/django_ray/raytaskexecution/{row.pk}/workflow/graph/"
     status, _ = request(admin_path, method="GET", response_limit=16 * 1024)
     if status not in {302, 403}:
@@ -162,6 +169,20 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
         for number, attempt in enumerate(attempts, 1):
             if attempt["attempt_number"] != number:
                 raise ValueError("Workflow history is not the exact attempt sequence")
+            if case.policy == "disabled":
+                if attempt["workflow_progress_summary_json"] not in (None, ""):
+                    raise ValueError("Disabled workflow retained an attempt summary")
+                observations.append(
+                    read_disabled_workflow_graph(
+                        request,
+                        task_id=task_id,
+                        execution_pk=row.pk,
+                        expected_state=attempt["state"],
+                        token=token,
+                        admin_cookie=cookie,
+                    )
+                )
+                continue
             stored = attempt["workflow_progress_summary_json"]
             if not isinstance(stored, str) or len(stored.encode()) > 65536:
                 raise ValueError("Workflow history summary is absent or unbounded")
@@ -195,6 +216,26 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
                 attempt=number if number < len(case.states) else None,
             )
     return observations
+
+
+def verify_no_disabled_publication(execution_pk: int) -> None:
+    """Reject current, archived or staged data without hydrating its payload."""
+    from django.db.models import Q
+
+    from django_ray.models import RayTaskExecution, TaskAttempt, WorkflowProgressRunStorage
+
+    empty_summary = Q(workflow_progress_summary_json__isnull=True) | Q(
+        workflow_progress_summary_json=""
+    )
+    empty_progress = Q(progress_data__isnull=True) | Q(progress_data="")
+    if (
+        RayTaskExecution.objects.filter(pk=execution_pk)
+        .exclude(empty_summary & empty_progress)
+        .exists()
+        or TaskAttempt.objects.filter(execution_id=execution_pk).exclude(empty_summary).exists()
+        or WorkflowProgressRunStorage.objects.filter(execution_id=execution_pk).exists()
+    ):
+        raise ValueError("Disabled workflow retained publication storage")
 
 
 def verify_no_workflow_detail(execution_pk: int) -> None:

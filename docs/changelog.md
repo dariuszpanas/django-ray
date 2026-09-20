@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Explain disabled workflow reporting on the Admin graph endpoint when the
+  current attempt has no publication. Infer only a bounded valid current policy;
+  malformed, oversized and archived selections do not invent graph history.
+
 - Timestamp task claims after selecting their locked rows so a concurrently
   committed enqueue cannot appear to start before creation. Recheck queue
   deadlines after selection and leave newly expired tasks for the bounded expiry

@@ -223,3 +223,78 @@ def read_full_workflow_graph(
         "fixture_graph_verified": fixture is not None,
         "complete_workflow_gate": False,
     }
+
+
+def read_disabled_workflow_graph(
+    request: ApplicationHttp,
+    *,
+    task_id: str,
+    execution_pk: int,
+    expected_state: str,
+    token: str,
+    admin_cookie: str,
+) -> dict[str, Any]:
+    """Prove disabled reporting exposes no invented publication or graph."""
+    if not token or not admin_cookie or type(execution_pk) is not int or execution_pk < 1:
+        raise ValueError("Disabled workflow observation requires identity and credentials")
+    observations = []
+    for path, admin in (
+        (f"/api/cluster/workflows/{task_id}", False),
+        (f"/admin/django_ray/raytaskexecution/{execution_pk}/workflow/graph/", True),
+    ):
+        status, body = request(
+            path,
+            method="GET",
+            headers={"Cookie": admin_cookie} if admin else {"Authorization": f"Bearer {token}"},
+            response_limit=128 * 1024,
+            required_response_headers={"X-Content-Type-Options": "nosniff"},
+            required_cache_directives=frozenset({"no-store"}) if admin else frozenset(),
+        )
+        if status != 200:
+            raise ValueError("Disabled workflow observation failed")
+        observations.append(decode_workflow_object(body))
+    summary, graph = observations
+    required_summary = {
+        "schema": "django-ray.workflow-progress-summary",
+        "schema_version": 1,
+        "task_id": task_id,
+        "availability": "DISABLED",
+        "complete": False,
+        "source_schema_version": None,
+        "summary": None,
+        "run_identity": None,
+        "publication": {
+            "summary_revision": None,
+            "topology_version": None,
+            "detail_revision": None,
+        },
+    }
+    required_graph = {
+        "schema": "django-ray.admin-workflow-graph",
+        "schema_version": 2,
+        "status": "UNAVAILABLE",
+        "complete": False,
+        "nodes": [],
+        "edges": [],
+        "counts": {"nodes": 0, "edges": 0},
+        "message": "Workflow reporting was disabled for this attempt, so no graph was saved. "
+        "Use supported full reporting for future runs if you need a graph.",
+    }
+    for actual, expected in ((summary, required_summary), (graph, required_graph)):
+        if any(
+            key not in actual
+            or type(actual[key]) is not type(value)
+            or json.dumps(actual[key], sort_keys=True) != json.dumps(value, sort_keys=True)
+            for key, value in expected.items()
+        ):
+            raise ValueError("Disabled workflow invented publication or hid its policy")
+    return {
+        "task_id": task_id,
+        "state": expected_state,
+        "reporting_policy": "disabled",
+        "run_identity": None,
+        "publication": None,
+        "counts": {"nodes": 0, "edges": 0},
+        "api_admin_graph_match": True,
+        "complete_workflow_gate": False,
+    }

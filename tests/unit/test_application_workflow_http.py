@@ -200,3 +200,65 @@ def test_terminal_only_rejects_false_summary_counts(observation, field, value):
     ] = value
     with pytest.raises(ValueError, match="claimed observed graph detail"):
         read_full_workflow_graph(request, **arguments)
+
+
+@pytest.mark.parametrize(
+    "corruption", [None, "identity", "publication", "policy", "graph", "message"]
+)
+def test_disabled_workflow_requires_absent_publication_and_honest_graph(corruption):
+    from qualification.application.workflow_http import read_disabled_workflow_graph
+
+    summary = {
+        "schema": "django-ray.workflow-progress-summary",
+        "schema_version": 1,
+        "task_id": "disabled-task",
+        "availability": "DISABLED",
+        "complete": False,
+        "source_schema_version": None,
+        "summary": None,
+        "run_identity": None,
+        "publication": {
+            "summary_revision": None,
+            "topology_version": None,
+            "detail_revision": None,
+        },
+    }
+    graph = {
+        "schema": "django-ray.admin-workflow-graph",
+        "schema_version": 2,
+        "status": "UNAVAILABLE",
+        "complete": False,
+        "nodes": [],
+        "edges": [],
+        "counts": {"nodes": 0, "edges": 0},
+        "message": "Workflow reporting was disabled for this attempt, so no graph was saved. "
+        "Use supported full reporting for future runs if you need a graph.",
+    }
+    if corruption == "identity":
+        summary["run_identity"] = {"attempt_number": 2}
+    elif corruption == "publication":
+        summary["publication"]["summary_revision"] = 1
+    elif corruption == "policy":
+        summary["availability"] = "NOT_REPORTED"
+    elif corruption == "graph":
+        graph["nodes"] = [{"id": "invented"}]
+    elif corruption == "message":
+        graph["message"] = "Wait for a graph"
+    request = Mock(side_effect=[(200, json.dumps(value).encode()) for value in (summary, graph)])
+    arguments = {
+        "task_id": "disabled-task",
+        "execution_pk": 12,
+        "expected_state": "SUCCEEDED",
+        "token": "credential",
+        "admin_cookie": "session",
+    }
+    if corruption:
+        with pytest.raises(ValueError, match="invented publication"):
+            read_disabled_workflow_graph(request, **arguments)
+    else:
+        receipt = read_disabled_workflow_graph(request, **arguments)
+        assert receipt["publication"] is None and receipt["run_identity"] is None
+        assert "credential" not in json.dumps(receipt)
+        assert request.call_count == 2
+        assert request.call_args_list[0].kwargs["headers"] == {"Authorization": "Bearer credential"}
+        assert request.call_args_list[1].kwargs["headers"] == {"Cookie": "session"}

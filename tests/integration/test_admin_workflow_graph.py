@@ -425,7 +425,7 @@ def test_graph_endpoint_projects_one_coherent_first_page_without_raw_payloads(
             "summary",
             {
                 "include_legacy": False,
-                "infer_current_reporting_policy": False,
+                "infer_current_reporting_policy": True,
                 "attempt_number": 1,
             },
         ),
@@ -1024,3 +1024,52 @@ def test_graph_endpoint_reads_real_terminal_schema_v3_storage(settings) -> None:
     stored_preview.refresh_from_db()
     assert bytes(stored_preview.payload) == stored_payload
     assert stored_preview.digest == stored_digest
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("selection_kind", ["disabled", "malformed", "oversized"])
+def test_disabled_current_plan_without_publication_explains_unavailable_graph(
+    archived, selection_kind
+):
+    from django_ray.workflow.plans import PlanEligibility
+
+    selection = PlanEligibility(("dynamic_tasks",), (), 0).select(
+        "dynamic_tasks", requested_policy="auto", reporting_policy="disabled"
+    )
+    serialized = json.dumps(selection.as_dict())
+    if selection_kind == "malformed":
+        serialized = '{"reporting_policy":"disabled"}'
+    elif selection_kind == "oversized":
+        serialized = " " * 65536 + serialized
+    execution = _execution(
+        attempt_number=2 if archived else 1,
+        progress_data=None,
+        workflow_progress_summary_json=None,
+        workflow_plan_selection=serialized,
+    )
+    if archived:
+        TaskAttempt.objects.create(
+            execution=execution,
+            attempt_number=1,
+            state=TaskState.FAILED,
+            workflow_progress_summary_json=None,
+        )
+    user = get_user_model().objects.create_superuser(username="disabled-workflow-graph-admin")
+    request = RequestFactory().get(
+        "/admin/workflow/graph/" + ("?attempt_number=1" if archived else "")
+    )
+    request.user = user
+    with CaptureQueriesContext(connection) as queries:
+        response = _task_admin().workflow_graph_view(request, str(execution.pk))
+    assert response.status_code == 200
+    payload = _json(response)
+    inferred = not archived and selection_kind == "disabled"
+    _assert_empty_graph(payload, "UNAVAILABLE" if inferred else "NOT_REPORTED")
+    assert ("reporting was disabled" in payload["message"]) is inferred
+    assert response["Cache-Control"] == "no-store"
+    assert response["X-Content-Type-Options"] == "nosniff"
+    statements = " ".join(query["sql"].lower() for query in queries)
+    assert "workflowprogresstopology" not in statements
+    assert "workflowprogressnodedetail" not in statements
+    assert len(response.content) <= ADMIN_WORKFLOW_GRAPH_MAX_RESPONSE_BYTES
