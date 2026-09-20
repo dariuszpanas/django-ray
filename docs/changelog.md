@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent application qualification from rejecting a heartbeat committed during
+  its lease read as a future timestamp. Retain stale/future checks and emit
+  fixed failure codes without exposing exception messages or RuntimeEnv data.
 - Serialize concurrent updates and terminal handoff within a shared leaf-local
   workflow progress session. Preserve its one-outstanding-call bound and coherent
   terminal counters when threads report progress or finish at the same time.
