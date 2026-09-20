@@ -3953,7 +3953,7 @@ class TestWorkerReconnectPollReconcile:
         assert json.loads(task.result_data or "null") == 3
         assert task.pk not in cmd.active_tasks
 
-    def test_reconcile_legacy_failed_job_still_uses_logs_and_retry_policy(
+    def test_reconcile_legacy_failed_job_is_lost_without_logs_or_retry(
         self,
         monkeypatch,
     ) -> None:
@@ -3992,9 +3992,11 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.reconcile_tasks() == 1
 
         task.refresh_from_db()
-        assert log_calls == [task.ray_job_id]
-        assert task.state == TaskState.QUEUED
-        assert task.attempt_number == 2
+        assert log_calls == []
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert "application effects are unknown" in task.error_message
+        assert "legacy traceback" not in (task.error_traceback or "")
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_success_with_non_json_logs_waits_for_completion_envelope(
@@ -4550,7 +4552,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.ray_job_id is None
         assert task.ray_address is None
 
-    def test_reconcile_tasks_missing_completion_eventually_retries(self, monkeypatch) -> None:
+    def test_reconcile_tasks_missing_completion_becomes_lost(self, monkeypatch) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
         task = RayTaskExecution.objects.create(
             task_id="reconcile-missing-completion-stale-001",
@@ -4574,8 +4576,8 @@ class TestWorkerReconnectPollReconcile:
         cmd.reconcile_tasks()
 
         task.refresh_from_db()
-        assert task.state == TaskState.QUEUED
-        assert task.attempt_number == 2
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_owner_transfer_during_status_rpc_blocks_terminal_effects(
@@ -4715,9 +4717,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.RUNNING
         assert task.pk in cmd.active_tasks
 
-    def test_reconcile_tasks_expired_malformed_envelope_uses_failure_policy(
-        self, monkeypatch
-    ) -> None:
+    def test_reconcile_tasks_expired_malformed_envelope_becomes_lost(self, monkeypatch) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
         task = RayTaskExecution.objects.create(
             task_id="reconcile-malformed-completion-expired-001",
@@ -4743,9 +4743,9 @@ class TestWorkerReconnectPollReconcile:
         cmd.reconcile_tasks()
 
         task.refresh_from_db()
-        assert task.state == TaskState.QUEUED
-        assert task.attempt_number == 2
-        assert "malformed completion envelope" in (task.error_message or "")
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert "application effects are unknown" in (task.error_message or "")
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_expired_running_malformed_envelope_stops_without_retry(
@@ -4815,7 +4815,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.RUNNING
         assert task.pk in cmd.active_tasks
 
-    def test_reconcile_tasks_expired_success_without_envelope_uses_failure_policy(
+    def test_reconcile_tasks_expired_success_without_envelope_becomes_lost(
         self, monkeypatch
     ) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
@@ -4842,9 +4842,9 @@ class TestWorkerReconnectPollReconcile:
         cmd.reconcile_tasks()
 
         task.refresh_from_db()
-        assert task.state == TaskState.QUEUED
-        assert task.attempt_number == 2
-        assert "without a completion envelope" in (task.error_message or "")
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert "application effects are unknown" in (task.error_message or "")
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_tasks_failure_envelope_uses_retry_policy(self, monkeypatch) -> None:
@@ -5416,7 +5416,10 @@ class TestWorkerReconnectPollReconcile:
         )
         cmd = _make_command()
         cmd.active_tasks = {task.pk: task.ray_job_id or ""}
-        monkeypatch.setattr(cmd, "_handle_task_failure", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.record_lost",
+            lambda *_args, **_kwargs: False,
+        )
 
         class FakeRunner:
             def get_status(self, _handle):
@@ -5495,7 +5498,10 @@ class TestWorkerReconnectPollReconcile:
         )
         cmd = _make_command()
         cmd.active_tasks = {task.pk: task.ray_job_id or ""}
-        monkeypatch.setattr(cmd, "_handle_task_failure", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.record_lost",
+            lambda *_args, **_kwargs: False,
+        )
 
         class FakeRunner:
             def get_status(self, _handle):
@@ -5519,7 +5525,10 @@ class TestWorkerReconnectPollReconcile:
         )
         cmd = _make_command()
         cmd.active_tasks = {task.pk: task.ray_job_id or ""}
-        monkeypatch.setattr(cmd, "_handle_task_failure", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.record_lost",
+            lambda *_args, **_kwargs: False,
+        )
 
         class FakeRunner:
             def get_status(self, _handle):
@@ -5539,7 +5548,7 @@ class TestWorkerReconnectPollReconcile:
         assert task.state == TaskState.RUNNING
         assert task.pk in cmd.active_tasks
 
-    def test_reconcile_failed_job_preserves_completion_published_while_fetching_logs(
+    def test_reconcile_failed_job_preserves_completion_published_before_loss_fence(
         self,
         monkeypatch,
     ) -> None:
@@ -5564,8 +5573,18 @@ class TestWorkerReconnectPollReconcile:
                 )
 
             def get_logs(self, _handle):
-                RayTaskExecution.objects.filter(pk=task.pk).update(completion_data=completion_data)
-                return "stale traceback"
+                raise AssertionError("untrusted failure must not fetch logs")
+
+        from django_ray.management.commands import django_ray_worker as worker_module
+
+        original_prepare = worker_module.prepare_remote_cancellation
+
+        def publish_before_loss_fence(runner, handle):
+            prepared = original_prepare(runner, handle)
+            RayTaskExecution.objects.filter(pk=task.pk).update(completion_data=completion_data)
+            return prepared
+
+        monkeypatch.setattr(worker_module, "prepare_remote_cancellation", publish_before_loss_fence)
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 

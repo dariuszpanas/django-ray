@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workflow progress session. Preserve its one-outstanding-call bound and coherent
   terminal counters when threads report progress or finish at the same time.
   This does not establish a workflow-wide bound across separate producers.
+- Treat legacy Ray Job failures without trusted completion as `LOST` with unknown
+  application effects, without fetching job logs or automatically retrying.
+  Missing or malformed terminal completions retain the existing grace period,
+  then become `LOST` rather than authorizing replay, even after Ray reports success.
+  Preserve exact worker/job/attempt/generation/completion fences and historical
+  records; current authenticated Ray Job completions and retries are unchanged.
+
 - Explain unavailable Admin workflow graphs using the saved reporting policy and
   publication state, including unfinished runs, terminal-only or disabled
   reporting, expired detail and missing historical publications. Direct oversized

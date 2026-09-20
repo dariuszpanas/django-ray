@@ -86,6 +86,24 @@ keys. Changing the temporary directory does not recover an earlier failed
 publication. Follow the [Kubernetes deployment guide](kubernetes.md) for the
 storage and dashboard setup details.
 
+## Reconcile legacy Ray Job failures
+
+A legacy Ray Job that reports failure without a trusted completion now becomes
+`LOST`, with an explicit unknown-effects message and no automatic retry. Managers
+do not fetch or persist its job logs to infer an outcome. A terminal legacy Job
+with a missing or malformed completion also becomes `LOST` after the existing
+completion grace period, including when Ray reports success. Review external effects
+before an explicit recovery decision; `LOST` does not mean the callable never ran.
+The transition remains fenced by the current worker lease, job, attempt,
+generation and completion. A concurrent trusted completion or replacement owner
+must win over a stale failure observation.
+
+Current Ray Jobs remain supported: authenticated completion, same-version manager
+recovery and retries authorized by a valid completion retain their existing
+behavior. Historical rows and artifacts are not rewritten or removed. This
+change retires only the untrusted failed-job diagnostic/retry fallback; it does
+not activate another protocol or restore mixed-version execution support.
+
 ## Coordinated stopped-writer upgrade
 
 The current changes after 0.5.0 add no django-ray database migrations or new task

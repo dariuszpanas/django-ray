@@ -1952,3 +1952,99 @@ def test_postgresql_concurrent_closers_apply_one_expected_revision() -> None:
     assert policy.legacy_worker_admission_enabled is False
     assert policy.revision == 2
     assert not LegacyWorkerAdmissionToken.objects.exists()
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize("terminal_case", ["failed", "missing", "malformed"])
+@pytest.mark.parametrize(
+    "replacement", [None, "completion", "owner", "attempt", "generation", "job", "lease"]
+)
+def test_postgresql_legacy_job_failure_fences_independent_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str | None,
+    terminal_case: str,
+) -> None:
+    """A second connection wins before loss without log reads or stale stops."""
+    _require_postgresql()
+    from django_ray.management.commands import django_ray_worker as worker_module
+
+    worker = _explicit_v1_worker("legacy-failure-fence-worker")
+    task = RayTaskExecution.objects.create(
+        task_id="legacy-failure-fence-task",
+        callable_path="testproject.tasks.add_numbers",
+        queue_name="default",
+        state=TaskState.RUNNING,
+        claimed_by_worker=worker.worker_id,
+        ray_job_id="raysubmit_legacy_failure_fence",
+        started_at=timezone.now() - timedelta(minutes=10),
+        completion_data="{not-json" if terminal_case == "malformed" else None,
+        args_json="[]",
+        kwargs_json="{}",
+    )
+    worker.active_tasks = {task.pk: task.ray_job_id or ""}
+    remote_calls: list[str] = []
+    observer_pid = _postgresql_backend_pid()
+    completion = '{"success": true, "result": 3}'
+
+    def replace_from_independent_connection() -> int:
+        close_old_connections()
+        try:
+            writer_pid = _postgresql_backend_pid()
+            changes = {
+                "completion": {"completion_data": completion},
+                "owner": {"claimed_by_worker": "replacement-owner"},
+                "attempt": {"attempt_number": task.attempt_number + 1},
+                "generation": {"execution_generation": task.execution_generation + 1},
+                "job": {"ray_job_id": "raysubmit_replacement_job"},
+            }
+            if replacement == "lease":
+                TaskWorkerLease.objects.filter(worker_id=worker.worker_id).update(is_active=False)
+            elif replacement is not None:
+                RayTaskExecution.objects.filter(pk=task.pk).update(**changes[replacement])
+            return writer_pid
+        finally:
+            connections.close_all()
+
+    class FakeRunner:
+        def get_status(self, handle: SubmissionHandle) -> JobInfo:
+            return JobInfo(
+                job_id=handle.ray_job_id or "",
+                status=JobStatus.FAILED if terminal_case == "failed" else JobStatus.SUCCEEDED,
+                message="untrusted text",
+            )
+
+        def get_logs(self, _handle: SubmissionHandle) -> str:
+            remote_calls.append("logs")
+            raise AssertionError("legacy failure must not fetch logs")
+
+        def cancel(self, _handle: SubmissionHandle) -> bool:
+            remote_calls.append("stop")
+            return True
+
+    original_prepare = worker_module.prepare_remote_cancellation
+
+    def prepare_with_replacement(runner: Any, handle: Any) -> Any:
+        prepared = original_prepare(runner, handle)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            assert (
+                executor.submit(replace_from_independent_connection).result(timeout=5)
+                != observer_pid
+            )
+        return prepared
+
+    monkeypatch.setattr(worker_module, "prepare_remote_cancellation", prepare_with_replacement)
+    monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+    worker.reconcile_tasks()
+    task.refresh_from_db()
+    if replacement is None:
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert "application effects are unknown" in (task.error_message or "")
+        assert "untrusted text" not in (task.error_message or "")
+        assert remote_calls == ["stop"]
+    else:
+        assert task.state == TaskState.RUNNING
+        assert remote_calls == []
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        if replacement == "completion":
+            assert task.completion_data == completion

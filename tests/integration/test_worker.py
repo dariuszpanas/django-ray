@@ -25,7 +25,6 @@ from django_ray.models import (
     TaskState,
     TaskWorkerLease,
 )
-from django_ray.redaction import normalize_terminal_text
 from django_ray.runner.base import SubmissionHandle
 from django_ray.runner.cancellation import CancellationOutcome, CancellationOutcomeStatus
 from django_ray.runner.ray_core import RayCoreHandle
@@ -1597,8 +1596,8 @@ class TestWorkerRayJobFailureHandling:
         assert task.attempt_number == 1
         assert task.finished_at is not None
 
-    def test_reconcile_failed_job_retries_when_attempts_remain(self, monkeypatch):
-        """Ray FAILED status should trigger retry path."""
+    def test_reconcile_failed_job_is_lost_when_attempts_remain(self, monkeypatch):
+        """Untrusted Ray FAILED status must not authorize automatic replay."""
         cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-reconcile-retry-001",
@@ -1622,7 +1621,7 @@ class TestWorkerRayJobFailureHandling:
                 )
 
             def get_logs(self, handle):
-                return "traceback-log-content"
+                raise AssertionError("legacy failure must not fetch logs")
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
@@ -1630,11 +1629,10 @@ class TestWorkerRayJobFailureHandling:
         cmd.reconcile_tasks()
 
         task.refresh_from_db()
-        assert task.state == TaskState.QUEUED
-        assert task.attempt_number == 2
-        assert task.run_after is not None
-        assert task.error_message == "ray failed"
-        assert task.error_traceback == "traceback-log-content"
+        assert task.state == TaskState.LOST
+        assert task.attempt_number == 1
+        assert "application effects are unknown" in task.error_message
+        assert task.error_traceback is None
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_succeeded_job_with_failure_payload_retries(self, monkeypatch):
@@ -1683,8 +1681,8 @@ class TestWorkerRayJobFailureHandling:
         assert task.error_traceback == "tb"
         assert task.pk not in cmd.active_tasks
 
-    def test_reconcile_failed_job_marks_failed_at_max_attempts(self, monkeypatch):
-        """Ray FAILED status should become terminal when max attempts is reached."""
+    def test_reconcile_failed_job_is_lost_at_max_attempts(self, monkeypatch):
+        """Exhausted retries do not turn an uncertain outcome into trusted failure."""
         cmd = self._make_command()
         task = RayTaskExecution.objects.create(
             task_id="test-ray-reconcile-failed-001",
@@ -1710,11 +1708,7 @@ class TestWorkerRayJobFailureHandling:
                 )
 
             def get_logs(self, handle):
-                return (
-                    "\x1b[36mray::django_ray:task()\x1b[39m\r\n"
-                    'File "/app/src/django_ray/runtime/remote.py", line 81\n'
-                    "ModuleNotFoundError: No module named 'django_ray'"
-                )
+                raise AssertionError("legacy failure must not fetch logs")
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
 
@@ -1722,23 +1716,13 @@ class TestWorkerRayJobFailureHandling:
         cmd.reconcile_tasks()
 
         task.refresh_from_db()
-        assert task.state == TaskState.FAILED
+        assert task.state == TaskState.LOST
         assert task.attempt_number == 3
         assert task.finished_at is not None
-        assert task.error_message == "\x1b[31mray final\x1b[39m"
-        assert normalize_terminal_text(task.error_message) == "ray final"
-        assert task.error_traceback == (
-            "\x1b[36mray::django_ray:task()\x1b[39m\r\n"
-            'File "/app/src/django_ray/runtime/remote.py", line 81\n'
-            "ModuleNotFoundError: No module named 'django_ray'"
-        )
-        assert normalize_terminal_text(task.error_traceback) == (
-            "ray::django_ray:task()\n"
-            'File "/app/src/django_ray/runtime/remote.py", line 81\n'
-            "ModuleNotFoundError: No module named 'django_ray'"
-        )
-        assert "ray final" in cmd.stdout.getvalue()
-        assert "\x1b" not in cmd.stdout.getvalue()
+        assert "application effects are unknown" in task.error_message
+        assert task.error_traceback is None
+        assert "ray final" not in cmd.stdout.getvalue()
+        assert "automatic retry was suppressed" in cmd.stdout.getvalue()
         assert task.pk not in cmd.active_tasks
 
 
