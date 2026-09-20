@@ -1,4 +1,4 @@
-"""Bound one leaf-local workflow application-progress producer."""
+"""Bound one workflow producer's replaceable progress updates."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _poll_ray_ack(reference: Any) -> WorkflowProgressProducerAck:
 
 
 class WorkflowProgressProducerSession:
-    """Coalesce one leaf's replaceable updates behind one outstanding call."""
+    """Coalesce one producer's replaceable updates behind one outstanding call."""
 
     __slots__ = (
         "_ack_poller",
@@ -183,6 +183,36 @@ class WorkflowProgressProducerSession:
             },
             limits=self._limits,
         )
+        return self._offer_wire(wire)
+
+    def offer_map_progress(
+        self,
+        label: str,
+        *,
+        submitted: int,
+        completed: int,
+        input_exhausted: bool,
+    ) -> bool:
+        """Coalesce canonical coordinator counters using the same call bound."""
+        with self._lock:
+            if self._finished_report is not None:
+                return False
+            wire = prepare_workflow_progress_event(
+                self._run_identity,
+                WorkflowProgressEventKind.MAP_PROGRESS,
+                {
+                    "node_id": self._node_id,
+                    "label": label,
+                    "submitted": submitted,
+                    "completed": completed,
+                    "input_exhausted": input_exhausted,
+                },
+                limits=self._limits,
+            )
+            return self._offer_wire(wire)
+
+    def _offer_wire(self, wire: bytes) -> bool:
+        """Queue a validated canonical event while owning the session lock."""
         self._increment("offered")
 
         outstanding_pending = self._observe_outstanding()

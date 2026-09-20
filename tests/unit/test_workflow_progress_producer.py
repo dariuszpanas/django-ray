@@ -128,6 +128,108 @@ def _decoded(actor: _Actor) -> list[Any]:
     ]
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_map_coordinator_bounds_forced_updates_before_terminal_handoff(
+    monkeypatch: pytest.MonkeyPatch, failed: bool
+) -> None:
+    from django_ray.runtime.context import WorkflowRunIdentity
+    from django_ray.workflows import _RayExecutor
+
+    monkeypatch.setattr(
+        "django_ray.workflow.progress.producer._poll_ray_ack",
+        lambda _reference: WorkflowProgressProducerAck.PENDING,
+    )
+    actor = _Actor()
+    executor = object.__new__(_RayExecutor)
+    executor.progress_actor = actor
+    executor.workflow_run_identity = WorkflowRunIdentity(
+        **{key: value for key, value in _RUN_IDENTITY.items() if key != "schema_version"}
+    )
+    executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
+    executor._progress_suppression_depth = 0
+    executor._map_progress_sent_at = {}
+    executor._map_progress_producers = {}
+    for completed in range(1_000):
+        executor.map_progress(
+            "map",
+            "map:increment",
+            submitted=1_000,
+            completed=completed,
+            input_exhausted=True,
+            force=True,
+        )
+    assert len(actor.ingest.calls) == 1
+    executor.map_finished(
+        "map",
+        "map:increment",
+        submitted=1_000,
+        completed=1_000,
+        input_exhausted=True,
+        failed=failed,
+    )
+    events = _decoded(actor)
+    assert [event.kind for event in events] == [
+        WorkflowProgressEventKind.MAP_PROGRESS,
+        WorkflowProgressEventKind.MAP_PROGRESS,
+        WorkflowProgressEventKind.FAILED if failed else WorkflowProgressEventKind.COMPLETED,
+    ]
+    assert [event.payload["completed"] for event in events[:2]] == [0, 1_000]
+    executor.map_progress(
+        "map",
+        "map:increment",
+        submitted=1_000,
+        completed=1_000,
+        input_exhausted=True,
+        force=True,
+    )
+    assert len(actor.ingest.calls) == 3
+
+
+@pytest.mark.real_ray
+def test_real_ray_map_progress_has_one_pending_call_and_final_handoff(ray_runtime: Any) -> None:
+    actor = ray_runtime.remote(num_cpus=0, max_concurrency=4)(_BlockedRayIngestActor).remote(
+        _RUN_IDENTITY
+    )
+    session = WorkflowProgressProducerSession(actor, _RUN_IDENTITY, "map")
+    for completed in range(1_000):
+        assert session.offer_map_progress(
+            "map:increment", submitted=1_000, completed=completed, input_exhausted=True
+        )
+    report = session.finish()
+    assert report["submitted"] == 2
+    assert report["pending_acknowledgements"] == 2
+    events = ray_runtime.get(actor.release_and_collect.remote(2), timeout=15)
+    assert [event[1] for event in events] == ["map_progress", "map_progress"]
+    # This deliberately concurrent receiver may start calls in either order.
+    # The coordinator test separately asserts terminal submission ordering.
+    assert sorted(event[2]["completed"] for event in events) == [0, 999]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [WorkflowProgressProducerAck.ACTOR_REJECTED, WorkflowProgressProducerAck.ACK_FAILED],
+)
+def test_map_rejection_drops_latest_value_without_repeated_actor_calls(
+    status: WorkflowProgressProducerAck,
+) -> None:
+    actor = _Actor()
+    session = WorkflowProgressProducerSession(
+        actor, _RUN_IDENTITY, "map", ack_poller=lambda _reference: status
+    )
+    assert session.offer_map_progress(
+        "map:increment", submitted=10, completed=0, input_exhausted=True
+    )
+    for completed in range(1, 11):
+        assert not session.offer_map_progress(
+            "map:increment", submitted=10, completed=completed, input_exhausted=True
+        )
+    report = session.finish()
+    assert len(actor.ingest.calls) == 1
+    assert report[status.value] == 1
+    assert report["locally_dropped"] == 10
+    assert report["pending_acknowledgements"] == 0
+
+
 def test_never_ready_actor_keeps_one_call_and_one_latest_slot() -> None:
     actor = _Actor()
     session = WorkflowProgressProducerSession(
