@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+from qualification.latency.cost import ManagerCostSnapshots
+
 
 def run(name: str, *, recovery_only: bool) -> None:
     import django
@@ -29,6 +31,7 @@ def run(name: str, *, recovery_only: bool) -> None:
         "peak_active": 0,
     }
     polling = False
+    snapshots = ManagerCostSnapshots(settings.ROOT, name)
 
     def observe(execute, sql, params, many, context):
         started = time.monotonic()
@@ -43,6 +46,7 @@ def run(name: str, *, recovery_only: bool) -> None:
     class ObservedCommand(Command):
         def poll_ray_job_completions(self):
             nonlocal polling
+            snapshots.observe(self.worker_id, counters)
             counters["fast_polls"] += 1
             # This isolates the durable-receipt improvement in the same binary.
             # It is a recovery-only control, not an old-version benchmark.
@@ -57,6 +61,9 @@ def run(name: str, *, recovery_only: bool) -> None:
                 polling = False
 
         def claim_and_process_tasks(self, queues, concurrency):
+            # Fast polling stops when the final task leaves active_tasks.
+            # Continue serving the final cost observation from the idle loop.
+            snapshots.observe(self.worker_id, counters)
             result = super().claim_and_process_tasks(queues, concurrency)
             counters["peak_active"] = max(counters["peak_active"], len(self.active_tasks))
             return result

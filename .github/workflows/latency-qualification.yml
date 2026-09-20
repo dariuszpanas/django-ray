@@ -1,0 +1,104 @@
+name: Job Latency Qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/latency-qualification.yml
+      - qualification/latency/**
+      - qualification/transactions/Dockerfile
+      - tests/unit/test_latency_cost.py
+      - tests/unit/test_latency_qualification.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: job-latency-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  latency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      COMPOSE_PROJECT_NAME: job-latency-qualification
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require exact-source Linux CI
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 40); do
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/check-runs" \
+              --jq '[.check_runs[] | select(.name == "CI Gate")] | sort_by(.started_at) | last | .conclusion // "pending"')
+            case "$conclusion" in
+              success) exit 0 ;;
+              pending) sleep 25 ;;
+              *) echo "::error::Linux CI checkpoint did not pass"; exit 1 ;;
+            esac
+          done
+          echo "::error::No passing exact-source CI Gate within the deadline"
+          exit 1
+
+      - name: Admit disposable runner and export exact source
+        run: |
+          test "$(nproc)" -ge 4
+          awk '/MemTotal/ { exit ($2 < 14000000) }' /proc/meminfo
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 20000000
+          test -z "$(git status --porcelain)"
+          source_dir="$RUNNER_TEMP/latency-source"
+          mkdir -m 755 "$source_dir"
+          git archive HEAD | tar -x -C "$source_dir"
+          echo "COMPOSE_FILE=$source_dir/qualification/latency/compose.yaml" >> "$GITHUB_ENV"
+          export LATENCY_EVIDENCE_DIR="$RUNNER_TEMP/latency-receipts"
+          mkdir -m 700 "$LATENCY_EVIDENCE_DIR"
+          sudo chown 10001:10001 "$LATENCY_EVIDENCE_DIR"
+          echo "LATENCY_EVIDENCE_DIR=$LATENCY_EVIDENCE_DIR" >> "$GITHUB_ENV"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/latency-source.txt"
+
+      - name: Build installed-wheel fixture
+        timeout-minutes: 12
+        run: |
+          docker compose config --quiet
+          docker compose build latency
+          docker image inspect django-ray-latency-qualification:local --format '{{.Id}}' > "$RUNNER_TEMP/latency-image.txt"
+
+      - name: Measure matched real Job completion windows
+        run: |
+          set -o pipefail
+          timeout --signal=INT --kill-after=20s 420s \
+            docker compose run --no-deps --rm latency 2>&1 |
+            tee "$RUNNER_TEMP/latency-execution.log"
+
+      - name: Remove owned resources
+        if: always()
+        run: |
+          if [[ -n "$COMPOSE_FILE" ]]; then
+            docker compose down --timeout 20 --remove-orphans
+          fi
+          if [[ -d "$LATENCY_EVIDENCE_DIR" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$LATENCY_EVIDENCE_DIR"
+          fi
+          test -z "$(docker ps -aq --filter label=com.docker.compose.project=job-latency-qualification)"
+
+      - name: Retain bounded qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: job-latency-qualification
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/latency-receipts/
+            ${{ runner.temp }}/latency-source.txt
+            ${{ runner.temp }}/latency-image.txt
+            ${{ runner.temp }}/latency-execution.log

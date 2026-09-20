@@ -4,6 +4,9 @@ Path-selected deployed evidence is reviewed under the affected-gate policy. The 
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
 changes. Its passing current-source result is required when the enqueue-only gate row applies,
 in addition to `CI Gate` and `Commit Messages`; it is not a repository-wide required status.
+The `Job Latency Qualification` workflow similarly runs after exact-source Linux CI
+for polling-fixture changes. Its passing receipts and cleanup must be reviewed before
+accepting measurement changes; it does not run inside the prerequisite `CI Gate`.
 
 Thank you for your interest in contributing to django-ray!
 

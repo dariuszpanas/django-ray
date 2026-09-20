@@ -15,10 +15,10 @@ deadline after the 60-second offline install, within the 420-second workload bud
 external cleanup has a separate 180-second ceiling. Managers run serially at
 concurrency one. No local Windows Ray or full CI is part of this workload.
 
-Five cases execute seven real current-protocol `rq2` Jobs against an owned SQLite WAL
+Five cases execute nine real current-protocol `rq2` Jobs against an owned SQLite WAL
 database and filesystem request store:
 
-- A recovery-only control disables the new receipt method in the same installed
+- A three-task recovery-only control disables the new receipt method in the same installed
   binary. It retains the actual 30-second reconciliation interval and must observe
   at least ten seconds between completion commit and terminal observation. The
   held task is released after a scan has observed its real Job, excluding variable
@@ -50,7 +50,7 @@ reconciliation/completion counts, peak tracked concurrency and bounded Jobs HTTP
 requests. SQL text, parameters and request bodies are not retained. These small
 samples measure this fixture and include instrumentation overhead.
 
-The report requires all five cases, seven distinct rq2 identities, installed imports
+The report requires all five cases, nine distinct rq2 identities, installed imports
 in the driver/managers/Jobs, first-attempt outcomes, consistent timing arithmetic,
 one submission per task, successful manager shutdown, inactive leases, terminal Jobs
 and removal of the owned fixture. Missing, partial, skipped, oversized or failed
@@ -67,3 +67,28 @@ retirement or a coordinated release upgrade. Those boundaries retain their own
 tests and gates. The source change leaves submission, encoding and orphan-adoption
 rules intact; the existing failure-fence unit tests remain required alongside this
 runtime measurement and current-head hosted Linux CI.
+
+## Matched completion-window costs
+
+Receipt schema 2 uses three successful tasks in both the recovery-only control
+and the fast capacity-one case. Each task obtains a manager counter snapshot after
+its callable has started and immediately before fixture release, then another
+after terminal state is observed. Recovery-only tasks are released after a scan
+has observed the held Job. At most 16 ordered, create-only snapshots are served
+per manager; the matched cases each use six.
+
+The before/after differences report SQL count/time, elapsed observation-window
+time and HTTP requests whose monotonic timestamps fall within the same window.
+Startup, the deliberate pre-release hold, and shutdown lie outside these windows.
+The end snapshot is taken on a later manager loop turn, so the window may include
+slot reuse or the next submission. Retain the raw boundaries and do not label the
+elapsed window as exact persistence time or interpret it as production throughput.
+Fixed-shape receipts reject manager replacement, cumulative counter resets,
+overlapping windows and HTTP totals inconsistent with the proxy log.
+
+These are same-binary, matched finite completion-window observations. They do not
+provide a previous-release benchmark or yet isolate every enqueue, submission,
+remote execution and persistence phase required by issue #467. The original
+300-second driver and 420-second workload budgets remain unchanged; a timeout
+fails qualification rather than yielding a partial passing comparison. The updated
+nine-Job workload still requires clean-source Linux qualification before acceptance.

@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from qualification.latency.cost import MAX_COST_SNAPSHOTS, completion_window_cost
 from qualification.latency.processes import JobsProxy, Manager
 
 
@@ -105,9 +106,30 @@ def run(root: Path, expected_module: str) -> dict:
             assert task.ray_job_request_reference
             return receipt
 
-        def complete(task, *, fail=False):
+        snapshot_sequences = {}
+
+        def cost_snapshot(name):
+            sequence = snapshot_sequences.get(name, 0) + 1
+            assert sequence <= MAX_COST_SNAPSHOTS
+            snapshot_sequences[name] = sequence
+            stem = f"{name}-cost-{sequence:02d}"
+            (root / f"{stem}.request").touch(exist_ok=False)
+            return wait(lambda: read_json(root / f"{stem}.json"), managers)
+
+        def complete(task, *, fail=False, cost_manager=None):
             before = started(task)
             identity = (task.ray_job_id, task.attempt_number, task.execution_generation)
+            if cost_manager == "recovery-only":
+
+                def observed_scan():
+                    scans = sorted(root.glob("recovery-only-scan-*.json"))
+                    observed = read_json(scans[-1]) if scans else None
+                    if observed and observed["reconciled_ns"] >= before["started_ns"]:
+                        return observed
+                    return None
+
+                wait(observed_scan, managers, seconds=35)
+            cost_before = cost_snapshot(cost_manager) if cost_manager else None
             released_ns = time.monotonic_ns()
             (root / f"release-{task.pk}").touch(exist_ok=False)
 
@@ -117,6 +139,18 @@ def run(root: Path, expected_module: str) -> dict:
 
             wait(is_terminal, managers)
             terminal_ns = time.monotonic_ns()
+            cost_window = None
+            if cost_before is not None:
+                cost_after = cost_snapshot(cost_manager)
+                cost_after["api_requests"] = sum(
+                    cost_before["at_ns"] <= request["at_ns"] < cost_after["at_ns"]
+                    for request in proxy.requests
+                )
+                cost_window = {
+                    "before": cost_before,
+                    "after": cost_after,
+                    "cost": completion_window_cost(cost_before, cost_after),
+                }
             committed = wait(lambda: read_json(root / f"completion-{task.pk}.json"), managers)
             assert task.state == (TaskState.FAILED if fail else TaskState.SUCCEEDED)
             assert (task.ray_job_id, task.attempt_number, task.execution_generation) == identity
@@ -144,12 +178,13 @@ def run(root: Path, expected_module: str) -> dict:
                 "terminal_ns": terminal_ns,
                 "receipt_to_terminal_seconds": (terminal_ns - committed["committed_ns"]) / 1e9,
                 "release_to_terminal_seconds": (terminal_ns - released_ns) / 1e9,
+                "cost_window": cost_window,
             }
 
         # Align release after the initial slow scan; do not count cold startup as
         # receipt delay. The control uses the same binary and the real 30s clock.
         for name, count, fail in (
-            ("recovery-only", 1, False),
+            ("recovery-only", 3, False),
             ("capacity-one", 3, False),
             ("failure", 1, True),
             ("api-outage", 1, False),
@@ -183,7 +218,14 @@ def run(root: Path, expected_module: str) -> dict:
                 else:
                     raise AssertionError("Jobs API outage was not effective")
                 outage_ns = time.monotonic_ns()
-            observations = [complete(task, fail=fail) for task in tasks]
+            observations = [
+                complete(
+                    task,
+                    fail=fail,
+                    cost_manager=name if name in {"recovery-only", "capacity-one"} else None,
+                )
+                for task in tasks
+            ]
             claim_delays = [
                 (later["database_times"]["claimed_ns"] - earlier["database_times"]["finished_ns"])
                 / 1e9
@@ -246,7 +288,7 @@ def run(root: Path, expected_module: str) -> dict:
             }
         )
         assert not TaskWorkerLease.objects.filter(is_active=True).exists()
-        assert RayTaskExecution.objects.count() == 7
+        assert RayTaskExecution.objects.count() == 9
         assert not RayTaskExecution.objects.exclude(
             state__in=[TaskState.SUCCEEDED, TaskState.FAILED]
         ).exists()
@@ -277,7 +319,7 @@ def run(root: Path, expected_module: str) -> dict:
             proxy.close()
         ray.shutdown()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "module": expected_module,
         "cases": cases,
         "failure": failure,

@@ -7,6 +7,7 @@ import re
 from xml.etree import ElementTree
 
 from qualification.docker.scenario import QualificationError
+from qualification.latency.cost import completion_window_cost
 
 CASES = ("recovery-only", "capacity-one", "failure", "api-outage", "manager-replacement")
 WORKLOAD = "ray-job-completion-latency"
@@ -36,7 +37,7 @@ def validate_probe(value, *, expected_module):
             "managers_stopped",
         }
     )
-    require(type(value["schema_version"]) is int and value["schema_version"] == 1)
+    require(type(value["schema_version"]) is int and value["schema_version"] == 2)
     require(value["module"] == expected_module and value["failure"] is None)
     require(value["ray_shutdown"] is True and value["managers_stopped"] is True)
     require(isinstance(value["cases"], list) and len(value["cases"]) == len(CASES))
@@ -58,7 +59,8 @@ def validate_probe(value, *, expected_module):
         )
         require(case["name"] == name and case["passed"] is True)
         number(case["initial_reconciliation_ns"])
-        count = 3 if name == "capacity-one" else 1
+        matched = name in {"capacity-one", "recovery-only"}
+        count = 3 if matched else 1
         require(isinstance(case["tasks"], list) and len(case["tasks"]) == count)
         for task in case["tasks"]:
             require(
@@ -78,6 +80,7 @@ def validate_probe(value, *, expected_module):
                     "terminal_ns",
                     "receipt_to_terminal_seconds",
                     "release_to_terminal_seconds",
+                    "cost_window",
                 }
             )
             require(type(task["task_pk"]) is int and task["task_pk"] > 0)
@@ -115,6 +118,16 @@ def validate_probe(value, *, expected_module):
                 require(duration == (task["terminal_ns"] - task[initial]) / 1e9)
             delay = task["receipt_to_terminal_seconds"]
             require(delay >= 10 if name == "recovery-only" else delay < 5)
+            window = task["cost_window"]
+            if matched:
+                require(isinstance(window, dict) and set(window) == {"before", "after", "cost"})
+                require(window["cost"] == completion_window_cost(window["before"], window["after"]))
+                require(
+                    task["job_started_ns"] <= window["before"]["at_ns"] <= task["released_ns"]
+                    and window["after"]["at_ns"] >= task["terminal_ns"]
+                )
+            else:
+                require(window is None)
         expected_delays = [
             (later["database_times"]["claimed_ns"] - earlier["database_times"]["finished_ns"]) / 1e9
             for earlier, later in zip(case["tasks"], case["tasks"][1:], strict=False)
@@ -181,6 +194,22 @@ def validate_probe(value, *, expected_module):
         )
         if name == "api-outage":
             require(sum(r["status"] == 503 for r in requests) == 1)
+        if matched:
+            windows = [task["cost_window"] for task in case["tasks"]]
+            require(len({window["before"]["manager"] for window in windows}) == 1)
+            for previous, current in zip(windows, windows[1:], strict=False):
+                require(previous["after"]["at_ns"] <= current["before"]["at_ns"])
+                for field in ("queries", "query_seconds"):
+                    require(previous["after"][field] <= current["before"][field])
+            for window in windows:
+                require(window["before"]["api_requests"] == 0)
+                require(
+                    window["after"]["api_requests"]
+                    == sum(
+                        window["before"]["at_ns"] <= request["at_ns"] < window["after"]["at_ns"]
+                        for request in requests
+                    )
+                )
     return value
 
 
