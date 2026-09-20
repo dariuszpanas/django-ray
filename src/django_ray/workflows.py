@@ -586,11 +586,16 @@ class _RayExecutor(_Executor):
         self.ray = ray
         self.materialized_plan = materialized_plan
 
+        self.task_context = get_current_task_context()
+        if self.task_context is not None:
+            from django_ray.runtime.context import require_strict_task_execution_context
+
+            require_strict_task_execution_context(self.task_context)
+
         remote_step, remote_collect, progress_actor_cls = _get_cached_workflow_remotes()
         self.remote_step = remote_step
         self.remote_collect = remote_collect
 
-        self.task_context = get_current_task_context()
         self.task_execution_pk = (
             self.task_context.task_pk if self.task_context is not None else None
         )
@@ -772,7 +777,7 @@ class _RayExecutor(_Executor):
     ) -> dict[str, Any]:
         """Build one exact nested request only for an explicitly strict parent."""
         task_context = getattr(self, "task_context", None)
-        if task_context is None or task_context.strict_execution_request is False:
+        if task_context is None:
             return {}
 
         from django_ray.execution_codec import (

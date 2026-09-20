@@ -10,6 +10,13 @@ Default workflow graph activation and final upgrade acceptance remain pending.
 
 ### Changed
 
+- Durable workflow leaves also require a complete independently bound nested
+  request. An old leaf carrying a task ID or workflow identity without that
+  request is refused before application setup, import, invocation or progress
+  publication. The coordinator rejects incomplete durable contexts before
+  creating remote handles. Standalone workflows without durable identity remain
+  supported; historical graph readers are unchanged. Do not resume old producers
+  after the drain or replay uncertain effects automatically.
 - Unversioned Ray Job payloads and positional Core durable-task submissions
   are retired. They return a fixed, non-retryable execution rejection before
   application setup or input loading. Malformed payloads also fail the CLI

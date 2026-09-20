@@ -274,7 +274,9 @@ fixed non-retryable refusals without crossing application setup/import, input,
 completion or callable boundaries. The Job CLI must exit 78 without exposing
 payloads; malformed input must also refuse. Current Core/Jobs execution and
 preserved history are still checked by the remaining native phases on SQLite
-and PostgreSQL. Resource-free tests do not establish that hosted evidence.
+and PostgreSQL. Three additional unbound durable workflow-leaf variants must
+refuse before application/progress handling. Resource-free tests do not establish
+that hosted evidence.
 
 Keep these execution and historical-data boundaries separate:
 
@@ -283,6 +285,7 @@ Keep these execution and historical-data boundaries separate:
 | Old Ray Job payload execution | Removed; `src/django_ray/runtime/entrypoint.py` returns fixed refusal before setup |
 | Positional unversioned remote invocation | Refused in `src/django_ray/runtime/remote.py`; standalone nested workflows remain supported |
 | Non-strict Job failure fallback | Retired log retrieval and automatic replay in `django_ray_worker.py`; unknown effects retain `LOST`. The diagnostic runner API remains separate from completion authority. |
+| Unbound durable workflow leaves | Refused before setup/publication in `runtime/remote.py`; coordinator requires complete strict durable context. Standalone no-context workflows remain supported. |
 | Strict request-family discrimination | `src/django_ray/ray_job_protocol.py`, rq1/rq2 classification |
 | Input artifact purgers and reference readers | `src/django_ray/input_storage.py`, `src/django_ray/ray_job_request_storage.py` and their cleanup commands |
 
