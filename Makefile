@@ -57,7 +57,7 @@ linux-test-aggregate:
 # Install dependencies
 install:
 	uv sync
-	uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga --version
+	uvx --from yaga-cli==0.2.0 --with typos==1.50.2 yaga --version
 	$(MAKE) configure-git
 
 # Configure this worktree to use the tracked commit template and hook.
@@ -82,7 +82,7 @@ commit-policy-test:
 	python -m scripts.check_commit_policy
 
 # Pure Python workflow checks; override YAGA=yaga to use a global installation.
-YAGA ?= uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga
+YAGA ?= uvx --from yaga-cli==0.2.0 --with typos==1.50.2 yaga
 YAGA_FORMAT ?= text
 workflow-check:
 	$(YAGA) repo check --plan .yaga/checks/workflows.toml --format $(YAGA_FORMAT)

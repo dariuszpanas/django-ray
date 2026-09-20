@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           export UV_CACHE_DIR="$RUNNER_TEMP/policy-cache-prepared"
-          uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga --version
+          uvx --from yaga-cli==0.2.0 --with typos==1.50.2 yaga --version
           uvx --from typos==1.50.2 typos --version
           python - <<'PYTHON'
           import os

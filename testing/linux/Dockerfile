@@ -46,7 +46,7 @@ RUN python scripts/test_suite_source.py verify --source-manifest /opt/test-input
     && python -m ensurepip --upgrade --default-pip \
     && uv cache clean \
     && uv build --require-hashes --out-dir /opt/test-distributions \
-    && uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga --version \
+    && uvx --from yaga-cli==0.2.0 --with typos==1.50.2 yaga --version \
     && uvx --from typos==1.50.2 typos --version \
     && python scripts/test_suite_source.py verify --source-manifest /opt/test-inputs/source-manifest.json \
     && python testing/linux/image_support.py record \

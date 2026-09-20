@@ -278,7 +278,7 @@ or tests and must not contain secrets. Work must continue normally when Obsidian
 ### YAGA commit policy
 
 The required `Commit Messages` check and local hook/Make commands use released
-YAGA 0.1.2 with the structural policy in `.yaga.toml`. The migration preserves
+YAGA 0.2.0 with the structural policy in `.yaga.toml`. The migration preserves
 existing commit and title rules; spelling with pinned Typos 1.50.2 is an explicit
 additional check. Node.js and npm are no longer development prerequisites.
 

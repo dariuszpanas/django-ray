@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 YAGA_COMMAND = (
     "uvx",
     "--from",
-    "yaga-cli==0.1.2",
+    "yaga-cli==0.2.0",
     "--with",
     "typos==1.50.2",
     "yaga",

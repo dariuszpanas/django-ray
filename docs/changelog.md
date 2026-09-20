@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   job/task identifiers are URL-encoded. Missing or invalid addresses show
   configuration guidance instead of broken links. See the
   [upgrade guide](deployment/upgrading-from-0.5.md).
-- Replace commitlint with released YAGA 0.1.2 for the required `Commit Messages`
+- Replace commitlint with released YAGA 0.2.0 for the required `Commit Messages`
   Action, local hook and Make commands, preserving the existing structural rules.
   Add isolated commit/title spelling checks with pinned Typos 1.50.2. Trusted
   same-repository Dependabot PRs retain their narrow commit-policy exemption;

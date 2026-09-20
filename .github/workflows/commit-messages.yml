@@ -44,6 +44,6 @@ jobs:
           tar -xzf "$archive" -C "$tool_dir" ./typos
           "$tool_dir/typos" --version
           echo "$tool_dir" >> "$GITHUB_PATH"
-      - uses: dariuszpanas/yaga/actions/commit-check@f4f87140c4e132b6cf645caddde951d10b978d56 # v0.1.2
+      - uses: dariuszpanas/yaga/actions/commit-check@f61bbfa878447157239bb92ff67977bd64400afd # v0.2.0
         with:
           trusted-config: .yaga.toml

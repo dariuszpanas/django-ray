@@ -41,7 +41,7 @@ make test
 
 Run `make workflow-check` to check immutable Actions/container references and the
 YAGA `recommended-v3` workflow security profile. This uses the pinned released
-`yaga-cli==0.1.2` through uvx; it does not add a package runtime dependency.
+`yaga-cli==0.2.0` through uvx; it does not add a package runtime dependency.
 The same explicit `.yaga/checks/workflows.toml` plan runs in the required CI lint job.
 Both findings (exit 1) and operational errors (exit 2) fail the check.
 
@@ -947,7 +947,7 @@ By contributing, you agree that your contributions will be licensed under the BS
 ### YAGA commit policy
 
 The required `Commit Messages` check and local hook/Make commands use released
-YAGA 0.1.2 with the structural policy in `.yaga.toml`. The migration preserves
+YAGA 0.2.0 with the structural policy in `.yaga.toml`. The migration preserves
 existing commit and title rules; spelling with pinned Typos 1.50.2 is an explicit
 additional check. Node.js and npm are no longer development prerequisites.
 
