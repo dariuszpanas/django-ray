@@ -4300,3 +4300,70 @@ def test_rq2_duplicate_stays_uncertain_when_owner_fails_before_remote_request(
     assert not TaskInputPayload.objects.filter(
         payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
     ).exists()
+
+
+@pytest.mark.parametrize("expires_during_selection", [False, True])
+def test_claim_clock_follows_independently_committed_enqueue(monkeypatch, expires_during_selection):
+    from django.db.models.query import QuerySet
+
+    import django_ray.management.commands.django_ray_worker as worker_module
+
+    processed = []
+    command = _claim_command("postgres-claim-clock", processed)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_backend_pid()")
+        claimant_pid = cursor.fetchone()[0]
+    clock = [datetime.now(UTC) + timedelta(seconds=1)]
+
+    class ControlledDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0] if tz is not None else clock[0].replace(tzinfo=None)
+
+    monkeypatch.setattr(worker_module, "datetime", ControlledDateTime)
+    fetch = QuerySet._fetch_all
+    created = []
+
+    def enqueue():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pid = cursor.fetchone()[0]
+            task = _execution(
+                "postgres-enqueue-during-selection",
+                created_at=clock[0],
+                queue_deadline_at=clock[0] if expires_during_selection else None,
+            )
+            return task.pk, writer_pid
+        finally:
+            connection.close()
+
+    def insert_before_claim_query(query):
+        if (
+            query.model is RayTaskExecution
+            and query.query.select_for_update
+            and query.query.order_by == ("-priority", "created_at", "pk")
+            and not created
+        ):
+            clock[0] += timedelta(milliseconds=1)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                created.append(pool.submit(enqueue).result(timeout=10))
+        return fetch(query)
+
+    monkeypatch.setattr(QuerySet, "_fetch_all", insert_before_claim_query)
+    assert command.claim_and_process_tasks(["default"], concurrency=1) == (
+        0 if expires_during_selection else 1
+    )
+    task_pk, writer_pid = created[0]
+    assert writer_pid != claimant_pid
+    task = RayTaskExecution.objects.get(pk=task_pk)
+    if expires_during_selection:
+        assert processed == []
+        assert task.state == TaskState.QUEUED
+        assert task.started_at is None
+        assert task.claimed_by_worker is None
+    else:
+        assert processed == [task.pk]
+        assert task.state == TaskState.RUNNING
+        assert task.created_at <= task.started_at == clock[0]

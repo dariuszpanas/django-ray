@@ -24,6 +24,7 @@ class CoreEvidenceFailure(StrEnum):
     """Closed diagnostic vocabulary; never include observed values."""
 
     EXECUTION_CONTRACT = "execution_contract"
+    EXECUTION_TIMING = "execution_timing"
     OWNER_IDENTITY = "owner_identity"
     OWNER_HEARTBEAT = "owner_heartbeat"
     ATTEMPT_COUNT = "attempt_count"
@@ -61,6 +62,12 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
     now = timezone.now()
     current_version = version("django-ray")
     if (
+        not row.started_at
+        or not row.finished_at
+        or not row.created_at <= row.started_at <= row.finished_at <= now
+    ):
+        raise CoreEvidenceError(CoreEvidenceFailure.EXECUTION_TIMING)
+    if (
         row.state != "SUCCEEDED"
         or row.attempt_number != 1
         or row.execution_generation < 1
@@ -73,9 +80,6 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         or row.created_with_django_ray_version != current_version
         or row.managed_with_django_ray_version != current_version
         or row.executor_django_ray_version != current_version
-        or not row.started_at
-        or not row.finished_at
-        or not row.created_at <= row.started_at <= row.finished_at <= now
     ):
         raise CoreEvidenceError(CoreEvidenceFailure.EXECUTION_CONTRACT)
     worker = TaskWorkerLease.objects.get(worker_id=row.claimed_by_worker)
