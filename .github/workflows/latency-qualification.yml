@@ -8,6 +8,7 @@ on:
       - qualification/latency/**
       - qualification/transactions/Dockerfile
       - tests/unit/test_latency_cost.py
+      - tests/unit/test_latency_phases.py
       - tests/unit/test_latency_qualification.py
   workflow_dispatch:
 

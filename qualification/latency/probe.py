@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from qualification.latency.cost import MAX_COST_SNAPSHOTS, completion_window_cost
+from qualification.latency.phases import phase_durations
 from qualification.latency.processes import JobsProxy, Manager
 
 
@@ -93,9 +94,18 @@ def run(root: Path, expected_module: str) -> dict:
             assert metrics["counters"]["peak_active"] <= 1
             return metrics
 
+        enqueue_stamps = {}
+
         def enqueue(*, fail=False):
+            enqueue_started_ns = time.monotonic_ns()
             result = held_result.enqueue(fail=fail)
-            return RayTaskExecution.objects.get(task_id=result.id)
+            enqueue_returned_ns = time.monotonic_ns()
+            task = RayTaskExecution.objects.get(task_id=result.id)
+            enqueue_stamps[task.pk] = {
+                "enqueue_started_ns": enqueue_started_ns,
+                "enqueue_returned_ns": enqueue_returned_ns,
+            }
+            return task
 
         def started(task):
             receipt = wait(lambda: read_json(root / f"started-{task.pk}.json"), managers)
@@ -119,6 +129,9 @@ def run(root: Path, expected_module: str) -> dict:
         def complete(task, *, fail=False, cost_manager=None):
             before = started(task)
             identity = (task.ray_job_id, task.attempt_number, task.execution_generation)
+            submission = wait(lambda: read_json(root / f"submission-{task.pk}.json"), managers)
+            assert submission.pop("job_id") == identity[0]
+            claim = read_json(root / f"claim-{task.pk}.json")
             if cost_manager == "recovery-only":
 
                 def observed_scan():
@@ -138,6 +151,8 @@ def run(root: Path, expected_module: str) -> dict:
                 return task.state in (TaskState.SUCCEEDED, TaskState.FAILED, TaskState.LOST)
 
             wait(is_terminal, managers)
+            persistence = wait(lambda: read_json(root / f"persistence-{task.pk}.json"), managers)
+            committed = wait(lambda: read_json(root / f"completion-{task.pk}.json"), managers)
             terminal_ns = time.monotonic_ns()
             cost_window = None
             if cost_before is not None:
@@ -151,7 +166,19 @@ def run(root: Path, expected_module: str) -> dict:
                     "after": cost_after,
                     "cost": completion_window_cost(cost_before, cost_after),
                 }
-            committed = wait(lambda: read_json(root / f"completion-{task.pk}.json"), managers)
+            finished = read_json(root / f"callable-finished-{task.pk}.json")
+            stamps = {
+                **enqueue_stamps[task.pk],
+                **claim,
+                **submission,
+                **finished,
+                **persistence,
+                "callable_started_ns": before["started_ns"],
+                "released_ns": released_ns,
+                "receipt_committed_ns": committed["committed_ns"],
+                "receipt_write_started_ns": committed["write_started_ns"],
+                "terminal_observed_ns": terminal_ns,
+            }
             assert task.state == (TaskState.FAILED if fail else TaskState.SUCCEEDED)
             assert (task.ray_job_id, task.attempt_number, task.execution_generation) == identity
             assert task.attempt_number == 1
@@ -179,6 +206,7 @@ def run(root: Path, expected_module: str) -> dict:
                 "receipt_to_terminal_seconds": (terminal_ns - committed["committed_ns"]) / 1e9,
                 "release_to_terminal_seconds": (terminal_ns - released_ns) / 1e9,
                 "cost_window": cost_window,
+                "phases": {"stamps": stamps, "durations": phase_durations(stamps)},
             }
 
         # Align release after the initial slow scan; do not count cold startup as
@@ -319,7 +347,7 @@ def run(root: Path, expected_module: str) -> dict:
             proxy.close()
         ray.shutdown()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "module": expected_module,
         "cases": cases,
         "failure": failure,

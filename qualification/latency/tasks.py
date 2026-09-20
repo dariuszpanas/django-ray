@@ -27,6 +27,10 @@ def held_result(*, fail=False):
         if time.monotonic() >= deadline:
             raise TimeoutError("qualification task was not released")
         time.sleep(0.02)
-    if fail:
-        raise ValueError("qualification expected failure")
-    return {"value": 42, "task_pk": task_pk}
+    try:
+        if fail:
+            raise ValueError("qualification expected failure")
+        return {"value": 42, "task_pk": task_pk}
+    finally:
+        with (settings.ROOT / f"callable-finished-{task_pk}.json").open("x") as stream:
+            json.dump({"callable_finished_ns": time.monotonic_ns()}, stream)

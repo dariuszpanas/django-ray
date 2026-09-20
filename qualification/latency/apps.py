@@ -10,7 +10,9 @@ observed_task_pk = None
 
 
 def observe_completion(execute, sql, params, many, context):
+    write_started_ns = time.monotonic_ns()
     result = execute(sql, params, many, context)
+    write_returned_ns = time.monotonic_ns()
     # The production writer updates only this column. Do not retain SQL/params.
     if observed_task_pk is not None and sql.startswith(
         'UPDATE "django_ray_raytaskexecution" SET "completion_data" ='
@@ -20,7 +22,9 @@ def observe_completion(execute, sql, params, many, context):
         assert context["connection"].get_autocommit()
         path = settings.ROOT / f"completion-{observed_task_pk}.json"
         with path.open("x") as stream:
-            json.dump({"committed_ns": time.monotonic_ns()}, stream)
+            json.dump(
+                {"write_started_ns": write_started_ns, "committed_ns": write_returned_ns}, stream
+            )
     return result
 
 

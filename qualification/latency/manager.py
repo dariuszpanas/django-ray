@@ -6,6 +6,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from qualification.latency.cost import ManagerCostSnapshots
 
@@ -16,7 +17,8 @@ def run(name: str, *, recovery_only: bool) -> None:
     django.setup()
     from django.conf import settings
     from django.core.management import call_command
-    from django.db import connection
+    from django.db import connection, transaction
+    from ray.job_submission import JobSubmissionClient
 
     import django_ray
     from django_ray.management.commands.django_ray_worker import Command
@@ -32,6 +34,28 @@ def run(name: str, *, recovery_only: bool) -> None:
     }
     polling = False
     snapshots = ManagerCostSnapshots(settings.ROOT, name)
+    processing_task_pk = None
+    submit_job = JobSubmissionClient.submit_job
+
+    def write_phase(kind, task_pk, value):
+        with (settings.ROOT / f"{kind}-{task_pk}.json").open("x") as stream:
+            json.dump(value, stream)
+
+    def observed_submission(client, *args, **kwargs):
+        assert type(processing_task_pk) is int
+        started_ns = time.monotonic_ns()
+        submission_id = submit_job(client, *args, **kwargs)
+        acknowledged_ns = time.monotonic_ns()
+        write_phase(
+            "submission",
+            processing_task_pk,
+            {
+                "job_id": submission_id,
+                "submission_started_ns": started_ns,
+                "submission_acknowledged_ns": acknowledged_ns,
+            },
+        )
+        return submission_id
 
     def observe(execute, sql, params, many, context):
         started = time.monotonic()
@@ -44,6 +68,37 @@ def run(name: str, *, recovery_only: bool) -> None:
                 counters["fast_queries"] += 1
 
     class ObservedCommand(Command):
+        def process_task(self, task):
+            nonlocal processing_task_pk
+            processing_task_pk = task.pk
+            write_phase("claim", task.pk, {"claim_observed_ns": time.monotonic_ns()})
+            try:
+                return super().process_task(task)
+            finally:
+                processing_task_pk = None
+
+        def _observe_persistence(self, method, task, *args, **kwargs):
+            started_ns = time.monotonic_ns()
+            persisted = method(task, *args, **kwargs)
+            if persisted:
+                transaction.on_commit(
+                    lambda: write_phase(
+                        "persistence",
+                        task.pk,
+                        {
+                            "persistence_started_ns": started_ns,
+                            "persistence_committed_ns": time.monotonic_ns(),
+                        },
+                    )
+                )
+            return persisted
+
+        def _store_and_succeed_task(self, task, *args, **kwargs):
+            return self._observe_persistence(super()._store_and_succeed_task, task, *args, **kwargs)
+
+        def _handle_task_failure(self, task, *args, **kwargs):
+            return self._observe_persistence(super()._handle_task_failure, task, *args, **kwargs)
+
         def poll_ray_job_completions(self):
             nonlocal polling
             snapshots.observe(self.worker_id, counters)
@@ -86,7 +141,10 @@ def run(name: str, *, recovery_only: bool) -> None:
     command = ObservedCommand()
     started = time.monotonic()
     try:
-        with connection.execute_wrapper(observe):
+        with (
+            connection.execute_wrapper(observe),
+            patch.object(JobSubmissionClient, "submit_job", observed_submission),
+        ):
             call_command(command, queue="default", concurrency=1, verbosity=0)
     finally:
         with (settings.ROOT / f"{name}-metrics.json").open("x") as stream:
