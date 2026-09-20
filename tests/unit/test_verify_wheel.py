@@ -58,6 +58,7 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
         "django_ray/workflow/progress/runs.py",
         "django_ray/workflow/progress/storage.py",
         "django_ray/workflow/progress/summary.py",
+        "django_ray/workflow/progress/terminal_input.py",
     }
     _verify_canonical_module_layout(EXPECTED_FILES)
     assert "django_ray/runner/ray_core.py" in EXPECTED_FILES

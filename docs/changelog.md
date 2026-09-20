@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bound small terminal workflow graph preparation to finite input bytes, values,
+  depth, nodes and edges, and use the canonical in-memory preparer instead of
+  acquiring SQLite spill storage. Preserve stored topology/detail, redaction and
+  attempt ownership. This improves the opt-in publisher; default graph activation
+  and workflow-wide producer admission remain pending.
 - **Breaking:** Admin dashboard links now require an explicit Django
   `RAY_DASHBOARD_URL` setting. The implicit localhost fallback is removed.
   Configure an address reachable from the operator's browser; local port-forward

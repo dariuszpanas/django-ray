@@ -924,6 +924,14 @@ publication, terminal expiry, and retention/orphan cleanup. Public detail servic
 implemented. The runtime producer continues to write schema-v2 compatibility snapshots
 of retained actor state and may additionally publish one terminal schema-v3 record only
 when the stricter pilot is explicitly enabled and admitted.
+The small terminal adapter admits an exact primitive snapshot before normalization:
+at most 4 MiB of canonical UTF-8 JSON, 131,072 values including keys, and depth 16.
+Its existing 512-node and 2,048-edge profile bounds materialized identity state.
+It uses the canonical in-memory topology/detail preparation path without acquiring
+a SQLite spill workspace. Oversized or invalid snapshots are refused without a
+durable candidate. These are preparation bounds, not a claim about Ray mailbox or
+deserialization memory. The pilot remains opt-in; this preparation change alone
+does not establish the supported default graph contract or live visualization.
 ADR-0005's production topology phase now externalizes exact node/edge identity,
 duplicate, reference, and selection state into a private bounded SQLite workspace and
 removes it before returning prepared evidence. The unchanged result still includes

@@ -41,6 +41,7 @@ EXPECTED_WORKFLOW_MODULE_FILES = {
     "django_ray/workflow/progress/runs.py",
     "django_ray/workflow/progress/storage.py",
     "django_ray/workflow/progress/summary.py",
+    "django_ray/workflow/progress/terminal_input.py",
 }
 EXPECTED_FILES = {
     "django_ray/__init__.py",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -424,6 +425,107 @@ def _execution() -> tuple[RayTaskExecution, WorkflowRunIdentity]:
 def _allow(execution: RayTaskExecution) -> bool:
     del execution
     return True
+
+
+def _prepare_terminal(identity: WorkflowRunIdentity, snapshot: Any):
+    return publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+
+
+@pytest.mark.parametrize("maximum_profile", [False, True])
+def test_terminal_adapter_matches_spill_preparation(
+    maximum_profile: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.workflow.progress.preparation import prepare_workflow_progress_topology
+
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    if maximum_profile:
+        prototype = snapshot["graph"]["nodes"][0]
+        nodes = []
+        for index in range(512):
+            node = deepcopy(prototype)
+            node["node_id"] = f"0.{index}"
+            nodes.append(node)
+        edges = [
+            {"source": f"0.{index}", "target": f"0.{index + offset}"}
+            for offset in range(1, 5)
+            for index in range(512 - offset)
+        ]
+        edges.extend({"source": f"0.{index}", "target": f"0.{index + 5}"} for index in range(10))
+        for node in nodes:
+            node["dependencies"] = sorted(
+                edge["source"] for edge in edges if edge["target"] == node["node_id"]
+            )
+        snapshot["graph"] = {"nodes": nodes, "edges": edges}
+        snapshot["plan"]["node_count"] = 512
+        snapshot["total_nodes"] = snapshot["completed_nodes"] = 512
+        snapshot["ingress"]["retained_nodes"] = 512
+        snapshot["ingress"]["retained_edges"] = 2_048
+        _refresh_retained_bytes(snapshot)
+    materialized = _prepare_terminal(identity, snapshot)
+    monkeypatch.setattr(
+        publication,
+        "_prepare_workflow_progress_topology_materialized",
+        prepare_workflow_progress_topology,
+    )
+    spilled = _prepare_terminal(identity, snapshot)
+    assert materialized == spilled
+
+
+def test_terminal_adapter_concurrent_preparations_never_acquire_spill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.workflow.progress import preparation
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("terminal preparation must not acquire spill")
+
+    monkeypatch.setattr(preparation, "SQLitePreparationWorkspace", forbidden)
+
+    def prepare(index: int):
+        identity = _identity(index + 1)
+        return _prepare_terminal(identity, _snapshot(identity))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(prepare, range(12)))
+    assert [result.topology.identity.task_execution_pk for result in results] == list(range(1, 13))
+    assert len({result.topology.manifest_digest for result in results}) == 12
+    assert len({id(result.topology) for result in results}) == 12
+
+
+@pytest.mark.parametrize("failure", ["bytes", "nodes", "edges", "cycle"])
+def test_terminal_adapter_refuses_before_materialized_preparation(
+    failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django_ray.workflow.progress.terminal_input import TERMINAL_SNAPSHOT_MAX_BYTES
+
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    if failure == "bytes":
+        snapshot["graph"]["nodes"][0]["label"] = "x" * TERMINAL_SNAPSHOT_MAX_BYTES
+    elif failure == "nodes":
+        snapshot["graph"]["nodes"] *= 257
+    elif failure == "edges":
+        snapshot["graph"]["edges"] *= 2_049
+    else:
+        snapshot["graph"]["nodes"].append(snapshot)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unadmitted input must not reach materialized preparation")
+
+    monkeypatch.setattr(publication, "_prepare_workflow_progress_topology_materialized", forbidden)
+    with pytest.raises(publication.WorkflowProgressPilotError) as rejected:
+        _prepare_terminal(identity, snapshot)
+    assert rejected.value.reason is publication.WorkflowProgressPilotReason.ADMISSION_LIMIT
 
 
 def test_terminal_adapter_splits_topology_detail_and_groups_events() -> None:
