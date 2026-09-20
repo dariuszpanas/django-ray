@@ -4090,18 +4090,14 @@ class Command(BaseCommand):
                     )
                     return
                 if self._completion_envelope_grace_expired(task, now=now):
-                    handled = handle_failure_authoritatively(
-                        error_message=f"Ray Job produced a {completion_error} completion envelope",
-                        exception_type="RayCompletionMalformed",
+                    resolve_stale_untrusted_execution(
                         expected_completion_data=completion_data,
-                    )
-                    if handled is False:
-                        return
-                    complete_tracking()
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"\nTask {task.pk} exceeded the completion envelope grace period"
-                        )
+                        error_message=(
+                            "Legacy Ray Job has no trusted completion after its grace period; "
+                            "application effects are unknown and automatic retry is suppressed"
+                        ),
+                        log_detail="has an uncertain legacy completion outcome",
+                        require_stale=False,
                     )
                 else:
                     self.stdout.write(
@@ -4118,18 +4114,14 @@ class Command(BaseCommand):
             # Ray Job logs are diagnostic only. Missing envelopes remain
             # non-terminal until the bounded grace period expires.
             if self._completion_envelope_grace_expired(task, now=now):
-                handled = handle_failure_authoritatively(
-                    error_message="Ray Job completed without a completion envelope",
-                    exception_type="RayCompletionUnknown",
+                resolve_stale_untrusted_execution(
                     expected_completion_data=completion_data,
-                )
-                if handled is False:
-                    return
-                complete_tracking()
-                self.stdout.write(
-                    self.style.WARNING(
-                        f"\nTask {task.pk} exceeded the completion envelope grace period"
-                    )
+                    error_message=(
+                        "Legacy Ray Job has no trusted completion after its grace period; "
+                        "application effects are unknown and automatic retry is suppressed"
+                    ),
+                    log_detail="has an uncertain legacy completion outcome",
+                    require_stale=False,
                 )
                 return
             self.stdout.write(
@@ -4140,18 +4132,18 @@ class Command(BaseCommand):
             return
 
         if job_info.status == JobStatus.FAILED:
-            logs = runner.get_logs(handle)
-            handled = handle_failure_authoritatively(
-                error_message=job_info.message or "Ray job failed",
-                error_traceback=logs,
-                exception_type="RayJobFailed",
+            # A legacy control-plane failure does not prove whether application
+            # effects occurred. Logs cannot authorize retry or supply a trusted
+            # completion; preserve the exact uncertain attempt without replay.
+            resolve_stale_untrusted_execution(
                 expected_completion_data=completion_data,
+                error_message=(
+                    "Legacy Ray Job failed without a trusted completion; "
+                    "application effects are unknown and automatic retry is suppressed"
+                ),
+                log_detail="has an uncertain legacy Ray Job outcome",
+                require_stale=False,
             )
-            if handled is False:
-                return
-            complete_tracking()
-            diagnostic = render_console_diagnostic(task.error_message or "Ray job failed")
-            self.stdout.write(self.style.ERROR(f"\nTask {task.pk} failed: {diagnostic}"))
             return
 
         if job_info.status == JobStatus.STOPPED:

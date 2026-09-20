@@ -22,7 +22,7 @@ DJANGO_RAY = {
     "RUNNER": RUNNER,
     "RAY_ADDRESS": "http://127.0.0.1:8265" if RUNNER == "ray_job" else "auto",
     "DEFAULT_CONCURRENCY": 1,
-    "MAX_TASK_ATTEMPTS": 1,
+    "MAX_TASK_ATTEMPTS": 3 if CONFIG.get("legacy_failure_probe", False) else 1,
     "WORKER_HEARTBEAT_SECONDS": 2,
     "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     "MAX_INLINE_INPUT_SIZE_BYTES": 1024,

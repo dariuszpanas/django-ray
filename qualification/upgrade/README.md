@@ -230,6 +230,19 @@ The crash phase uses a thirty-second stuck timeout and two-second task heartbeat
 This proves manager-plus-Ray loss, not adoption of a surviving Core ObjectRef or
 safe retry of an unknown external side effect.
 
+The Jobs recipes also run a candidate-only legacy-failure phase after preserved
+history and rollback reads. Four real Ray Jobs each append one harmless marker: two fail and two succeed. A separate candidate manager adopts their legacy running
+carriers with three attempts configured: the missing-completion case must become
+`LOST` without replay, while a valid completion must win over failed Job status.
+The two successful Jobs have expired missing/malformed completions and must
+also become `LOST` without replay. A log-read observer must remain untouched. The receipt records both outcomes,
+unchanged attempt/generation, preserved history, inactive leases and reaped Ray
+children. This phase runs in a fresh one-CPU Ray instance on SQLite and PostgreSQL,
+within the existing 240-second phase deadline and owned fixture cleanup. It does
+not invoke a retired django-ray payload or authorize mixed-version execution.
+Independent PostgreSQL tests cover completion/owner/attempt/generation/job/lease
+replacement before the loss fence; the deployed probe is not a concurrency proof.
+
 Every receipt always contains `complete_upgrade_gate: false` and the remaining
 acceptance list. A successful database stage does not close #381. Before release:
 
@@ -260,7 +273,7 @@ The database fixture deliberately does not remove these current paths:
 | --- | --- |
 | Old Ray Job payload execution | `src/django_ray/runtime/entrypoint.py`, `_execute_legacy_payload` |
 | Positional unversioned remote invocation | `src/django_ray/runtime/remote.py` |
-| Non-strict Job failure/log fallback | `src/django_ray/management/commands/django_ray_worker.py`, legacy `get_logs` path; `src/django_ray/runner/ray_job.py` |
+| Non-strict Job failure fallback | Retired log retrieval and automatic replay in `django_ray_worker.py`; unknown effects retain `LOST`. The diagnostic runner API remains separate from completion authority. |
 | Strict request-family discrimination | `src/django_ray/ray_job_protocol.py`, rq1/rq2 classification |
 | Input artifact purgers and reference readers | `src/django_ray/input_storage.py`, `src/django_ray/ray_job_request_storage.py` and their cleanup commands |
 

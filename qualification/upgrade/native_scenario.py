@@ -60,6 +60,7 @@ def phase(root, backend, name, target, *, database, artifacts, runner, crash_man
                 "artifacts": str(artifacts),
                 "runner": runner,
                 "crash_manager": crash_manager and name == "candidate-run",
+                "legacy_failure_probe": name == "candidate-legacy-failure",
             }
         ),
         RAY_USAGE_STATS_ENABLED="0",
@@ -129,6 +130,18 @@ def backend(parent, name, targets, runner, crash_manager=False):
                         artifacts=restored,
                         runner=runner,
                         crash_manager=crash_manager,
+                    )
+                )
+            if runner == "ray_job":
+                phases.append(
+                    phase(
+                        root,
+                        name,
+                        "candidate-legacy-failure",
+                        targets["candidate"],
+                        database="restored",
+                        artifacts=restored,
+                        runner=runner,
                     )
                 )
             assert wheel._sha256(root / "backup") == backup_digest

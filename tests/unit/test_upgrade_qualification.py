@@ -359,3 +359,22 @@ def test_native_graph_read_only_fence_is_independent_of_module_layout(
     )
     reads.list_workflow_topology_nodes.assert_called_once()
     cursor.execute.assert_called_once_with("SHOW default_transaction_read_only")
+
+
+def test_legacy_failure_manager_uses_cli_shutdown_semantics(monkeypatch):
+    import django
+    from django.core import management
+
+    from django_ray.runner.ray_job import RayJobRunner
+    from qualification.upgrade import legacy_failure
+
+    calls = []
+    monkeypatch.setattr(django, "setup", lambda: None)
+    monkeypatch.setattr(management, "execute_from_command_line", calls.append)
+    original_logs = RayJobRunner.get_logs
+    try:
+        legacy_failure.manager()
+        assert RayJobRunner.get_logs is not original_logs
+        assert calls == [["django-ray-qualification", "django_ray_worker", "--concurrency=1"]]
+    finally:
+        RayJobRunner.get_logs = original_logs

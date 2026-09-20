@@ -362,6 +362,7 @@ def main():
         "baseline-read",
         "candidate-read",
         "candidate-run",
+        "candidate-legacy-failure",
         "baseline-post-write",
     }:
         raise SystemExit("invalid native upgrade phase")
@@ -381,6 +382,20 @@ def main():
 
     root = settings.ROOT
     observations = {}
+    if phase == "candidate-legacy-failure":
+        from qualification.upgrade.legacy_failure import run
+
+        Path(receipt).write_text(
+            json.dumps(
+                {
+                    "phase": phase,
+                    "version": django_ray.__version__,
+                    "module": expected_module,
+                    "observations": run(root),
+                }
+            )
+        )
+        return
     if phase == "baseline-post-write":
         from django.db import connection
         from django.db.migrations.recorder import MigrationRecorder
