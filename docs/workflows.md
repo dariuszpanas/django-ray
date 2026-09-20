@@ -844,6 +844,15 @@ The outer Django task is the durability and retry boundary:
   contains no producer identities or application values. A pending acknowledgement
   means only that the leaf had not observed its result when it sealed the report; the
   actor may still process that application-progress call before the report.
+  Under retained-byte pressure, the collector can discard display progress and
+  recent `PROGRESS` events to admit structural or lifecycle data. It keeps map
+  fanout counts, task states, topology and failure details. Map numeric growth is
+  reserved when retained, so a later counter update cannot displace lifecycle
+  evidence. Fixed `replaceable` counters distinguish evicted node displays,
+  evicted progress events and dropped updates from invalid ingress. Valid display
+  drops do not invalidate a complete terminal publication. If structural data or
+  observed map counts cannot fit without display progress, rejection remains
+  explicit; the collector does not claim a complete graph or exceed its budget.
   The actor-cost block uses
   saturating counters for actor-received logical calls/bytes, calls decoded under the
   exact run fence by fixed event kind, end-to-end processed delivery delay, ingest

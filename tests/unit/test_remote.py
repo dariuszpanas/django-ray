@@ -2378,6 +2378,333 @@ def test_progress_actor_rejects_replacement_over_retained_byte_limit() -> None:
     assert oversized_label not in json.dumps(snapshot)
 
 
+@pytest.mark.parametrize(
+    "terminal_kind", [WorkflowProgressEventKind.FAILED, WorkflowProgressEventKind.COMPLETED]
+)
+@pytest.mark.parametrize(
+    "map_progress,other_node,byte_limit",
+    [(False, False, 1350), (False, True, 1700), (True, False, 1300)],
+)
+@pytest.mark.parametrize("submitted", [1000, WORKFLOW_PROGRESS_LIMITS_V1.identity_max_integer])
+def test_replaceable_progress_cannot_displace_terminal_state(
+    terminal_kind: WorkflowProgressEventKind,
+    map_progress: bool,
+    other_node: bool,
+    byte_limit: int,
+    submitted: int,
+) -> None:
+    """A terminal event that fits alone must also fit after progress pressure."""
+    limits = replace(WORKFLOW_PROGRESS_LIMITS_V1, combined_max_decoded_bytes=byte_limit)
+    for with_progress in (False, True):
+        actor = _progress_actor(limits=limits)
+        for node_id in ["leaf", "other"] if other_node else ["leaf"]:
+            if map_progress:
+                registration_kind = WorkflowProgressEventKind.MAP_REGISTERED
+                registration = {
+                    "node_id": node_id,
+                    "label": node_id,
+                    "max_concurrency": 1,
+                    "max_items": None,
+                }
+            else:
+                registration_kind = WorkflowProgressEventKind.NODE_REGISTERED
+                registration = {
+                    "node_id": node_id,
+                    "label": node_id,
+                    "callable_path": "tests.unit.test_remote.workflow_target",
+                    "runtime_env": {"mode": "inherit"},
+                    "ray_options": {},
+                }
+            assert actor.ingest(_progress_wire(registration_kind, registration))
+        if not map_progress:
+            assert actor.ingest(
+                _progress_wire(
+                    WorkflowProgressEventKind.STARTED,
+                    {
+                        "node_id": "leaf",
+                        "label": "leaf",
+                        "execution": {
+                            "assigned_resources": {},
+                            "ray_job_id": None,
+                            "ray_node_id": None,
+                            "ray_task_id": None,
+                            "ray_worker_id": None,
+                        },
+                    },
+                )
+            )
+        if with_progress:
+            node_id = "other" if other_node else "leaf"
+            if map_progress:
+                progress_kind = WorkflowProgressEventKind.MAP_PROGRESS
+                progress = {
+                    "node_id": node_id,
+                    "label": node_id,
+                    "submitted": submitted,
+                    "completed": submitted - 1,
+                    "input_exhausted": True,
+                }
+            else:
+                progress_kind = WorkflowProgressEventKind.APPLICATION_PROGRESS
+                progress = {
+                    "node_id": node_id,
+                    "current": 1.0,
+                    "total": 2.0,
+                    "message": "x" * 400,
+                    "metrics": {},
+                }
+            # Valid display data can be dropped or evicted under pressure;
+            # neither path may invalidate the complete lifecycle snapshot.
+            assert actor.ingest(_progress_wire(progress_kind, progress))
+        terminal = {"node_id": "leaf", "label": "leaf"}
+        if terminal_kind is WorkflowProgressEventKind.FAILED:
+            terminal["error"] = "fixture failure"
+        assert actor.ingest(_progress_wire(terminal_kind, terminal))
+        snapshot = actor.snapshot()
+        assert snapshot["ingress"]["retained_bytes"] <= byte_limit
+        assert snapshot["ingress"]["rejected"] == 0
+        leaf = next(node for node in snapshot["graph"]["nodes"] if node["node_id"] == "leaf")
+        assert leaf["state"] == (
+            "FAILED" if terminal_kind is WorkflowProgressEventKind.FAILED else "SUCCEEDED"
+        )
+        if map_progress and with_progress:
+            assert leaf["fanout"]["submitted_items"] == submitted
+        if not other_node:
+            from django_ray.runtime.context import WorkflowRunIdentity
+            from django_ray.workflow.progress.publication import (
+                prepare_terminal_workflow_progress_publication,
+            )
+
+            prepared = prepare_terminal_workflow_progress_publication(
+                WorkflowRunIdentity(
+                    task_execution_pk=int(_WORKFLOW_RUN_IDENTITY["task_execution_pk"]),
+                    attempt_number=int(_WORKFLOW_RUN_IDENTITY["attempt_number"]),
+                    execution_generation=int(_WORKFLOW_RUN_IDENTITY["execution_generation"]),
+                    run_id=str(_WORKFLOW_RUN_IDENTITY["run_id"]),
+                ),
+                snapshot,
+                plan_fingerprint=str(_WORKFLOW_PLAN["fingerprint"]),
+                selected_strategy="dynamic_tasks",
+                reporting_policy="full",
+                detail_days=7,
+            )
+            assert prepared.summary["state"] == leaf["state"]
+            detail = json.loads(prepared.detail.records[0].payload)
+            assert detail["state"] == leaf["state"]
+            if map_progress and with_progress:
+                assert detail["fanout"]["submitted_items"] == submitted
+
+
+@pytest.mark.parametrize("structural_kind", ["node", "edges"])
+def test_progress_actor_preserves_structural_admission_at_byte_boundary(structural_kind) -> None:
+    registration = _progress_wire(
+        WorkflowProgressEventKind.NODE_REGISTERED,
+        {
+            "node_id": "leaf",
+            "label": "leaf",
+            "callable_path": "tests.unit.test_remote.workflow_target",
+            "runtime_env": {"mode": "inherit"},
+            "ray_options": {},
+        },
+    )
+    if structural_kind == "node":
+        structural = _progress_wire(
+            WorkflowProgressEventKind.NODE_REGISTERED,
+            {
+                "node_id": "next",
+                "label": "next",
+                "callable_path": "tests.unit.test_remote.workflow_target",
+                "runtime_env": {"mode": "inherit"},
+                "ray_options": {},
+            },
+        )
+    else:
+        structural = _progress_wire(
+            WorkflowProgressEventKind.EDGES_REGISTERED,
+            {"edges": [{"source": "leaf", "target": f"child-{index}"} for index in range(16)]},
+        )
+    baseline = _progress_actor()
+    assert baseline.ingest(registration)
+    assert baseline.ingest(structural)
+    expected = baseline.snapshot()
+    minimum = expected["ingress"]["retained_bytes"]
+    evictions = 0
+    for byte_limit in (minimum, minimum + 1, minimum + 200, minimum + 500):
+        actor = _progress_actor(
+            limits=replace(WORKFLOW_PROGRESS_LIMITS_V1, combined_max_decoded_bytes=byte_limit)
+        )
+        assert actor.ingest(registration)
+        assert actor.ingest(
+            _progress_wire(
+                WorkflowProgressEventKind.APPLICATION_PROGRESS,
+                {
+                    "node_id": "leaf",
+                    "current": 1.0,
+                    "total": 2.0,
+                    "message": "x" * 200,
+                    "metrics": {},
+                },
+            )
+        )
+        assert actor.ingest(structural)
+        actual = actor.snapshot()
+        assert actual["ingress"]["rejected"] == 0
+        assert actual["ingress"]["retained_bytes"] <= byte_limit
+        assert actual["graph"]["edges"] == expected["graph"]["edges"]
+        assert [dict(node, progress=None) for node in actual["graph"]["nodes"]] == expected[
+            "graph"
+        ]["nodes"]
+        evictions += actual["ingress"]["replaceable"]["evicted_nodes"]
+    assert evictions > 0
+
+
+@pytest.mark.real_ray
+@pytest.mark.parametrize(
+    "terminal_kind", [WorkflowProgressEventKind.FAILED, WorkflowProgressEventKind.COMPLETED]
+)
+def test_real_ray_progress_pressure_preserves_terminal_state(ray_cluster, terminal_kind) -> None:
+    limits = replace(WORKFLOW_PROGRESS_LIMITS_V1, combined_max_decoded_bytes=1400)
+    actor = ray_cluster.remote(num_cpus=0.25)(WorkflowProgressActor).remote(
+        _progress_wire(WorkflowProgressEventKind.INITIALIZED, {"plan": _WORKFLOW_PLAN}),
+        limits=limits,
+    )
+    events = [
+        (
+            WorkflowProgressEventKind.NODE_REGISTERED,
+            {
+                "node_id": "leaf",
+                "label": "leaf",
+                "callable_path": "tests.unit.test_remote.workflow_target",
+                "runtime_env": {"mode": "inherit"},
+                "ray_options": {},
+            },
+        ),
+        (
+            WorkflowProgressEventKind.APPLICATION_PROGRESS,
+            {"node_id": "leaf", "current": 1.0, "total": 2.0, "message": "x" * 400, "metrics": {}},
+        ),
+        (
+            terminal_kind,
+            {"node_id": "leaf", "label": "leaf"}
+            | (
+                {"error": "fixture failure"}
+                if terminal_kind is WorkflowProgressEventKind.FAILED
+                else {}
+            ),
+        ),
+    ]
+    try:
+        for kind, payload in events:
+            assert ray_cluster.get(actor.ingest.remote(_progress_wire(kind, payload)), timeout=20)
+        snapshot = ray_cluster.get(actor.snapshot.remote(), timeout=20)
+        assert snapshot["graph"]["nodes"][0]["state"] == (
+            "FAILED" if terminal_kind is WorkflowProgressEventKind.FAILED else "SUCCEEDED"
+        )
+        assert snapshot["ingress"]["rejected"] == 0
+        assert snapshot["ingress"]["retained_bytes"] <= limits.combined_max_decoded_bytes
+        assert snapshot["ingress"]["replaceable"]["evicted_nodes"] == 1
+    finally:
+        ray_cluster.kill(actor, no_restart=True)
+
+
+def test_progress_actor_saturates_display_drop_counters_without_rejection() -> None:
+    actor = _progress_actor(
+        limits=replace(
+            WORKFLOW_PROGRESS_LIMITS_V1,
+            combined_max_decoded_bytes=900,
+            identity_max_integer=9,
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.NODE_REGISTERED,
+            {
+                "node_id": "leaf",
+                "label": "leaf",
+                "callable_path": "tests.unit.test_remote.workflow_target",
+                "runtime_env": {"mode": "inherit"},
+                "ray_options": {},
+            },
+        )
+    )
+    wire = _progress_wire(
+        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        {"node_id": "leaf", "current": 1.0, "total": 2.0, "message": "x" * 400, "metrics": {}},
+    )
+    for _ in range(20):
+        assert actor.ingest(wire)
+    snapshot = actor.snapshot()
+    assert snapshot["ingress"]["replaceable"] == {
+        "evicted_nodes": 0,
+        "evicted_events": 0,
+        "dropped_updates": 9,
+    }
+    assert snapshot["ingress"]["cost"]["saturated"] is True
+    assert snapshot["ingress"]["rejected"] == 0
+    assert snapshot["ingress"]["retained_bytes"] <= 900
+    assert snapshot["graph"]["nodes"][0]["progress"] is None
+
+
+def test_progress_actor_rejects_map_counts_that_cannot_be_retained() -> None:
+    actor = _progress_actor(
+        limits=replace(WORKFLOW_PROGRESS_LIMITS_V1, combined_max_decoded_bytes=600)
+    )
+    before = actor.snapshot()
+    assert not actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.MAP_PROGRESS,
+            {
+                "node_id": "unregistered-map",
+                "label": "map",
+                "submitted": 1000,
+                "completed": 1,
+                "input_exhausted": True,
+            },
+        )
+    )
+    after = actor.snapshot()
+    assert after["graph"] == before["graph"]
+    assert after["revision"] == before["revision"]
+    assert after["ingress"]["rejected"] == before["ingress"]["rejected"] + 1
+    assert after["ingress"]["replaceable"]["dropped_updates"] == 0
+
+
+def test_progress_actor_preserves_progress_when_terminal_data_cannot_fit() -> None:
+    limits = replace(WORKFLOW_PROGRESS_LIMITS_V1, combined_max_decoded_bytes=1400)
+    actor = _progress_actor(limits=limits)
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.NODE_REGISTERED,
+            {
+                "node_id": "leaf",
+                "label": "leaf",
+                "callable_path": "tests.unit.test_remote.workflow_target",
+                "runtime_env": {"mode": "inherit"},
+                "ray_options": {},
+            },
+        )
+    )
+    assert actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.APPLICATION_PROGRESS,
+            {"node_id": "leaf", "current": 1.0, "total": 2.0, "message": "x" * 400, "metrics": {}},
+        )
+    )
+    before = actor.snapshot()
+    assert not actor.ingest(
+        _progress_wire(
+            WorkflowProgressEventKind.FAILED,
+            {"node_id": "leaf", "label": "leaf", "error": "e" * 2000},
+        )
+    )
+    after = actor.snapshot()
+    assert after["graph"] == before["graph"]
+    assert after["recent_events"] == before["recent_events"]
+    assert after["revision"] == before["revision"]
+    assert after["ingress"]["retained_bytes"] == before["ingress"]["retained_bytes"]
+    assert after["ingress"]["replaceable"] == before["ingress"]["replaceable"]
+
+
 def test_progress_actor_counts_protocol_truncation_without_raw_retention() -> None:
     actor = _progress_actor()
     raw_error = "sensitive-" + ("x" * 5000)

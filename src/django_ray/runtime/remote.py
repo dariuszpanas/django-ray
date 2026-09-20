@@ -813,6 +813,8 @@ class _WorkflowProgressCollector:
         self._edge_payload_bytes = 0
         self._event_payload_bytes = 0
         self._pending_output_preview_count = 0
+        self._map_counter_reserve_bytes = 0
+        self._replaceable = {"evicted_nodes": 0, "evicted_events": 0, "dropped_updates": 0}
         self._plan_size = canonical_workflow_progress_retained_size(self.plan_summary)
         self._retained_bytes = workflow_progress_retained_state_size(
             plan_bytes=self._plan_size,
@@ -1120,9 +1122,17 @@ class _WorkflowProgressCollector:
         node_updates: dict[str, dict[str, Any]] | None = None,
         edge_additions: set[tuple[str, str]] | None = None,
         recent_event: dict[str, Any] | None = None,
+        discard_progress: bool = False,
     ) -> str | None:
-        node_updates = {} if node_updates is None else node_updates
+        node_updates = {} if node_updates is None else dict(node_updates)
         edge_additions = set() if edge_additions is None else edge_additions
+        evicted_nodes = 0
+        if discard_progress:
+            for node_id, previous in self.nodes.items():
+                candidate = node_updates.get(node_id, previous)
+                if candidate["progress"] is not None:
+                    node_updates[node_id] = {**candidate, "progress": None}
+                    evicted_nodes += 1
         new_node_count = sum(node_id not in self.nodes for node_id in node_updates)
         if len(self.nodes) + new_node_count > self._node_limit:
             return "node_limit"
@@ -1138,9 +1148,15 @@ class _WorkflowProgressCollector:
             edge: canonical_workflow_progress_retained_size({"source": edge[0], "target": edge[1]})
             for edge in new_edges
         }
-        candidate_events = list(self.events)
-        candidate_event_sizes = list(self._event_sizes)
-        event_payload_bytes = self._event_payload_bytes
+        retained_events = [
+            (event, size)
+            for event, size in zip(self.events, self._event_sizes, strict=True)
+            if not discard_progress or event["event"] != "PROGRESS"
+        ]
+        candidate_events = [event for event, _size in retained_events]
+        candidate_event_sizes = [size for _event, size in retained_events]
+        event_payload_bytes = sum(candidate_event_sizes)
+        evicted_events = len(self.events) - len(candidate_events)
         if recent_event is not None and self._recent_event_limit:
             candidate_events.append(recent_event)
             recent_event_size = canonical_workflow_progress_retained_size(recent_event)
@@ -1154,9 +1170,13 @@ class _WorkflowProgressCollector:
 
         node_payload_bytes = self._node_payload_bytes
         pending_output_preview_count = self._pending_output_preview_count
+        map_counter_reserve_bytes = self._map_counter_reserve_bytes
         for node_id, size in node_sizes.items():
             node_payload_bytes += size - self._node_sizes.get(node_id, 0)
             previous = self.nodes.get(node_id)
+            map_counter_reserve_bytes += self._map_counter_reserve(node_updates[node_id])
+            if previous is not None:
+                map_counter_reserve_bytes -= self._map_counter_reserve(previous)
             if previous is not None and previous["output_preview"]["availability"] == "PENDING":
                 pending_output_preview_count -= 1
             if node_updates[node_id]["output_preview"]["availability"] == "PENDING":
@@ -1172,7 +1192,9 @@ class _WorkflowProgressCollector:
             event_count=len(candidate_events),
         )
         terminal_retained_bytes = (
-            retained_bytes + pending_output_preview_count * _PENDING_PREVIEW_TERMINAL_RESERVE_BYTES
+            retained_bytes
+            + pending_output_preview_count * _PENDING_PREVIEW_TERMINAL_RESERVE_BYTES
+            + map_counter_reserve_bytes
         )
         if terminal_retained_bytes > self._retained_bytes_limit:
             return "retained_bytes_limit"
@@ -1189,7 +1211,30 @@ class _WorkflowProgressCollector:
         self._event_payload_bytes = event_payload_bytes
         self._retained_bytes = retained_bytes
         self._pending_output_preview_count = pending_output_preview_count
+        self._map_counter_reserve_bytes = map_counter_reserve_bytes
+        self._add_cost_counter(self._replaceable, "evicted_nodes", evicted_nodes)
+        self._add_cost_counter(self._replaceable, "evicted_events", evicted_events)
         return None
+
+    def _map_counter_reserve(self, node: dict[str, Any]) -> int:
+        """Reserve numeric growth without erasing observed map counts on eviction."""
+        if node["kind"] != "map" or node["state"] in _TERMINAL_NODE_STATES:
+            return 0
+        fanout = node["fanout"]
+        if not isinstance(fanout, dict):
+            return 0
+        maximum = {
+            **fanout,
+            "submitted_items": self._counter_max,
+            "completed_items": self._counter_max,
+            "in_flight_items": self._counter_max,
+            "input_exhausted": False,
+        }
+        return max(
+            0,
+            canonical_workflow_progress_retained_size(maximum)
+            - canonical_workflow_progress_retained_size(fanout),
+        )
 
     def _node_event_candidate(
         self,
@@ -1263,7 +1308,7 @@ class _WorkflowProgressCollector:
                 recent_event = self._recent_event(node, "PROGRESS", occurred_at)
         elif event.kind is WorkflowProgressEventKind.MAP_PROGRESS:
             node["kind"] = "map"
-            node["label"] = label
+            # Registration owns the label; replaceable counters cannot grow it.
             fanout = node.get("fanout")
             if not isinstance(fanout, dict):
                 fanout = {
@@ -1408,6 +1453,10 @@ class _WorkflowProgressCollector:
                 self._aggregate_producer_report(event)
                 return self._accept(event)
 
+            replaceable = event.kind in {
+                WorkflowProgressEventKind.APPLICATION_PROGRESS,
+                WorkflowProgressEventKind.MAP_PROGRESS,
+            }
             node_updates: dict[str, dict[str, Any]] = {}
             edge_additions: set[tuple[str, str]] = set()
             recent_event = None
@@ -1424,6 +1473,39 @@ class _WorkflowProgressCollector:
                 edge_additions=edge_additions,
                 recent_event=recent_event,
             )
+            if rejection == "retained_bytes_limit" and replaceable:
+                # A valid observational update may be dropped under pressure.
+                # Keep this separate from corrupt/rejected lifecycle ingress,
+                # which intentionally prevents a complete graph publication.
+                if event.kind is WorkflowProgressEventKind.MAP_PROGRESS:
+                    node_id = event.payload["node_id"]
+                    previous = self.nodes.get(node_id)
+                    # Numeric growth is reserved for retained maps. An
+                    # out-of-order update can also introduce a map, so always
+                    # try retaining its real counts without the display data.
+                    # If that cannot fit, reject rather than silently accepting
+                    # an incomplete graph or manufacturing zero fanout later.
+                    minimal = {node_id: {**node_updates[node_id], "progress": None}}
+                    minimal_rejection = self._commit(node_updates=minimal)
+                    if minimal_rejection is not None:
+                        return self._reject(minimal_rejection)
+                    self._add_cost_counter(
+                        self._replaceable,
+                        "evicted_nodes",
+                        int(previous is not None and previous["progress"] is not None),
+                    )
+                self._add_cost_counter(self._replaceable, "dropped_updates", 1)
+                return self._accept(event)
+            if rejection == "retained_bytes_limit" and not replaceable:
+                # Retry atomically with replaceable display data removed. Keep
+                # observed map counts, task states, topology and failure data.
+                # A failed retry must leave even the progress data unchanged.
+                rejection = self._commit(
+                    node_updates=node_updates,
+                    edge_additions=edge_additions,
+                    recent_event=recent_event,
+                    discard_progress=True,
+                )
             if rejection is not None:
                 return self._reject(rejection)
             return self._accept(event)
@@ -1505,6 +1587,7 @@ class _WorkflowProgressCollector:
                 "retained_edges": len(self.edges),
                 "cost": cost,
                 "producer": copy.deepcopy(self._producer),
+                "replaceable": dict(self._replaceable),
             },
         }
         build_wall_ns = max(0, _wall_time_ns() - build_wall_started)

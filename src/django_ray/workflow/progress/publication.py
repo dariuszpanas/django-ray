@@ -390,7 +390,11 @@ def _validate_ingress_envelope(
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     ingress_keys = frozenset(ingress_value)
     optional_keys = ingress_keys - _INGRESS_KEYS
-    if not _INGRESS_KEYS <= ingress_keys or not optional_keys <= {"cost", "producer"}:
+    if not _INGRESS_KEYS <= ingress_keys or not optional_keys <= {
+        "cost",
+        "producer",
+        "replaceable",
+    }:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     ingress = ingress_value
     accepted_counts = _event_kind_counters(
@@ -436,6 +440,20 @@ def _validate_ingress_envelope(
         )
     elif accepted_counts["producer_report"] != 0:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    if "replaceable" in ingress:
+        eviction = _exact_mapping(
+            ingress["replaceable"], {"evicted_nodes", "evicted_events", "dropped_updates"}
+        )
+        offered = _saturating_counter_sum(
+            counter_max, accepted_counts["application_progress"], accepted_counts["map_progress"]
+        )
+        counters = {key: _counter(value, maximum=counter_max) for key, value in eviction.items()}
+        if any(
+            _saturating_counter_sum(counter_max, counters[key], counters["dropped_updates"])
+            > offered
+            for key in ("evicted_nodes", "evicted_events")
+        ):
+            raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     return ingress
 
 

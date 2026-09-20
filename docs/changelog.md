@@ -69,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact-source CI workflow attempt rather than an obsolete aggregate check.
   Preserve failure blocking, avoid draft-to-ready cancellation races, and log
   the selected run and attempt for review.
+- Preserve workflow lifecycle capacity under progress saturation by evicting
+  replaceable display progress before rejecting structural or terminal updates.
+  Retain observed map fanout counts and report display drops separately from
+  invalid ingress. Structural data that cannot fit still fails explicitly. This
+  bounds retained actor state; aggregate admission across producers and retries
+  remains pending.
 
 - Explain disabled workflow reporting on the Admin graph endpoint when the
   current attempt has no publication. Infer only a bounded valid current policy;

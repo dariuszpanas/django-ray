@@ -28,6 +28,7 @@ from qualification.application.workflow_http import (
     read_disabled_workflow_graph,
     read_full_workflow_graph,
 )
+from qualification.application.workflow_pressure import verify_deployed_pressure
 from qualification.application.workflow_session import qualification_admin_session
 
 
@@ -372,8 +373,14 @@ def main(argv: list[str] | None = None) -> int:
             observations[case.name] = execute_case(
                 request, token=read_token(args.token_file), case=case
             )
+        receipt["failed_stage"] = "collector-pressure"
+        pressure = verify_deployed_pressure()
         receipt.update(
-            status="passed", failed_stage=None, publisher="pilot", observations=observations
+            status="passed",
+            failed_stage=None,
+            publisher="pilot",
+            observations=observations,
+            collector_pressure=pressure,
         )
         encoded = json.dumps(receipt, sort_keys=True).encode()
         if len(encoded) > 16384:
@@ -387,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             receipt["failed_stage"] = "receipt"
         receipt.update(status="failed")
         receipt.pop("observations", None)
+        receipt.pop("collector_pressure", None)
         traceback = error.__traceback__
         while traceback is not None:
             module = traceback.tb_frame.f_globals.get("__name__", "")
