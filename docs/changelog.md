@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RuntimeEnv identity instead of resolving today's default environment. Existing
   history remains readable; enqueue new work explicitly under current settings.
 
+- **Breaking:** Retire independently bound inline Ray Job payload execution.
+  `--payload-b64` now refuses even valid `rq1` requests before application setup;
+  current `rq2` stored request references remain supported. Drain old producers
+  before upgrading. Historical readers and strict-family rejection remain.
 - **Breaking:** Reject durable workflow leaves that carry a task or workflow
   identity without a bound nested request, before application setup or progress
   publication. Current strict requests and standalone workflows remain supported;

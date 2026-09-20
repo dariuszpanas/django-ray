@@ -142,6 +142,33 @@ def _booby_trap_application_seams(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestEntrypointPayload:
     """Tests for payload-based task execution path."""
 
+    @pytest.mark.parametrize("transport_version", [1, 2])
+    @pytest.mark.parametrize("through_cli", [False, True])
+    def test_bound_inline_carrier_is_retired_before_application_setup(
+        self, monkeypatch, capsys, transport_version, through_cli
+    ):
+        request, serialized = _strict_request(transport_version=transport_version)
+        monkeypatch.setenv(RAY_JOB_CONFIG_JSON_ENV_VAR, _strict_config(request, serialized))
+        _booby_trap_application_seams(monkeypatch)
+        if through_cli:
+            assert entrypoint.main(["--payload-b64", _payload_b64(serialized)]) == 78
+            captured = capsys.readouterr()
+            assert not captured.out
+            assert captured.err.strip() == (
+                "django-ray task failed: execution request rejected: unsupported_transport"
+            )
+        else:
+            result = entrypoint.execute_task_from_payload(_payload_b64(serialized))
+            assert isinstance(result, entrypoint._StrictRequestRejectionResult)
+            decoded = decode_execution_completion(
+                result,
+                expected_identity=request.identity,
+                expected_execution_protocol_version=request.execution_protocol_version,
+            )
+            assert decoded.completion.success is False
+            assert decoded.completion.retryable is False
+            assert decoded.completion.error == "execution request rejected: unsupported_transport"
+
     def test_execute_task_from_payload_refuses_unversioned_dispatch(self, monkeypatch) -> None:
         """Retired payload values never reach the application adapter."""
         _booby_trap_application_seams(monkeypatch)
@@ -154,15 +181,31 @@ class TestEntrypointPayload:
         assert "private" not in result
 
     @pytest.mark.parametrize("transport_version", [1, 2])
-    def test_strict_payload_validates_before_dispatch_and_enriches_completion(
+    def test_rq2_request_validates_before_dispatch_and_enriches_completion(
         self,
         monkeypatch,
         transport_version: int,
     ) -> None:
+        import django_ray.ray_job_request_storage as request_storage
+
         request, serialized = _strict_request(transport_version=transport_version)
+        locator = _rq2_locator(serialized)
+        monkeypatch.setattr(request_storage, "decode_ray_job_request_locator", lambda _: locator)
+        monkeypatch.setattr(
+            request_storage,
+            "load_ray_job_request",
+            lambda _: LoadedRayJobRequest(
+                serialized_request=serialized,
+                request=request,
+                locator=locator,
+                reference=locator.reference,
+                digest=locator.digest,
+                size_bytes=locator.size_bytes,
+            ),
+        )
         monkeypatch.setenv(
             RAY_JOB_CONFIG_JSON_ENV_VAR,
-            _strict_config(request, serialized),
+            _rq2_config(request, serialized, locator),
         )
         captured: dict[str, object] = {}
 
@@ -192,7 +235,7 @@ class TestEntrypointPayload:
 
         monkeypatch.setattr(entrypoint, "execute_task", fake_execute_task)
 
-        encoded = entrypoint.execute_task_from_payload(_payload_b64(serialized))
+        encoded = entrypoint.execute_task_from_reference(encode_ray_job_request_locator(locator))
         decoded = decode_execution_completion(
             encoded,
             expected_identity=request.identity,
@@ -1070,15 +1113,10 @@ class TestEntrypointPayload:
         monkeypatch,
         capsys,
     ) -> None:
-        request, serialized = _strict_request()
-        monkeypatch.setenv(
-            RAY_JOB_CONFIG_JSON_ENV_VAR,
-            _strict_config(request, serialized),
-        )
         monkeypatch.setattr(
             entrypoint,
-            "execute_task",
-            lambda **_kwargs: json.dumps(
+            "execute_task_from_reference",
+            lambda _locator: json.dumps(
                 {
                     "success": False,
                     "error": "application failure",
@@ -1087,7 +1125,7 @@ class TestEntrypointPayload:
             ),
         )
 
-        exit_code = entrypoint.main(["--payload-b64", _payload_b64(serialized)])
+        exit_code = entrypoint.main(["--request-ref-b64", "bounded-locator"])
 
         assert exit_code == 0
         assert capsys.readouterr().err.strip() == ("django-ray task failed: application failure")

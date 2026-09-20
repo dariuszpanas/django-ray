@@ -16,10 +16,16 @@ def verify_retired_carriers() -> dict[str, object]:
     from django.apps import apps
 
     from django_ray.execution_codec import (
+        ExecutionIdentity,
+        ExecutionRequest,
         NestedExecutionRequestRejected,
         NestedExecutionRequestRejection,
+        encode_execution_request,
     )
-    from django_ray.ray_job_protocol import RAY_JOB_CONFIG_JSON_ENV_VAR
+    from django_ray.ray_job_protocol import (
+        RAY_JOB_CONFIG_JSON_ENV_VAR,
+        build_ray_job_request_metadata,
+    )
     from django_ray.runtime import context, entrypoint, import_utils, remote, runtime_env
 
     assert not apps.ready, "carrier refusal must precede Django setup"
@@ -94,6 +100,36 @@ def verify_retired_carriers() -> dict[str, object]:
                     assert entrypoint.main(["--payload-b64", encoded]) == 78
                 assert not output.getvalue()
                 assert "carrier-private-canary" not in errors.getvalue()
+        for transport in (1, 2):
+            request = ExecutionRequest(
+                identity=ExecutionIdentity(44, "retired-inline-task", 1, 1),
+                execution_protocol_version=1,
+                callable_path="carrier-private-canary.callback",
+                transport_version=transport,
+                serialized_args="[]" if transport == 1 else "null",
+                serialized_kwargs="{}" if transport == 1 else "null",
+                input_reference=None
+                if transport == 1
+                else "s3://carrier-private-canary/input.json",
+                runtime_env_profile=None,
+                runtime_env_hash="0" * 64,
+                runtime_env_plan_identity={},
+                compiled_graph_submission_transport="ray-job",
+            )
+            serialized = encode_execution_request(request)
+            encoded = base64.urlsafe_b64encode(serialized.encode()).decode()
+            os.environ[RAY_JOB_CONFIG_JSON_ENV_VAR] = json.dumps(
+                {
+                    "runtime_env": {},
+                    "metadata": build_ray_job_request_metadata(request, serialized),
+                }
+            )
+            check(entrypoint.execute_task_from_payload(encoded), "unsupported_transport")
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                assert entrypoint.main(["--payload-b64", encoded]) == 78
+            assert not output.getvalue()
+            assert "carrier-private-canary" not in errors.getvalue()
         os.environ.pop(RAY_JOB_CONFIG_JSON_ENV_VAR, None)
         check(entrypoint.execute_task_from_payload("%%%"), "invalid_versioned")
         for reference in (None, "carrier-private-canary"):
@@ -131,6 +167,7 @@ def verify_retired_carriers() -> dict[str, object]:
     return {
         "legacy_runtime_env_refused": 4,
         "job_carriers_refused": 4,
+        "inline_job_carriers_refused": 2,
         "core_carriers_refused": 2,
         "workflow_carriers_refused": 3,
         "malformed_job_refused": True,

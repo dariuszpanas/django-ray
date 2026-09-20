@@ -508,7 +508,7 @@ def _strict_request_rejection(
 
 
 def execute_task_from_payload(payload_b64: str) -> str:
-    """Execute independently bound strict requests; reject retired carriers."""
+    """Classify retired inline requests without crossing the application boundary."""
     from django_ray.execution_codec import (
         ExecutionRequestDecodeError,
         ExecutionRequestRejection,
@@ -576,22 +576,11 @@ def execute_task_from_payload(payload_b64: str) -> str:
             _binding_rejection_classification(error.classification),
         )
 
-    return execute_task(
-        callable_path=request.callable_path,
-        serialized_args=request.serialized_args,
-        serialized_kwargs=request.serialized_kwargs,
-        task_execution_pk=request.identity.task_execution_pk,
-        task_id=request.identity.task_id,
-        attempt_number=request.identity.attempt_number,
-        execution_generation=request.identity.execution_generation,
-        runtime_env_profile=request.runtime_env_profile,
-        runtime_env_hash=request.runtime_env_hash,
-        runtime_env_plan_identity=request.runtime_env_plan_identity,
-        input_reference=request.input_reference,
-        ray_job_driver=True,
-        _completion_identity=request.identity,
-        _execution_protocol_version=request.execution_protocol_version,
-        _strict_execution_request=True,
+    # Independently bound rq1 payloads are retired too. Preserve strict-family
+    # classification above, but only the stored rq2 reference path may execute.
+    return _strict_request_rejection(
+        expectation,
+        ExecutionRequestRejection.UNSUPPORTED_TRANSPORT,
     )
 
 
@@ -709,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
     request_source = parser.add_mutually_exclusive_group(required=True)
     request_source.add_argument(
         "--payload-b64",
-        help="URL-safe base64 encoded task payload",
+        help="Retired inline carrier; always refuses execution",
     )
     request_source.add_argument(
         "--request-ref-b64",
