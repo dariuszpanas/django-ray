@@ -967,3 +967,15 @@ def plan_overflow_identity(value: int) -> int:
 def build_plan_overflow_workflow():
     """Cross the real 64-node plan limit with exactly 65 serial leaves."""
     return chain(*(step(plan_overflow_identity) for _ in range(65)))
+
+
+def admin_limit_identity(value: int) -> int:
+    """Keep the display-limit fixture's fixed scalar without external effects."""
+    if type(value) is not int or value != 42:
+        raise ValueError("Admin limit fixture requires its fixed scalar")
+    return value
+
+
+def build_admin_limit_workflow():
+    """Cross the real 100-node Admin display ceiling with 101 serial leaves."""
+    return chain(*(step(admin_limit_identity) for _ in range(101)))

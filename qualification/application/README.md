@@ -228,15 +228,16 @@ not inferred from Job status. The cold receipt's predecessor digest must match t
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
 
-The workflow observation stage runs eight fixed tasks serially in each Ray generation: complex
+The workflow observation stage runs nine fixed tasks serially in each Ray generation: complex
 workflow success and failure under `full`, `terminal_only` and `disabled`, followed by the recovery showcase's
 two failed attempts and successful third attempt. Production settings disable the complex-workflow
 demo HTTP route, so those six cases use the bounded Django task enqueue API inside the fixture.
-The recovery case uses its production HTTP endpoint. A final fixed 65-leaf serial chain uses
+The recovery case uses its production HTTP endpoint. A fixed 65-leaf serial chain uses
 full reporting and the bounded task enqueue API. Its saved plan crosses the real 64-node limit;
 the durable result must remain exactly `42`, and the graph must retain all 65 successful nodes
-and 64 serial dependencies. This covers plan overflow, not the separate 100-node Admin graph ceiling. No fixture inputs, fanout, sleeps or
-resource limits are increased. All cases use authenticated HTTP polling and
+and 64 serial dependencies. The additional fixed 101-node case below covers the separate Admin
+display ceiling. Together the nine cases cover eleven attempts. Existing case inputs and resource
+limits remain unchanged. All cases use authenticated HTTP polling and
 attempt-pinned workflow reads, and compare those publications with authenticated Admin graph JSON.
 Temporary database-backed Admin sessions and the HTML checker's disposable user are deleted and
 their absence checked after observation. The retained Admin smoke checker uses the same fixed-origin,
@@ -296,3 +297,15 @@ explicit disabled explanation without a run identity, publication or graph.
 Database checks reject current/archived progress and staged run storage. These
 cases do not claim rendered disabled-page coverage or package-default activation;
 the full-policy cases still exercise the explicitly enabled pilot publisher.
+
+
+The fixed Admin display-limit case runs 101 serial identity leaves with scalar result `42`.
+It crosses the actual 100-node Admin ceiling, independently of the 64-node saved-plan limit.
+Authenticated attempt/publication-pinned API reads must retain all 101 successful nodes,
+101 details and 100 serial dependencies. Each collection permits at most four pages of 100
+records, with a 256 KiB response ceiling; repeated cursors, missing records and changed
+identities fail the stage. Admin must return a bounded empty `LIMIT_EXCEEDED` graph and
+point to the paginated API. Anonymous access is denied and diagnostic/history fingerprints
+must remain unchanged. This case does not execute browser JavaScript or qualify default
+publication. It uses existing deadlines/capacity, no new submission route, and explicit full
+pilot reporting. The exact callable is added to the sample's authenticated read policy.

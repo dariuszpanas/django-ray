@@ -17,7 +17,8 @@ from uuid import UUID
 
 from qualification.application.api import TASK_FAILURE_STATES, validate_task_status_payload
 from qualification.application.run_api import ApplicationHttp, read_token
-from qualification.application.workflow_admin import observe_admin_contract
+from qualification.application.workflow_admin import _protected_diagnostics, observe_admin_contract
+from qualification.application.workflow_display_limit import read_admin_display_limit
 from qualification.application.workflow_http import (
     decode_workflow_object,
     read_disabled_workflow_graph,
@@ -81,6 +82,16 @@ def workflow_cases() -> tuple[WorkflowCase, ...]:
             "testproject.apps.cluster_tasks.tasks.plan_overflow_workflow_qualification",
         )
     )
+    cases.append(
+        WorkflowCase(
+            "admin-display-limit",
+            "",
+            (),
+            ("SUCCEEDED",),
+            "full",
+            "testproject.apps.cluster_tasks.tasks.admin_display_limit_qualification",
+        )
+    )
     return tuple(cases)
 
 
@@ -99,15 +110,15 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
         # Submit these fixed cases through the same bounded Django task API.
         from testproject.admission import enqueue_sample
         from testproject.apps.cluster_tasks.tasks import (
+            admin_display_limit_qualification,
             complex_workflow_benchmark,
             plan_overflow_workflow_qualification,
         )
 
-        fixture_task = (
-            plan_overflow_workflow_qualification
-            if case.name == "plan-overflow"
-            else complex_workflow_benchmark
-        )
+        fixture_task = {
+            "plan-overflow": plan_overflow_workflow_qualification,
+            "admin-display-limit": admin_display_limit_qualification,
+        }.get(case.name, complex_workflow_benchmark)
         result = enqueue_sample(fixture_task, **dict(case.options))
         enqueue = {"task_id": result.id, "args": result.args, "kwargs": result.kwargs}
     else:
@@ -184,6 +195,11 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
     status, _ = request(f"/api/cluster/workflows/{task_id}", method="GET", response_limit=16 * 1024)
     if status not in {401, 403}:
         raise ValueError("Anonymous workflow API access was not denied")
+    if (
+        case.name == "admin-display-limit"
+        and not RayTaskExecution.objects.filter(pk=row.pk, result_data="42").exists()
+    ):
+        raise ValueError("Display-limit workflow changed its fixed result")
     observations = []
     with qualification_admin_session() as cookie:
         for number, attempt in enumerate(attempts, 1):
@@ -217,6 +233,20 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
                 key: identity[key]
                 for key in ("schema_version", "run_id", "attempt_number", "execution_generation")
             }
+            if case.name == "admin-display-limit":
+                before = _protected_diagnostics(task_id)
+                observation = read_admin_display_limit(
+                    request,
+                    task_id=task_id,
+                    execution_pk=row.pk,
+                    run_identity=public_identity,
+                    token=token,
+                    admin_cookie=cookie,
+                )
+                if _protected_diagnostics(task_id) != before:
+                    raise ValueError("Display-limit observation changed protected diagnostics")
+                observations.append({**observation, "diagnostics_preserved": True})
+                continue
             observations.append(
                 read_full_workflow_graph(
                     request,
