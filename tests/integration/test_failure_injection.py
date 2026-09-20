@@ -37,6 +37,7 @@ class TestFailureInjection:
         """If Ray disconnects, pending Ray Core tasks should go through retry policy."""
         cmd = self._make_command()
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-fi-disconnect-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -204,6 +205,7 @@ class TestFailureInjection:
         )
 
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-fi-heartbeat-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",

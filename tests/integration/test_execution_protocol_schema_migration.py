@@ -999,6 +999,7 @@ def test_postgresql_incompatible_writer_first_blocks_reopen(write_kind: str) -> 
     if write_kind == "retry":
         terminal = RayTaskExecution.objects.create(
             task_id="rollback-race-writer-first-terminal",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             callable_path="tests.unit.test_workflows.increment",
             execution_protocol_version=2,
             state=TaskState.FAILED,
@@ -1077,6 +1078,7 @@ def test_postgresql_reopen_first_rejects_incompatible_writer(
     if write_kind == "retry":
         terminal = RayTaskExecution.objects.create(
             task_id="rollback-race-reopen-first-terminal",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             callable_path="tests.unit.test_workflows.increment",
             execution_protocol_version=2,
             state=TaskState.FAILED,

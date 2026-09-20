@@ -1395,6 +1395,7 @@ class TestWorkerCommandRuntimeDb:
         cmd.execution_mode = "local"
         cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id=f"request-transport-{input_reference is not None}",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1501,6 +1502,7 @@ class TestWorkerCommandRuntimeDb:
         cmd = _make_command(worker_id="legacy-sync-worker")
         cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="legacy-sync-completion",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1533,6 +1535,7 @@ class TestWorkerCommandRuntimeDb:
         cmd = _make_command(worker_id="stale-worker")
         cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="stale-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1978,6 +1981,7 @@ class TestWorkerCommandRuntimeDb:
         cmd._create_lease("default")
         task = RayTaskExecution.objects.create(
             task_id="sync-shutdown-001",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
             state=TaskState.RUNNING,
@@ -2119,3 +2123,35 @@ class TestWorkerCommandRuntimeDb:
 
         assert identity.worker_id == "shutdown-worker"
         assert released == ["shutdown-worker", "ray-shutdown"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["sync", "local", "cluster", "jobs"])
+def test_worker_refuses_legacy_runtime_env_before_execution(monkeypatch, mode):
+    cmd = _make_command(worker_id="legacy-runtime-env-worker")
+    cmd.execution_mode = mode
+    cmd._create_lease("default")
+    task = RayTaskExecution.objects.create(
+        task_id="legacy-runtime-env-worker-task",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        claimed_by_worker=cmd.worker_id,
+        runtime_env_json="{}",
+        runtime_env_hash="",
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("legacy task crossed the execution boundary")
+
+    monkeypatch.setattr("django_ray.runtime.runtime_env.resolve_runtime_env_profile", forbidden)
+    for method in ("execute_task_sync", "submit_task_to_ray_core", "submit_task_to_ray"):
+        monkeypatch.setattr(cmd, method, forbidden)
+    cmd.process_task(task)
+    task.refresh_from_db()
+    assert task.state == TaskState.FAILED
+    assert task.attempt_number == 1
+    assert task.error_message == (
+        "django-ray: Legacy RuntimeEnv snapshot cannot execute; enqueue a new task"
+    )
+    assert task.runtime_env_json == "{}"
+    assert task.runtime_env_hash == ""

@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -19,7 +20,7 @@ def verify_retired_carriers() -> dict[str, object]:
         NestedExecutionRequestRejection,
     )
     from django_ray.ray_job_protocol import RAY_JOB_CONFIG_JSON_ENV_VAR
-    from django_ray.runtime import context, entrypoint, import_utils, remote
+    from django_ray.runtime import context, entrypoint, import_utils, remote, runtime_env
 
     assert not apps.ready, "carrier refusal must precede Django setup"
     calls = 0
@@ -41,6 +42,7 @@ def verify_retired_carriers() -> dict[str, object]:
     with contextlib.ExitStack() as stack:
         for owner, name in (
             (django, "setup"),
+            (runtime_env, "resolve_runtime_env_profile"),
             (entrypoint, "execute_task"),
             (entrypoint, "bootstrap_django"),
             (entrypoint, "load_task_input"),
@@ -52,6 +54,22 @@ def verify_retired_carriers() -> dict[str, object]:
         ):
             stack.enter_context(patch.object(owner, name, forbidden))
         stack.enter_context(patch.dict(os.environ))
+        for profile in (None, ""):
+            for digest in (None, ""):
+                legacy = SimpleNamespace(
+                    pk=44,
+                    runtime_env_profile=profile,
+                    runtime_env_json="{}",
+                    runtime_env_hash=digest,
+                )
+                try:
+                    runtime_env.runtime_env_for_execution(legacy)
+                except runtime_env.RuntimeEnvSnapshotError as error:
+                    assert str(error) == (
+                        "django-ray: Legacy RuntimeEnv snapshot cannot execute; enqueue a new task"
+                    )
+                else:
+                    raise AssertionError("legacy RuntimeEnv snapshot was accepted")
         for metadata in (None, {"django_ray_task_id": "44", "django_ray_attempt_number": "1"}):
             if metadata is None:
                 os.environ.pop(RAY_JOB_CONFIG_JSON_ENV_VAR, None)
@@ -111,6 +129,7 @@ def verify_retired_carriers() -> dict[str, object]:
     assert calls == 0
     assert not apps.ready
     return {
+        "legacy_runtime_env_refused": 4,
         "job_carriers_refused": 4,
         "core_carriers_refused": 2,
         "workflow_carriers_refused": 3,

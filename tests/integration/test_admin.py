@@ -3065,6 +3065,7 @@ class TestRayTaskExecutionAdmin:
         )
 
         failed = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-001",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.FAILED,
@@ -3076,6 +3077,7 @@ class TestRayTaskExecutionAdmin:
             completion_data='{"success": false}',
         )
         lost = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-002",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.LOST,
@@ -3086,6 +3088,7 @@ class TestRayTaskExecutionAdmin:
         )
         expired_deadline = datetime.now(UTC) - timedelta(minutes=1)
         expired = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-expired-003",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.EXPIRED,
@@ -3097,6 +3100,7 @@ class TestRayTaskExecutionAdmin:
             queue_deadline_at=expired_deadline,
         )
         running = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-004",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,
@@ -3255,6 +3259,7 @@ class TestRayTaskExecutionAdmin:
     def test_execution_detail_retry_reuses_confirmation_and_returns_to_detail(self) -> None:
         user = get_user_model().objects.create_superuser(username="retry-detail-flow")
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-detail-flow",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.FAILED,
@@ -3406,6 +3411,7 @@ class TestRayTaskExecutionAdmin:
     def test_execution_detail_retry_requires_csrf_for_both_posts(self) -> None:
         user = get_user_model().objects.create_superuser(username="retry-detail-csrf")
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-detail-csrf",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.FAILED,
@@ -3632,6 +3638,7 @@ class TestRayTaskExecutionAdmin:
     def test_retry_confirmation_requires_csrf_for_both_posts(self) -> None:
         actor = get_user_model().objects.create_superuser(username="retry-confirmation-csrf-actor")
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-confirmation-csrf-001",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.FAILED,
@@ -3737,6 +3744,7 @@ class TestRayTaskExecutionAdmin:
         admin_obj = _task_admin()
         monkeypatch.setattr(admin_obj, "message_user", lambda request, message: None)
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-confirmation-key-rotation-001",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.FAILED,
@@ -3943,6 +3951,7 @@ class TestRayTaskExecutionAdmin:
             runtime_env_hash="0" * 64,
         )
         valid = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="admin-retry-runtime-env-valid-001",
             callable_path="testproject.tasks.failing_task",
             state=TaskState.LOST,

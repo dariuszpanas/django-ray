@@ -58,6 +58,7 @@ class TestWorkerSync:
         """Test that the worker processes a simple task correctly."""
         # Create a task
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -497,6 +498,7 @@ class TestWorkerSync:
         from django_ray.management.commands.django_ray_worker import Command
 
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-async-success-001",
             callable_path="testproject.tasks.async_add_numbers",
             queue_name="default",
@@ -535,6 +537,7 @@ class TestWorkerSync:
             "RETRY_EXCEPTION_DENYLIST": ["testproject.tasks.NoRetryError"],
         }
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-async-retry-001",
             callable_path="testproject.tasks.async_failing_task",
             queue_name="default",
@@ -599,6 +602,7 @@ class TestWorkerSync:
             run,
         )
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-workflow-recovery-001",
             callable_path=(
                 "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task"
@@ -679,6 +683,7 @@ class TestWorkerSync:
             "RETRY_EXCEPTION_DENYLIST": ["testproject.tasks.NoRetryError"],
         }
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-async-no-retry-001",
             callable_path="testproject.tasks.async_failing_task",
             queue_name="default",
@@ -755,6 +760,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-success-after-failure-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -785,6 +791,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-versioned-sync-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -840,6 +847,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-legacy-nan-sync-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -882,6 +890,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-legacy-long-failure-sync-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -928,6 +937,7 @@ class TestWorkerSync:
         cmd.active_tasks = {}
         _acquire_test_lease(cmd)
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-versioned-sync-mismatch-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -986,6 +996,7 @@ class TestWorkerSync:
         """Test that the worker handles failing tasks correctly."""
         # Create a failing task
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-worker-002",
             callable_path="testproject.tasks.failing_task",
             queue_name="default",
@@ -1018,6 +1029,7 @@ class TestWorkerSync:
     def test_worker_retries_failing_task(self, setup_django_env):
         """Test that the worker schedules retry for a failing task."""
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-retry-001",
             callable_path="testproject.tasks.failing_task",
             queue_name="default",
@@ -1091,6 +1103,7 @@ class TestWorkerSync:
         """Test that the worker only processes tasks from the specified queue."""
         # Create tasks in different queues
         task_default = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-queue-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1099,6 +1112,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
         task_other = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-queue-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="other",
@@ -1135,6 +1149,7 @@ class TestWorkerSync:
         priorities = [0, 50, -10, 100, 25]
         for i, priority in enumerate(priorities):
             task = RayTaskExecution.objects.create(
+                runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
                 task_id=f"test-concurrency-{i}",
                 callable_path="testproject.tasks.add_numbers",
                 queue_name="default",
@@ -1170,6 +1185,7 @@ class TestWorkerSync:
     def test_worker_handles_task_with_kwargs(self, setup_django_env):
         """Test that the worker correctly passes kwargs to tasks."""
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-kwargs-001",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -1203,6 +1219,7 @@ class TestWorkerSync:
         """Test that the worker processes tasks from multiple queues."""
         # Create tasks in different queues
         task_default = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-multi-queue-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1211,6 +1228,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
         task_high = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-multi-queue-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="high-priority",
@@ -1219,6 +1237,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
         task_other = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-multi-queue-003",
             callable_path="testproject.tasks.add_numbers",
             queue_name="other",
@@ -1254,6 +1273,7 @@ class TestWorkerSync:
     def test_worker_processes_larger_numeric_priority_first_across_queues(self) -> None:
         """Queue names do not override Django's numeric task priority."""
         task_low = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="high-priority",
@@ -1263,6 +1283,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
         task_default = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1272,6 +1293,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
         task_high = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-003",
             callable_path="testproject.tasks.add_numbers",
             queue_name="low-priority",
@@ -1332,6 +1354,7 @@ class TestWorkerSync:
         """Creation time breaks ties even when selected queues differ."""
         now = datetime.now(UTC)
         older = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-fifo-older",
             callable_path="testproject.tasks.add_numbers",
             queue_name="batch",
@@ -1342,6 +1365,7 @@ class TestWorkerSync:
             created_at=now - timedelta(seconds=1),
         )
         newer = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-fifo-newer",
             callable_path="testproject.tasks.add_numbers",
             queue_name="urgent",
@@ -1371,6 +1395,7 @@ class TestWorkerSync:
         """Eligible delayed/retried work shares the numeric ordering contract."""
         now = datetime.now(UTC)
         immediate = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-immediate",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1380,6 +1405,7 @@ class TestWorkerSync:
             kwargs_json="{}",
         )
         due = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-due",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1391,6 +1417,7 @@ class TestWorkerSync:
             attempt_number=2,
         )
         future = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-priority-future",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1519,6 +1546,7 @@ class TestWorkerRayJobFailureHandling:
 
         cmd = self._make_command()
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-ray-submit-retry-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1639,6 +1667,7 @@ class TestWorkerRayJobFailureHandling:
         """A SUCCEEDED Ray job with success=false payload should use retry logic."""
         cmd = self._make_command()
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-ray-reconcile-retry-002",
             callable_path="testproject.tasks.failing_task",
             queue_name="default",
@@ -1758,6 +1787,7 @@ class TestWorkerOrphanRecovery:
         )
 
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-orphan-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1794,6 +1824,7 @@ class TestWorkerOrphanRecovery:
         from datetime import datetime, timedelta
 
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-orphan-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -1842,6 +1873,7 @@ class TestWorkerOrphanRecovery:
         from django_ray.runner.reconciliation import mark_task_lost as real_mark_task_lost
 
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-orphan-lost-aba-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2205,6 +2237,7 @@ class TestWorkerResultStorage:
 
         large_text = "x" * 256
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-result-001",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -2230,6 +2263,7 @@ class TestWorkerResultStorage:
         )
 
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-result-002",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -2266,6 +2300,7 @@ class TestWorkerResultStorage:
 
         large_text = "x" * 256
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-result-004",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",
@@ -2350,6 +2385,7 @@ class TestWorkerResultStorage:
         )
 
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="test-result-005",
             callable_path="testproject.tasks.echo_task",
             queue_name="default",

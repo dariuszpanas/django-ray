@@ -1005,6 +1005,7 @@ def test_retry_rejects_fold_resource_drift_before_leaf_effects() -> None:
     from django_ray.workflow.progress.runs import allocate_workflow_run
 
     execution = RayTaskExecution.objects.create(
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         task_id="workflow-result-fold-plan-retry",
         callable_path=f"{__name__}.record_side_effect",
         state=TaskState.RUNNING,

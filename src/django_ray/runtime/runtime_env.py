@@ -358,16 +358,9 @@ def runtime_env_for_execution(
             raise RuntimeEnvSnapshotError(
                 f"django-ray: Persisted RuntimeEnv snapshot{task_label} has an incomplete identity"
             )
-        legacy_runtime_env: ResolvedRuntimeEnv | None
-        try:
-            legacy_runtime_env = resolve_runtime_env_profile()
-        except ImproperlyConfigured:
-            legacy_runtime_env = None
-        if legacy_runtime_env is None:
-            raise RuntimeEnvSnapshotError(
-                "django-ray: Legacy RuntimeEnv fallback could not be resolved"
-            )
-        return legacy_runtime_env
+        raise RuntimeEnvSnapshotError(
+            "django-ray: Legacy RuntimeEnv snapshot cannot execute; enqueue a new task"
+        )
 
     if profile is not None and not _PROFILE_NAME.fullmatch(profile):
         raise RuntimeEnvSnapshotError(

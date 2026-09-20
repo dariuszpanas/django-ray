@@ -611,6 +611,7 @@ class TestWorkerCommandCoverage:
     @pytest.mark.django_db
     def test_sync_execution_ignores_replacement_completion(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id="coverage-sync-stale-success-001",
             callable_path="testproject.tasks.add_numbers",
             state=TaskState.RUNNING,

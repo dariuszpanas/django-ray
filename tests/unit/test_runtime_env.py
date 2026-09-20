@@ -533,44 +533,23 @@ def test_execution_snapshot_detects_tampering() -> None:
         runtime_env_for_execution(execution)
 
 
-def test_legacy_execution_without_snapshot_identity_uses_current_default(settings) -> None:
-    settings.DJANGO_RAY = _config()
-    execution = SimpleNamespace(
-        pk=8,
-        runtime_env_profile=None,
-        runtime_env_json="{}",
-        runtime_env_hash="",
-    )
-
-    resolved = runtime_env_for_execution(execution)
-
-    assert resolved.profile == "thin"
-    assert resolved.spec == {"env_vars": {"MODE": "thin"}}
-
-
-def test_legacy_execution_sanitizes_default_resolution_failures(monkeypatch) -> None:
+@pytest.mark.parametrize("profile", [None, ""])
+@pytest.mark.parametrize("digest", [None, ""])
+def test_legacy_execution_refuses_current_default_resolution(monkeypatch, profile, digest) -> None:
     from django_ray.runtime import runtime_env as runtime_env_module
 
-    marker = "arbitrary-legacy-secret-18a7"
-    monkeypatch.setattr(
-        runtime_env_module,
-        "resolve_runtime_env_profile",
-        lambda: (_ for _ in ()).throw(ImproperlyConfigured(marker)),
-    )
+    def forbidden(*args, **kwargs):
+        pytest.fail("legacy execution resolved current configuration")
+
+    monkeypatch.setattr(runtime_env_module, "resolve_runtime_env_profile", forbidden)
     execution = SimpleNamespace(
         pk=8,
-        runtime_env_profile=None,
+        runtime_env_profile=profile,
         runtime_env_json="{}",
-        runtime_env_hash="",
+        runtime_env_hash=digest,
     )
-
-    with pytest.raises(
-        RuntimeEnvSnapshotError,
-        match="Legacy RuntimeEnv fallback could not be resolved",
-    ) as exc_info:
+    with pytest.raises(RuntimeEnvSnapshotError, match="Legacy RuntimeEnv snapshot cannot execute"):
         runtime_env_for_execution(execution)
-
-    _assert_snapshot_error_is_sanitized(exc_info.value, marker)
 
 
 def test_empty_snapshot_with_digest_remains_immutable(settings) -> None:

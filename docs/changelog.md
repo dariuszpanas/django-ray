@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution, receipt waiting and persistence observations in the bounded Job
   latency fixture. Preserve raw phase timestamps, deliberate hold time and the
   distinction between observed boundaries and internal Ray/database timings.
+- **Breaking:** Refuse execution and retry of historical tasks without a captured
+  RuntimeEnv identity instead of resolving today's default environment. Existing
+  history remains readable; enqueue new work explicitly under current settings.
+
 - **Breaking:** Reject durable workflow leaves that carry a task or workflow
   identity without a bound nested request, before application setup or progress
   publication. Current strict requests and standalone workflows remain supported;

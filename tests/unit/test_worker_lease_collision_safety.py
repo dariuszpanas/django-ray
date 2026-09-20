@@ -265,6 +265,7 @@ class TestWorkerLeaseCollisionSafety:
         command._create_lease("default")
 
         queued = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id=f"mode-claim-{execution_mode}",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
@@ -305,6 +306,7 @@ class TestWorkerLeaseCollisionSafety:
             queue_name="default",
         )
         overdue = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id=f"mode-expiry-{execution_mode}",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",

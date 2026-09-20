@@ -313,7 +313,7 @@ class TestWorkerDispatchAndReconnectHelpers:
             callable_path="testproject.tasks.add_numbers",
             runtime_env_profile=None,
             runtime_env_json="{}",
-            runtime_env_hash="",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         )
         cmd = _make_command()
         events: list[str] = []
@@ -350,7 +350,7 @@ class TestWorkerDispatchAndReconnectHelpers:
             execution_generation=0,
             runtime_env_profile=None,
             runtime_env_json="{}",
-            runtime_env_hash="",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         )
         cmd = _make_command()
         captured: list[dict[str, Any]] = []
@@ -393,7 +393,7 @@ class TestWorkerDispatchAndReconnectHelpers:
             execution_generation=7,
             runtime_env_profile=None,
             runtime_env_json="{}",
-            runtime_env_hash="",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         )
         cmd = _make_command(worker_id="worker-sync-fence")
         captured: list[dict[str, Any]] = []
@@ -1886,6 +1886,7 @@ class TestWorkerReconnectPollReconcile:
         self, monkeypatch, result_json: str
     ) -> None:
         task = RayTaskExecution.objects.create(
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             task_id=f"poll-stale-completion-{json.loads(result_json)['success']}-001",
             callable_path="testproject.tasks.add_numbers",
             queue_name="default",
