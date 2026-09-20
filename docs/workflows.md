@@ -542,6 +542,15 @@ events, including `STARTED`, `COMPLETED`, and `FAILED`, are never coalesced. Pro
 acknowledgement, or diagnostic failure remains observational and cannot replace the
 callable's result or exception.
 
+Coordinator map counters use the same per-producer bound, including forced
+updates. Time throttling still applies to ordinary updates, but a stalled actor
+does not accumulate another call on each interval. The final handoff can leave
+two unacknowledged replaceable calls: the original call and one latest value.
+Map registration, edges and terminal lifecycle events remain non-coalesced.
+These are per-producer limits, not a workflow-wide bound across maps, forked
+leaves or retries; aggregate admission remains tracked in
+[issue #261](https://github.com/dariuszpanas/django-ray/issues/261).
+
 Metrics are bounded operational metadata: use at most 32 scalar string, number,
 boolean, or null values. Keys are capped at 64 UTF-8 bytes, strings at 256 UTF-8
 bytes, and the normalized mapping at 4 KiB; sensitive or oversized values are

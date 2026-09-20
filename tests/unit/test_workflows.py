@@ -2852,6 +2852,7 @@ def test_ray_executor_map_lifecycle_uses_only_bounded_ingest(
     executor.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
     executor._progress_suppression_depth = 0
     executor._map_progress_sent_at = {}
+    executor._map_progress_producers = {}
     dependencies = tuple(f"0.upstream-{index}" for index in range(65))
 
     executor.map_started(
@@ -2916,6 +2917,7 @@ def test_progress_actor_requires_complete_run_identity() -> None:
     executor.workflow_run_identity = None
     executor._progress_suppression_depth = 0
     executor._map_progress_sent_at = {}
+    executor._map_progress_producers = {}
 
     with pytest.raises(AssertionError, match="complete run identity"):
         executor.map_started(

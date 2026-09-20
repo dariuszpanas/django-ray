@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevent application qualification from rejecting a heartbeat committed during
   its lease read as a future timestamp. Retain stale/future checks and emit
   fixed failure codes without exposing exception messages or RuntimeEnv data.
+- Coalesce coordinator map progress behind one outstanding acknowledgement and
+  one latest-value slot, including forced updates. Hand off at most one final
+  value before the terminal lifecycle event. This bounds each map producer;
+  workflow-wide admission across producers and retries remains pending.
 - Serialize concurrent updates and terminal handoff within a shared leaf-local
   workflow progress session. Preserve its one-outstanding-call bound and coherent
   terminal counters when threads report progress or finish at the same time.

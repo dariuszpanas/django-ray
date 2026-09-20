@@ -15,11 +15,14 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Siz
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.import_utils import import_callable
 from django_ray.workflow.contracts import WorkflowDefinitionKind
+
+if TYPE_CHECKING:
+    from django_ray.workflow.progress.producer import WorkflowProgressProducerSession
 
 
 class WorkflowDefinitionError(ValueError):
@@ -599,6 +602,7 @@ class _RayExecutor(_Executor):
         self._pending_progress_snapshot_ref = None
         self._progress_suppression_depth = 0
         self._map_progress_sent_at: dict[str, float] = {}
+        self._map_progress_producers: dict[str, WorkflowProgressProducerSession] = {}
         self._terminal_progress_publication_attempted = False
         self.reporting_policy = "full"
         self.workflow_progress_limits = WORKFLOW_PROGRESS_LIMITS_V1
@@ -1601,20 +1605,30 @@ class _RayExecutor(_Executor):
         last_sent = self._map_progress_sent_at.get(node_id, 0.0)
         if not force and now - last_sent < flush_seconds:
             return
-        from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
+        if self.workflow_run_identity is None:
+            raise AssertionError("a workflow progress actor requires a complete run identity")
+        from django_ray.workflow.progress.producer import WorkflowProgressProducerSession
 
-        if self._send_progress_event(
-            self.progress_actor,
-            WorkflowProgressEventKind.MAP_PROGRESS,
-            {
-                "node_id": node_id,
-                "label": label,
-                "submitted": submitted,
-                "completed": completed,
-                "input_exhausted": input_exhausted,
-            },
-        ):
-            self._map_progress_sent_at[node_id] = now
+        try:
+            producer = self._map_progress_producers.get(node_id)
+            if producer is None:
+                producer = WorkflowProgressProducerSession(
+                    self.progress_actor,
+                    self.workflow_run_identity.as_dict(),
+                    node_id,
+                    limits=self.workflow_progress_limits,
+                )
+                self._map_progress_producers[node_id] = producer
+            if producer.offer_map_progress(
+                label,
+                submitted=submitted,
+                completed=completed,
+                input_exhausted=input_exhausted,
+            ):
+                self._map_progress_sent_at[node_id] = now
+        except BaseException:
+            # Observational failures must not replace the workflow outcome.
+            return
 
     def map_finished(
         self,
@@ -1631,17 +1645,20 @@ class _RayExecutor(_Executor):
             return
         from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
-        self._send_progress_event(
-            self.progress_actor,
-            WorkflowProgressEventKind.MAP_PROGRESS,
-            {
-                "node_id": node_id,
-                "label": label,
-                "submitted": submitted,
-                "completed": completed,
-                "input_exhausted": input_exhausted,
-            },
+        self.map_progress(
+            node_id,
+            label,
+            submitted=submitted,
+            completed=completed,
+            input_exhausted=input_exhausted,
+            force=True,
         )
+        producer = self._map_progress_producers.get(node_id)
+        if producer is not None:
+            try:
+                producer.finish()
+            except BaseException:
+                pass
         self._send_progress_event(
             self.progress_actor,
             (WorkflowProgressEventKind.FAILED if failed else WorkflowProgressEventKind.COMPLETED),
