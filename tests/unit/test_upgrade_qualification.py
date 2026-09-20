@@ -303,3 +303,59 @@ def test_sqlite_restore_checks_django_constraints_and_closes_connections(tmp_pat
     # paths must release the connection before fixture cleanup.
     (tmp_path / "restored.sqlite3").unlink()
     (tmp_path / "backup").unlink()
+
+
+@pytest.mark.parametrize("version", ["0.4.0", "0.5.0", "0.6.0"])
+@pytest.mark.parametrize("refusal", ["25006", "unexpected-error", "accepted"])
+def test_native_graph_read_only_fence_is_independent_of_module_layout(
+    monkeypatch, version, refusal
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import django.db
+    import django.db.transaction
+
+    import django_ray
+    from qualification.upgrade import native_workflow
+
+    monkeypatch.setattr(django_ray, "__version__", version)
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ("on",)
+    connection = MagicMock(vendor="postgresql")
+    connection.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr(django.db, "connection", connection)
+    monkeypatch.setattr(django.db.transaction, "atomic", nullcontext)
+
+    def topology(*args, **kwargs):
+        if refusal == "accepted":
+            return []
+        cause = RuntimeError("database read-only refusal")
+        cause.sqlstate = refusal
+        raise django.db.InternalError("cannot lock read-only rows") from cause
+
+    reads = SimpleNamespace(
+        get_workflow_progress_summary=Mock(return_value={}),
+        list_workflow_topology_nodes=Mock(side_effect=topology),
+    )
+    modules = []
+
+    def import_module(name):
+        modules.append(name)
+        return reads if name.endswith("reads") else SimpleNamespace()
+
+    monkeypatch.setattr(native_workflow, "importlib", SimpleNamespace(import_module=import_module))
+    execution = SimpleNamespace(pk=1)
+    if refusal == "25006":
+        native_workflow.read_graph(execution)
+    else:
+        with pytest.raises(AssertionError):
+            native_workflow.read_graph(execution)
+    assert modules[0] == (
+        "django_ray.workflow_progress_reads"
+        if version == "0.4.0"
+        else "django_ray.workflow.progress.reads"
+    )
+    reads.list_workflow_topology_nodes.assert_called_once()
+    cursor.execute.assert_called_once_with("SHOW default_transaction_read_only")

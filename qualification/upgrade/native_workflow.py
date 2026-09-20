@@ -27,19 +27,21 @@ def read_graph(execution):
     import django_ray
 
     # 0.5 reorganized these modules; invoke each installed version's own reader.
-    released = django_ray.__version__ == "0.4.0"
+    legacy_modules = django_ray.__version__ == "0.4.0"
     reads = importlib.import_module(
-        "django_ray.workflow_progress_reads" if released else "django_ray.workflow.progress.reads"
+        "django_ray.workflow_progress_reads"
+        if legacy_modules
+        else "django_ray.workflow.progress.reads"
     )
     graphs = importlib.import_module(
-        "django_ray.admin_workflow_graph" if released else "django_ray.workflow.admin_graph"
+        "django_ray.admin_workflow_graph" if legacy_modules else "django_ray.workflow.admin_graph"
     )
 
     def authorize(row):
         return row.pk == execution.pk
 
     envelope = reads.get_workflow_progress_summary(execution, authorize=authorize)
-    if released and connection.vendor == "postgresql":
+    if connection.vendor == "postgresql":
         with connection.cursor() as cursor:
             cursor.execute("SHOW default_transaction_read_only")
             read_only = cursor.fetchone() == ("on",)
