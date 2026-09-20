@@ -317,7 +317,7 @@ def test_ci_runs_the_broad_matrix_for_every_open_pr_push() -> None:
     workflow = _workflow()
     assert workflow["on"]["pull_request"] == {
         "branches": ["main"],
-        "types": ["opened", "synchronize", "reopened", "ready_for_review"],
+        "types": ["opened", "synchronize", "reopened"],
     }
     assert "run-name" not in workflow
 
@@ -1099,7 +1099,7 @@ def test_yaga_required_requires_pinned_spelling_without_author_allowlist() -> No
 
 def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> None:
     document = _workflow(WORKFLOWS / "upgrade-native-qualification.yml")
-    assert document["permissions"] == {"contents": "read", "checks": "read"}
+    assert document["permissions"] == {"contents": "read", "checks": "read", "actions": "read"}
     assert set(document["on"]) == {"pull_request", "workflow_dispatch"}
     job = document["jobs"]["native"]
     assert job["strategy"]["max-parallel"] == "1"
@@ -1116,12 +1116,9 @@ def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> 
     assert checkout["ref"] == job["env"]["SOURCE_SHA"]
     assert checkout["persist-credentials"] == "false"
     checkpoint = steps[1]["run"]
-    assert "commits/$SOURCE_SHA/check-runs" in checkpoint
-    assert '.name == "CI Gate"' in checkpoint
-    assert "success) exit 0" in checkpoint
-    assert "exit 1" in checkpoint
+    assert checkpoint == "python scripts/wait_for_ci_checkpoint.py"
     commands = "\n".join(step.get("run", "") for step in steps)
-    assert commands.index("No passing exact-source") < commands.index("docker compose build")
+    assert commands.index("wait_for_ci_checkpoint.py") < commands.index("docker compose build")
     assert "1200s" in commands
     cleanup = next(step for step in steps if step.get("name") == "Remove owned test resources")
     assert cleanup["if"] == "always()"
@@ -1131,5 +1128,5 @@ def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> 
         in cleanup["run"]
     )
     upload = steps[-1]
-    assert upload["if"] == "always()"
+    assert upload["if"] == "always() && steps.native_rehearsal.outcome != 'skipped'"
     assert upload["with"]["name"] == "upgrade-native-qualification-${{ matrix.recipe }}"

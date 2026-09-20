@@ -8,6 +8,19 @@ The `Job Latency Qualification` workflow similarly runs after exact-source Linux
 for polling-fixture changes. Its passing receipts and cleanup must be reviewed before
 accepting measurement changes; it does not run inside the prerequisite `CI Gate`.
 
+Application, native upgrade and latency qualification inspect the latest `CI`
+workflow run for the exact source commit and its current attempt. They wait for
+an active replacement instead of treating a cancelled predecessor's aggregate
+check as authoritative. Completed failures remain blocking. The checkpoint logs
+the source commit, CI run and attempt; its wait deadline is finite. Moving a PR
+from draft to ready does not restart the broad CI matrix.
+
+After repairing or retrying a genuine CI failure, explicitly rerun any affected
+qualification that stopped at its prerequisite and inspect its receipts. A green
+CI rerun does not turn an earlier red qualification into passing evidence. Keep
+the original failure logs and explain any reused identical-source evidence in
+the PR; do not silently treat a failed deployed check as waived.
+
 Thank you for your interest in contributing to django-ray!
 
 Changes to an adopter-facing import, setting, command, metric, lifecycle status, or

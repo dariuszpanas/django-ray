@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - scripts/wait_for_ci_checkpoint.py
       - '.github/workflows/application-qualification.yml'
       - 'qualification/application/**'
       - 'testproject/**'
@@ -23,6 +24,7 @@ on:
 permissions:
   contents: read
   checks: read
+  actions: read
 
 concurrency:
   group: application-qualification-${{ github.event.pull_request.number || github.run_id }}
@@ -48,18 +50,7 @@ jobs:
         timeout-minutes: 20
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          for attempt in $(seq 1 40); do
-            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/check-runs" \
-              --jq '[.check_runs[] | select(.name == "CI Gate")] | sort_by(.started_at) | last | .conclusion // "pending"')
-            case "$conclusion" in
-              success) exit 0 ;;
-              pending) sleep 25 ;;
-              *) echo "::error::Linux CI checkpoint did not pass"; exit 1 ;;
-            esac
-          done
-          echo "::error::No passing exact-source Linux CI Gate within the checkpoint deadline"
-          exit 1
+        run: python scripts/wait_for_ci_checkpoint.py
 
       - name: Install pinned public test tools
         timeout-minutes: 5

@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make application, native upgrade and latency qualification follow the latest
+  exact-source CI workflow attempt rather than an obsolete aggregate check.
+  Preserve failure blocking, avoid draft-to-ready cancellation races, and log
+  the selected run and attempt for review.
+
 - Explain disabled workflow reporting on the Admin graph endpoint when the
   current attempt has no publication. Infer only a bounded valid current policy;
   malformed, oversized and archived selections do not invent graph history.

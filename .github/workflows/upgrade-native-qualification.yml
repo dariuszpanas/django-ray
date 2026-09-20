@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - scripts/wait_for_ci_checkpoint.py
       - .github/workflows/upgrade-native-qualification.yml
       - qualification/upgrade/**
       - qualification/transactions/Dockerfile
@@ -20,6 +21,7 @@ on:
 permissions:
   contents: read
   checks: read
+  actions: read
 
 concurrency:
   group: upgrade-native-${{ github.event.pull_request.number || github.run_id }}
@@ -60,18 +62,7 @@ jobs:
         timeout-minutes: 20
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          for attempt in $(seq 1 40); do
-            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/check-runs" \
-              --jq '[.check_runs[] | select(.name == "CI Gate")] | sort_by(.started_at) | last | .conclusion // "pending"')
-            case "$conclusion" in
-              success) exit 0 ;;
-              pending) sleep 25 ;;
-              *) echo "::error::Linux CI checkpoint did not pass"; exit 1 ;;
-            esac
-          done
-          echo "::error::No passing exact-source Linux CI Gate within the checkpoint deadline"
-          exit 1
+        run: python scripts/wait_for_ci_checkpoint.py
 
       - name: Verify disposable runner capacity before building
         run: |
@@ -109,6 +100,7 @@ jobs:
           docker image inspect django-ray-upgrade-qualification:local --format '{{.Id}}' > "$RUNNER_TEMP/upgrade-image.txt"
 
       - name: Rehearse stopped writers, restoration and native execution
+        id: native_rehearsal
         run: |
           set -o pipefail
           timeout --signal=INT --kill-after=20s 1200s \
@@ -139,7 +131,7 @@ jobs:
           PY
 
       - name: Retain native-stage evidence and explicit remaining acceptance
-        if: always()
+        if: always() && steps.native_rehearsal.outcome != 'skipped'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: upgrade-native-qualification-${{ matrix.recipe }}
