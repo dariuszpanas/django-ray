@@ -1072,12 +1072,24 @@ def test_yaga_candidate_reads_trusted_policy_without_pr_checkout() -> None:
     fetch = steps[1]
     assert "refs/pull/${PR_NUMBER}/head:${pr_ref}" in fetch["run"]
     assert 'test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"' in fetch["run"]
-    assert steps[2]["with"] == {"trusted-config": ".yaga.toml"}
-    assert steps[2]["uses"] == (
-        "dariuszpanas/yaga/actions/commit-check@84ee59391cc6a670c34d81babdce39090a69e7a0"
+    assert steps[3]["with"] == {"trusted-config": ".yaga.toml"}
+    assert steps[3]["uses"] == (
+        "dariuszpanas/yaga/actions/commit-check@edd052701cb67a4bae0573d1654cd4de43d36073"
     )
 
 
 def test_yaga_candidate_explicitly_skips_trusted_dependabot_policy() -> None:
     config = tomllib.loads((PROJECT_ROOT / ".yaga.toml").read_text(encoding="utf-8"))
     assert config["commit"]["dependabot-pull-requests"] == "skip"
+
+
+def test_yaga_candidate_requires_pinned_spelling_without_author_allowlist() -> None:
+    config = tomllib.loads((PROJECT_ROOT / ".yaga.toml").read_text(encoding="utf-8"))
+    assert config["commit"]["typos"] == "check"
+    assert not config["commit"].get("skip-pull-request-authors")
+    steps = _jobs(WORKFLOWS / "yaga-commit-qualification.yml")["candidate"]["steps"]
+    install = steps[2]["run"]
+    assert 'mktemp -d "$RUNNER_TEMP/typos.XXXXXX"' in install
+    assert "v1.50.2/typos-v1.50.2-x86_64-unknown-linux-musl.tar.gz" in install
+    assert "abcb3e257c7c2abeff4d903f7fe68071357637605bdb283ce2251f44bc70dc09" in install
+    assert "sha256sum --check" in install

@@ -298,6 +298,13 @@ rules for trusted same-repository Dependabot PRs on `dependabot/` branches. Even
 and fetched-head verification still apply; ordinary PRs cannot opt out by using
 a bot-like branch name. The required `Commit Messages` exemption is unchanged.
 
+The advisory candidate checks spelling in titles and full commit messages with
+Typos 1.50.2, installed outside the checkout after SHA-256 verification. Trusted
+YAGA mode uses the built-in dictionary with `--isolated`; PR, parent and global
+Typos configuration cannot weaken it. Findings and missing or broken tools fail
+the candidate check. Dependabot remains exempt after provenance validation;
+no general PR author allowlist is enabled. Required commitlint is unchanged.
+
 ### Repository spelling
 
 Run `make spelling-check` to check docs, source, tests and configuration with
