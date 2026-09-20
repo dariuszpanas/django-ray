@@ -95,7 +95,10 @@ def test_default_publisher_is_not_misrepresented_as_pilot(fixture_runner, monkey
 
 
 @pytest.mark.parametrize("case", runner.workflow_cases(), ids=lambda case: case.name)
-def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch, case):
+@pytest.mark.parametrize("browser_mutates", [False, True])
+def test_execute_observes_each_durable_attempt_after_one_submission(
+    monkeypatch, case, browser_mutates
+):
     task_id = "f717c512-17d7-4b5e-b778-d614fb14427c"
     identities = [
         {"schema_version": 1, "run_id": task_id, "attempt_number": n, "execution_generation": n}
@@ -146,6 +149,13 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
     monkeypatch.setattr(runner, "read_disabled_workflow_graph", graph)
     admin = Mock(return_value={"admin_workflow": "verified"})
     monkeypatch.setattr(runner, "observe_admin_contract", admin)
+    browser = Mock(return_value={"status": "passed"})
+    monkeypatch.setattr(runner, "observe_rendered_workflow", browser)
+    fingerprints = Mock(
+        side_effect=([("original",)] * (2 if case.name == "admin-display-limit" else 0))
+        + [("original",), ("changed" if browser_mutates else "original",)]
+    )
+    monkeypatch.setattr(runner, "_protected_diagnostics", fingerprints)
     polling = {
         "task_id": task_id,
         "state": case.states[-1],
@@ -167,9 +177,19 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
         expected["admin_contract"] = {"admin_workflow": "verified"}
     if case.name == "admin-display-limit":
         expected["diagnostics_preserved"] = True
-    assert runner.execute_case(request, token="fixture-token", case=case) == [expected] * len(
-        case.states
-    )
+    expected_attempts = [dict(expected) for _ in case.states]
+    expected_attempts[-1]["browser_contract"] = {"status": "passed", "diagnostics_preserved": True}
+    if browser_mutates:
+        with pytest.raises(ValueError, match="Browser observation changed protected"):
+            runner.execute_case(request, token="fixture-token", case=case)
+        browser.assert_called_once()
+        assert fingerprints.call_count == (4 if case.name == "admin-display-limit" else 2)
+        return
+    assert runner.execute_case(request, token="fixture-token", case=case) == expected_attempts
+    browser.assert_called_once()
+    assert browser.call_args.kwargs["execution_pk"] == 12
+    assert browser.call_args.kwargs["policy"] == case.policy
+    assert browser.call_args.kwargs["admin_cookie"] == "fixture-cookie"
     if case.name != "recovery":
         from testproject.apps.cluster_tasks import tasks as fixture_tasks
 

@@ -11,3 +11,12 @@ COPY --chown=1000:1000 qualification/application/*.py /app/qualification/applica
 
 # Preserve the base application's non-root user, entrypoint and default mode.
 # Assertion Jobs select their finite Python module with an explicit command.
+
+# Browser tooling belongs only to the disposable qualification layer.
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/qualification-browser-cache
+RUN /usr/local/bin/python -m venv /opt/qualification-browser && \
+    /opt/qualification-browser/bin/pip install --no-cache-dir playwright==1.63.0 && \
+    /opt/qualification-browser/bin/python -m playwright install --with-deps --only-shell chromium && \
+    rm -rf /var/lib/apt/lists/*
+USER django

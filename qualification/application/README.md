@@ -259,8 +259,14 @@ against the recorded source without exposing application diagnostics or credenti
 This is explicitly a pilot-publication baseline, not proof that the package's default publisher
 supports Admin graphs. The reader checks publication identity, API/Admin agreement and independent
 fixture topology and state expectations. The reused HTML checker verifies escaped and redacted
-diagnostic presentation, but does not execute browser JavaScript or establish exhaustive redaction
-coverage. Receipts also report
+diagnostic presentation. A separate Chromium child executes the shipped Admin JavaScript, opens
+current and archived graph disclosures, and checks visible terminal node/edge counts, edge geometry,
+failure states and disabled/terminal-only explanations against independently verified API facts.
+Failed archived attempts retain the exact verified count of unstarted nodes; terminal graphs
+must not contain running nodes. A failed workflow does not imply that every planned node ran.
+The integrated size cases check the visible 65-node graph and the 101-node display-limit guidance
+without rendering a partial over-limit graph.
+This does not establish exhaustive redaction or default-publication coverage. Receipts also report
 `complete_workflow_gate: false`; issue #512 tracks the remaining assertions.
 Before failure cleanup, the runner also retains at most 100 RayCluster, Pod and Event records
 per resource, capped at 64 KiB per file. These include status and event messages, never resource
@@ -295,7 +301,7 @@ mode requires current-source Linux CI before repeating the application test.
 Disabled-policy cases check authenticated API and Admin JSON responses for an
 explicit disabled explanation without a run identity, publication or graph.
 Database checks reject current/archived progress and staged run storage. These
-cases do not claim rendered disabled-page coverage or package-default activation;
+cases do not claim package-default activation;
 the full-policy cases still exercise the explicitly enabled pilot publisher.
 
 
@@ -306,6 +312,23 @@ Authenticated attempt/publication-pinned API reads must retain all 101 successfu
 records, with a 256 KiB response ceiling; repeated cursors, missing records and changed
 identities fail the stage. Admin must return a bounded empty `LIMIT_EXCEEDED` graph and
 point to the paginated API. Anonymous access is denied and diagnostic/history fingerprints
-must remain unchanged. This case does not execute browser JavaScript or qualify default
-publication. It uses existing deadlines/capacity, no new submission route, and explicit full
+must remain unchanged. The separate browser observer checks the rendered limit guidance and
+absence of graph nodes; this does not qualify default publication. It uses existing deadlines/capacity, no new submission route, and explicit full
 pilot reporting. The exact callable is added to the sample's authenticated read policy.
+
+### Rendered Admin observation
+
+The qualification image adds Playwright 1.63.0 and its matching Chromium headless shell in an
+isolated environment; application dependencies and the production base image are unchanged.
+Each fixed workflow case launches one browser subprocess with a 45-second wall deadline and a
+fresh process group. The caller kills any remaining descendants and waits for its child on success
+or failure. The existing assertion Pod CPU, memory, scratch and overall deadline remain enforced;
+this does not claim a separate browser memory limit. Browser traffic is limited to same-origin GET
+requests. The disposable session travels on private stdin and is removed by the existing session
+owner. No screenshots, DOM text, cookies, raw browser errors or arbitrary URLs enter receipts.
+Server-side fingerprints additionally verify that the browser visit preserves protected diagnostics
+and task history. The result retains policy, attempt count, preservation and a zero-JavaScript-error
+assertion only. A browser
+failure may retain the verifier source line, without exception text. A failed browser
+observation fails qualification; unit mocks are not rendered evidence. Source-matched Linux execution
+before and after cold Ray is required before this workload can be accepted.

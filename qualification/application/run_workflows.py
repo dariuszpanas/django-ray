@@ -18,6 +18,10 @@ from uuid import UUID
 from qualification.application.api import TASK_FAILURE_STATES, validate_task_status_payload
 from qualification.application.run_api import ApplicationHttp, read_token
 from qualification.application.workflow_admin import _protected_diagnostics, observe_admin_contract
+from qualification.application.workflow_browser import (
+    BrowserObservationError,
+    observe_rendered_workflow,
+)
 from qualification.application.workflow_display_limit import read_admin_display_limit
 from qualification.application.workflow_http import (
     decode_workflow_object,
@@ -267,6 +271,17 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
                 policy=case.policy,
                 attempt=number if number < len(case.states) else None,
             )
+        before_browser = _protected_diagnostics(task_id)
+        browser_contract = observe_rendered_workflow(
+            request,
+            execution_pk=row.pk,
+            policy=case.policy,
+            observations=observations,
+            admin_cookie=cookie,
+        )
+        if _protected_diagnostics(task_id) != before_browser:
+            raise ValueError("Browser observation changed protected diagnostics or task history")
+        observations[-1]["browser_contract"] = {**browser_contract, "diagnostics_preserved": True}
     return observations
 
 
@@ -366,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
         with args.receipt.open("xb") as stream:
             stream.write(encoded)
     except Exception as error:
+        if isinstance(error, BrowserObservationError) and error.line is not None:
+            receipt["browser_failure_line"] = error.line
         if receipt["failed_stage"] is None:
             receipt["failed_stage"] = "receipt"
         receipt.update(status="failed")
