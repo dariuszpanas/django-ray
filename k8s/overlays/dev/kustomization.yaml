@@ -58,6 +58,10 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/env
         value:
+          - name: DJANGO_RAY_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
           - name: RAY_ADDRESS
             value: ray://ray-head-svc:10001
           - name: DJANGO_RAY_QUEUES

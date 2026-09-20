@@ -52,6 +52,10 @@ spec:
             - configMapRef:
                 name: django-ray-config
           env:
+            - name: DJANGO_RAY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: RAY_ADDRESS
               value: ray://ray-head-svc:10001
             - name: DJANGO_RAY_QUEUE
@@ -100,10 +104,13 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - test -d /proc/1 && grep -q python /proc/1/cmdline
+                - >-
+                  exec python testproject/manage.py django_ray_worker_ready
+                  --queue "${DJANGO_RAY_QUEUES:-${DJANGO_RAY_QUEUE:-default}}"
+                  --hostname "$DJANGO_RAY_POD_NAME" --json
             initialDelaySeconds: 30
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 6
           livenessProbe:
             exec:

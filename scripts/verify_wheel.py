@@ -82,6 +82,8 @@ EXPECTED_FILES = {
     "django_ray/migrations/0026_ray_task_target_execution_evidence.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
+    "django_ray/management/commands/django_ray_worker_ready.py",
+    "django_ray/worker_readiness.py",
     "django_ray/runner/ray_core.py",
     "django_ray/runner/ray_job.py",
     "django_ray/runtime/entrypoint.py",
@@ -321,6 +323,7 @@ def verify_installed_wheel(expected_version: str) -> None:
     expected_commands = {
         "django_ray_protocol_status",
         "django_ray_worker",
+        "django_ray_worker_ready",
     }
     missing_commands = expected_commands - get_commands().keys()
     if missing_commands:
