@@ -52,6 +52,7 @@ from testproject.apps.cluster_tasks.workflows import (
     WorkflowRecoveryEarlyFixtureError,
     WorkflowRecoveryMidFixtureError,
     WorkflowShowcaseFixtureError,
+    build_admin_limit_workflow,
     build_plan_overflow_workflow,
     inspect_runtime_environment,
     run_complex_branch_workflow,
@@ -728,3 +729,10 @@ def long_running_job(
 def plan_overflow_workflow_qualification() -> int:
     """Execute exactly 65 serial leaves with a fixed scalar and full reporting."""
     return build_plan_overflow_workflow().with_progress_reporting("full").run(42, use_ray=True)
+
+
+@task(queue_name="default")
+@bounded_sample_task
+def admin_display_limit_qualification() -> int:
+    """Run exactly 101 serial identity leaves under explicit full reporting."""
+    return build_admin_limit_workflow().with_progress_reporting("full").run(42, use_ray=True)

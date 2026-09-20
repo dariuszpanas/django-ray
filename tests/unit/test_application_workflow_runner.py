@@ -125,6 +125,7 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
     )
     manager = Mock()
     manager.only.return_value.get.return_value = row
+    manager.filter.return_value.exists.return_value = True
     monkeypatch.setattr("django_ray.models.RayTaskExecution.objects", manager)
     overflow = Mock()
     monkeypatch.setattr(runner, "verify_plan_overflow_storage", overflow)
@@ -139,6 +140,8 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
         runner, "qualification_admin_session", lambda: nullcontext("fixture-cookie")
     )
     graph = Mock(side_effect=lambda *_args, **_kwargs: {"observed": True})
+    monkeypatch.setattr(runner, "_protected_diagnostics", lambda _id: ("unchanged",))
+    monkeypatch.setattr(runner, "read_admin_display_limit", graph)
     monkeypatch.setattr(runner, "read_full_workflow_graph", graph)
     monkeypatch.setattr(runner, "read_disabled_workflow_graph", graph)
     admin = Mock(return_value={"admin_workflow": "verified"})
@@ -160,17 +163,30 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
         responses.insert(0, (200, json.dumps(submitted).encode()))
     request = Mock(side_effect=responses)
     expected = {"observed": True}
-    if case.policy != "disabled":
+    if case.policy != "disabled" and case.name != "admin-display-limit":
         expected["admin_contract"] = {"admin_workflow": "verified"}
+    if case.name == "admin-display-limit":
+        expected["diagnostics_preserved"] = True
     assert runner.execute_case(request, token="fixture-token", case=case) == [expected] * len(
         case.states
     )
+    if case.name != "recovery":
+        from testproject.apps.cluster_tasks import tasks as fixture_tasks
+
+        assert enqueue.call_args.args[0] is getattr(
+            fixture_tasks, case.callable_path.rsplit(".", 1)[1]
+        )
     if case.policy == "disabled":
         disabled_storage.assert_called_once_with(12)
         storage.assert_called_once_with(12)
         admin.assert_not_called()
         graph.assert_called_once()
         assert graph.call_args.kwargs["expected_state"] == case.states[0]
+        return
+    if case.name == "admin-display-limit":
+        assert graph.call_args.kwargs["run_identity"] == identities[0]
+        admin.assert_not_called()
+        enqueue.assert_called_once()
         return
     disabled_storage.assert_not_called()
     assert enqueue.call_count == (0 if case.name == "recovery" else 1)
@@ -240,3 +256,19 @@ def test_disabled_publication_checks_current_history_and_staging(retained):
             runner.verify_no_disabled_publication(task.pk)
     else:
         runner.verify_no_disabled_publication(task.pk)
+
+
+def test_combined_workload_retains_both_distinct_size_boundaries():
+    cases = runner.workflow_cases()
+    assert [case.name for case in cases] == [
+        "full-success",
+        "full-failure",
+        "terminal_only-success",
+        "terminal_only-failure",
+        "disabled-success",
+        "disabled-failure",
+        "recovery",
+        "plan-overflow",
+        "admin-display-limit",
+    ]
+    assert sum(len(case.states) for case in cases) == 11

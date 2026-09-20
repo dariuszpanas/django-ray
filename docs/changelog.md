@@ -103,6 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This covers plan overflow; default graph activation, rendered browser behavior
   and the separate Admin graph ceiling remain pending.
 
+
+- Add a fixed 101-node application qualification case for Admin display limits,
+  requiring retained paginated API detail and an honest empty Admin response.
+  This does not enable default graphs or establish rendered browser behavior.
+
 - Add a supported read-only worker-lease readiness API and management command
   with exact queue/hostname selection, optional worker ID, fixed JSON and exit
   codes. The Kubernetes worker example now checks lease readiness instead of
