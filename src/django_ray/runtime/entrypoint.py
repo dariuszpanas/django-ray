@@ -507,40 +507,8 @@ def _strict_request_rejection(
     return _StrictRequestRejectionResult(_fixed_unbound_request_rejection(classification))
 
 
-def _execute_legacy_payload(payload_json: str) -> str:
-    """Retain the released unversioned protocol-v1 payload adapter."""
-    from django_ray.input_storage import InputPayloadValidationError
-
-    try:
-        payload = json.loads(payload_json)
-        transport_version = payload.get("transport_version", 1)
-        if transport_version not in (1, 2):
-            raise InputPayloadValidationError(
-                f"Unsupported Ray Job input transport version: {transport_version}"
-            )
-        if transport_version == 2 and not payload.get("input_reference"):
-            raise InputPayloadValidationError(
-                "Ray Job input transport version 2 requires input_reference"
-            )
-        return execute_task(
-            callable_path=payload["callable_path"],
-            serialized_args=payload.get("serialized_args", "null"),
-            serialized_kwargs=payload.get("serialized_kwargs", "null"),
-            task_execution_pk=payload.get("task_execution_pk"),
-            task_id=payload.get("task_id"),
-            attempt_number=payload.get("attempt_number"),
-            execution_generation=payload.get("execution_generation"),
-            runtime_env_profile=payload.get("runtime_env_profile"),
-            runtime_env_hash=payload.get("runtime_env_hash", ""),
-            runtime_env_plan_identity=payload.get("runtime_env_plan_identity"),
-            input_reference=payload.get("input_reference"),
-        )
-    except Exception as error:
-        return _serialize_error(error)
-
-
 def execute_task_from_payload(payload_b64: str) -> str:
-    """Fence a strict request or execute the released protocol-v1 payload."""
+    """Execute independently bound strict requests; reject retired carriers."""
     from django_ray.execution_codec import (
         ExecutionRequestDecodeError,
         ExecutionRequestRejection,
@@ -563,8 +531,6 @@ def execute_task_from_payload(payload_b64: str) -> str:
     try:
         payload_json = _decode_payload_b64(payload_b64)
     except _PayloadDecodeError as error:
-        if expectation is None and not error.resource_limit:
-            return _serialize_error(error)
         classification = (
             ExecutionRequestRejection.RESOURCE_LIMIT
             if error.resource_limit
@@ -581,11 +547,7 @@ def execute_task_from_payload(payload_b64: str) -> str:
             ),
         )
     except ExecutionRequestDecodeError as error:
-        if expectation is not None or error.attempted_versioned:
-            return _strict_request_rejection(expectation, error.classification)
-        if not error.allows_legacy_fallback:
-            return _strict_request_rejection(expectation, error.classification)
-        return _execute_legacy_payload(payload_json)
+        return _strict_request_rejection(expectation, error.classification)
 
     # A versioned payload without an independent control-plane expectation is
     # never allowed to make its own identity trustworthy.

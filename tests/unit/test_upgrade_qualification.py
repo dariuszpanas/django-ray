@@ -378,3 +378,31 @@ def test_legacy_failure_manager_uses_cli_shutdown_semantics(monkeypatch):
         assert calls == [["django-ray-qualification", "django_ray_worker", "--concurrency=1"]]
     finally:
         RayJobRunner.get_logs = original_logs
+
+
+def test_retired_carriers_are_refused_in_a_fresh_process_before_setup():
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            "import json; from qualification.upgrade.carriers import verify_retired_carriers; "
+            "print(json.dumps(verify_retired_carriers()))",
+        ],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(root / "src"), str(root)])},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+    assert json.loads(result.stdout) == {
+        "job_carriers_refused": 4,
+        "core_carriers_refused": 2,
+        "malformed_job_refused": True,
+        "cli_refusal_exit": 78,
+        "application_boundary_calls": 0,
+        "django_setup": False,
+    }
+    assert not result.stderr

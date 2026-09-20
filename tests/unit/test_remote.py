@@ -318,24 +318,28 @@ def workflow_progress_target(value: int, *, fail: bool = False) -> int:
 
 def test_execute_django_task_remote_logs_failure(monkeypatch, capsys) -> None:
     payload = json.dumps({"success": False, "error": "boom"})
-    monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", lambda *args: payload)
+    monkeypatch.setattr(
+        "django_ray.runtime.entrypoint.execute_task", lambda *args, **kwargs: payload
+    )
 
-    result = execute_django_task_remote("tests.fake", "[]", "{}", 12)
+    result = _execute_strict_request(encode_execution_request(_strict_execution_request()))
 
     captured = capsys.readouterr()
     assert result == payload
-    assert "[Task 12] Starting: tests.fake" in captured.out
-    assert "[Task 12] FAILED: boom" in captured.err
+    assert "[Task 217] Starting: tests.strict_task" in captured.out
+    assert "[Task 217] FAILED: boom" in captured.err
 
 
 def test_execute_django_task_remote_logs_fixed_success_marker(monkeypatch, capsys) -> None:
     payload = json.dumps({"success": True, "result": {"password": "secret-value"}})
-    monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", lambda *args: payload)
+    monkeypatch.setattr(
+        "django_ray.runtime.entrypoint.execute_task", lambda *args, **kwargs: payload
+    )
 
-    execute_django_task_remote("tests.fake", "[]", "{}", 13)
+    _execute_strict_request(encode_execution_request(_strict_execution_request()))
 
     captured = capsys.readouterr()
-    assert "[Task 13] SUCCESS" in captured.out
+    assert "[Task 217] SUCCESS" in captured.out
     assert "secret-value" not in captured.out
     assert "result_type" not in captured.out
     assert "result_size_bytes" not in captured.out
@@ -351,15 +355,17 @@ def test_execute_django_task_remote_forwards_input_reference(monkeypatch) -> Non
 
     monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
 
-    execute_django_task_remote(
-        "tests.fake",
-        "null",
-        "null",
-        14,
+    request = replace(
+        _strict_execution_request(),
+        transport_version=2,
+        serialized_args="null",
+        serialized_kwargs="null",
         input_reference="resultfs://input",
     )
-
-    assert captured["kwargs"] == {"input_reference": "resultfs://input"}
+    _execute_strict_request(encode_execution_request(request))
+    forwarded = captured["kwargs"]
+    assert isinstance(forwarded, dict)
+    assert forwarded["input_reference"] == "resultfs://input"
 
 
 def test_execute_django_task_remote_propagates_attempt_and_generation(monkeypatch) -> None:
@@ -381,22 +387,13 @@ def test_execute_django_task_remote_propagates_attempt_and_generation(monkeypatc
 
     monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", fake_execute)
 
-    execute_django_task_remote(
-        "tests.fake",
-        "[]",
-        "{}",
-        15,
-        attempt_number=3,
-        execution_generation=9,
-        compiled_graph_submission_transport="ray-client",
-    )
-
+    _execute_strict_request(encode_execution_request(_strict_execution_request()))
     assert captured == {
-        "task_pk": 15,
+        "task_pk": 217,
         "execution_protocol_version": 1,
         "attempt_number": 3,
-        "execution_generation": 9,
-        "compiled_graph_submission_transport": "ray-client",
+        "execution_generation": 6,
+        "compiled_graph_submission_transport": "direct-ray-core",
     }
 
 
@@ -2604,3 +2601,25 @@ def test_progress_actor_cost_is_fixed_bounded_and_actor_observed(monkeypatch) ->
     serialized_cost = json.dumps(cost)
     assert "must-not-enter-cost" not in serialized_cost
     assert "accepted" not in serialized_cost
+
+
+@pytest.mark.parametrize("input_reference", [None, "private-input-reference"])
+def test_unversioned_durable_core_carrier_is_inert(monkeypatch, input_reference):
+    def forbidden(*args, **kwargs):
+        pytest.fail("retired carrier reached application execution")
+
+    monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", forbidden)
+    monkeypatch.setattr("django_ray.runtime.context.durable_task_execution", forbidden)
+    result = execute_django_task_remote(
+        "private.application.callback",
+        "[]",
+        "{}",
+        44,
+        attempt_number=1,
+        execution_generation=1,
+        input_reference=input_reference,
+    )
+    rejected = json.loads(result)
+    assert rejected["error"] == "execution request rejected: legacy_request"
+    assert rejected["retryable"] is False
+    assert "private" not in result

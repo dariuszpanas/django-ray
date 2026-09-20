@@ -14,10 +14,37 @@ from typing import Any
 import pytest
 import ray
 
+from django_ray.execution_codec import (
+    ExecutionIdentity,
+    ExecutionRequest,
+    decode_execution_completion,
+    encode_execution_request,
+)
 from tests.local_ray import init_local_ray
 
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+
+def _async_execution_request(pk, callable_path, args, transport="direct-ray-core"):
+    return ExecutionRequest(
+        identity=ExecutionIdentity(
+            task_execution_pk=pk,
+            task_id=f"async-execution-{pk}",
+            attempt_number=1,
+            execution_generation=1,
+        ),
+        execution_protocol_version=1,
+        callable_path=callable_path,
+        transport_version=1,
+        serialized_args=args,
+        serialized_kwargs="{}",
+        input_reference=None,
+        runtime_env_profile=None,
+        runtime_env_hash="0" * 64,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport=transport,
+    )
 
 
 def _ray_worker_execution_metadata_probe() -> dict[str, object]:
@@ -324,17 +351,33 @@ class TestRayRemoteExecution:
         remote_entrypoint: Any = ray.remote(execute_django_task_remote).options(
             runtime_env={"env_vars": {"DJANGO_SETTINGS_MODULE": "testproject.settings"}}
         )
-        result = json.loads(
-            ray.get(
-                remote_entrypoint.remote(
-                    "testproject.tasks.async_context_probe",
-                    '["ray-core"]',
-                    "{}",
-                    4242,
-                )
+        serialized_completion = ray.get(
+            remote_entrypoint.remote(
+                encode_execution_request(
+                    _async_execution_request(
+                        4242, "testproject.tasks.async_context_probe", '["ray-core"]'
+                    )
+                ),
+                expected_task_execution_pk=4242,
+                expected_task_id="async-execution-4242",
+                expected_attempt_number=1,
+                expected_execution_generation=1,
+                expected_execution_protocol_version=1,
             )
         )
+        result = json.loads(serialized_completion)
 
+        decoded = decode_execution_completion(
+            serialized_completion,
+            expected_identity=ExecutionIdentity(
+                task_execution_pk=4242,
+                task_id="async-execution-4242",
+                attempt_number=1,
+                execution_generation=1,
+            ),
+            expected_execution_protocol_version=1,
+        )
+        assert decoded.completion.success is True
         assert result["success"] is True
         assert result["result"] == {
             "value": "ray-core",
@@ -342,7 +385,7 @@ class TestRayRemoteExecution:
             "execution_id_after": 4242,
             "ray_job_driver_before": False,
             "ray_job_driver_after": False,
-            "task_id": None,
+            "task_id": None,  # The probe does not request an ORM lookup.
             "active_task_count": 1,
             "loop_running": True,
         }
@@ -350,10 +393,14 @@ class TestRayRemoteExecution:
         failure = json.loads(
             ray.get(
                 remote_entrypoint.remote(
-                    "testproject.tasks.async_failing_task",
-                    "[]",
-                    "{}",
-                    4243,
+                    encode_execution_request(
+                        _async_execution_request(4243, "testproject.tasks.async_failing_task", "[]")
+                    ),
+                    expected_task_execution_pk=4243,
+                    expected_task_id="async-execution-4243",
+                    expected_attempt_number=1,
+                    expected_execution_generation=1,
+                    expected_execution_protocol_version=1,
                 )
             )
         )
@@ -642,16 +689,13 @@ class TestRayRemoteExecution:
         """A local Ray Job driver completes an encoded async-task payload."""
         from ray.job_submission import JobSubmissionClient
 
-        payload = base64.urlsafe_b64encode(
-            json.dumps(
-                {
-                    "callable_path": "testproject.tasks.async_add_numbers",
-                    "serialized_args": "[20, 22]",
-                    "serialized_kwargs": "{}",
-                },
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).decode("ascii")
+        from django_ray.ray_job_protocol import build_ray_job_request_metadata
+
+        request = _async_execution_request(
+            4245, "testproject.tasks.async_add_numbers", "[20, 22]", "ray-job"
+        )
+        serialized = encode_execution_request(request)
+        payload = base64.urlsafe_b64encode(serialized.encode("utf-8")).decode("ascii")
         python_path = os.pathsep.join(
             path
             for path in (
@@ -664,6 +708,7 @@ class TestRayRemoteExecution:
         client = JobSubmissionClient("http://127.0.0.1:8265")
         job_id = client.submit_job(
             entrypoint=(f"python -m django_ray.runtime.entrypoint --payload-b64 {payload}"),
+            metadata=build_ray_job_request_metadata(request, serialized),
             runtime_env={
                 "env_vars": {
                     "DJANGO_SETTINGS_MODULE": "testproject.settings",

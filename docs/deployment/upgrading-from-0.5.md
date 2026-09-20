@@ -2,13 +2,22 @@
 
 This page describes changes currently on main after 0.5.0. It is preparation for
 an eventual release, not a release announcement or approval to deploy a candidate.
-The next version and the scope of default workflow graphs remain undecided.
-The following summary records the retained changes without selecting a version.
+The planned next release is 0.6.0, tracked in
+[the release scope](https://github.com/dariuszpanas/django-ray/issues/508).
+Default workflow graph activation and final upgrade acceptance remain pending.
 
 ## Changes currently on main
 
 ### Changed
 
+- Unversioned Ray Job payloads and positional Core durable-task submissions
+  are retired. They return a fixed, non-retryable execution rejection before
+  application setup or input loading. Malformed payloads also fail the CLI
+  with its unsupported-execution exit code, 78. Use current managers and their
+  independently bound request carriers; do not replay stored old submissions.
+  Complete the drain and stop old writers before upgrading. Resolve uncertain
+  outcomes explicitly. Historical rows/artifacts and standalone nested
+  workflow execution remain supported without rewriting their identities.
 - Django Admin dashboard links now require an explicit top-level Django
   `RAY_DASHBOARD_URL` setting. The implicit `http://localhost:8265` fallback is
   removed. Configure a URL reachable from the operator's browser; local
