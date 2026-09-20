@@ -273,7 +273,8 @@ def verify_installed_wheel(expected_version: str) -> None:
     import cryptography
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    if not cryptography.__version__ or len(AESGCM.generate_key(bit_length=256)) != 32:
+    Version(cryptography.__version__)
+    if len(AESGCM.generate_key(bit_length=256)) != 32:
         raise RuntimeError("cryptography runtime dependency could not be imported")
 
     import django

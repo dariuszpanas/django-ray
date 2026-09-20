@@ -13,11 +13,16 @@ import hashlib
 import math
 import random
 import time
-from typing import Any
+from typing import Any, TypedDict
 
 from django.tasks import task
 
 from testproject.workload_limits import bounded_sample_task
+
+
+class _SearchResult(TypedDict):
+    params: dict[str, Any]
+    score: float
 
 
 @task(queue_name="ml")
@@ -270,7 +275,7 @@ def hyperparameter_search(
     values = list(param_grid.values())
     combinations = list(itertools.product(*values))
 
-    results = []
+    results: list[_SearchResult] = []
 
     for combo in combinations:
         params = dict(zip(keys, combo, strict=True))
