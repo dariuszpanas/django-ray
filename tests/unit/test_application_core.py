@@ -106,6 +106,33 @@ def test_durable_evidence_authenticates_snapshot_and_manager(durable):
     assert "ciphertext" not in json.dumps(result)
 
 
+def test_owner_clock_is_captured_after_concurrent_heartbeat(durable, monkeypatch):
+    observed_at = timezone.now()
+    clock = [observed_at]
+    monkeypatch.setattr(timezone, "now", lambda: clock[0])
+
+    def read_worker(**kwargs):
+        clock[0] += timedelta(milliseconds=1)
+        durable.worker.last_heartbeat_at = clock[0]
+        return durable.worker
+
+    monkeypatch.setattr(TaskWorkerLease.objects, "get", read_worker)
+    result = run_core.verify_durable_task(
+        TASK_ID, profile="project", manager_prefix="django-manager-"
+    )
+    assert result["worker_id"] == "owned-worker"
+
+
+@pytest.mark.parametrize("offset", [-61, 1])
+def test_owner_clock_still_rejects_stale_or_future_heartbeats(durable, monkeypatch, offset):
+    observed_at = timezone.now()
+    monkeypatch.setattr(timezone, "now", lambda: observed_at)
+    durable.worker.last_heartbeat_at = observed_at + timedelta(seconds=offset)
+    with pytest.raises(run_core.CoreEvidenceError) as raised:
+        run_core.verify_durable_task(TASK_ID, profile="project", manager_prefix="django-manager-")
+    assert raised.value.code is run_core.CoreEvidenceFailure.OWNER_HEARTBEAT
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -188,8 +215,9 @@ def test_runtime_probe_uses_existing_bounded_api_route(durable, monkeypatch):
     }
 
 
+@pytest.mark.parametrize("classified", [False, True])
 def test_core_failure_retains_safe_api_progress_without_private_response(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, classified
 ):
     import django
 
@@ -201,6 +229,8 @@ def test_core_failure_retains_safe_api_progress_without_private_response(
         args[0].last_http_status = 200
         kwargs["evidence"].task_id = TASK_ID
         kwargs["evidence"].task_state = "FAILED"
+        if classified:
+            raise run_core.CoreEvidenceError(run_core.CoreEvidenceFailure.OWNER_HEARTBEAT)
         raise ValueError("private API response")
 
     monkeypatch.setattr(run_core, "verify_application_api", private_failure)
@@ -209,6 +239,7 @@ def test_core_failure_retains_safe_api_progress_without_private_response(
     output = capsys.readouterr().out
     assert "private" not in output
     failed = json.loads(output)
+    assert failed["failure_code"] == ("owner_heartbeat" if classified else "unclassified")
     assert failed["failed_stage"] == "application_api"
     assert failed["api_diagnostics"]["requests"] == 11
     assert failed["api_diagnostics"]["last_http_status"] == 200

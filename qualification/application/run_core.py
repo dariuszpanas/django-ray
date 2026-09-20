@@ -7,6 +7,7 @@ import json
 import os
 import time
 from dataclasses import asdict
+from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
 
@@ -17,6 +18,27 @@ from qualification.application.api import (
     verify_application_api,
 )
 from qualification.application.run_api import ApplicationHttp, read_token
+
+
+class CoreEvidenceFailure(StrEnum):
+    """Closed diagnostic vocabulary; never include observed values."""
+
+    EXECUTION_CONTRACT = "execution_contract"
+    OWNER_IDENTITY = "owner_identity"
+    OWNER_HEARTBEAT = "owner_heartbeat"
+    ATTEMPT_COUNT = "attempt_count"
+    ATTEMPT_MISMATCH = "attempt_mismatch"
+    RUNTIME_ENVELOPE = "runtime_envelope"
+    RUNTIME_KEY = "runtime_key"
+    RUNTIME_PROFILE = "runtime_profile"
+
+
+class CoreEvidenceError(ValueError):
+    """A failed fixed assertion whose code is safe in a diagnostic receipt."""
+
+    def __init__(self, code: CoreEvidenceFailure) -> None:
+        self.code = CoreEvidenceFailure(code)
+        super().__init__(self.code.value)
 
 
 def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> dict:
@@ -55,21 +77,27 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         or not row.finished_at
         or not row.created_at <= row.started_at <= row.finished_at <= now
     ):
-        raise ValueError("Durable application execution does not match the core contract")
+        raise CoreEvidenceError(CoreEvidenceFailure.EXECUTION_CONTRACT)
     worker = TaskWorkerLease.objects.get(worker_id=row.claimed_by_worker)
+    # A heartbeat may commit during the lease read. Compare the returned row
+    # against a clock captured after that observation, not before the query.
+    owner_observed_at = timezone.now()
     if (
         not worker.is_active
         or not worker.hostname.startswith(manager_prefix)
         or worker.django_ray_version != current_version
         or worker.started_at > row.started_at
-        or not now - timedelta(seconds=config["WORKER_LEASE_SECONDS"])
-        <= worker.last_heartbeat_at
-        <= now
     ):
-        raise ValueError("Durable application execution lacks a current manager owner")
+        raise CoreEvidenceError(CoreEvidenceFailure.OWNER_IDENTITY)
+    if not (
+        owner_observed_at - timedelta(seconds=config["WORKER_LEASE_SECONDS"])
+        <= worker.last_heartbeat_at
+        <= owner_observed_at
+    ):
+        raise CoreEvidenceError(CoreEvidenceFailure.OWNER_HEARTBEAT)
     attempts = list(row.attempts.all())
     if len(attempts) != 1:
-        raise ValueError("Core execution has unexpected attempt history")
+        raise CoreEvidenceError(CoreEvidenceFailure.ATTEMPT_COUNT)
     attempt = attempts[0]
     for field in (
         "attempt_number",
@@ -83,7 +111,7 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         "result_reference",
     ):
         if getattr(attempt, field) != getattr(row, field):
-            raise ValueError("Durable attempt differs from its execution")
+            raise CoreEvidenceError(CoreEvidenceFailure.ATTEMPT_MISMATCH)
 
     marker = "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
     if (
@@ -91,10 +119,10 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         or len(row.runtime_env_json.encode()) > 64 * 1024
         or marker in row.runtime_env_json
     ):
-        raise ValueError("RuntimeEnv storage is unbounded or exposes the plaintext canary")
+        raise CoreEvidenceError(CoreEvidenceFailure.RUNTIME_ENVELOPE)
     envelope = json.loads(row.runtime_env_json)
     if envelope.get("key_id") != "qualification":
-        raise ValueError("RuntimeEnv storage does not use the qualification key")
+        raise CoreEvidenceError(CoreEvidenceFailure.RUNTIME_KEY)
     plaintext = unprotect_runtime_env_snapshot(
         row.runtime_env_json,
         task_id=row.task_id,
@@ -111,7 +139,7 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         or runtime.get("env_vars", {}).get("DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE") != marker
         or runtime.get("working_dir") != os.environ["DJANGO_RAY_RECOVERY_WORKING_DIR"]
     ):
-        raise ValueError("Durable RuntimeEnv does not match the offline qualification profile")
+        raise CoreEvidenceError(CoreEvidenceFailure.RUNTIME_PROFILE)
     return {
         "task_id": row.task_id,
         "execution_id": row.pk,
@@ -236,8 +264,13 @@ def main(argv: list[str] | None = None) -> int:
             stream.write(encoded)
         receipt.update(status="passed", failed_stage=None)
         passed = True
-    except Exception:
+    except Exception as exc:
         # No raw HTTP/DB/Ray responses, RuntimeEnv plaintext or credentials.
+        receipt["failure_code"] = (
+            exc.code.value
+            if isinstance(exc, CoreEvidenceError) and isinstance(exc.code, CoreEvidenceFailure)
+            else "unclassified"
+        )
         receipt.pop("api", None)
         receipt.pop("executions", None)
         if request is not None:
