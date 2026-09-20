@@ -149,6 +149,7 @@ test-postgres:
 		tests/integration/test_ray_target_routing_coordination.py \
 		tests/integration/test_ray_worker_target_capabilities.py \
 		tests/integration/test_protocol_status.py \
+		tests/integration/test_worker_readiness.py \
 		tests/integration/test_execution_protocol_schema_migration.py \
 		tests/integration/test_ray_target_persistence_migration.py \
 		tests/integration/test_ray_task_target_binding_migration.py \

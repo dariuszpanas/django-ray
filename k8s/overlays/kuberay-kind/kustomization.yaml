@@ -219,9 +219,18 @@ patches:
       kind: Deployment
       name: django-ray-worker-ray-job
   - patch: |
-      - op: replace
-        path: /spec/template/spec/containers/0/env/1/value
-        value: default,high-priority,low-priority
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: django-ray-worker
+      spec:
+        template:
+          spec:
+            containers:
+              - name: django-ray-worker
+                env:
+                  - name: DJANGO_RAY_QUEUE
+                    value: default,high-priority,low-priority
     target:
       kind: Deployment
       name: django-ray-worker

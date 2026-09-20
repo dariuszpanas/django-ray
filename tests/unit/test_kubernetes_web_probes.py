@@ -73,6 +73,29 @@ def _allowed_hosts(resources: list[dict[str, Any]]) -> list[str]:
     return [host.strip() for host in config_map["data"]["DJANGO_ALLOWED_HOSTS"].split(",")]
 
 
+def test_worker_readiness_observes_its_lease_without_changing_liveness(
+    rendered_kustomization: tuple[Path, list[dict[str, Any]]],
+) -> None:
+    _, resources = rendered_kustomization
+    deployment = _resource(resources, kind="Deployment", name="django-ray-worker")
+    container = next(
+        item
+        for item in deployment["spec"]["template"]["spec"]["containers"]
+        if item["name"] == "django-ray-worker"
+    )
+    command = container["readinessProbe"]["exec"]["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    assert command[2] == (
+        "exec python testproject/manage.py django_ray_worker_ready "
+        '--queue "${DJANGO_RAY_QUEUES:-${DJANGO_RAY_QUEUE:-default}}" '
+        '--hostname "$DJANGO_RAY_POD_NAME" --json'
+    )
+    pod_name = next(item for item in container["env"] if item["name"] == "DJANGO_RAY_POD_NAME")
+    assert pod_name["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
+    assert "django_ray_worker_ready" not in " ".join(container["livenessProbe"]["exec"]["command"])
+    assert container["readinessProbe"]["timeoutSeconds"] > 0
+
+
 @pytest.mark.django_db
 def test_http_web_probes_send_a_host_django_accepts(
     rendered_kustomization: tuple[Path, list[dict[str, Any]]],

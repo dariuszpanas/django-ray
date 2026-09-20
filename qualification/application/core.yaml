@@ -735,6 +735,10 @@ spec:
                   - secretRef:
                       name: application-credentials
                   env:
+                  - name: DJANGO_RAY_POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
                   - name: DJANGO_SECRET_KEY_PART_ONE
                     valueFrom:
                       secretKeyRef:
@@ -761,10 +765,12 @@ spec:
                       command:
                       - /bin/sh
                       - -c
-                      - test -d /proc/1 && grep -q python /proc/1/cmdline
+                      - >-
+                        exec python testproject/manage.py django_ray_worker_ready
+                        --queue "$DJANGO_RAY_QUEUES" --hostname "$DJANGO_RAY_POD_NAME" --json
                     initialDelaySeconds: 5
                     periodSeconds: 10
-                    timeoutSeconds: 3
+                    timeoutSeconds: 10
                     failureThreshold: 6
                 volumes:
                 - name: runtime

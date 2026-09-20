@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a supported read-only worker-lease readiness API and management command
+  with exact queue/hostname selection, optional worker ID, fixed JSON and exit
+  codes. The Kubernetes worker example now checks lease readiness instead of
+  treating the presence of Python as readiness. This does not attest Ray
+  connectivity or available task capacity.
 - Document a Kubernetes execution golden path, browser-facing dashboard access,
   workflow Admin expectations and private worker-owned temporary storage for
   graph preparation. Clarify that successful task execution does not guarantee

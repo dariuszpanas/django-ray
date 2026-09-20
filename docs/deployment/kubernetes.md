@@ -169,6 +169,50 @@ overlays instead send `Host: django-ray.localhost`. The Kong local overlay delib
 readiness probe and process liveness probe for its overload-testing profile, while its HTTP startup
 probe sends the same local host header.
 
+### Task-manager worker readiness
+
+The base worker readiness probe checks a fresh database lease for its exact queue
+and Pod hostname with the supported command:
+
+```bash
+python manage.py django_ray_worker_ready --database default \
+  --queue default --hostname manager-pod --json
+```
+
+Use `--worker-id` when the exact lease ID is available. Without it, more than one
+live lease at the same coordinates is ambiguous. `--queue` is the exact advertised
+lease queue label; for a multi-queue worker, supply its normalized, ordered,
+comma-separated label. It is not a claim that an arbitrary queue is serviceable.
+The packaged example obtains the Pod name from the Downward API and assumes the
+default Pod hostname. Deployments with a custom hostname must pass that actual
+worker hostname instead.
+
+Exit codes are **0** for ready, **1** for no unique live lease, and **2** for invalid
+input, invalid settings or an unavailable observation. JSON has the fixed fields
+`schema_version` (1), `scope` (`worker_lease`), `status` and `reason`; it does not echo
+coordinates, rows or database error messages. Human output uses the same status
+and reason. A failed command also writes a fixed error to stderr. Reasons are
+`live_lease`, `no_live_lease`, `ambiguous_lease`, `invalid_coordinates`,
+`invalid_database`, `invalid_settings`, `transaction_active` or
+`database_unavailable`.
+
+The read uses one observation time and at most two constant database values.
+Active leases must have no stop time, must have started, and must have a heartbeat
+between that observation and the inclusive `WORKER_LEASE_SECONDS` cutoff.
+Future timestamps fail closed. Inactive history does not hide a current lease.
+The Python API `django_ray.worker_readiness.check_worker_lease_readiness` provides
+the same report without private leasing imports or model queries; call it outside
+a transaction so an older transaction snapshot cannot appear current. Database
+query duration still depends on the database; retain a finite probe timeout.
+
+This proves only observed task-manager lease readiness, not free concurrency,
+backlog serviceability, Ray connectivity, immutable target identity or application
+dispatcher readiness. Kubernetes readiness does not itself stop task claims.
+Keep liveness separate: the example retains its process check so a database or
+Ray outage does not by itself restart a live manager. Consumers can replace their
+private `TaskWorkerLease`/leasing probes after adopting a release containing this
+interface.
+
 All overlays use the same loopback access path. The historically named `kong-local` overlay keeps
 its larger capacity profile but no longer creates Kong or external ingress routes. Use
 `k8s-forward-ray`, `k8s-forward-grafana`, and `k8s-forward-prometheus` with an explicit context for
