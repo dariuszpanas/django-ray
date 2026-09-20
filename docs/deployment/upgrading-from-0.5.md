@@ -10,6 +10,13 @@ Default workflow graph activation and final upgrade acceptance remain pending.
 
 ### Changed
 
+- Independently bound inline Ray Job requests are retired as well. The old
+  `--payload-b64` CLI path refuses valid `rq1` requests before application setup,
+  without input loading or completion persistence, and exits 78. Current managers
+  submit stored `rq2` request references using `--request-ref-b64`. Stop old
+  producers at the coordinated Beta boundary; no stored submission is silently
+  converted or replayed. Strict-family rejection and inert historical reads stay
+  intact. This does not remove inline argument encoding inside a current request.
 - Durable workflow leaves also require a complete independently bound nested
   request. An old leaf carrying a task ID or workflow identity without that
   request is refused before application setup, import, invocation or progress

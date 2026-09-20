@@ -278,11 +278,17 @@ and PostgreSQL. Three additional unbound durable workflow-leaf variants must
 refuse before application/progress handling. Resource-free tests do not establish
 that hosted evidence.
 
+Two independently bound inline `rq1` Job requests must also refuse before those
+application boundaries, for both inline and referenced argument encodings.
+Their CLI refusal still exits 78 without exposing application values. Current
+`rq2` reference execution remains covered by native Jobs qualification; the
+native async CLI tests use stored references for success, failure and context.
+
 Keep these execution and historical-data boundaries separate:
 
 | Boundary | Current source to audit in the retirement change |
 | --- | --- |
-| Old Ray Job payload execution | Removed; `src/django_ray/runtime/entrypoint.py` returns fixed refusal before setup |
+| Old Ray Job payload execution | Unversioned and bound inline rq1 carriers refuse in `runtime/entrypoint.py` before setup; current stored rq2 references execute |
 | Positional unversioned remote invocation | Refused in `src/django_ray/runtime/remote.py`; standalone nested workflows remain supported |
 | Non-strict Job failure fallback | Retired log retrieval and automatic replay in `django_ray_worker.py`; unknown effects retain `LOST`. The diagnostic runner API remains separate from completion authority. |
 | Unbound durable workflow leaves | Refused before setup/publication in `runtime/remote.py`; coordinator requires complete strict durable context. Standalone no-context workflows remain supported. |

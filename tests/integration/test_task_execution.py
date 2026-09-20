@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,18 @@ def _async_execution_request(pk, callable_path, args, transport="direct-ray-core
         runtime_env_plan_identity={},
         compiled_graph_submission_transport=transport,
     )
+
+
+async def _async_job_context_probe():
+    """Assert context inside the rq2 Job without printing its return value."""
+    from django_ray.runtime.context import get_current_task_context, get_current_task_execution_pk
+
+    for _ in range(2):
+        context = get_current_task_context()
+        assert context is not None and context.ray_job_driver is True
+        assert get_current_task_execution_pk() == 4245
+        await asyncio.sleep(0)
+    return 42
 
 
 def _ray_worker_execution_metadata_probe() -> dict[str, object]:
@@ -681,21 +693,41 @@ class TestRayRemoteExecution:
         )
         assert rejection.observed_target.observed_runtime == runtime
 
+    @pytest.mark.parametrize("outcome", ["success", "failure", "context"])
     def test_ray_job_runs_async_task_through_cli_entrypoint(
         self,
         django_settings_env,
         ray_cluster,
+        tmp_path,
+        outcome,
     ):
-        """A local Ray Job driver completes an encoded async-task payload."""
+        """A local rq2 Job preserves async success, failure and context."""
         from ray.job_submission import JobSubmissionClient
 
-        from django_ray.ray_job_protocol import build_ray_job_request_metadata
+        from django_ray.ray_job_protocol import (
+            STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
+            build_ray_job_request_reference_metadata,
+            coordination_sha256,
+        )
+        from django_ray.ray_job_request_storage import prepare_ray_job_request
 
-        request = _async_execution_request(
-            4245, "testproject.tasks.async_add_numbers", "[20, 22]", "ray-job"
+        callable_path, args = {
+            "success": ("testproject.tasks.async_add_numbers", "[20, 22]"),
+            "failure": ("testproject.tasks.async_failing_task", "[]"),
+            "context": ("tests.integration.test_task_execution._async_job_context_probe", "[]"),
+        }[outcome]
+        request = _async_execution_request(4245, callable_path, args, "ray-job")
+        request = replace(
+            request, identity=replace(request.identity, task_id=f"async-job-{outcome}")
         )
         serialized = encode_execution_request(request)
-        payload = base64.urlsafe_b64encode(serialized.encode("utf-8")).decode("ascii")
+        prepared = prepare_ray_job_request(
+            serialized,
+            {
+                "INPUT_STORAGE_BACKEND": "filesystem",
+                "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path / "requests"),
+            },
+        )
         python_path = os.pathsep.join(
             path
             for path in (
@@ -707,8 +739,17 @@ class TestRayRemoteExecution:
         )
         client = JobSubmissionClient("http://127.0.0.1:8265")
         job_id = client.submit_job(
-            entrypoint=(f"python -m django_ray.runtime.entrypoint --payload-b64 {payload}"),
-            metadata=build_ray_job_request_metadata(request, serialized),
+            submission_id=(
+                f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}"
+                f"{coordination_sha256(request.identity)}"
+            ),
+            entrypoint=(
+                "python -m django_ray.runtime.entrypoint --request-ref-b64 "
+                f"{prepared.encoded_locator}"
+            ),
+            metadata=build_ray_job_request_reference_metadata(
+                request, serialized, prepared.reference, prepared.encoded_locator
+            ),
             runtime_env={
                 "env_vars": {
                     "DJANGO_SETTINGS_MODULE": "testproject.settings",
@@ -731,7 +772,11 @@ class TestRayRemoteExecution:
                 client.stop_job(job_id)
 
         assert status == "SUCCEEDED", logs
-        assert "django-ray task completed successfully" in logs
+        if outcome == "failure":
+            assert "django-ray task failed:" in logs
+            assert "Async task requested a retryable failure" in logs
+        else:
+            assert "django-ray task completed successfully" in logs
         assert "was never awaited" not in logs
 
 
