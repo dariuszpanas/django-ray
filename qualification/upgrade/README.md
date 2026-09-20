@@ -143,7 +143,16 @@ receipts continue to report `complete_upgrade_gate: false`.
 ### Opt-in native Core rehearsal
 
 `native.yaml` adds a sequential real-manager rehearsal on the same exact released
-and candidate wheels. It is not part of the routine hosted matrix. Use the source
+and candidate wheels. The path-selected [Upgrade Native Qualification workflow](../../.github/workflows/upgrade-native-qualification.yml)
+runs Core, Jobs, Jobs manager crash and Core/Ray loss serially on disposable
+hosted Linux runners against the reviewed 0.5.0 baseline. It waits for the exact
+source CI Gate before building, checks runner capacity, and retains separate
+source, archive, image, log and runtime receipts for each scenario. Every runtime
+container retains the limits below and a 1,200-second execution deadline. A
+passing run qualifies these native assertions only; it does not clear the
+remaining acceptance list or certify the inaccessible private deployment.
+
+For an admitted standalone environment, use the source
 export and baseline preparation above, select `qualification/upgrade/native.yaml`,
 and build/run service `native` under an outer 1,200-second timeout. The native
 service requires two CPUs, 8 GiB RAM without swap, 1,024 PIDs, 512 MiB shared

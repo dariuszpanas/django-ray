@@ -34,6 +34,9 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
+    ("upgrade-native-qualification.yml", "native"): (
+        "Path-selected deployed evidence is reviewed under the affected-gate policy"
+    ),
     ("upgrade-qualification.yml", "data"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
@@ -1093,3 +1096,41 @@ def test_yaga_candidate_requires_pinned_spelling_without_author_allowlist() -> N
     assert "v1.50.2/typos-v1.50.2-x86_64-unknown-linux-musl.tar.gz" in install
     assert "abcb3e257c7c2abeff4d903f7fe68071357637605bdb283ce2251f44bc70dc09" in install
     assert "sha256sum --check" in install
+
+
+def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> None:
+    document = _workflow(WORKFLOWS / "upgrade-native-qualification.yml")
+    assert document["permissions"] == {"contents": "read", "checks": "read"}
+    assert set(document["on"]) == {"pull_request", "workflow_dispatch"}
+    job = document["jobs"]["native"]
+    assert job["strategy"]["max-parallel"] == "1"
+    assert job["strategy"]["fail-fast"] == "false"
+    assert job["strategy"]["matrix"]["include"] == [
+        {"recipe": "native", "service": "native"},
+        {"recipe": "jobs", "service": "jobs"},
+        {"recipe": "jobs-crash", "service": "jobs"},
+        {"recipe": "core-loss", "service": "native"},
+    ]
+    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "0.5.0"
+    steps = job["steps"]
+    checkout = steps[0]["with"]
+    assert checkout["ref"] == job["env"]["SOURCE_SHA"]
+    assert checkout["persist-credentials"] == "false"
+    checkpoint = steps[1]["run"]
+    assert "commits/$SOURCE_SHA/check-runs" in checkpoint
+    assert '.name == "CI Gate"' in checkpoint
+    assert "success) exit 0" in checkpoint
+    assert "exit 1" in checkpoint
+    commands = "\n".join(step.get("run", "") for step in steps)
+    assert commands.index("No passing exact-source") < commands.index("docker compose build")
+    assert "1200s" in commands
+    cleanup = next(step for step in steps if step.get("name") == "Remove owned test resources")
+    assert cleanup["if"] == "always()"
+    assert "docker compose down --timeout 20 --remove-orphans" in cleanup["run"]
+    assert (
+        "docker ps -aq --filter label=com.docker.compose.project=upgrade-native-qualification"
+        in cleanup["run"]
+    )
+    upload = steps[-1]
+    assert upload["if"] == "always()"
+    assert upload["with"]["name"] == "upgrade-native-qualification-${{ matrix.recipe }}"
