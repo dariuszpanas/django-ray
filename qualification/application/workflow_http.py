@@ -12,7 +12,11 @@ from uuid import UUID
 
 from qualification.application.run_api import ApplicationHttp
 from qualification.application.workflow_envelopes import validate_workflow_envelope
-from qualification.application.workflow_fixtures import verify_complex_graph, verify_recovery_graph
+from qualification.application.workflow_fixtures import (
+    verify_complex_graph,
+    verify_plan_overflow_graph,
+    verify_recovery_graph,
+)
 
 COLLECTIONS = {
     "topology_nodes": "topology/nodes",
@@ -72,7 +76,7 @@ def read_full_workflow_graph(
         raise ValueError("Workflow observation requires a terminal outcome")
     if reporting_policy not in {"full", "terminal_only"}:
         raise ValueError("Workflow observation requires a supported reporting policy")
-    if fixture not in {None, "complex", "recovery"}:
+    if fixture not in {None, "complex", "recovery", "plan-overflow"}:
         raise ValueError("Workflow observation requires a known fixture")
     full = reporting_policy == "full"
     attempt = run_identity.get("attempt_number")
@@ -194,6 +198,8 @@ def read_full_workflow_graph(
         raise ValueError("Authenticated Admin graph differs from the pinned API publication")
     if full and fixture == "complex":
         verify_complex_graph(graph, failed=expected_state == "FAILED")
+    elif full and fixture == "plan-overflow":
+        verify_plan_overflow_graph(graph)
     elif full and fixture == "recovery":
         verify_recovery_graph(graph, attempt=attempt)
     if not full and (

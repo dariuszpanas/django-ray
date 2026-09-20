@@ -98,6 +98,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a fixed 65-step workflow qualification case that crosses the saved-plan
+  node limit while checking complete authenticated API/Admin graph output.
+  This covers plan overflow; default graph activation, rendered browser behavior
+  and the separate Admin graph ceiling remain pending.
+
 - Add a supported read-only worker-lease readiness API and management command
   with exact queue/hostname selection, optional worker ID, fixed JSON and exit
   codes. The Kubernetes worker example now checks lease readiness instead of

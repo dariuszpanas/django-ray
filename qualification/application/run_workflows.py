@@ -1,4 +1,4 @@
-"""Observe seven serial workflow fixtures through their API and Admin surfaces.
+"""Observe bounded serial workflow fixtures through their API and Admin surfaces.
 
 Run only inside the disposable application fixture. The outer workload owns the
 hard deadline, source/cold-Ray proof, cancellation and namespace cleanup.
@@ -71,6 +71,16 @@ def workflow_cases() -> tuple[WorkflowCase, ...]:
             "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
         )
     )
+    cases.append(
+        WorkflowCase(
+            "plan-overflow",
+            "",
+            (),
+            ("SUCCEEDED",),
+            "full",
+            "testproject.apps.cluster_tasks.tasks.plan_overflow_workflow_qualification",
+        )
+    )
     return tuple(cases)
 
 
@@ -88,9 +98,17 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
         # Production deliberately disables the complex-workflow demo route.
         # Submit these fixed cases through the same bounded Django task API.
         from testproject.admission import enqueue_sample
-        from testproject.apps.cluster_tasks.tasks import complex_workflow_benchmark
+        from testproject.apps.cluster_tasks.tasks import (
+            complex_workflow_benchmark,
+            plan_overflow_workflow_qualification,
+        )
 
-        result = enqueue_sample(complex_workflow_benchmark, **dict(case.options))
+        fixture_task = (
+            plan_overflow_workflow_qualification
+            if case.name == "plan-overflow"
+            else complex_workflow_benchmark
+        )
+        result = enqueue_sample(fixture_task, **dict(case.options))
         enqueue = {"task_id": result.id, "args": result.args, "kwargs": result.kwargs}
     else:
         status, body = request(
@@ -153,6 +171,8 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
     )
     if [item["state"] for item in attempts] != list(case.states):
         raise ValueError("Workflow history is missing, oversized or has unexpected outcomes")
+    if case.name == "plan-overflow":
+        verify_plan_overflow_storage(row.pk)
     if case.policy in {"terminal_only", "disabled"}:
         verify_no_workflow_detail(row.pk)
     if case.policy == "disabled":
@@ -207,7 +227,9 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
                     token=token,
                     admin_cookie=cookie,
                     reporting_policy=case.policy,
-                    fixture="recovery" if case.name == "recovery" else "complex",
+                    fixture=(
+                        case.name if case.name in {"recovery", "plan-overflow"} else "complex"
+                    ),
                 )
             )
             observations[-1]["admin_contract"] = observe_admin_contract(
@@ -236,6 +258,25 @@ def verify_no_disabled_publication(execution_pk: int) -> None:
         or WorkflowProgressRunStorage.objects.filter(execution_id=execution_pk).exists()
     ):
         raise ValueError("Disabled workflow retained publication storage")
+
+
+def verify_plan_overflow_storage(execution_pk: int) -> None:
+    """Require the bounded overflow sentinel before certifying its live graph."""
+    from django.db.models.functions import Length
+
+    from django_ray.models import RayTaskExecution
+    from qualification.application.workflow_fixtures import verify_plan_overflow_manifest
+
+    row = (
+        RayTaskExecution.objects.annotate(plan_size=Length("workflow_plan_json"))
+        .filter(pk=execution_pk, plan_size__lte=65536, result_data="42")
+        .values("workflow_plan_json")
+        .get()
+    )
+    serialized = row["workflow_plan_json"]
+    if not isinstance(serialized, str) or len(serialized.encode()) > 65536:
+        raise ValueError("Plan overflow fixture has no bounded plan")
+    verify_plan_overflow_manifest(decode_workflow_object(serialized))
 
 
 def verify_no_workflow_detail(execution_pk: int) -> None:

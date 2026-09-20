@@ -153,3 +153,41 @@ def verify_complex_graph(graph: Mapping[str, Any], *, failed: bool) -> None:
         != frozenset((a, b) for a, b in COMPLEX_EDGES if a in states and b in states)
     ):
         raise ValueError("Complex fixture failure changed its observed branch boundary")
+
+
+def verify_plan_overflow_graph(graph: Mapping[str, Any]) -> None:
+    """Require every executed leaf even though the saved plan is a sentinel."""
+    nodes = graph.get("nodes")
+    edges = graph.get("edges")
+    if (
+        not isinstance(nodes, list)
+        or len(nodes) != 65
+        or any(not isinstance(node, dict) for node in nodes)
+        or {node.get("id"): node.get("state") for node in nodes}
+        != {f"0.{index}": "SUCCEEDED" for index in range(65)}
+    ):
+        raise ValueError("Plan overflow fixture lost executed nodes or terminal states")
+    if (
+        not isinstance(edges, list)
+        or len(edges) != 64
+        or any(not isinstance(edge, dict) for edge in edges)
+        or {(edge.get("source"), edge.get("target")) for edge in edges}
+        != {(f"0.{index}", f"0.{index + 1}") for index in range(64)}
+    ):
+        raise ValueError("Plan overflow fixture changed its serial dependencies")
+
+
+def verify_plan_overflow_manifest(manifest: Mapping[str, Any]) -> None:
+    """Distinguish plan overflow from a small plan or absent plan metadata."""
+    snapshot = manifest.get("snapshot")
+    if (
+        manifest.get("nodes") != []
+        or not isinstance(snapshot, dict)
+        or snapshot.get("state") != "overflow"
+        or snapshot.get("reasons") != ["node_limit"]
+        or type(snapshot.get("observed_node_count")) is not int
+        or snapshot["observed_node_count"] != 65
+        or type(snapshot.get("observed_edge_count")) is not int
+        or snapshot["observed_edge_count"] != 64
+    ):
+        raise ValueError("Plan overflow fixture did not retain its expected sentinel")

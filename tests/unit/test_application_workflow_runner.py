@@ -126,6 +126,8 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
     manager = Mock()
     manager.only.return_value.get.return_value = row
     monkeypatch.setattr("django_ray.models.RayTaskExecution.objects", manager)
+    overflow = Mock()
+    monkeypatch.setattr(runner, "verify_plan_overflow_storage", overflow)
     storage = Mock()
     monkeypatch.setattr(runner, "verify_no_workflow_detail", storage)
     disabled_storage = Mock()
@@ -178,13 +180,14 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
     assert [call.kwargs["run_identity"] for call in graph.call_args_list] == identities
     assert [call.kwargs["expected_state"] for call in graph.call_args_list] == list(case.states)
     assert [call.kwargs["fixture"] for call in graph.call_args_list] == [
-        "recovery" if case.name == "recovery" else "complex"
+        case.name if case.name in {"recovery", "plan-overflow"} else "complex"
     ] * len(case.states)
     assert [call.kwargs["attempt"] for call in admin.call_args_list] == [
         *range(1, len(case.states)),
         None,
     ]
     assert storage.call_count == (1 if case.policy == "terminal_only" else 0)
+    assert overflow.call_count == (1 if case.name == "plan-overflow" else 0)
 
 
 @pytest.mark.parametrize("retained", [None, 0, 1, 2])

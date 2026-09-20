@@ -955,3 +955,15 @@ def run_runtime_env_cache_benchmark(
             else None
         ),
     }
+
+
+def plan_overflow_identity(value: int) -> int:
+    """Keep the fixed qualification payload unchanged without external effects."""
+    if type(value) is not int or value != 42:
+        raise ValueError("Plan overflow fixture requires its fixed scalar")
+    return value
+
+
+def build_plan_overflow_workflow():
+    """Cross the real 64-node plan limit with exactly 65 serial leaves."""
+    return chain(*(step(plan_overflow_identity) for _ in range(65)))
