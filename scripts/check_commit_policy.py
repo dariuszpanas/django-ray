@@ -28,6 +28,7 @@ def message(header: str, body: str = BODY, footer: str | None = VALIDATION) -> s
 def cases() -> list[tuple[str, str, str, int]]:
     """Retain the structural fixtures previously exercised through commitlint."""
     header = "fix(worker): preserve lease ownership"
+    misspelled_receive = "receive".replace("ei", "ie")
     fixtures = [
         ("descriptive", "message", message(header), 0),
         ("header-only", "message", header, 1),
@@ -59,6 +60,13 @@ def cases() -> list[tuple[str, str, str, int]]:
         ("revert", "message", message('Revert "' + header + '"'), 1),
         ("valid-title", "title", header, 0),
         ("invalid-title", "title", "Preserve lease ownership", 1),
+        ("title-spelling", "title", f"fix(worker): {misspelled_receive} lease ownership", 1),
+        (
+            "body-spelling",
+            "message",
+            message(header, BODY.replace("publish", misspelled_receive)),
+            1,
+        ),
     ]
     for separator in ("BREAKING CHANGE", "BREAKING-CHANGE"):
         fixtures.append(

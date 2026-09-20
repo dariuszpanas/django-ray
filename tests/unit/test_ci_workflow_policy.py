@@ -1073,7 +1073,7 @@ def test_yaga_required_reads_trusted_policy_without_pr_checkout() -> None:
     assert 'test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"' in fetch["run"]
     assert steps[3]["with"] == {"trusted-config": ".yaga.toml"}
     assert steps[3]["uses"] == (
-        "dariuszpanas/yaga/actions/commit-check@f4f87140c4e132b6cf645caddde951d10b978d56"
+        "dariuszpanas/yaga/actions/commit-check@f61bbfa878447157239bb92ff67977bd64400afd"
     )
 
 

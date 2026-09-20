@@ -32,7 +32,7 @@ The following summary records the retained changes without selecting a version.
   The receipts retain their incomplete release-acceptance status.
 - Add pinned YAGA workflow checks and repository-wide Typos checks for docs,
   source, tests and configuration.
-- Replace commitlint with released YAGA 0.1.2 in the required commit workflow,
+- Replace commitlint with released YAGA 0.2.0 in the required commit workflow,
   local hook and Make commands while preserving the existing structural rules.
   Add isolated commit spelling checks and retain the narrow trusted Dependabot
   exemption; repository spelling and ordinary CI still apply to dependency PRs.
