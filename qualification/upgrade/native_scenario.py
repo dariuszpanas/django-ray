@@ -16,7 +16,13 @@ from pathlib import Path
 
 from qualification.docker import scenario as wheel
 from qualification.upgrade import scenario as data
-from qualification.upgrade.contract import BACKENDS, BASELINE_COMMIT, MISSING
+from qualification.upgrade.contract import (
+    BACKENDS,
+    BASELINE_COMMIT,
+    BASELINE_VERSION,
+    CANDIDATE_VERSION,
+    MISSING,
+)
 from qualification.upgrade.prepare import verify_archive
 
 
@@ -44,6 +50,7 @@ def phase(root, backend, name, target, *, database, artifacts, runner, crash_man
     )
     env = wheel._subprocess_environment(install_target=target, source_root=data.ROOT)
     env.update(
+        DJANGO_RAY_UPGRADE_BASELINE=BASELINE_VERSION,
         PATH=str(python.parent) + os.pathsep + env.get("PATH", ""),
         DJANGO_SETTINGS_MODULE="qualification.upgrade.native_settings",
         DJANGO_RAY_UPGRADE_ROOT=str(root),
@@ -68,7 +75,7 @@ def phase(root, backend, name, target, *, database, artifacts, runner, crash_man
     )
     value = json.loads(wheel._bounded_regular_bytes(receipt, maximum=65536))
     assert value["phase"] == name and value["module"] == module
-    assert value["version"] == ("0.4.0" if released else "0.5.0")
+    assert value["version"] == (BASELINE_VERSION if released else CANDIDATE_VERSION)
     return value
 
 
@@ -179,6 +186,8 @@ def execute(runner="ray_core", *, crash_manager=False):
         "outcome": "passed" if failure is None else "failed",
         "failure": failure,
         "baseline_commit": BASELINE_COMMIT,
+        "baseline_version": BASELINE_VERSION,
+        "candidate_version": CANDIDATE_VERSION,
         "baseline_archive_sha256": wheel._sha256(Path("/opt/released-source.tar")),
         "candidate_source_files_sha256": wheel._package_tree_digest(data.ROOT),
         "identities": identities,

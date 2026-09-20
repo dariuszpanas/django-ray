@@ -2,9 +2,10 @@
 FROM python:3.12-slim-trixie AS released
 COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
 ENV UV_PROJECT_ENVIRONMENT=/opt/released-venv UV_LINK_MODE=copy UV_COMPILE_BYTECODE=0
+ARG UPGRADE_BASELINE_COMMIT=95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485
 WORKDIR /opt/released-source
 COPY --from=released-source source.tar /opt/released-source.tar
-RUN python -c "import tarfile; a=tarfile.open('/opt/released-source.tar'); assert a.pax_headers.get('comment') == '95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485'; a.extractall('/opt/released-source', filter='data')"
+RUN python -c "import os, tarfile; expected=os.environ['UPGRADE_BASELINE_COMMIT']; a=tarfile.open('/opt/released-source.tar'); assert expected in ('95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485', 'ab1186ba4520d8837d1a8658041e05427b990b4d'); assert a.pax_headers.get('comment') == expected; a.extractall('/opt/released-source', filter='data')"
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev --extra postgres \
     && uv build --wheel --out-dir /opt/released-wheels \

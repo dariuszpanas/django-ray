@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import json
+import os
+import tomllib
+from pathlib import Path
 from xml.etree import ElementTree
 
 from qualification.docker.scenario import QualificationError
 
-BASELINE_COMMIT = "95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485"
-BASELINE_VERSION = "0.4.0"
-CANDIDATE_VERSION = "0.5.0"
+BASELINES = {
+    "0.4.0": "95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485",
+    "0.5.0": "ab1186ba4520d8837d1a8658041e05427b990b4d",
+}
+BASELINE_VERSION = os.environ.get("DJANGO_RAY_UPGRADE_BASELINE", "0.4.0")
+if BASELINE_VERSION not in BASELINES:
+    raise QualificationError("unsupported-upgrade-baseline")
+BASELINE_COMMIT = BASELINES[BASELINE_VERSION]
+BASELINE_TAG = f"v{BASELINE_VERSION}"
+# The installed candidate must match this checkout, including pre-release work
+# before its version is bumped. Source digests distinguish equal-version trees.
+with (Path(__file__).resolve().parents[2] / "pyproject.toml").open("rb") as stream:
+    CANDIDATE_VERSION = tomllib.load(stream)["project"]["version"]
 BACKENDS = ("sqlite", "postgresql")
 PHASES = (
     "baseline-seed",

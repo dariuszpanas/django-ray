@@ -3,8 +3,8 @@
 This public Docker Compose recipe runs the first bounded part of
 [#381](https://github.com/dariuszpanas/django-ray/issues/381): preserve released
 database history and filesystem artifacts across a stopped-writer migration.
-It uses the exact `v0.4.0` Git archive and independently installed released and
-candidate wheels. Each version uses its own locked dependency environment.
+It selects a reviewed `v0.4.0` or `v0.5.0` Git archive and independently installs
+released and candidate wheels. Each version uses its own locked dependency environment.
 No task manager, Ray process, Kubernetes client or shared database starts.
 
 The recipe runs SQLite and PostgreSQL 17 serially. Every phase uses a fresh
@@ -65,6 +65,8 @@ set -euo pipefail
 test -z "$(git status --porcelain)"
 baseline_parent=$(mktemp -d)
 export UPGRADE_BASELINE_SOURCE="$baseline_parent/released"
+export DJANGO_RAY_UPGRADE_BASELINE=0.5.0
+export UPGRADE_BASELINE_COMMIT=$(python -c 'from qualification.upgrade.contract import BASELINE_COMMIT; print(BASELINE_COMMIT)')
 python -m qualification.upgrade.prepare "$UPGRADE_BASELINE_SOURCE"
 sha256sum "$UPGRADE_BASELINE_SOURCE/source.tar" | cut -d ' ' -f 1 > "$baseline_parent/baseline-sha256.txt"
 source_dir=$(mktemp -d)
@@ -92,7 +94,7 @@ PY
 cat "$UPGRADE_EVIDENCE_DIR/execution-manifest.json"
 ```
 
-The export command refuses a different `v0.4.0` commit. The caller's fresh Git
+The export command refuses a different commit for the selected released tag. The caller's fresh Git
 export is the baseline authority; its retained SHA256 must match the archive
 inside the executing image. The archive's PAX commit header is an additional
 metadata check, not independent proof of its contents. Runtime verification also
@@ -114,6 +116,27 @@ ten connections, 16 MiB shared buffers, 1 MiB work memory and a 32 MiB temporary
 file limit. A clean server shutdown is required; timeout/forced shutdown, missing
 phases, version/import drift, changed history or failed fixture cleanup fails the
 stage. The caller's Compose trap removes the container after failure or cancellation.
+
+## Selecting the release boundary
+
+`DJANGO_RAY_UPGRADE_BASELINE` accepts only `0.4.0` and `0.5.0`; its default remains
+`0.4.0` for existing callers. Each entry pins a reviewed released commit. Export
+`UPGRADE_BASELINE_COMMIT` from that selection before building so the image checks
+the same archive identity; the runtime independently verifies the selected pin.
+Use `0.5.0` for next-release qualification under
+[#526](https://github.com/dariuszpanas/django-ray/issues/526). Hosted database
+qualification runs both baselines separately and retains distinct artifacts.
+
+The candidate version comes from the selected source checkout's `pyproject.toml`.
+Its installed wheel must match that version, while source and package digests
+identify the exact code even before a development version bump. An equal version
+string does not make the baseline and candidate source interchangeable. Each
+manifest records both versions and the released commit. No old receipt is relabeled.
+
+Selecting a baseline does not qualify its native runtime scenarios. The next
+release still needs the applicable source-matched native and deployed assertions,
+final versioned candidate, and coordinated drain/restore evidence. Database-only
+receipts continue to report `complete_upgrade_gate: false`.
 
 ## Remaining release acceptance
 
@@ -146,7 +169,7 @@ container, and each Job receives the selected installed package and disposable
 settings through its RuntimeEnv. Jobs run serially through the actual manager;
 the receipt identifies the runner. No Ray Client connection is used.
 
-Both runtime recipes finish with a fresh 0.4.0 reader after candidate execution.
+Both runtime recipes finish with a fresh selected-baseline reader after candidate execution.
 Database-enforced read-only mode retains migrations through `0026` and checks
 all eight old/current task records, attempts and input/result artifacts. This
 extends the enqueue-only rollback fixture with actual completed work. It does
