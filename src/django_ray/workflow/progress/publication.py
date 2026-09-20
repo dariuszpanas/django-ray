@@ -28,12 +28,12 @@ from django_ray.workflow.progress.limits import (
     canonical_workflow_progress_retained_size,
     workflow_progress_retained_state_size,
 )
-from django_ray.workflow.progress.preparation import prepare_workflow_progress_topology
 from django_ray.workflow.progress.storage import (
     WORKFLOW_PROGRESS_NODE_DETAIL_SCHEMA_VERSION,
     PreparedWorkflowProgressDetail,
     PreparedWorkflowProgressTopology,
     WorkflowProgressStorageError,
+    _prepare_workflow_progress_topology_materialized,
     discard_workflow_progress_topology_candidate,
     persist_workflow_progress_publication,
     prepare_workflow_progress_detail,
@@ -45,6 +45,11 @@ from django_ray.workflow.progress.summary import (
     WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION,
     WorkflowProgressSummaryError,
     serialize_workflow_progress_summary,
+)
+from django_ray.workflow.progress.terminal_input import (
+    TerminalSnapshotInvalidError,
+    TerminalSnapshotLimitError,
+    admit_terminal_snapshot,
 )
 
 _SNAPSHOT_KEYS = frozenset(
@@ -922,7 +927,21 @@ def prepare_terminal_workflow_progress_publication(
     detail_days: int,
     limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
 ) -> PreparedWorkflowProgressPilotPublication:
-    """Adapt one complete actor snapshot into bounded schema-v3 publication input."""
+    """Adapt one admitted terminal snapshot without acquiring spill storage."""
+    try:
+        admit_terminal_snapshot(snapshot_value)
+    except TerminalSnapshotLimitError as error:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.ADMISSION_LIMIT) from error
+    except TerminalSnapshotInvalidError as error:
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT) from error
+    if (
+        limits.topology_node_max_items
+        > WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.topology_node_max_items
+        or limits.topology_edge_max_items
+        > WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.topology_edge_max_items
+        or limits.detail_max_items > WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.detail_max_items
+    ):
+        raise WorkflowProgressPilotError(WorkflowProgressPilotReason.ADMISSION_LIMIT)
     snapshot = _exact_mapping(snapshot_value, _SNAPSHOT_KEYS)
     if (
         type(snapshot["schema_version"]) is not int
@@ -1042,7 +1061,7 @@ def prepare_terminal_workflow_progress_publication(
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
 
     try:
-        topology = prepare_workflow_progress_topology(
+        topology = _prepare_workflow_progress_topology_materialized(
             identity,
             1,
             topology_nodes,
