@@ -611,6 +611,56 @@ def test_terminal_adapter_accepts_historical_ingress_without_cost() -> None:
     assert prepared.summary["state"] == "SUCCEEDED"
 
 
+@pytest.mark.parametrize(
+    "counters",
+    [
+        {"evicted_nodes": 0, "evicted_events": 0, "dropped_updates": 0},
+        {"evicted_nodes": 1, "evicted_events": 1, "dropped_updates": 1},
+        {"evicted_nodes": 0, "evicted_events": 0, "dropped_updates": 2},
+    ],
+)
+def test_terminal_adapter_accepts_bounded_progress_eviction(counters) -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["replaceable"] = counters
+    prepared = publication.prepare_terminal_workflow_progress_publication(
+        identity,
+        snapshot,
+        plan_fingerprint=FINGERPRINT,
+        selected_strategy="dynamic_tasks",
+        reporting_policy="full",
+        detail_days=7,
+    )
+    assert prepared.summary["state"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize(
+    "counters",
+    [
+        {"evicted_nodes": True, "evicted_events": 0, "dropped_updates": 0},
+        {"evicted_nodes": -1, "evicted_events": 0, "dropped_updates": 0},
+        {"evicted_nodes": 3, "evicted_events": 0, "dropped_updates": 0},
+        {"evicted_nodes": 2, "evicted_events": 0, "dropped_updates": 1},
+        {"evicted_nodes": 0, "evicted_events": 2, "dropped_updates": 1},
+        {"evicted_nodes": 0, "evicted_events": 0},
+        {"evicted_nodes": 0, "evicted_events": 0, "dropped_updates": 0, "unknown": 0},
+    ],
+)
+def test_terminal_adapter_rejects_unreconciled_progress_eviction(counters) -> None:
+    identity = _identity()
+    snapshot = _snapshot(identity)
+    snapshot["ingress"]["replaceable"] = counters
+    with pytest.raises(publication.WorkflowProgressPilotError):
+        publication.prepare_terminal_workflow_progress_publication(
+            identity,
+            snapshot,
+            plan_fingerprint=FINGERPRINT,
+            selected_strategy="dynamic_tasks",
+            reporting_policy="full",
+            detail_days=7,
+        )
+
+
 def test_terminal_adapter_accepts_strict_optional_ingress_producer() -> None:
     identity = _identity()
     snapshot = _snapshot(identity)

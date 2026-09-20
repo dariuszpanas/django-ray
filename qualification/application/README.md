@@ -57,6 +57,28 @@ identity, Ray generation, manager ownership, cleanup or any other gate layer.
 The command starts no services and has no Kubernetes client. `core.yaml` wires the API layer
 into a bounded application stage; its admission, image binding and evidence requirements follow below.
 
+## Collector pressure within the workflow layer
+
+`run_workflows` also requires `workflow_pressure.py` to pass before writing a
+successful workflow receipt. Before and after the existing required cold-Ray
+replacement, four serial actors exercise ordinary-node and map success/failure
+with injected 1,300/1,400-byte retained-state limits. Each actor uses 0.25 logical
+CPU, no restart or method retry, and the source-verified `/runtime/recovery.zip`.
+The local archive is supplied at Ray job initialization and inherited by actors;
+Ray actor options cannot accept a local archive path.
+The probe owns its Ray Client connection, limits individual result waits to 20
+seconds within a 120-second budget, kills each actor and observes its removal.
+The surrounding assertion Job bounds connection/shutdown time and owns namespace
+cleanup; this adds no shared cluster or capacity changes.
+
+The fixed `collector_pressure` receipt proves actual pressure eviction/drop,
+canonical byte accounting, admitted lifecycle events, unchanged failure details,
+retained map counts and successful terminal detail preparation. A missing or
+failed probe prevents the workflow layer from passing. This is collector and
+preparation evidence from synthetic identities, not a persisted Django task,
+default graph activation or aggregate mailbox admission. The separate workflow
+cases retain their real task, API/Admin, history and diagnostic assertions.
+
 ## Generic Ray nodes and cold generations
 
 `generic_nodes.py` supplies a separate assertion Job layer. It connects only to an explicit Ray

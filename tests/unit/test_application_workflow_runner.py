@@ -27,6 +27,7 @@ def fixture_runner(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "read_token", lambda _path: "fixture-token")
     execute = Mock(return_value=[{"state": "observed"}])
     monkeypatch.setattr(runner, "execute_case", execute)
+    monkeypatch.setattr(runner, "verify_deployed_pressure", lambda: {"actors_removed": True})
     receipt = tmp_path / "receipt.json"
     args = ["--token-file", str(tmp_path / "token"), "--receipt", str(receipt)]
     return args, receipt, execute
@@ -40,6 +41,7 @@ def test_success_records_all_serial_cases_without_claiming_complete_gate(fixture
     assert value["status"] == "passed"
     assert value["complete_workflow_gate"] is False
     assert value["publisher"] == "pilot"
+    assert value["collector_pressure"] == {"actors_removed": True}
     assert [call.kwargs["case"] for call in execute.call_args_list] == list(runner.workflow_cases())
 
 
@@ -64,6 +66,21 @@ def test_failed_case_stops_submissions_and_omits_raw_error(
     assert location["module"] == "qualification.application.run_workflows"
     assert location["function"] == "main"
     assert type(location["line"]) is int
+
+
+def test_pressure_failure_prevents_passing_receipt(fixture_runner, monkeypatch, capsys):
+    args, receipt, _execute = fixture_runner
+    monkeypatch.setattr(
+        runner, "verify_deployed_pressure", Mock(side_effect=ValueError("private fixture data"))
+    )
+    assert runner.main(args) == 1
+    assert not receipt.exists()
+    output = capsys.readouterr().out
+    assert "private fixture data" not in output
+    result = json.loads(output)
+    assert result["failed_stage"] == "collector-pressure"
+    assert "collector_pressure" not in result
+    assert "observations" not in result
 
 
 def test_receipt_cannot_overwrite_existing_evidence(fixture_runner, capsys):
