@@ -132,6 +132,7 @@ attempt = TaskAttempt.objects.create(
 )
 failed_execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-retry",
+    runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     callable_path="testproject.tasks.failing_task",
     state=TaskState.FAILED,
     error_message="unfold-retry-secret-marker",
@@ -140,6 +141,7 @@ failed_execution = RayTaskExecution.objects.create(
 )
 detail_failed_execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-detail-retry",
+    runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     callable_path="testproject.tasks.failing_task",
     state=TaskState.FAILED,
     error_message="unfold-detail-retry-secret-marker",
@@ -779,12 +781,14 @@ user = get_user_model().objects.create_superuser(
 )
 failed_execution = RayTaskExecution.objects.create(
     task_id="standard-admin-retry",
+    runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     callable_path="testproject.tasks.failing_task",
     state=TaskState.FAILED,
     error_message="standard-admin-retry-secret-marker",
 )
 detail_failed_execution = RayTaskExecution.objects.create(
     task_id="standard-admin-detail-retry",
+    runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     callable_path="testproject.tasks.failing_task",
     state=TaskState.FAILED,
     error_message="standard-admin-detail-retry-secret-marker",

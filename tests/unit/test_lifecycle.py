@@ -124,6 +124,7 @@ def _execution_select_projections(
 @pytest.mark.django_db
 def test_retry_task_uses_one_based_counter_and_preserves_attempt() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-retry-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -210,6 +211,7 @@ def test_attempt_archival_copies_exact_protocol_and_provenance(
         "finalized_cancel": TaskState.CANCELLING,
     }[transition]
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-provenance-{transition}-{executor_version or 'unknown'}",
         callable_path="testproject.tasks.add_numbers",
         metadata_schema_version=1,
@@ -321,6 +323,7 @@ def test_enriched_completion_stamps_executor_provenance_on_terminal_outcome(
     transition: str,
 ) -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-enriched-completion-{transition}",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -357,6 +360,7 @@ def test_enriched_completion_stamps_executor_provenance_on_terminal_outcome(
 @pytest.mark.django_db
 def test_enriched_completion_archives_then_clears_executor_provenance_on_retry() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-enriched-completion-retry",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -386,6 +390,7 @@ def test_legacy_completion_omission_preserves_existing_executor_provenance(
     transition: str,
 ) -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-legacy-completion-{transition}",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -416,6 +421,7 @@ def test_legacy_completion_omission_preserves_existing_executor_provenance(
 @pytest.mark.parametrize("transition", ["success", "failure"])
 def test_rejected_completion_does_not_mutate_executor_provenance(transition: str) -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-rejected-completion-provenance-{transition}",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -475,6 +481,7 @@ def test_package_lifecycle_rejects_unsupported_protocol_before_effects(
     )
     now = datetime.now(UTC)
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-unsupported-{operation}",
         callable_path="testproject.tasks.add_numbers",
         state=initial_state,
@@ -538,6 +545,7 @@ def test_stale_identity_precedes_unsupported_protocol_and_protocol_precedes_stat
         legacy_producers_retired=True,
     )
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-unsupported-precedence",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.QUEUED,
@@ -602,6 +610,7 @@ def test_explicit_supported_protocol_override_allows_v2_retry() -> None:
         legacy_producers_retired=True,
     )
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-explicit-v2-retry",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -630,6 +639,7 @@ def test_explicit_supported_protocol_override_allows_v2_retry() -> None:
 def test_explicit_retry_of_expired_task_gets_fresh_deadline() -> None:
     old_deadline = datetime.now(UTC) - timedelta(days=1)
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="retry-expired-queue-deadline-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.EXPIRED,
@@ -680,6 +690,7 @@ def test_retry_uses_exact_projection_and_preserves_input_and_result_storage(
             envelope_version=1,
         )
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-projected-retry-{storage_mode}",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -904,6 +915,7 @@ def test_running_cancellation_uses_presence_projection_without_diagnostics(
 ) -> None:
     unrelated_marker = "unrelated-running-cancel-" + ("y" * 65_536)
     running = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-projected-cancel-running-{completion_pending}",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -938,6 +950,7 @@ def test_running_cancellation_keeps_presence_read_on_locked_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-cancel-database-affinity",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1009,6 +1022,7 @@ def test_cancellation_duplicate_terminal_and_stale_paths_use_one_bounded_lock(
 ) -> None:
     marker = "unrelated-noop-" + ("z" * 65_536)
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-projected-cancel-{state.lower()}",
         callable_path="testproject.tasks.add_numbers",
         state=state,
@@ -1043,6 +1057,7 @@ def test_attempt_storage_failure_rolls_back_projected_lifecycle_transition(
 ) -> None:
     state = TaskState.FAILED if operation == "retry" else TaskState.QUEUED
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-projected-storage-failure-{operation}",
         callable_path="testproject.tasks.add_numbers",
         state=state,
@@ -1075,6 +1090,7 @@ def test_automatic_retry_attempt_archive_failure_rolls_back_provenance_clear(
         legacy_producers_retired=True,
     )
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-auto-retry-provenance-archive-failure",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1110,6 +1126,7 @@ def test_automatic_retry_attempt_archive_failure_rolls_back_provenance_clear(
 @pytest.mark.django_db
 def test_failure_preserves_raw_redaction_evidence_for_current_and_archived_attempts() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-terminal-diagnostic-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1150,6 +1167,7 @@ def test_failure_preserves_raw_redaction_evidence_for_current_and_archived_attem
 @pytest.mark.django_db
 def test_cancellation_preserves_raw_diagnostic_for_bounded_readers() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-terminal-cancellation-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.CANCELLING,
@@ -1172,6 +1190,7 @@ def test_cancellation_preserves_raw_diagnostic_for_bounded_readers() -> None:
 @pytest.mark.django_db
 def test_retry_task_promotes_legacy_submission_address_to_target() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-legacy-routing-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -1189,6 +1208,7 @@ def test_retry_task_promotes_legacy_submission_address_to_target() -> None:
 @pytest.mark.django_db
 def test_retry_task_keeps_ambiguous_legacy_auto_on_global_fallback() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-legacy-auto-routing-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -1206,6 +1226,7 @@ def test_retry_task_keeps_ambiguous_legacy_auto_on_global_fallback() -> None:
 @pytest.mark.django_db
 def test_retry_task_does_not_promote_ray_core_handle_to_job_target() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-ray-core-routing-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -1225,6 +1246,7 @@ def test_retry_task_does_not_promote_ray_core_handle_to_job_target() -> None:
 @pytest.mark.django_db
 def test_retry_task_rejects_a_stale_execution_generation() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-retry-stale-generation-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -1260,6 +1282,7 @@ def test_retry_task_rejects_a_stale_execution_generation() -> None:
 @pytest.mark.django_db
 def test_request_task_retry_reports_acceptance_and_duplicate_current_state() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-retry-request-accepted-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -1299,6 +1322,7 @@ def test_request_task_retry_reports_acceptance_and_duplicate_current_state() -> 
 @pytest.mark.django_db
 def test_request_task_retry_preserves_a_succeeded_execution() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-retry-request-succeeded-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.SUCCEEDED,
@@ -1330,6 +1354,7 @@ def test_request_task_retry_preserves_a_succeeded_execution() -> None:
 @pytest.mark.django_db
 def test_request_task_retry_reports_stale_and_missing_fences() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-retry-request-stale-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.FAILED,
@@ -1682,6 +1707,7 @@ def test_terminal_failure_can_record_a_corrupt_snapshot_without_retrying() -> No
 @pytest.mark.django_db
 def test_cancellation_request_cancels_queued_task_and_records_attempt() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-cancel-queued-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.QUEUED,
@@ -1710,6 +1736,7 @@ def test_cancellation_request_cancels_queued_task_and_records_attempt() -> None:
 @pytest.mark.django_db
 def test_cancellation_request_marks_running_task_for_worker() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-cancel-running-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1735,6 +1762,7 @@ def test_cancellation_request_preserves_pending_completion_publication() -> None
     from django_ray.runtime.entrypoint import _persist_task_completion
 
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-cancel-completion-pending-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1781,6 +1809,7 @@ def test_cancellation_request_returns_stable_noop_status(
     expected_status: TaskCancellationRequestStatus,
 ) -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-cancel-noop-{state.lower()}",
         callable_path="testproject.tasks.add_numbers",
         state=state,
@@ -1805,6 +1834,7 @@ def test_cancellation_request_distinguishes_missing_invalid_and_stale_rows() -> 
     assert missing.execution_generation is None
 
     invalid = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-cancel-invalid-001",
         callable_path="testproject.tasks.add_numbers",
         execution_generation=9,
@@ -1815,6 +1845,7 @@ def test_cancellation_request_distinguishes_missing_invalid_and_stale_rows() -> 
     assert invalid_result.state == "CORRUPT"
 
     stale = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-cancel-stale-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1836,6 +1867,7 @@ def test_cancellation_request_distinguishes_missing_invalid_and_stale_rows() -> 
 @pytest.mark.django_db
 def test_cancellation_attempt_fence_rejects_automatic_retry_replacement() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-cancel-auto-retry-race-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1878,6 +1910,7 @@ def test_cancellation_attempt_fence_rejects_automatic_retry_replacement() -> Non
 @pytest.mark.django_db
 def test_record_failure_rejects_replaced_execution() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-race-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1903,6 +1936,7 @@ def test_record_failure_rejects_replaced_execution() -> None:
 @pytest.mark.django_db
 def test_record_failure_rejects_replaced_worker_owner() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-owner-race-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1932,6 +1966,7 @@ def test_record_failure_rejects_replaced_worker_owner() -> None:
 @pytest.mark.parametrize("transition", ["failure", "success", "cancel"])
 def test_terminal_transitions_reject_replaced_completion_envelope(transition: str) -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-completion-fence-{transition}-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -1983,6 +2018,7 @@ def test_terminal_transitions_reject_replaced_completion_envelope(transition: st
 def test_terminal_transitions_reject_replaced_attempt(transition: str) -> None:
     initial_state = TaskState.CANCELLING if transition == "cancel" else TaskState.RUNNING
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-attempt-fence-{transition}-001",
         callable_path="testproject.tasks.add_numbers",
         state=initial_state,
@@ -2043,6 +2079,7 @@ def test_record_lost_rejects_refreshed_activity_snapshot(
 ) -> None:
     observed_heartbeat = datetime.now(UTC) - timedelta(minutes=10)
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id=f"lifecycle-lost-activity-fence-{field}-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -2073,6 +2110,7 @@ def test_record_lost_rejects_refreshed_activity_snapshot(
 @pytest.mark.django_db
 def test_record_lost_rejects_durable_completion_envelope() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-lost-completion-fence-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -2105,6 +2143,7 @@ def test_record_lost_rejects_durable_completion_envelope() -> None:
 @pytest.mark.django_db
 def test_record_failure_clears_attempt_selection_when_retrying() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-retry-selection-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -2121,6 +2160,7 @@ def test_record_failure_clears_attempt_selection_when_retrying() -> None:
 @pytest.mark.django_db
 def test_succeed_task_records_success_attempt_and_clears_errors() -> None:
     task = RayTaskExecution.objects.create(
+        runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-success-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
@@ -2136,3 +2176,34 @@ def test_succeed_task_records_success_attempt_and_clears_errors() -> None:
     history = TaskAttempt.objects.get(execution=task, attempt_number=2)
     assert history.state == TaskState.SUCCEEDED
     assert history.result_data == "3"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize("profile", [None, ""])
+def test_legacy_runtime_env_retry_preserves_history(monkeypatch, automatic, profile) -> None:
+    def forbidden(*args, **kwargs):
+        pytest.fail("legacy retry resolved current configuration")
+
+    monkeypatch.setattr("django_ray.runtime.runtime_env.resolve_runtime_env_profile", forbidden)
+    task = RayTaskExecution.objects.create(
+        task_id="legacy-runtime-env-retry",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING if automatic else TaskState.FAILED,
+        attempt_number=2,
+        execution_generation=4,
+        runtime_env_profile=profile,
+        runtime_env_json="{}",
+        runtime_env_hash="",
+        result_data='{"retained":true}',
+        error_message="retained diagnostic",
+        claimed_by_worker="retained-worker",
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+    with pytest.raises(RuntimeEnvSnapshotError, match="Legacy RuntimeEnv snapshot cannot execute"):
+        if automatic:
+            record_failure(task, error_message="new failure", retry=True)
+        else:
+            retry_task(task.pk)
+    assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()

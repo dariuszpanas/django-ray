@@ -148,6 +148,7 @@ def _summary(
 def running_execution(db) -> RayTaskExecution:
     return RayTaskExecution.objects.create(
         task_id="workflow-summary-125",
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         callable_path="tests.unit.test_workflow_progress_summary.workflow",
         state=TaskState.RUNNING,
         attempt_number=2,

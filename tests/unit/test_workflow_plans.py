@@ -2555,6 +2555,7 @@ def test_retry_unsafe_plan_message_reports_truncated_path_count() -> None:
 @pytest.mark.django_db
 def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
     execution = RayTaskExecution.objects.create(
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         task_id="workflow-plan-retry",
         callable_path="tests.unit.test_workflow_plans.increment",
         state=TaskState.RUNNING,
@@ -2585,6 +2586,7 @@ def test_retry_must_match_the_plan_pinned_by_the_first_attempt() -> None:
 @pytest.mark.django_db
 def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
     execution = RayTaskExecution.objects.create(
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         task_id="workflow-result-buffer-plan-retry",
         callable_path=f"{__name__}.record_side_effect",
         state=TaskState.RUNNING,
@@ -2634,6 +2636,7 @@ def test_retry_rejects_result_buffer_resource_drift_before_effects() -> None:
 @pytest.mark.django_db
 def test_retry_rejects_opaque_runtime_env_even_when_secret_free_plan_matches() -> None:
     execution = RayTaskExecution.objects.create(
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         task_id="workflow-plan-opaque-runtime-retry",
         callable_path=f"{__name__}.increment",
         state=TaskState.RUNNING,
@@ -2699,6 +2702,7 @@ def test_retry_allows_content_hashed_local_runtime_env(tmp_path) -> None:
     )
     selection = plan.eligibility.select("dynamic_tasks", requested_policy="auto")
     execution = RayTaskExecution.objects.create(
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         task_id="workflow-plan-local-runtime-retry",
         callable_path=f"{__name__}.increment",
         state=TaskState.RUNNING,

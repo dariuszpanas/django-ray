@@ -293,3 +293,10 @@ The runtime follow-up must distinguish inert historical reads from execution
 acceptance, retain malformed/retired strict-family rejection, and preserve
 current rq2 receipts and manager recovery. Neither a current migration pass nor
 a terminal fixture row establishes that an old producer can safely keep writing.
+
+
+The installed-candidate carrier probe also rejects all four missing-identity
+RuntimeEnv marker variants before Django setup or current-default resolution.
+This is execution refusal only: historical task and artifact readers remain in
+the preserved-data stage, and current named, empty and encrypted snapshots retain
+their ordinary validation paths.

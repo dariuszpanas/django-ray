@@ -3180,6 +3180,7 @@ class TestExecutionsAPI:
         """Test retrying a failed execution."""
         task = RayTaskExecution.objects.create(
             task_id="test-retry",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             callable_path="test.task",
             state=TaskState.FAILED,
             error_message="Some error",

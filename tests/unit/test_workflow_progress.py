@@ -711,6 +711,7 @@ def test_replacement_claim_rolls_back_storage_deletion_when_task_update_fails(
 @pytest.mark.django_db
 def test_automatic_retry_clears_identity_and_rejects_late_writer() -> None:
     execution = RayTaskExecution.objects.create(
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         task_id="workflow-run-auto-retry",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.RUNNING,
@@ -733,6 +734,7 @@ def test_automatic_retry_clears_identity_and_rejects_late_writer() -> None:
 @pytest.mark.django_db
 def test_manual_retry_clears_identity_and_rejects_terminal_writer() -> None:
     execution = RayTaskExecution.objects.create(
+        runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         task_id="workflow-run-manual-retry",
         callable_path="tests.unit.test_workflows.increment",
         state=TaskState.FAILED,

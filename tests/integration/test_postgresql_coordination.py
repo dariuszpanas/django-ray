@@ -221,6 +221,7 @@ def _execution(task_id: str, **overrides: object) -> RayTaskExecution:
         "state": TaskState.QUEUED,
         "args_json": "[1, 2]",
         "kwargs_json": "{}",
+        "runtime_env_hash": hashlib.sha256(b"{}").hexdigest(),
     }
     values.update(overrides)
     return RayTaskExecution.objects.create(**values)
@@ -4367,3 +4368,35 @@ def test_claim_clock_follows_independently_committed_enqueue(monkeypatch, expire
         assert processed == [task.pk]
         assert task.state == TaskState.RUNNING
         assert task.created_at <= task.started_at == clock[0]
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_concurrent_legacy_runtime_env_retries_preserve_row(automatic) -> None:
+    from django_ray.runtime.runtime_env import RuntimeEnvSnapshotError
+
+    task = _execution(
+        "postgres-legacy-runtime-env-retry",
+        state=TaskState.RUNNING if automatic else TaskState.FAILED,
+        attempt_number=3,
+        execution_generation=7,
+        runtime_env_profile=None,
+        runtime_env_json="{}",
+        runtime_env_hash="",
+        result_data='{"retained":true}',
+        error_message="retained diagnostic",
+    )
+    before = RayTaskExecution.objects.filter(pk=task.pk).values().get()
+
+    def refuse():
+        with pytest.raises(
+            RuntimeEnvSnapshotError, match="Legacy RuntimeEnv snapshot cannot execute"
+        ):
+            if automatic:
+                record_failure(task, error_message="new failure", retry=True)
+            else:
+                retry_task(task.pk)
+        return "refused"
+
+    assert _run_concurrently(refuse, refuse) == ["refused", "refused"]
+    assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
+    assert not TaskAttempt.objects.filter(execution=task).exists()

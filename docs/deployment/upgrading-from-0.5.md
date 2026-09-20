@@ -176,3 +176,18 @@ execution retirement, applicable deployed cold-Ray observations and the operator
 actual dashboard/proxy still require acceptance. Run the affected checks again
 when their source or deployment changes; do not relabel an old receipt as a new
 release result.
+
+
+## Historical tasks without a RuntimeEnv snapshot
+
+Pre-0.3 rows may carry the migration marker `{}` with no RuntimeEnv digest or
+profile. Execution and retry now refuse this marker before resolving current
+configuration. The original environment cannot be reconstructed reliably from
+these rows. Current empty snapshots with a digest remain supported, as do named
+and encrypted snapshots with valid identities.
+
+Keep historical rows and their results. After checking the original outcome and
+any possible side effects, explicitly enqueue new work under the intended current
+configuration. Do not clear hashes, rewrite the marker, or retry old work to
+silently adopt today's default profile. Complete the stopped-writer upgrade and
+old-work drain before starting the candidate.

@@ -261,6 +261,7 @@ class TestLiveFailureInjection:
         cmd = _make_live_command()
         task = RayTaskExecution.objects.create(
             task_id="live-fi-disconnect-001",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
             callable_path="time.sleep",
             queue_name="default",
             state=TaskState.RUNNING,
