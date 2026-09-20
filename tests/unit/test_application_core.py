@@ -106,6 +106,14 @@ def test_durable_evidence_authenticates_snapshot_and_manager(durable):
     assert "ciphertext" not in json.dumps(result)
 
 
+def test_durable_evidence_identifies_inverted_claim_time_without_values(durable):
+    durable.row.created_at = durable.row.started_at + timedelta(microseconds=1)
+    with pytest.raises(run_core.CoreEvidenceError) as raised:
+        run_core.verify_durable_task(TASK_ID, profile="project", manager_prefix="django-manager-")
+    assert raised.value.code is run_core.CoreEvidenceFailure.EXECUTION_TIMING
+    assert str(raised.value) == "execution_timing"
+
+
 def test_owner_clock_is_captured_after_concurrent_heartbeat(durable, monkeypatch):
     observed_at = timezone.now()
     clock = [observed_at]

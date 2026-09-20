@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Timestamp task claims after selecting their locked rows so a concurrently
+  committed enqueue cannot appear to start before creation. Recheck queue
+  deadlines after selection and leave newly expired tasks for the bounded expiry
+  sweep without starting them.
+
 - Prevent application qualification from rejecting a heartbeat committed during
   its lease read as a future timestamp. Retain stale/future checks and emit
   fixed failure codes without exposing exception messages or RuntimeEnv data.

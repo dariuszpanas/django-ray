@@ -2438,3 +2438,67 @@ class TestWorkerResultStorage:
             == "oversize://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?bytes=256"
         )
         assert task.pk not in cmd.active_tasks
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("expires_during_selection", [False, True])
+def test_claim_observes_tasks_created_after_selection_clock(monkeypatch, expires_during_selection):
+    from django.db.models.query import QuerySet
+
+    import django_ray.management.commands.django_ray_worker as worker_module
+
+    command = Command()
+    command.stdout = StringIO()
+    command.execution_mode = "local"
+    command.worker_id = "claim-clock-regression"
+    command.active_tasks = {}
+    command._create_lease("default")
+    processed = []
+    monkeypatch.setattr(command, "process_task", lambda task: processed.append(task.pk))
+    clock = [datetime.now(UTC) + timedelta(seconds=1)]
+
+    class ControlledDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0] if tz is not None else clock[0].replace(tzinfo=None)
+
+    monkeypatch.setattr(worker_module, "datetime", ControlledDateTime)
+    fetch = QuerySet._fetch_all
+    created = []
+
+    def insert_before_claim_query(query):
+        if (
+            query.model is RayTaskExecution
+            and query.query.select_for_update
+            and query.query.order_by == ("-priority", "created_at", "pk")
+            and not created
+        ):
+            clock[0] += timedelta(milliseconds=1)
+            task = RayTaskExecution.objects.create(
+                task_id="created-during-claim",
+                callable_path="tests.never_called",
+                queue_name="default",
+                state="QUEUED",
+                args_json="[]",
+                kwargs_json="{}",
+                created_at=clock[0],
+                queue_deadline_at=clock[0] if expires_during_selection else None,
+            )
+            created.append(task)
+        return fetch(query)
+
+    monkeypatch.setattr(QuerySet, "_fetch_all", insert_before_claim_query)
+    assert command.claim_and_process_tasks(["default"], concurrency=1) == (
+        0 if expires_during_selection else 1
+    )
+    task = created[0]
+    task.refresh_from_db()
+    if expires_during_selection:
+        assert processed == []
+        assert task.state == TaskState.QUEUED
+        assert task.started_at is None
+        assert task.claimed_by_worker is None
+    else:
+        assert processed == [task.pk]
+        assert task.state == TaskState.RUNNING
+        assert task.created_at <= task.started_at == clock[0]

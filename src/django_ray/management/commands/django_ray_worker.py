@@ -1688,7 +1688,7 @@ class Command(BaseCommand):
             # Re-read the clock after attempt archival for the bounded expiry
             # batch. A deadline reached during that work must be excluded from
             # this claim even though the next sweep owns its transition.
-            claim_now = datetime.now(UTC)
+            selection_now = datetime.now(UTC)
 
             # A single query keeps immediate and delayed/retried work in the same
             # priority order. Queue names only select workload-isolation boundaries.
@@ -1700,10 +1700,22 @@ class Command(BaseCommand):
                     execution_protocol_version__gte=supported_protocols.minimum,
                     execution_protocol_version__lte=supported_protocols.maximum,
                 )
-                .filter(Q(run_after__isnull=True) | Q(run_after__lte=claim_now))
-                .filter(Q(queue_deadline_at__isnull=True) | Q(queue_deadline_at__gt=claim_now))
+                .filter(Q(run_after__isnull=True) | Q(run_after__lte=selection_now))
+                .filter(Q(queue_deadline_at__isnull=True) | Q(queue_deadline_at__gt=selection_now))
                 .order_by("-priority", "created_at", "pk")[:available_slots]
             )
+
+            claim_now = selection_now
+            if tasks:
+                # Enqueue may commit between the eligibility clock and SELECT.
+                # Timestamp only rows actually observed, and do not start work
+                # whose queue deadline elapsed while selection was in flight.
+                claim_now = datetime.now(UTC)
+                tasks = [
+                    task
+                    for task in tasks
+                    if task.queue_deadline_at is None or task.queue_deadline_at > claim_now
+                ]
 
             for task in tasks:
                 task.state = TaskState.RUNNING
