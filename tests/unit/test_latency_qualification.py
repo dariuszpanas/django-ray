@@ -14,13 +14,36 @@ import yaml
 
 from qualification.docker import scenario as wheel
 from qualification.latency import contract, scenario
+from qualification.latency.cost import completion_window_cost
+
+
+@pytest.mark.parametrize("mutation", ["missing", "manager", "http", "cost", "reset"])
+def test_matched_cost_rejects_incomplete_or_inconsistent_windows(mutation):
+    value = receipt("/installed/django_ray/__init__.py")
+    tasks = value["cases"][0]["tasks"]
+    window = tasks[1]["cost_window"]
+    if mutation == "missing":
+        tasks[1]["cost_window"] = None
+    elif mutation == "manager":
+        window["before"]["manager"] = window["after"]["manager"] = "replacement"
+    elif mutation == "http":
+        window["after"]["api_requests"] = 1
+        window["cost"] = completion_window_cost(window["before"], window["after"])
+    elif mutation == "cost":
+        window["cost"]["queries"] = 0
+    else:
+        window["before"]["queries"] = 0
+        window["after"]["queries"] = 2
+        window["cost"] = completion_window_cost(window["before"], window["after"])
+    with pytest.raises(wheel.QualificationError):
+        contract.validate_probe(value, expected_module="/installed/django_ray/__init__.py")
 
 
 def receipt(module):
     cases = []
     task_pk = 0
     for name in contract.CASES:
-        count = 3 if name == "capacity-one" else 1
+        count = 3 if name in {"capacity-one", "recovery-only"} else 1
         tasks = []
         for _ in range(count):
             task_pk += 1
@@ -40,6 +63,7 @@ def receipt(module):
                     "terminal_ns": start + 2_000_000_000 + int(elapsed * 1e9),
                     "receipt_to_terminal_seconds": elapsed,
                     "release_to_terminal_seconds": elapsed + 1,
+                    "cost_window": None,
                     "database_times": {
                         "created_ns": task_pk * 1_000_000_000,
                         "claimed_ns": task_pk * 1_000_000_000 + 100,
@@ -47,6 +71,29 @@ def receipt(module):
                     },
                 }
             )
+            if count == 3:
+                before = {
+                    "manager": name,
+                    "at_ns": start,
+                    "queries": task_pk * 10,
+                    "query_seconds": task_pk * 0.25,
+                    "api_requests": 0,
+                }
+                after = before | {
+                    "at_ns": tasks[-1]["terminal_ns"],
+                    "queries": task_pk * 10 + 2,
+                    "query_seconds": task_pk * 0.25 + 0.25,
+                }
+                tasks[-1]["cost_window"] = {
+                    "before": before,
+                    "after": after,
+                    "cost": {
+                        "elapsed_seconds": elapsed + 2,
+                        "queries": 2,
+                        "query_seconds": 0.25,
+                        "api_requests": 0,
+                    },
+                }
         managers = []
         for index in range(2 if name == "manager-replacement" else 1):
             completed = (
@@ -89,7 +136,7 @@ def receipt(module):
             }
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "module": module,
         "cases": cases,
         "failure": None,

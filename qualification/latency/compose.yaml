@@ -1,0 +1,29 @@
+# Disposable hosted Linux execution; never start this on a shared local host.
+services:
+  latency:
+    build:
+      context: ../..
+      dockerfile: qualification/transactions/Dockerfile
+    image: django-ray-latency-qualification:local
+    command: [python, -m, qualification.latency.scenario]
+    user: "10001:10001"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 2.0
+    mem_limit: 7g
+    memswap_limit: 7g
+    pids_limit: 1024
+    shm_size: 512m
+    stop_grace_period: 20s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=3g,mode=1777
+    volumes:
+      - type: bind
+        source: ../..
+        target: /workspace
+        read_only: true
+      - type: bind
+        source: ${LATENCY_EVIDENCE_DIR:?Set an empty evidence directory writable by UID 10001}
+        target: /evidence

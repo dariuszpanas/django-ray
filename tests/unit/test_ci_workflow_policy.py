@@ -26,6 +26,9 @@ REQUIRED_CHECK_JOBS = {
 }
 REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate"}
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
+    ("latency-qualification.yml", "latency"): (
+        "Path-selected deployed evidence is reviewed under the affected-gate policy"
+    ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"

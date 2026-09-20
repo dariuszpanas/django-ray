@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound requests remain supported. Drain old work and stop old writers before
   upgrading; rejected or uncertain work is never silently replayed. Historical
   data readers and standalone nested workflow execution are preserved.
+- Match the polling qualification control and fast cases at three tasks each,
+  with bounded SQL/HTTP completion-window observations and a disposable hosted
+  Linux runner. These fixture measurements do not establish production speedup
+  or isolate every execution phase.
 - Bound small terminal workflow graph preparation to finite input bytes, values,
   depth, nodes and edges, and use the canonical in-memory preparer instead of
   acquiring SQLite spill storage. Preserve stored topology/detail, redaction and
