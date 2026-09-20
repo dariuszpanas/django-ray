@@ -108,6 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requiring retained paginated API detail and an honest empty Admin response.
   This does not enable default graphs or establish rendered browser behavior.
 
+- Extend the disposable application workload with bounded Chromium checks of
+  rendered current and archived Admin graphs and reporting-policy explanations.
+  Keep default-publication and full release acceptance as separate requirements.
+
 - Add a supported read-only worker-lease readiness API and management command
   with exact queue/hostname selection, optional worker ID, fixed JSON and exit
   codes. The Kubernetes worker example now checks lease readiness instead of
