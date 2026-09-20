@@ -8,7 +8,6 @@ permissions:
   contents: read
 
 concurrency:
-  # Keep stale event heads from cancelling the current-head proof.
   group: commit-messages-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
@@ -19,55 +18,32 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
           fetch-depth: 0
-          ref: main
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-          cache: npm
-
-      - name: Install commit policy
-        run: npm ci --ignore-scripts
-
-      - name: Validate PR title
-        if: >-
-          !(
-            github.event.pull_request.user.login == 'dependabot[bot]' &&
-            github.event.pull_request.head.repo.full_name == github.repository &&
-            startsWith(github.event.pull_request.head.ref, 'dependabot/')
-          )
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: make commit-title-check
-
+          persist-credentials: false
       - name: Fetch and verify PR commits
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          set -euo pipefail
           pr_ref="refs/remotes/pull/${PR_NUMBER}/head"
           git fetch --no-tags --force origin \
             "refs/pull/${PR_NUMBER}/head:${pr_ref}"
-
-          fetched_head="$(git rev-parse "$pr_ref")"
-          if [ "$fetched_head" != "$PR_HEAD_SHA" ]; then
-            echo "Fetched PR head does not match the event head SHA." >&2
-            exit 1
-          fi
+          test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"
           git cat-file -e "${PR_BASE_SHA}^{commit}"
-
-      - name: Validate ordinary PR commits
-        if: >-
-          !(
-            github.event.pull_request.user.login == 'dependabot[bot]' &&
-            github.event.pull_request.head.repo.full_name == github.repository &&
-            startsWith(github.event.pull_request.head.ref, 'dependabot/')
-          )
-        env:
-          COMMIT_BASE: ${{ github.event.pull_request.base.sha }}
-          COMMIT_HEAD: refs/remotes/pull/${{ github.event.pull_request.number }}/head
-        run: make commit-check
+      - name: Install pinned Typos
+        run: |
+          set -euo pipefail
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/typos.XXXXXX")"
+          archive="$tool_dir/typos.tar.gz"
+          curl --fail --silent --show-error --location \
+            https://github.com/crate-ci/typos/releases/download/v1.50.2/typos-v1.50.2-x86_64-unknown-linux-musl.tar.gz \
+            --output "$archive"
+          echo "abcb3e257c7c2abeff4d903f7fe68071357637605bdb283ce2251f44bc70dc09  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$tool_dir" ./typos
+          "$tool_dir/typos" --version
+          echo "$tool_dir" >> "$GITHUB_PATH"
+      - uses: dariuszpanas/yaga/actions/commit-check@f4f87140c4e132b6cf645caddde951d10b978d56 # v0.1.2
+        with:
+          trusted-config: .yaga.toml

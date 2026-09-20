@@ -25,18 +25,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-          cache: npm
-
-      - name: Install commit policy
-        run: npm ci --ignore-scripts
-
-      - name: Test commit policy
-        run: make commit-policy-test
-
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
@@ -48,6 +36,30 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --frozen
+
+      - name: Test commit policy
+        run: uv run make commit-policy-test
+
+      - name: Verify relocated offline policy tools
+        run: |
+          set -euo pipefail
+          export UV_CACHE_DIR="$RUNNER_TEMP/policy-cache-prepared"
+          uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga --version
+          uvx --from typos==1.50.2 typos --version
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+
+          from testing.linux.image_support import tree_bytes
+
+          size = tree_bytes(Path(os.environ["UV_CACHE_DIR"]))
+          assert size < 128 * 1024 * 1024, f"tool cache exceeds the sealed Linux image allowance: {size}"
+          PYTHON
+          cp -a "$UV_CACHE_DIR" "$RUNNER_TEMP/policy-cache-runtime"
+          mv "$UV_CACHE_DIR" "$RUNNER_TEMP/policy-cache-unavailable"
+          export UV_CACHE_DIR="$RUNNER_TEMP/policy-cache-runtime"
+          export UV_OFFLINE=1
+          uv run --no-sync make commit-policy-test spelling-check
 
       - name: Check workflows with YAGA
         run: make workflow-check YAGA_FORMAT=github

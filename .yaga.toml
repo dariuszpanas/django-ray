@@ -1,9 +1,10 @@
-# Qualified with pinned YAGA Action revision; released 0.1.1 lacks these options.
+# Shared policy for released YAGA 0.1.2 CLI and immutable Action.
 config-version = 1
 [commit]
 # Preserve the trusted same-repository Dependabot exemption.
 dependabot-pull-requests = "skip"
 typos = "check"
+typos-config = "isolated"
 allowed-types = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "style", "test"]
 type-case = "lower"
 header-max-length = 72

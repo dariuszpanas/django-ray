@@ -2,14 +2,11 @@
 # Context: source.tar, source-manifest.json, build-constraints.txt, kubectl.
 # Supply digest-pinned images and the reviewed Debian snapshot during preparation.
 ARG PYTHON_IMAGE
-ARG NODE_IMAGE
 ARG UV_IMAGE
-FROM ${NODE_IMAGE} AS node
 FROM ${UV_IMAGE} AS uv
 FROM ${PYTHON_IMAGE} AS tests
 
 ARG PYTHON_IMAGE
-ARG NODE_IMAGE
 ARG UV_IMAGE
 ARG DEBIAN_SNAPSHOT
 
@@ -25,7 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/opt/test-env/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # The base digest fixes Python and Debian; the snapshot fixes OS dependency resolution.
-RUN python -c 'import os,re; assert all(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}",os.environ[n]) for n in ("PYTHON_IMAGE","NODE_IMAGE","UV_IMAGE")); assert re.fullmatch(r"[0-9]{8}T[0-9]{6}Z",os.environ["DEBIAN_SNAPSHOT"])' \
+RUN python -c 'import os,re; assert all(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}",os.environ[n]) for n in ("PYTHON_IMAGE","UV_IMAGE")); assert re.fullmatch(r"[0-9]{8}T[0-9]{6}Z",os.environ["DEBIAN_SNAPSHOT"])' \
     && . /etc/os-release && test "$VERSION_CODENAME" = trixie \
     && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources \
     && printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s/ trixie main\ndeb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/%s/ trixie-security main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list \
@@ -33,11 +30,7 @@ RUN python -c 'import os,re; assert all(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64
     && apt-get install -y --no-install-recommends ca-certificates git make libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
-COPY --from=uv /uv /usr/local/bin/uv
-RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 COPY source.tar source-manifest.json build-constraints.txt /opt/test-inputs/
 COPY kubectl /usr/local/bin/kubectl
@@ -49,12 +42,12 @@ RUN echo '874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf  /usr
 
 WORKDIR /workspace
 RUN python scripts/test_suite_source.py verify --source-manifest /opt/test-inputs/source-manifest.json \
-    && test "$(node --version)" = "v$(cat .node-version)" \
     && uv sync --frozen --extra postgres --extra sample \
     && python -m ensurepip --upgrade --default-pip \
-    && npm ci --ignore-scripts --no-audit --no-fund \
     && uv cache clean \
     && uv build --require-hashes --out-dir /opt/test-distributions \
+    && uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga --version \
+    && uvx --from typos==1.50.2 typos --version \
     && python scripts/test_suite_source.py verify --source-manifest /opt/test-inputs/source-manifest.json \
     && python testing/linux/image_support.py record \
         --output /opt/test-inputs/image-environment.json

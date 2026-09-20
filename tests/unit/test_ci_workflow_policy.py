@@ -26,10 +26,6 @@ REQUIRED_CHECK_JOBS = {
 }
 REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate"}
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
-    (
-        "yaga-commit-qualification.yml",
-        "candidate",
-    ): "YAGA Commit Candidate is advisory during parity qualification",
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
@@ -1062,13 +1058,13 @@ def test_required_and_nonblocking_workflows_are_documented() -> None:
         assert all(reason in " ".join(documentation.split()) for documentation in documents)
 
 
-def test_yaga_candidate_reads_trusted_policy_without_pr_checkout() -> None:
-    path = WORKFLOWS / "yaga-commit-qualification.yml"
+def test_yaga_required_reads_trusted_policy_without_pr_checkout() -> None:
+    path = WORKFLOWS / "commit-messages.yml"
     workflow = _workflow(path)
     assert set(workflow["on"]) == {"pull_request_target"}
     assert workflow["permissions"] == {"contents": "read"}
     assert "github.event.pull_request.head.sha" in workflow["concurrency"]["group"]
-    steps = _jobs(path)["candidate"]["steps"]
+    steps = _jobs(path)["conventional-commits"]["steps"]
     checkout = steps[0]
     assert "ref" not in checkout["with"]
     assert checkout["with"]["persist-credentials"] == "false"
@@ -1077,20 +1073,20 @@ def test_yaga_candidate_reads_trusted_policy_without_pr_checkout() -> None:
     assert 'test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"' in fetch["run"]
     assert steps[3]["with"] == {"trusted-config": ".yaga.toml"}
     assert steps[3]["uses"] == (
-        "dariuszpanas/yaga/actions/commit-check@edd052701cb67a4bae0573d1654cd4de43d36073"
+        "dariuszpanas/yaga/actions/commit-check@f4f87140c4e132b6cf645caddde951d10b978d56"
     )
 
 
-def test_yaga_candidate_explicitly_skips_trusted_dependabot_policy() -> None:
+def test_yaga_required_explicitly_skips_trusted_dependabot_policy() -> None:
     config = tomllib.loads((PROJECT_ROOT / ".yaga.toml").read_text(encoding="utf-8"))
     assert config["commit"]["dependabot-pull-requests"] == "skip"
 
 
-def test_yaga_candidate_requires_pinned_spelling_without_author_allowlist() -> None:
+def test_yaga_required_requires_pinned_spelling_without_author_allowlist() -> None:
     config = tomllib.loads((PROJECT_ROOT / ".yaga.toml").read_text(encoding="utf-8"))
     assert config["commit"]["typos"] == "check"
     assert not config["commit"].get("skip-pull-request-authors")
-    steps = _jobs(WORKFLOWS / "yaga-commit-qualification.yml")["candidate"]["steps"]
+    steps = _jobs(WORKFLOWS / "commit-messages.yml")["conventional-commits"]["steps"]
     install = steps[2]["run"]
     assert 'mktemp -d "$RUNNER_TEMP/typos.XXXXXX"' in install
     assert "v1.50.2/typos-v1.50.2-x86_64-unknown-linux-musl.tar.gz" in install

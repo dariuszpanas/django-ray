@@ -20,7 +20,10 @@ WRITABLE_CACHE = Path("/tmp/linux-test-build-cache")
 
 
 def tree_bytes(root: Path) -> int:
-    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+    # Cache relocation preserves links; count the link itself, not its target.
+    return sum(
+        path.lstat().st_size for path in root.rglob("*") if path.is_symlink() or path.is_file()
+    )
 
 
 def prepare_directory(source: Path, destination: Path) -> None:
@@ -66,8 +69,7 @@ def record_environment(output: Path) -> None:
     for executable, arguments in (
         ("python", ["--version"]),
         ("uv", ["--version"]),
-        ("node", ["--version"]),
-        ("npm", ["--version"]),
+        ("uvx", ["--version"]),
         ("git", ["--version"]),
         ("make", ["--version"]),
         ("kubectl", ["version", "--client", "-o", "json"]),
@@ -79,7 +81,7 @@ def record_environment(output: Path) -> None:
     receipt = {
         "schema_version": 1,
         "execution": "not_run",
-        "images": {name: os.environ[name] for name in ("PYTHON_IMAGE", "NODE_IMAGE", "UV_IMAGE")},
+        "images": {name: os.environ[name] for name in ("PYTHON_IMAGE", "UV_IMAGE")},
         "debian_snapshot": os.environ["DEBIAN_SNAPSHOT"],
         "inputs": {
             name: hashlib.sha256((INPUTS / name).read_bytes()).hexdigest() for name in files

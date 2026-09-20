@@ -57,7 +57,7 @@ linux-test-aggregate:
 # Install dependencies
 install:
 	uv sync
-	npm ci --ignore-scripts
+	uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga --version
 	$(MAKE) configure-git
 
 # Configure this worktree to use the tracked commit template and hook.
@@ -71,21 +71,18 @@ configure-git:
 COMMIT_BASE ?= origin/main
 COMMIT_HEAD ?= HEAD
 commit-check:
-	npm run --silent commitlint -- \
-		--from "$(COMMIT_BASE)" \
-		--to "$(COMMIT_HEAD)" \
-		--git-log-args="--no-merges"
+	python scripts/check_commits.py range --base "$(COMMIT_BASE)" --head "$(COMMIT_HEAD)"
 
 # Validate a PR title from the PR_TITLE environment variable.
 commit-title-check:
-	@node -e "const title = process.env.PR_TITLE; if (!title) { console.error('PR_TITLE is required.'); process.exit(2); } process.stdout.write(title + '\n');" | npm run --silent commitlint:title
+	python scripts/check_commits.py title
 
 # Exercise the repository-owned commit policy fixtures.
 commit-policy-test:
-	npm test --silent
+	python -m scripts.check_commit_policy
 
 # Pure Python workflow checks; override YAGA=yaga to use a global installation.
-YAGA ?= uvx --from yaga-cli==0.1.1 yaga
+YAGA ?= uvx --from yaga-cli==0.1.2 --with typos==1.50.2 yaga
 YAGA_FORMAT ?= text
 workflow-check:
 	$(YAGA) repo check --plan .yaga/checks/workflows.toml --format $(YAGA_FORMAT)

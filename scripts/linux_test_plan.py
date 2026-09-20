@@ -133,7 +133,7 @@ def catalogue(manifest: Manifest) -> dict[str, Any]:
         },
         "coverage_floors": {"source": 95, "worker": 90, "ray_job": 90, "testproject": 80},
         "prerequisites": {
-            "environment": "uv sync --frozen --extra postgres; npm ci --ignore-scripts",
+            "environment": "uv sync --frozen --extra postgres; make commit-policy-test",
             "executables": ["node", "npm", "make", "git", "kubectl"],
             "kubectl_use": "local Kustomize rendering only; no cluster access",
             "source_manifest": "required for immutable archives without Git metadata",
