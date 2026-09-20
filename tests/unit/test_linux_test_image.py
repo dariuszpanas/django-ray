@@ -92,7 +92,7 @@ def test_image_receipt_records_observed_tools_and_exact_build_inputs(
     monkeypatch.setattr(image_support, "INPUTS", tmp_path)
     for name in ("source.tar", "source-manifest.json", "build-constraints.txt"):
         (tmp_path / name).write_bytes(name.encode())
-    for name in ("PYTHON_IMAGE", "NODE_IMAGE", "UV_IMAGE"):
+    for name in ("PYTHON_IMAGE", "UV_IMAGE"):
         monkeypatch.setenv(name, "example/image@sha256:" + "a" * 64)
     monkeypatch.setenv("DEBIAN_SNAPSHOT", "20260910T000000Z")
     monkeypatch.setattr(image_support.subprocess, "check_output", lambda *args, **kwargs: "tool\n")
@@ -106,3 +106,18 @@ def test_image_receipt_records_observed_tools_and_exact_build_inputs(
     monkeypatch.setattr(image_support, "MAX_BUILD_CACHE_BYTES", 4)
     with pytest.raises(ValueError, match="128 MiB"):
         image_support.record_environment(tmp_path / "oversized.json")
+
+
+def test_cache_size_counts_preserved_links_without_following_targets(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    target = tmp_path / "interpreter"
+    target.write_bytes(b"x" * 1024 * 1024)
+    link = cache / "python"
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+    assert image_support.tree_bytes(cache) == link.lstat().st_size
+    (cache / "package.whl").write_bytes(b"wheel")
+    assert image_support.tree_bytes(cache) == link.lstat().st_size + 5

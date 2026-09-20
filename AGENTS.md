@@ -54,7 +54,7 @@ When a task calls for a branch, start from current `main` and use the convention
 - Validate the retained range with `make commit-check` and validate the final PR title with
   `PR_TITLE='feat: describe the pull request' make commit-title-check`.
 
-Use Conventional Commit syntax for commit messages and PR titles. The tracked commitlint
+Use Conventional Commit syntax for commit messages and PR titles. The tracked `.yaga.toml`
 configuration is the authoritative structural policy. Run `make install` to install dependencies,
 the tracked template, and the `commit-msg` hook; use `make configure-git` to reinstall the template
 and hook configuration in an existing environment. Write commit messages in an editor or a prepared

@@ -43,10 +43,10 @@ boundaries, compatibility or rollout impact, and useful repository-local investi
 they materially help a future reader. One large atomic commit is valid; use proportional detail for
 small mechanical changes and keep unrelated changes in separate logical commits.
 
-The tracked commitlint configuration is the authoritative structural policy. It requires a
+The tracked `.yaga.toml` configuration is the authoritative structural policy. It requires a
 Conventional Commit header no longer than 72 characters with a summary of at least 10 characters, a
 blank line, and a descriptive body of at least 100 characters excluding footers. Wrap body prose at
-72 characters; footers use commitlint's 100-character limit. End every retained commit
+72 characters; footers use a 100-character limit. End every retained commit
 with a `Validation:` trailer that records exact commands and results or a specific reason validation
 was not run. PR titles use the same Conventional Commit header policy but do not require a body or
 trailer. Imperative wording and useful historical context remain writing guidance rather than
@@ -73,7 +73,7 @@ make install
 make configure-git
 ```
 
-The tracked hook validates the final message with the same commitlint policy used by the local range
+The tracked hook validates the final message with the same YAGA policy used by the local range
 check and hosted required check. Compose the message in the configured editor with `git commit`, or
 prepare a complete message file and use `git commit --file <path>`. Do not assemble prose with
 repeated `-m` flags, which create separate paragraphs, and do not bypass the hook with `--no-verify`.
@@ -101,7 +101,7 @@ required check but are excluded from title and commit-message linting; the workf
 verifies their exact event head, and the separate required `CI Gate` validates their complete change.
 `CI Gate` fails unless lint, docs, typing, supported-Python tests, PostgreSQL, live-cluster faults,
 testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and package build all
-succeed. For ordinary pull requests, the hosted commit check runs the same authoritative commitlint
+succeed. For ordinary pull requests, the hosted commit check runs the same authoritative `.yaga.toml`
 configuration as the tracked local hook and `make commit-check`.
 
 ## Rebase auto-merge
@@ -275,35 +275,36 @@ search only for relevant concepts, and write one task-local handoff. The vault n
 or tests and must not contain secrets. Work must continue normally when Obsidian is unavailable.
 
 
-### YAGA commit-policy qualification
+### YAGA commit policy
 
-YAGA Commit Candidate is advisory during parity qualification. The required
-`Commit Messages` check, local hook and commitlint configuration remain authoritative.
-The candidate Action is pinned to the merged upstream consumer-parity revision and
-reads `.yaga.toml` from the committed trusted event checkout, never the PR working
-tree. The released YAGA 0.1.1 CLI does not support these new commit-policy options;
-its separately configured workflow checks continue using the existing released pin.
+The required `Commit Messages` check and local hook/Make commands use released
+YAGA 0.1.2 with the structural policy in `.yaga.toml`. The migration preserves
+existing commit and title rules; spelling with pinned Typos 1.50.2 is an explicit
+additional check. Node.js and npm are no longer development prerequisites.
 
-The candidate runs on `pull_request_target` after this workflow reaches main.
-Checkout deliberately omits `ref` to use the exact trusted runner commit, avoiding
-a moving-main race. Fetching a PR ref does not check out or execute its files.
-The fetched head must match the event head before the Action checks the title and
-base-to-head commit range. Read-only permissions and PR/head-specific concurrency
-match the required check's boundaries. Qualification must cover actual GitHub events,
-valid and invalid messages and titles, and policy changes in a PR before cutover.
-Synthetic upstream controls alone are insufficient evidence for replacement.
+`make commit-check` checks non-merge commits in the selected range. An empty
+valid range succeeds; invalid revisions fail. `make commit-title-check` reads
+`PR_TITLE` as one literal argument and applies header and spelling rules without
+requiring a body or trailer. The hook uses explicit editor mode to remove Git
+comments, including the configured semicolon template guidance, before validation.
+Literal file checks retain comments. Missing or broken tools fail the check.
 
-The candidate policy explicitly skips title, commit-message and optional spelling
-rules for trusted same-repository Dependabot PRs on `dependabot/` branches. Event
-and fetched-head verification still apply; ordinary PRs cannot opt out by using
-a bot-like branch name. The required `Commit Messages` exemption is unchanged.
+The immutable released Action runs on `pull_request_target` with read-only
+permissions. Checkout omits `ref` to use the exact trusted runner commit. It
+fetches and verifies the event head without checking out or executing PR code.
+The Action reads committed trusted configuration, and concurrency includes both
+PR number and head so stale events cannot cancel current-head evidence.
 
-The advisory candidate checks spelling in titles and full commit messages with
-Typos 1.50.2, installed outside the checkout after SHA-256 verification. Trusted
-YAGA mode uses the built-in dictionary with `--isolated`; PR, parent and global
-Typos configuration cannot weaken it. Findings and missing or broken tools fail
-the candidate check. Dependabot remains exempt after provenance validation;
-no general PR author allowlist is enabled. Required commitlint is unchanged.
+Trusted same-repository Dependabot PRs on `dependabot/` branches skip title,
+commit-message and commit-spelling rules after provenance/head verification.
+Ordinary PRs cannot opt out through a bot-like branch name or author string.
+No general PR author allowlist is enabled. Repository spelling and CI still run.
+
+Commit spelling uses the isolated built-in dictionary locally and in the Action;
+PR, parent and global Typos configuration cannot weaken it. The Action installs
+Typos outside the checkout after SHA-256 verification. Local commands obtain the
+pinned CLI and Typos through uvx. `make commit-policy-test` runs the retained
+structural fixtures through that installed CLI.
 
 ### Repository spelling
 

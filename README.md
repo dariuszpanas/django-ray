@@ -219,7 +219,6 @@ guidance.
 ### Prerequisites
 - Python 3.12, 3.13, or 3.14
 - [uv](https://github.com/astral-sh/uv) package manager
-- Node.js matching `.node-version` with npm (development only)
 
 ### Installation
 

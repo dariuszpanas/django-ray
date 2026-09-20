@@ -164,12 +164,12 @@ requirements input, resolve all its transitive dependencies with
 result as `build-constraints.txt`. Every build requirement must be pinned with
 hashes. Reuse that exact file for repeated builds. The image constrains both
 editable installation and package builds, then warms the isolated backend
-cache with `uv build --require-hashes`. It removes the earlier dependency cache
-and caps the retained build cache at 128 MiB. Test dependencies remain selected
+cache with `uv build --require-hashes`. It removes the earlier dependency cache,
+warms the pinned YAGA/Typos tools for offline execution,
+and caps the retained build and tool cache at 128 MiB. Test dependencies remain selected
 from the unchanged frozen lock.
 
-Supply full digest references for a Python slim-trixie image, a Node image
-matching `.node-version`, and a compatible uv image. Supply a fixed Debian
+Supply full digest references for a Python slim-trixie image and a compatible uv image. Supply a fixed Debian
 snapshot timestamp, such as the selected preparation snapshot's
 `YYYYMMDDTHHMMSSZ` value. No floating image default or live Debian mirror is
 used. The recipe uses the Python interpreter already in that base image;
@@ -178,7 +178,6 @@ the initial regression target uses the repository's Python 3.12 baseline.
 ```bash
 docker build --platform linux/amd64 -f testing/linux/Dockerfile \
   --build-arg PYTHON_IMAGE="$PYTHON_IMAGE" \
-  --build-arg NODE_IMAGE="$NODE_IMAGE" \
   --build-arg UV_IMAGE="$UV_IMAGE" \
   --build-arg DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT" \
   --tag "$TEST_IMAGE" "$BUNDLE"
