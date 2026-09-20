@@ -13,11 +13,15 @@ services:
     build:
       context: ../..
       dockerfile: qualification/upgrade/Dockerfile
+      args:
+        UPGRADE_BASELINE_COMMIT: ${UPGRADE_BASELINE_COMMIT:-95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485}
       additional_contexts:
         tools: service:tools
         released-source: ${UPGRADE_BASELINE_SOURCE:?Set the directory produced by qualification.upgrade.prepare}
     image: django-ray-upgrade-qualification:${UPGRADE_IMAGE_TAG:-local}
     command: [python, -m, qualification.upgrade.scenario]
+    environment:
+      DJANGO_RAY_UPGRADE_BASELINE: ${DJANGO_RAY_UPGRADE_BASELINE:-0.4.0}
     user: "10001:10001"
     network_mode: none
     read_only: true

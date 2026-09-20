@@ -368,7 +368,11 @@ def main():
     import django_ray
 
     assert str(Path(django_ray.__file__).resolve()) == expected_module
-    assert django_ray.__version__ == ("0.5.0" if phase.startswith("candidate") else "0.4.0")
+    from qualification.upgrade.contract import BASELINE_VERSION, CANDIDATE_VERSION
+
+    assert django_ray.__version__ == (
+        CANDIDATE_VERSION if phase.startswith("candidate") else BASELINE_VERSION
+    )
     import django
 
     django.setup()

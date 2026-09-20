@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import io
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 import tarfile
+import tomllib
 from pathlib import Path
 from unittest.mock import Mock
 from xml.etree import ElementTree
@@ -237,3 +243,63 @@ def test_archive_failure_retains_failed_manifest_without_rehashing_missing_file(
     assert manifest["candidate_source_files_sha256"] is None
     assert manifest["complete_upgrade_gate"] is False
     assert ElementTree.fromstring(output["junit.xml"]).attrib["failures"] == "1"
+
+
+@pytest.mark.parametrize("baseline", ["0.4.0", "0.5.0"])
+def test_reviewed_baseline_selection_matches_candidate_source(baseline):
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json; from qualification.upgrade import contract as c; "
+            "print(json.dumps([c.BASELINE_VERSION, c.BASELINE_COMMIT, c.CANDIDATE_VERSION]))",
+        ],
+        cwd=root,
+        env={**os.environ, "DJANGO_RAY_UPGRADE_BASELINE": baseline},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    expected = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    assert json.loads(result.stdout) == [baseline, contract.BASELINES[baseline], expected]
+
+
+def test_unreviewed_baseline_fails_before_fixture_execution():
+    result = subprocess.run(
+        [sys.executable, "-c", "import qualification.upgrade.contract"],
+        cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "DJANGO_RAY_UPGRADE_BASELINE": "main"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "unsupported-upgrade-baseline" in result.stderr
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_sqlite_restore_checks_django_constraints_and_closes_connections(tmp_path, corrupt):
+    from django.db.backends.sqlite3._functions import register
+
+    with contextlib.closing(sqlite3.connect(tmp_path / "backup")) as source:
+        register(source)
+        source.execute(
+            "CREATE TABLE fixture (recorded TEXT CHECK "
+            "(django_format_dtdelta('+', recorded, 0) IS NOT NULL))"
+        )
+        if corrupt:
+            source.execute("PRAGMA ignore_check_constraints=ON")
+        source.execute(
+            "INSERT INTO fixture VALUES (?)", ("not-a-date" if corrupt else "2026-01-01",)
+        )
+        source.commit()
+    if corrupt:
+        with pytest.raises(AssertionError):
+            scenario._restore(tmp_path, "sqlite", "restored")
+    else:
+        scenario._restore(tmp_path, "sqlite", "restored")
+    # Windows refuses unlinking an open SQLite file. Both success and error
+    # paths must release the connection before fixture cleanup.
+    (tmp_path / "restored.sqlite3").unlink()
+    (tmp_path / "backup").unlink()

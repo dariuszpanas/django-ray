@@ -162,8 +162,8 @@ def _postgres(root):
 def _backup(root, backend):
     backup = root / "backup"
     if backend == "sqlite":
-        with sqlite3.connect(root / "baseline.sqlite3") as source:
-            with sqlite3.connect(backup) as destination:
+        with contextlib.closing(sqlite3.connect(root / "baseline.sqlite3")) as source:
+            with contextlib.closing(sqlite3.connect(backup)) as destination:
                 source.backup(destination)
     else:
         _run(
@@ -190,9 +190,15 @@ def _restore(root, backend, database):
     if database not in ("restored", "rollback"):
         raise wheel.QualificationError("invalid-upgrade-restore-destination")
     if backend == "sqlite":
-        with sqlite3.connect(root / "backup") as source:
-            with sqlite3.connect(root / f"{database}.sqlite3") as destination:
+        with contextlib.closing(sqlite3.connect(root / "backup")) as source:
+            with contextlib.closing(sqlite3.connect(root / f"{database}.sqlite3")) as destination:
                 source.backup(destination)
+                # Django migrations may use its deterministic SQLite functions
+                # inside CHECK constraints. Integrity checking evaluates those
+                # expressions even without rows; use the installed adapter.
+                from django.db.backends.sqlite3._functions import register
+
+                register(destination)
                 assert destination.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     else:
         _run(
@@ -230,7 +236,10 @@ def _phase(root, backend, phase, target, *, released, database, artifacts):
             artifacts,
         ],
         cwd=ROOT,
-        environment=wheel._subprocess_environment(install_target=target, source_root=ROOT),
+        environment={
+            **wheel._subprocess_environment(install_target=target, source_root=ROOT),
+            "DJANGO_RAY_UPGRADE_BASELINE": BASELINE_VERSION,
+        },
     )
     if len(result.stdout) > MAX_RECEIPT_BYTES:
         raise wheel.QualificationError("upgrade-phase-output-too-large")
@@ -400,6 +409,8 @@ def execute():
         "outcome": "passed" if failure is None else "failed",
         "failure": failure,
         "baseline_commit": BASELINE_COMMIT,
+        "baseline_version": BASELINE_VERSION,
+        "candidate_version": CANDIDATE_VERSION,
         "baseline_archive_sha256": baseline_archive_digest,
         "candidate_source_files_sha256": candidate_source_digest,
         "identities": identities,

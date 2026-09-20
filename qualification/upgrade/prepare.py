@@ -7,7 +7,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-from qualification.upgrade.contract import BASELINE_COMMIT
+from qualification.upgrade.contract import BASELINE_COMMIT, BASELINE_TAG
 
 
 def verify_archive(path: Path) -> None:
@@ -36,13 +36,13 @@ def main() -> None:
     if destination.is_relative_to(root) or destination.exists():
         raise SystemExit("expected-new-baseline-directory-outside-checkout")
     observed = subprocess.check_output(
-        ["git", "rev-parse", "v0.4.0^{commit}"],
+        ["git", "rev-parse", f"{BASELINE_TAG}^{{commit}}"],
         cwd=root,
         timeout=10,
         text=True,
     ).strip()
     if observed != BASELINE_COMMIT:
-        raise SystemExit("v0.4.0-does-not-match-reviewed-baseline")
+        raise SystemExit(f"{BASELINE_TAG}-does-not-match-reviewed-baseline")
     destination.mkdir(mode=0o755)
     path = destination / "source.tar"
     with path.open("xb") as stream:
