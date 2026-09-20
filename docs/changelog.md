@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Serialize concurrent updates and terminal handoff within a shared leaf-local
+  workflow progress session. Preserve its one-outstanding-call bound and coherent
+  terminal counters when threads report progress or finish at the same time.
+  This does not establish a workflow-wide bound across separate producers.
 - Explain unavailable Admin workflow graphs using the saved reporting policy and
   publication state, including unfinished runs, terminal-only or disabled
   reporting, expired detail and missing historical publications. Direct oversized

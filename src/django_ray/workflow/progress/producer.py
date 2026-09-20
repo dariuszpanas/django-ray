@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import StrEnum
+from threading import Lock
 from typing import Any
 
 from django_ray.workflow.progress.limits import (
@@ -62,6 +63,7 @@ class WorkflowProgressProducerSession:
         "_counters",
         "_finished_report",
         "_limits",
+        "_lock",
         "_node_id",
         "_outstanding",
         "_pending_wire",
@@ -83,6 +85,7 @@ class WorkflowProgressProducerSession:
         self._run_identity = dict(run_identity)
         self._node_id = node_id
         self._limits = limits
+        self._lock = Lock()
         self._counter_max = limits.identity_max_integer
         self._ack_poller = _poll_ray_ack if ack_poller is None else ack_poller
         self._outstanding: Any | None = None
@@ -153,7 +156,19 @@ class WorkflowProgressProducerSession:
         message: str | None = None,
         metrics: dict[str, Any] | None = None,
     ) -> bool:
-        """Validate and submit or coalesce one latest application-progress value."""
+        """Serialize offers so context copies share one acknowledgement slot."""
+        with self._lock:
+            return self._offer(current, total, message=message, metrics=metrics)
+
+    def _offer(
+        self,
+        current: int | float,
+        total: int | float,
+        *,
+        message: str | None,
+        metrics: dict[str, Any] | None,
+    ) -> bool:
+        """Validate and submit or coalesce while owning the session lock."""
         if self._finished_report is not None:
             return False
         wire = prepare_workflow_progress_event(
@@ -188,6 +203,11 @@ class WorkflowProgressProducerSession:
 
     def finish(self) -> dict[str, Any]:
         """Seal the producer and hand off at most one latest buffered value."""
+        with self._lock:
+            return self._finish()
+
+    def _finish(self) -> dict[str, Any]:
+        """Seal a consistent counter snapshot while owning the session lock."""
         if self._finished_report is not None:
             return dict(self._finished_report)
 
