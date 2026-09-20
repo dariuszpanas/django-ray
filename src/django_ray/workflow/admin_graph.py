@@ -260,6 +260,8 @@ def inspect_admin_workflow_graph_summary(
 
     source_schema = envelope.get("source_schema_version")
     if source_schema is None:
+        if envelope.get("availability") == "DISABLED" and envelope.get("summary") is None:
+            raise AdminWorkflowGraphError("UNAVAILABLE", reason="DISABLED")
         raise AdminWorkflowGraphError("NOT_REPORTED")
     if source_schema != WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION:
         raise AdminWorkflowGraphError("UNSUPPORTED")

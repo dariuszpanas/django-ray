@@ -2756,7 +2756,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
                 execution,
                 authorize=authorizer,
                 include_legacy=False,
-                infer_current_reporting_policy=False,
+                infer_current_reporting_policy=True,
                 attempt_number=attempt_number,
             )
         except WorkflowProgressReadError as error:

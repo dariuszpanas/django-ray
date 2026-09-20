@@ -43,7 +43,7 @@ def test_success_records_all_serial_cases_without_claiming_complete_gate(fixture
     assert [call.kwargs["case"] for call in execute.call_args_list] == list(runner.workflow_cases())
 
 
-@pytest.mark.parametrize("failure_index", range(5))
+@pytest.mark.parametrize("failure_index", range(len(runner.workflow_cases())))
 @pytest.mark.parametrize("module_name", ["qualification.application.run_workflows", "__main__"])
 def test_failed_case_stops_submissions_and_omits_raw_error(
     fixture_runner, capsys, failure_index, module_name, monkeypatch
@@ -111,6 +111,9 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
         }
         for identity, state in zip(identities, case.states, strict=True)
     ]
+    if case.policy == "disabled":
+        for item in history:
+            item["workflow_progress_summary_json"] = None
     attempts = MagicMock()
     attempts.annotate.return_value.filter.return_value.order_by.return_value.values.return_value.__getitem__.return_value = history
     row = SimpleNamespace(
@@ -125,6 +128,8 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
     monkeypatch.setattr("django_ray.models.RayTaskExecution.objects", manager)
     storage = Mock()
     monkeypatch.setattr(runner, "verify_no_workflow_detail", storage)
+    disabled_storage = Mock()
+    monkeypatch.setattr(runner, "verify_no_disabled_publication", disabled_storage)
     submitted = {"task_id": task_id, "args": [], "kwargs": dict(case.options)}
     enqueue = Mock(return_value=SimpleNamespace(id=task_id, args=[], kwargs=dict(case.options)))
     monkeypatch.setattr("testproject.admission.enqueue_sample", enqueue)
@@ -133,6 +138,7 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
     )
     graph = Mock(side_effect=lambda *_args, **_kwargs: {"observed": True})
     monkeypatch.setattr(runner, "read_full_workflow_graph", graph)
+    monkeypatch.setattr(runner, "read_disabled_workflow_graph", graph)
     admin = Mock(return_value={"admin_workflow": "verified"})
     monkeypatch.setattr(runner, "observe_admin_contract", admin)
     polling = {
@@ -151,9 +157,20 @@ def test_execute_observes_each_durable_attempt_after_one_submission(monkeypatch,
     if case.name == "recovery":
         responses.insert(0, (200, json.dumps(submitted).encode()))
     request = Mock(side_effect=responses)
-    assert runner.execute_case(request, token="fixture-token", case=case) == [
-        {"observed": True, "admin_contract": {"admin_workflow": "verified"}}
-    ] * len(case.states)
+    expected = {"observed": True}
+    if case.policy != "disabled":
+        expected["admin_contract"] = {"admin_workflow": "verified"}
+    assert runner.execute_case(request, token="fixture-token", case=case) == [expected] * len(
+        case.states
+    )
+    if case.policy == "disabled":
+        disabled_storage.assert_called_once_with(12)
+        storage.assert_called_once_with(12)
+        admin.assert_not_called()
+        graph.assert_called_once()
+        assert graph.call_args.kwargs["expected_state"] == case.states[0]
+        return
+    disabled_storage.assert_not_called()
     assert enqueue.call_count == (0 if case.name == "recovery" else 1)
     assert sum(call.kwargs["method"] == "POST" for call in request.call_args_list) == (
         1 if case.name == "recovery" else 0
@@ -190,3 +207,33 @@ def test_terminal_only_checks_all_detail_tables(monkeypatch, retained):
     else:
         with pytest.raises(ValueError, match="retained graph storage"):
             runner.verify_no_workflow_detail(12)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("retained", [None, "current", "attempt", "staged"])
+def test_disabled_publication_checks_current_history_and_staging(retained):
+    from django_ray.models import RayTaskExecution, TaskAttempt, WorkflowProgressRunStorage
+
+    task = RayTaskExecution.objects.create(task_id="disabled-storage-check", callable_path="unused")
+    if retained == "current":
+        task.progress_data = '{"unexpected":true}'
+        task.save(update_fields=["progress_data"])
+    elif retained == "attempt":
+        TaskAttempt.objects.create(
+            execution=task,
+            attempt_number=1,
+            state="FAILED",
+            workflow_progress_summary_json='{"unexpected":true}',
+        )
+    elif retained == "staged":
+        WorkflowProgressRunStorage.objects.create(
+            execution=task,
+            attempt_number=1,
+            execution_generation=1,
+            run_id="00000000-0000-0000-0000-000000000563",
+        )
+    if retained:
+        with pytest.raises(ValueError, match="retained publication storage"):
+            runner.verify_no_disabled_publication(task.pk)
+    else:
+        runner.verify_no_disabled_publication(task.pk)

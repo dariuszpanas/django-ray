@@ -228,8 +228,8 @@ not inferred from Job status. The cold receipt's predecessor digest must match t
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
 
-The workflow observation stage runs five fixed tasks serially in each Ray generation: complex
-workflow success and failure under `full` and `terminal_only`, followed by the recovery showcase's
+The workflow observation stage runs seven fixed tasks serially in each Ray generation: complex
+workflow success and failure under `full`, `terminal_only` and `disabled`, followed by the recovery showcase's
 two failed attempts and successful third attempt. Production settings disable the complex-workflow
 demo HTTP route, so those four cases use the bounded Django task enqueue API inside the fixture.
 The recovery case uses its production HTTP endpoint. All cases use authenticated HTTP polling and
@@ -285,3 +285,10 @@ This runs only the bounded application job, without waiting for or launching the
 The job summary and artifact explicitly identify diagnostic intent. Diagnostic execution does not
 satisfy final acceptance: publish the completed candidate to its PR, where the default acceptance
 mode requires current-source Linux CI before repeating the application test.
+
+
+Disabled-policy cases check authenticated API and Admin JSON responses for an
+explicit disabled explanation without a run identity, publication or graph.
+Database checks reject current/archived progress and staged run storage. These
+cases do not claim rendered disabled-page coverage or package-default activation;
+the full-policy cases still exercise the explicitly enabled pilot publisher.
