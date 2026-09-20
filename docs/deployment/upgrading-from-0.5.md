@@ -17,6 +17,13 @@ Default workflow graph activation and final upgrade acceptance remain pending.
   producers at the coordinated Beta boundary; no stored submission is silently
   converted or replayed. Strict-family rejection and inert historical reads stay
   intact. This does not remove inline argument encoding inside a current request.
+- Bound current tasks must produce results and diagnostics representable by the
+  strict completion format. Nonfinite results such as `NaN`, invalid values or
+  over-limit diagnostics no longer trigger an identity-free legacy completion.
+  Instead, the task reports `RayExecutionCompletionEncodingError` with its
+  execution identity and automatic retry disabled. Application effects may have
+  occurred: assess them before manually retrying. Valid current completions,
+  historical readers and the internal unbound synchronous adapter are retained.
 - Durable workflow leaves also require a complete independently bound nested
   request. An old leaf carrying a task ID or workflow identity without that
   request is refused before application setup, import, invocation or progress

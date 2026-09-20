@@ -105,7 +105,7 @@ def read_history(root, history_file="history.json"):
     return len(ids)
 
 
-def run_work(root):
+def run_work(root, *, check_completion_encoding=False):
     import ray
     from django.conf import settings
     from django.core.management import call_command
@@ -149,6 +149,7 @@ def run_work(root):
     assert outcome.state == "CANCELLED"
     manager = None
     crash = {}
+    encoding_failure = None
     log = (root / "manager.log").open("wb")
 
     def start_manager():
@@ -318,6 +319,47 @@ def run_work(root):
         if settings.RUNNER == "ray_job":
             for case in ("success", "failure", "retry"):
                 assert RayTaskExecution.objects.get(task_id=tasks[case].id).ray_job_id
+        if check_completion_encoding:
+            from django_ray.execution_codec import (
+                ExecutionCompletionSource,
+                ExecutionIdentity,
+                decode_execution_completion,
+            )
+
+            marker = root / "encoding-invocations"
+            assert not marker.exists()
+            encoded_task = controlled.enqueue("completion-encoding", PAYLOAD)
+            wait(
+                lambda: RayTaskExecution.objects.filter(
+                    task_id=encoded_task.id, state__in=TERMINAL
+                ).exists()
+            )
+            row = RayTaskExecution.objects.get(task_id=encoded_task.id)
+            assert row.state == "FAILED" and row.attempt_number == 1
+            assert marker.read_text() == "x"
+            assert row.error_message == (
+                "Task completion could not be encoded. Application effects may "
+                "have occurred; assess them before manually retrying."
+            )
+            assert not row.error_traceback
+            if settings.RUNNER == "ray_job":
+                decoded = decode_execution_completion(
+                    row.completion_data,
+                    expected_identity=ExecutionIdentity(
+                        row.pk, str(row.task_id), row.attempt_number, row.execution_generation
+                    ),
+                    expected_execution_protocol_version=row.execution_protocol_version,
+                )
+                assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+                assert decoded.completion.retryable is False
+                assert decoded.completion.success is False
+                assert decoded.completion.exception_type == "RayExecutionCompletionEncodingError"
+            encoding_failure = {
+                "state": row.state,
+                "application_invocations": 1,
+                "attempt_number": row.attempt_number,
+                "identity_bearing_job_completion": settings.RUNNER == "ray_job",
+            }
     finally:
         try:
             if manager is not None:
@@ -350,6 +392,7 @@ def run_work(root):
         "nonterminal": 0,
         "runner": settings.RUNNER,
         "manager_crash": crash,
+        "completion_encoding_failure": encoding_failure,
     }
 
 
@@ -424,7 +467,7 @@ def main():
             == 1
         )
         observations["post_write_tasks_read"] = read_history(root, "candidate-history.json")
-        assert observations["post_write_tasks_read"] == 8
+        assert observations["post_write_tasks_read"] == 9
         observations["database_read_only"] = True
         observations["migrations_retained"] = True
     if phase == "candidate-read":
@@ -432,7 +475,7 @@ def main():
     if phase != "baseline-run":
         observations["historical_tasks"] = read_history(root)
     if phase.endswith("-run"):
-        observations.update(run_work(root))
+        observations.update(run_work(root, check_completion_encoding=phase == "candidate-run"))
         if phase == "baseline-run":
             (root / "history.json").write_text(json.dumps(snapshot()))
             observations["historical_tasks"] = read_history(root)

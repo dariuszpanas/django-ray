@@ -21,6 +21,10 @@ def controlled(case, payload):
         bundle = importlib.import_module("upgrade_bundle")
         assert Path(bundle.__file__).resolve().is_relative_to(Path.cwd())
         assert bundle.marker() == "delivered-upgrade-artifact"
+    if case == "completion-encoding":
+        with (settings.ROOT / "encoding-invocations").open("a") as marker:
+            marker.write("x")
+        return float("nan")
     if case not in {"success", "failure", "retry", "cancelled"}:
         raise ValueError("unknown qualification case")
     if case == "cancelled":

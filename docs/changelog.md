@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Bound current task completions no longer fall back to an
+  identity-free legacy outcome when strict encoding fails. Nonfinite results or
+  unrepresentable diagnostics produce a fixed, identity-bearing failure without
+  automatic retry. Assess application effects before manually retrying; the task
+  may already have run. Historical completion readers remain available.
 - Separate enqueue, claim observation, submission acknowledgement, callable
   execution, receipt waiting and persistence observations in the bounded Job
   latency fixture. Preserve raw phase timestamps, deliberate hold time and the
