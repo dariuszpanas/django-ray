@@ -33,3 +33,7 @@ caf = "caf"
 extend-glob = ["workflow-progress-reads-postgresql17-windows-2026-07-21.md"]
 [type.sql-benchmark.extend-identifiers]
 SELECTs = "SELECTs"
+
+# Negative control: trusted checks must ignore this PR-side dictionary.
+[default.extend-words]
+teh = "teh"
