@@ -603,11 +603,8 @@ def _validate_changelog_development(
         raise ValueError("dated changelog release headings must be ordered newest version first")
     current_version = _read_pyproject_version(root)
     unreleased_body = changelog[unreleased_heading.end() : latest_release.start()].strip()
-    if unreleased_body and current_version in dated_versions:
-        raise ValueError(
-            f"current development version [{current_version}] cannot be dated while "
-            "Unreleased still contains changes"
-        )
+    # Development can collect notes before choosing or bumping the next version.
+    # Release validation separately requires an empty Unreleased section.
     pending_release_accepted = False
     if released_versions is not None:
         undocumented_tags = released_versions - dated_versions

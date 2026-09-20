@@ -599,7 +599,7 @@ def test_development_changelog_accepts_all_current_work_as_unreleased(tmp_path: 
     )
 
 
-def test_development_changelog_rejects_mixed_current_release_and_unreleased(
+def test_development_changelog_accepts_notes_before_next_version_bump(
     tmp_path: Path,
 ) -> None:
     _write_development_changelog(
@@ -607,14 +607,20 @@ def test_development_changelog_rejects_mixed_current_release_and_unreleased(
         current_version="0.4.0",
         changelog=(
             "## [Unreleased]\n\n### Added\n\n- still pending\n\n"
-            "## [0.4.0] - 2026-07-29\n\n- supposedly released\n\n"
+            "## [0.4.0] - 2026-07-29\n\n- released\n\n"
             "[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...HEAD\n"
             "[0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0\n"
         ),
     )
 
-    with pytest.raises(ValueError, match="cannot be dated while Unreleased still contains"):
-        release._validate_changelog_development(tmp_path, as_of=date(2026, 7, 29))
+    assert (
+        release._validate_changelog_development(
+            tmp_path, as_of=date(2026, 7, 29), released_versions={"0.4.0"}
+        )
+        is False
+    )
+    with pytest.raises(ValueError, match="Unreleased changelog section must be empty"):
+        release._validate_changelog_release(tmp_path, "0.4.0")
 
 
 def test_development_changelog_rejects_future_release_date(tmp_path: Path) -> None:

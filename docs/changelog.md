@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Admin dashboard links now require an explicit Django
+  `RAY_DASHBOARD_URL` setting. The implicit localhost fallback is removed.
+  Configure an address reachable from the operator's browser; local port-forward
+  users must also set it explicitly. Reverse-proxy base paths are preserved and
+  job/task identifiers are URL-encoded. Missing or invalid addresses show
+  configuration guidance instead of broken links. See the
+  [upgrade guide](deployment/upgrading-from-0.5.md).
+- Replace commitlint with released YAGA 0.1.2 for the required `Commit Messages`
+  Action, local hook and Make commands, preserving the existing structural rules.
+  Add isolated commit/title spelling checks with pinned Typos 1.50.2. Trusted
+  same-repository Dependabot PRs retain their narrow commit-policy exemption;
+  repository spelling and ordinary CI still apply. Node.js/npm are no longer
+  needed for the commit hook.
+
+### Fixed
+
+- Explain unavailable Admin workflow graphs using the saved reporting policy and
+  publication state, including unfinished runs, terminal-only or disabled
+  reporting, expired detail and missing historical publications. Direct oversized
+  views to retained paginated API detail where available. These messages do not
+  enable graphs by default or reconstruct missing historical graphs.
+- Preserve precise sample search-result types and installed-wheel dependency
+  checks under updated type-checker and cryptography releases.
+
+### Added
+
+- Document a Kubernetes execution golden path, browser-facing dashboard access,
+  workflow Admin expectations and private worker-owned temporary storage for
+  graph preparation. Clarify that successful task execution does not guarantee
+  graph publication.
+- Add a [post-0.5 upgrade guide](deployment/upgrading-from-0.5.md) covering explicit
+  settings, stopped writers, preserved artifacts and encryption keys, independent
+  restore, rollback boundaries and deployment-specific acceptance.
+- Qualify pilot workflow publication over authenticated API/Admin HTTP on cold
+  Ray, covering full and terminal-only success/failure, archived retry recovery
+  and cleanup. Default workflow graph activation remains pending.
+- Add immutable 0.4.0/0.5.0 upgrade baselines and bounded hosted Linux rehearsals
+  for Core, Jobs, Jobs-manager crashes and Core/Ray loss, including independent
+  restore and preserved history. These fixtures do not replace final-candidate
+  upgrade acceptance.
+- Run pinned YAGA workflow reference/security checks and repository-wide Typos
+  checks over documentation, source, tests and configuration in development and CI.
+- Allow development changelog entries before the next package version is chosen;
+  release validation still requires an empty `Unreleased` section.
+
 ## [0.5.0] - 2026-09-13
 
 ### Ray 2.58 baseline
