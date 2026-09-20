@@ -1844,3 +1844,146 @@ def test_unversioned_durable_job_carrier_is_inert(monkeypatch, transport_version
     assert rejected["error"] == "execution request rejected: legacy_request"
     assert rejected["retryable"] is False
     assert "private" not in result
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"result": float("nan")},
+        {"result": float("inf")},
+        {"result": {1, 2}},
+        {"success": False, "error": "private diagnostic" * 5000},
+        {"success": False, "error": "private\x00diagnostic"},
+        {"result_reference": "private\x00reference"},
+    ],
+    ids=["nan", "infinity", "unsupported", "oversized-error", "invalid-error", "invalid-reference"],
+)
+def test_bound_completion_encoding_failure_preserves_identity_without_retry(replacement):
+    identity = ExecutionIdentity(81, "00000000-0000-4000-8000-000000000081", 2, 4)
+    values = {
+        "success": True,
+        "result": 3,
+        "result_reference": None,
+        "error": None,
+        "error_traceback": None,
+        "exception_type": None,
+        "retryable": None,
+        **replacement,
+    }
+    wire = entrypoint._serialize_completion(
+        **values, completion_identity=identity, execution_protocol_version=1
+    )
+    decoded = decode_execution_completion(
+        wire, expected_identity=identity, expected_execution_protocol_version=1
+    )
+    assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+    assert decoded.completion.identity == identity
+    assert decoded.completion.success is False
+    assert decoded.completion.retryable is False
+    assert decoded.completion.result is None
+    assert decoded.completion.result_reference is None
+    assert decoded.completion.traceback is None
+    assert decoded.completion.exception_type == "RayExecutionCompletionEncodingError"
+    assert "private" not in wire
+    assert len(wire.encode()) < 2048
+
+
+@pytest.mark.parametrize("result_kind", ["nonfinite", "oversized"])
+def test_bound_task_encoding_failure_preserves_one_execution(monkeypatch, result_kind):
+    import django_ray.execution_codec as codec
+
+    identity = ExecutionIdentity(81, "00000000-0000-4000-8000-000000000081", 2, 4)
+    calls = []
+    persisted = []
+
+    def callable_result():
+        calls.append("effect")
+        return float("nan") if result_kind == "nonfinite" else "x" * 4096
+
+    monkeypatch.setattr(codec, "EXECUTION_COMPLETION_MAX_BYTES", 2048)
+    monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+    monkeypatch.setattr(entrypoint, "load_task_input", lambda **_values: ([], {}))
+    monkeypatch.setattr(
+        "django_ray.runtime.import_utils.import_callable", lambda _path: callable_result
+    )
+    monkeypatch.setattr(
+        entrypoint, "_persist_task_completion", lambda *args: persisted.append(args)
+    )
+    wire = entrypoint.execute_task(
+        "tests.serialization_effect",
+        "[]",
+        "{}",
+        _completion_identity=identity,
+        _execution_protocol_version=1,
+    )
+    decoded = decode_execution_completion(
+        wire, expected_identity=identity, expected_execution_protocol_version=1
+    )
+    assert calls == ["effect"]
+    assert len(persisted) == 1
+    assert persisted[0][-1] == wire
+    assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+    assert decoded.completion.success is False
+    assert decoded.completion.retryable is False
+    assert decoded.completion.exception_type == "RayExecutionCompletionEncodingError"
+
+
+def test_invalid_completion_identity_cannot_fall_back_to_legacy():
+    identity = ExecutionIdentity(0, "00000000-0000-4000-8000-000000000081", 2, 4)
+    with pytest.raises(ValueError, match="execution completion is invalid"):
+        entrypoint._serialize_completion(
+            success=True,
+            result=3,
+            result_reference=None,
+            error=None,
+            error_traceback=None,
+            exception_type=None,
+            retryable=None,
+            completion_identity=identity,
+            execution_protocol_version=1,
+        )
+
+
+@pytest.mark.parametrize("kind", ["unsupported", "circular", "nonfinite", "invalid-unicode"])
+def test_bound_result_preparation_failure_cannot_authorize_replay(monkeypatch, kind):
+    identity = ExecutionIdentity(81, "00000000-0000-4000-8000-000000000081", 2, 4)
+    cyclic = []
+    cyclic.append(cyclic)
+    result = {
+        "unsupported": {1},
+        "circular": cyclic,
+        "nonfinite": float("nan"),
+        "invalid-unicode": "\ud800",
+    }[kind]
+    calls = []
+
+    def execute_once():
+        calls.append("effect")
+        return result
+
+    monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+    monkeypatch.setattr(entrypoint, "load_task_input", lambda **kw: ([], {}))
+    monkeypatch.setattr(entrypoint, "get_settings", lambda: {"MAX_RESULT_SIZE_BYTES": 1024})
+    monkeypatch.setattr(entrypoint, "_persist_task_completion", lambda *args: None)
+    monkeypatch.setattr(
+        "django_ray.runtime.import_utils.import_callable", lambda path: execute_once
+    )
+    wire = entrypoint.execute_task(
+        "tests.effect",
+        "[]",
+        "{}",
+        task_execution_pk=81,
+        task_id=identity.task_id,
+        attempt_number=2,
+        execution_generation=4,
+        _completion_identity=identity,
+        _execution_protocol_version=1,
+    )
+    completion = decode_execution_completion(
+        wire, expected_identity=identity, expected_execution_protocol_version=1
+    ).completion
+    assert calls == ["effect"]
+    assert completion.success is False
+    assert completion.retryable is False
+    assert completion.exception_type == "RayExecutionCompletionEncodingError"
+    assert completion.traceback is None

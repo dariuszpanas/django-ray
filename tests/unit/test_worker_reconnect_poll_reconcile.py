@@ -5782,6 +5782,63 @@ class TestWorkerReconnectPollReconcile:
         assert task.result_data == "3"
         assert task.pk not in cmd.active_tasks
 
+    @pytest.mark.parametrize("budget", [3, 10])
+    def test_encoding_failure_receipt_prevents_an_available_automatic_retry(
+        self, monkeypatch, settings, budget
+    ):
+        from django_ray.runner.retry import should_retry
+        from django_ray.runtime.entrypoint import _serialize_completion
+
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "MAX_TASK_ATTEMPTS": budget,
+            "RETRY_EXCEPTION_DENYLIST": [],
+        }
+        cmd = _make_command()
+        job_id = _rq2_ray_job_id()
+        task = RayTaskExecution.objects.create(
+            task_id="encoding-failure-receipt",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            claimed_by_worker=cmd.worker_id,
+            ray_job_id=job_id,
+            attempt_number=1,
+            execution_generation=7,
+            runtime_env_json="{}",
+            runtime_env_hash="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        assert should_retry(task, "RayExecutionCompletionEncodingError").should_retry
+        task.completion_data = _serialize_completion(
+            success=True,
+            result=float("nan"),
+            result_reference=None,
+            error=None,
+            error_traceback=None,
+            exception_type=None,
+            retryable=None,
+            completion_identity=ExecutionIdentity(task.pk, str(task.task_id), 1, 7),
+            execution_protocol_version=task.execution_protocol_version,
+        )
+        task.save(update_fields=["completion_data"])
+        cmd.active_tasks = {task.pk: job_id}
+        cmd.active_task_identities = {task.pk: (1, 7)}
+        monkeypatch.setattr(
+            "django_ray.runner.ray_job.RayJobRunner",
+            lambda: pytest.fail("durable failure must not need a Ray control client"),
+        )
+        assert cmd.poll_ray_job_completions() == 1
+        task.refresh_from_db()
+        assert task.state == TaskState.FAILED
+        assert (task.attempt_number, task.execution_generation) == (1, 7)
+        assert task.result_data is None
+        assert "assess them before manually retrying" in task.error_message
+        assert task.pk not in cmd.active_tasks
+        assert list(TaskAttempt.objects.filter(execution=task).values_list("state", flat=True)) == [
+            TaskState.FAILED
+        ]
+
     @pytest.mark.parametrize("job_id", [_strict_ray_job_id(), _rq2_ray_job_id()])
     @pytest.mark.parametrize("success", [True, False])
     def test_fast_job_receipt_uses_exact_completion_without_constructing_a_runner(

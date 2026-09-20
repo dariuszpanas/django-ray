@@ -45,6 +45,14 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_RAY_JOB_PAYLOAD_B64_BYTES = 4 * ((EXECUTION_REQUEST_MAX_BYTES + 2) // 3)
+_COMPLETION_ENCODING_MESSAGE = (
+    "Task completion could not be encoded. Application effects may "
+    "have occurred; assess them before manually retrying."
+)
+
+
+class _ResultEncodingError(ValueError):
+    """Mark a result encoding failure after the callable has returned."""
 
 
 def get_settings() -> dict[str, Any]:
@@ -106,7 +114,7 @@ def _serialize_completion(
     completion_identity: ExecutionIdentity | None = None,
     execution_protocol_version: int | None = None,
 ) -> str:
-    """Serialize an enriched v1 outcome with a released-v1 fallback."""
+    """Keep bound outcomes versioned even when their body cannot be encoded."""
     payload = {
         "success": success,
         "result": result,
@@ -136,9 +144,23 @@ def _serialize_completion(
                 )
             )
         except (TypeError, ValueError):
-            # Protocol v1 deliberately retains the released JSON surface for
-            # producer-emittable values outside the strict enriched schema.
-            pass
+            # The callable may already have produced effects. Encoding failure
+            # must neither discard its identity nor authorize automatic replay.
+            # Do not recurse: invalid identity/protocol still fails closed.
+            return encode_execution_completion(
+                ExecutionCompletion(
+                    identity=completion_identity,
+                    execution_protocol_version=execution_protocol_version,
+                    executor_django_ray_version=__version__,
+                    success=False,
+                    result=None,
+                    result_reference=None,
+                    error=_COMPLETION_ENCODING_MESSAGE,
+                    traceback=None,
+                    exception_type="RayExecutionCompletionEncodingError",
+                    retryable=False,
+                )
+            )
     return json.dumps(payload)
 
 
@@ -155,6 +177,19 @@ def _serialize_error(
     )
     from django_ray.input_storage import InputPayloadValidationError
     from django_ray.workflow.plans import WorkflowPlanMismatchError
+
+    if isinstance(e, _ResultEncodingError):
+        return _serialize_completion(
+            success=False,
+            result=None,
+            result_reference=None,
+            error=_COMPLETION_ENCODING_MESSAGE,
+            error_traceback=None,
+            exception_type="RayExecutionCompletionEncodingError",
+            retryable=False,
+            completion_identity=completion_identity,
+            execution_protocol_version=execution_protocol_version,
+        )
 
     nested_rejection = find_nested_execution_request_rejection(e)
     if nested_rejection is not None:
@@ -265,12 +300,18 @@ def _prepare_completion_result(
     task_execution_pk: int | None,
     attempt_number: int | None,
     execution_generation: int | None,
+    strict_encoding: bool = False,
 ) -> tuple[Any | None, str | None]:
     """Keep the durable completion envelope bounded for oversized results."""
     if task_execution_pk is None or attempt_number is None or execution_generation is None:
         return result, None
 
-    serialized_result = json.dumps(result)
+    try:
+        serialized_result = json.dumps(result, allow_nan=not strict_encoding)
+    except (TypeError, ValueError, RecursionError):
+        if strict_encoding:
+            raise _ResultEncodingError from None
+        raise
     settings = get_settings()
     max_result_size = int(settings.get("MAX_RESULT_SIZE_BYTES", 1024 * 1024))
     if len(serialized_result.encode("utf-8")) <= max_result_size:
@@ -380,6 +421,9 @@ def execute_task(
             task_execution_pk=completion_task_execution_pk,
             attempt_number=attempt_number,
             execution_generation=execution_generation,
+            strict_encoding=(
+                _completion_identity is not None and _execution_protocol_version is not None
+            ),
         )
         result_json = _serialize_completion(
             success=True,

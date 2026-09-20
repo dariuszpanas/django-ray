@@ -180,7 +180,12 @@ the receipt identifies the runner. No Ray Client connection is used.
 
 Both runtime recipes finish with a fresh selected-baseline reader after candidate execution.
 Database-enforced read-only mode retains migrations through `0026` and checks
-all eight old/current task records, attempts and input/result artifacts. This
+all nine old/current task records, attempts and input/result artifacts. The
+candidate adds one nonfinite-result task after the existing execution cases.
+It must fail with a fixed completion-encoding diagnostic after one invocation;
+Jobs must retain a versioned, identity-matching non-retryable completion.
+This case retains the fixture's one-attempt configuration and does not alone
+prove suppression of a larger automatic retry budget. This
 extends the enqueue-only rollback fixture with actual completed work. It does
 not restart old managers or qualify old execution of current request carriers.
 
