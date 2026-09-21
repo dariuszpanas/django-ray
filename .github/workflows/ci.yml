@@ -238,7 +238,7 @@ jobs:
 
       - name: Run tests
         if: matrix.python-version != '3.12'
-        run: uv run --python ${{ matrix.python-version }} pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
+        run: uv run --python ${{ matrix.python-version }} python scripts/observe_pytest_exit.py -- -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
 
       - name: Enforce worker module coverage
         if: matrix.python-version == '3.12'
