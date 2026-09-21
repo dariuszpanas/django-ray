@@ -177,6 +177,41 @@ def verify_plan_overflow_graph(graph: Mapping[str, Any]) -> None:
         raise ValueError("Plan overflow fixture changed its serial dependencies")
 
 
+def verify_retry_graph(graph: Mapping[str, Any], *, outcome: str, details: list[dict]) -> None:
+    """Compare final graph detail with fixed callable retry outcomes."""
+    if outcome not in {"success", "exhausted", "unlimited"}:
+        raise ValueError("Unknown retry qualification outcome")
+    failed = outcome == "exhausted"
+    states = {"0": "FAILED"} if failed else {"0.0": "SUCCEEDED", "0.1": "SUCCEEDED"}
+    nodes = graph.get("nodes")
+    if (
+        not isinstance(nodes, list)
+        or len(nodes) != len(states)
+        or any(not isinstance(node, dict) for node in nodes)
+        or {node.get("id"): node.get("state") for node in nodes} != states
+    ):
+        raise ValueError("Retry graph disagrees with final callable outcomes")
+    edges = [] if failed else [{"source": "0.0", "target": "0.1"}]
+    if graph.get("edges") != edges:
+        raise ValueError("Retry graph dependency differs")
+    leaf = next(node for node in nodes if node["id"] == ("0" if failed else "0.0"))
+    if failed:
+        if "retry qualification exhausted" not in (leaf.get("error") or ""):
+            raise ValueError("Retry graph lost the final failure")
+    elif (
+        leaf.get("error") is not None
+        or leaf.get("output_preview", {}).get("value") != {"answer": 42}
+        or leaf.get("message") != "retry qualification"
+    ):
+        raise ValueError("Retry graph lost final preview or progress")
+    if not failed:
+        matches = [item for item in details if item.get("node_id") == "0.0"]
+        if len(matches) != 1 or (matches[0].get("progress") or {}).get("metrics") != {
+            "invocation": 3 if outcome == "unlimited" else 2
+        }:
+            raise ValueError("Retry API detail lost final invocation progress")
+
+
 def verify_plan_overflow_manifest(manifest: Mapping[str, Any]) -> None:
     """Distinguish plan overflow from a small plan or absent plan metadata."""
     snapshot = manifest.get("snapshot")

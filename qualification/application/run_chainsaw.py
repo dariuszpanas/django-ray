@@ -11,6 +11,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
+
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "qualification/application"
 CREDENTIAL_KEYS = (
@@ -53,7 +55,8 @@ def parse_receipts(raw: bytes, names: tuple[str, ...]) -> dict[str, bytes]:
         if not isinstance(value, dict) or value.get("layer") not in LAYERS.values():
             continue
         if (
-            len(line) > 16384
+            len(line)
+            > (WORKFLOW_RECEIPT_MAX_BYTES if value["layer"] == "workflow_api_admin" else 16384)
             or type(value.get("schema_version")) is not int
             or value["schema_version"] != 1
             or value.get("status") != "passed"

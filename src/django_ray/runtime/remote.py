@@ -24,6 +24,7 @@ from django_ray.workflow.progress.protocol import (
     WorkflowProgressLimits,
     WorkflowProgressProtocolError,
     decode_workflow_progress_event,
+    prepare_workflow_progress_event,
     send_workflow_progress_event,
 )
 
@@ -524,6 +525,7 @@ def execute_workflow_step_remote(
     output_preview_path: str | None = None,
     workflow_run_identity: dict[str, Any] | None = None,
     workflow_progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
+    return_outcome_marker: bool = False,
     nested_execution_request: str | None = None,
     expected_outer_task_execution_pk: int | None = None,
     expected_outer_task_id: str | None = None,
@@ -536,6 +538,8 @@ def execute_workflow_step_remote(
     expected_runtime_env_transport_digest: str | None = None,
 ) -> Any:
     """Execute one strict durable leaf or a standalone workflow call."""
+    if type(return_outcome_marker) is not bool:
+        raise TypeError("return_outcome_marker must be a boolean")
     request = _decode_workflow_step_request(
         nested_execution_request,
         callable_path=callable_path,
@@ -584,6 +588,7 @@ def execute_workflow_step_remote(
             output_preview_path=output_preview_path,
             workflow_run_identity=workflow_run_identity,
             workflow_progress_limits=workflow_progress_limits,
+            return_outcome_marker=return_outcome_marker,
         )
 
 
@@ -600,6 +605,7 @@ def _execute_workflow_step(
     output_preview_path: str | None = None,
     workflow_run_identity: dict[str, Any] | None = None,
     workflow_progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
+    return_outcome_marker: bool = False,
 ) -> Any:
     """Run a workflow step after its outer boundary has been selected."""
     if bootstrap_django:
@@ -645,7 +651,7 @@ def _execute_workflow_step(
             node_id,
             workflow_run_identity,
             workflow_progress_limits,
-        ):
+        ) as step_context:
             result = callable_obj(*input_args, *bound_args, **kwargs)
     except BaseException as error:
         nested_rejection = None
@@ -682,6 +688,7 @@ def _execute_workflow_step(
             raise nested_rejection from None
         logger.exception("Workflow step failed")
         raise
+    output_preview = None
     if output_preview_path is not None:
         from django_ray.workflow.previews import (
             WorkflowOutputPreviewAvailability,
@@ -726,6 +733,40 @@ def _execute_workflow_step(
         limits=workflow_progress_limits,
     )
     logger.info("Workflow step completed")
+    if return_outcome_marker:
+        # A second logical result follows Ray's final retry outcome. Its bounded
+        # canonical detail is independent of delivery order on worker handles.
+        # A metadata failure must never retry an already successful callable.
+        marker = None
+        try:
+            progress = None
+            if step_context is not None and step_context.producer is not None:
+                progress_wire = step_context.producer.terminal_progress_wire()
+                if progress_wire is not None:
+                    progress_event = decode_workflow_progress_event(
+                        progress_wire,
+                        expected_run_identity=workflow_run_identity,
+                        limits=workflow_progress_limits,
+                    )
+                    if progress_event.truncated:
+                        raise ValueError("Final workflow progress is incomplete")
+                    progress = progress_event.payload
+            marker = prepare_workflow_progress_event(
+                workflow_run_identity,
+                WorkflowProgressEventKind.NODE_SETTLED,
+                {
+                    "node_id": node_id,
+                    "state": "SUCCEEDED",
+                    "error": None,
+                    "execution": execution,
+                    "progress": progress,
+                    "output_preview": output_preview,
+                },
+                limits=workflow_progress_limits,
+            )
+        except Exception:
+            pass
+        return result, marker
     return result
 
 
@@ -804,6 +845,8 @@ class _WorkflowProgressCollector:
         self.plan_summary = copy.deepcopy(event.payload["plan"])
         self.revision = 0
         self.nodes: dict[str, dict[str, Any]] = {}
+        # At most one entry per retained node; no invocation or retry history.
+        self._settled_nodes: set[str] = set()
         self.edges: set[tuple[str, str]] = set()
         self.events: list[dict[str, Any]] = []
         self._node_sizes: dict[str, int] = {}
@@ -1248,7 +1291,48 @@ class _WorkflowProgressCollector:
         terminal = node["state"] in _TERMINAL_NODE_STATES
         recent_event: dict[str, Any] | None = None
 
-        if event.kind is WorkflowProgressEventKind.NODE_REGISTERED:
+        if node_id in self._settled_nodes and event.kind not in {
+            WorkflowProgressEventKind.NODE_REGISTERED,
+            WorkflowProgressEventKind.SUBMITTED,
+        }:
+            return {}, None
+
+        if event.kind is WorkflowProgressEventKind.NODE_SETTLED:
+            node["state"] = payload["state"]
+            node["finished_at"] = occurred_at
+            if node["state"] == "SUCCEEDED":
+                node["error"] = None
+                node["started_at"] = node["started_at"] or occurred_at
+                if payload["execution"] is not None:
+                    node["execution"] = copy.deepcopy(payload["execution"])
+                if payload["output_preview"] is not None:
+                    node["output_preview"] = copy.deepcopy(payload["output_preview"])
+                node["progress"] = None
+                progress = payload["progress"]
+                if progress is not None:
+                    node["progress"] = {
+                        "current": progress["total"],
+                        "total": progress["total"],
+                        "percent": 100.0,
+                        "message": progress["message"],
+                        "metrics": copy.deepcopy(progress["metrics"]),
+                        "updated_at": occurred_at,
+                    }
+            else:
+                node["error"] = payload["error"]
+                from django_ray.workflow.previews import (
+                    WorkflowOutputPreviewAvailability,
+                    unavailable_workflow_output_preview,
+                )
+
+                node["output_preview"] = unavailable_workflow_output_preview(
+                    WorkflowOutputPreviewAvailability.UNAVAILABLE
+                )
+                node["progress"] = None
+            recent_event = self._recent_event(
+                node, "COMPLETED" if node["state"] == "SUCCEEDED" else "FAILED", occurred_at
+            )
+        elif event.kind is WorkflowProgressEventKind.NODE_REGISTERED:
             node["label"] = label
             node["callable_path"] = payload["callable_path"]
             node["runtime_env"] = copy.deepcopy(payload["runtime_env"])
@@ -1452,6 +1536,10 @@ class _WorkflowProgressCollector:
             if event.kind is WorkflowProgressEventKind.PRODUCER_REPORT:
                 self._aggregate_producer_report(event)
                 return self._accept(event)
+            if event.kind is WorkflowProgressEventKind.NODE_SETTLED:
+                settled_node = self.nodes.get(event.payload["node_id"])
+                if settled_node is None or settled_node["kind"] == "map":
+                    return self._reject("protocol_error")
 
             replaceable = event.kind in {
                 WorkflowProgressEventKind.APPLICATION_PROGRESS,
@@ -1508,6 +1596,8 @@ class _WorkflowProgressCollector:
                 )
             if rejection is not None:
                 return self._reject(rejection)
+            if event.kind is WorkflowProgressEventKind.NODE_SETTLED:
+                self._settled_nodes.add(event.payload["node_id"])
             return self._accept(event)
         finally:
             self._record_ingest_handler_cost(

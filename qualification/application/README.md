@@ -241,7 +241,9 @@ namespace deletion a 180-second allowance. These are ceilings, not expected dura
 The runner retrieves at most 64 KiB from each exact setup/assertion container's log. It requires
 zero successful-container restarts, exit zero, the requested immutable image with its manifest
 digest in the observed container image ID, and every expected
-passing JSON receipt at no more than 16 KiB. It retains `setup.json`, `before-nodes.json`,
+passing JSON receipt at no more than 16 KiB, except the workflow receipt's 32 KiB
+budget for the fixed success, failure, recovery and nested-retry matrix. The shared
+64 KiB container-log ceiling remains unchanged. It retains `setup.json`, `before-nodes.json`,
 `before-core.json`, `before-workflows.json`, `after-nodes.json`, `after-core.json`,
 `after-workflows.json`, producer Pod/image identities, Chainsaw's
 XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
@@ -250,7 +252,7 @@ not inferred from Job status. The cold receipt's predecessor digest must match t
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
 
-The workflow observation stage runs nine fixed tasks serially in each Ray generation: complex
+The workflow observation stage runs twelve fixed tasks serially in each Ray generation: complex
 workflow success and failure under `full`, `terminal_only` and `disabled`, followed by the recovery showcase's
 two failed attempts and successful third attempt. Production settings disable the complex-workflow
 demo HTTP route, so those six cases use the bounded Django task enqueue API inside the fixture.
@@ -258,7 +260,11 @@ The recovery case uses its production HTTP endpoint. A fixed 65-leaf serial chai
 full reporting and the bounded task enqueue API. Its saved plan crosses the real 64-node limit;
 the durable result must remain exactly `42`, and the graph must retain all 65 successful nodes
 and 64 serial dependencies. The additional fixed 101-node case below covers the separate Admin
-display ceiling. Together the nine cases cover eleven attempts. Existing case inputs and resource
+display ceiling. Three retry cases add finite retry success, exhausted retries, and unlimited retries
+that deterministically settle after two failures. Success uses a two-leaf chain and
+checks result 42, final preview/progress and exact invocation count. Each owns one
+zero-CPU counter actor, uses quarter-CPU leaves and observes counter removal.
+Together the twelve cases cover fourteen durable attempts. Existing case inputs and resource
 limits remain unchanged. All cases use authenticated HTTP polling and
 attempt-pinned workflow reads, and compare those publications with authenticated Admin graph JSON.
 Temporary database-backed Admin sessions and the HTML checker's disposable user are deleted and

@@ -20,6 +20,21 @@ def receipt(layer="application_setup", **changes):
     ).encode()
 
 
+@pytest.mark.parametrize("extra", [0, 1])
+def test_workflow_receipt_has_its_own_exact_byte_ceiling(extra):
+    raw = receipt("workflow_api_admin", observation="")
+    raw = receipt(
+        "workflow_api_admin",
+        observation="x" * (runner.WORKFLOW_RECEIPT_MAX_BYTES - len(raw) + extra),
+    )
+    assert len(raw) == runner.WORKFLOW_RECEIPT_MAX_BYTES + extra
+    if extra:
+        with pytest.raises(ValueError):
+            runner.parse_receipts(raw, ("before-workflows",))
+    else:
+        assert runner.parse_receipts(raw, ("before-workflows",)) == {"before-workflows": raw}
+
+
 def test_receipts_keep_exact_node_bytes_and_skip_nonreceipt_lines():
     nodes = receipt("generic_ray_nodes")
     core = receipt("application_core")

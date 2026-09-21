@@ -800,7 +800,7 @@ def _workflow_admin_page_count(
         or payload.get("availability") != "AVAILABLE"
         or payload.get("complete") is not True
         or not isinstance(items, list)
-        or not items
+        or (not items and collection != "topology_edges")
         or type(returned_count) is not int
         or returned_count != len(items)
         or returned_count > _WORKFLOW_PAGE_LIMIT
@@ -808,7 +808,7 @@ def _workflow_admin_page_count(
         or not all(isinstance(item, dict) for item in items)
     ):
         raise DockerSmokeError(
-            f"admin {collection} route did not return one complete nonempty AVAILABLE page"
+            f"admin {collection} route did not return one complete AVAILABLE page"
         )
     return returned_count
 
@@ -1394,11 +1394,6 @@ def _verify_existing_workflow_admin_contract(
         )
         plan = diagnostics.get("plan")
         progress = diagnostics.get("progress")
-        expected_actions = {
-            "topology_nodes": True,
-            "topology_edges": True,
-            "node_details": True,
-        }
         if (
             diagnostics.get("schema") != "django-ray.admin-workflow-diagnostics"
             or diagnostics.get("schema_version") != 1
@@ -1409,7 +1404,6 @@ def _verify_existing_workflow_admin_contract(
             or progress.get("state") != "AVAILABLE"
             or progress.get("availability") != "AVAILABLE"
             or progress.get("complete") is not True
-            or progress.get("actions") != expected_actions
         ):
             raise DockerSmokeError(
                 "existing workflow admin diagnostics did not advertise AVAILABLE readers"
@@ -1432,13 +1426,30 @@ def _verify_existing_workflow_admin_contract(
         )
 
     if diagnostic_attempt is not None:
+        from django_ray.admin import (
+            ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES,
+            ADMIN_DIAGNOSTIC_MAX_CHARS,
+        )
         from django_ray.redaction import redact_text
 
         if attempt_detail_html is None:  # pragma: no cover - guarded assignment above
             raise DockerSmokeError("failed workflow attempt detail was not read")
         if diagnostic_traceback is None:  # pragma: no cover - guarded persistence check above
             raise DockerSmokeError("failed workflow attempt traceback was not read")
-        escaped_preview = html.escape(redact_text(diagnostic_traceback)[:256])
+        stored_traceback = diagnostic_attempt.error_traceback
+        oversized_traceback = (
+            len(stored_traceback) > ADMIN_DIAGNOSTIC_MAX_CHARS
+            or len(stored_traceback.encode("utf-8")) > ADMIN_DETAIL_DIAGNOSTIC_FIELD_MAX_BYTES
+        )
+        # Ordinary Admin deliberately omits oversized raw fields before fetching
+        # them. A long nested Ray failure must prove that refusal, not demand a
+        # raw preview that the bounded reader is forbidden to expose.
+        expected_traceback = (
+            "Stored diagnostic omitted because it exceeds the ordinary Admin read limit."
+            if oversized_traceback
+            else redact_text(diagnostic_traceback)[:256]
+        )
+        escaped_preview = html.escape(expected_traceback)
         parent_must_present_diagnostic = change_attempt_number is None
         if (
             _DIAGNOSTICS_STYLESHEET_RE.search(change_html) is None
@@ -1483,6 +1494,11 @@ def _verify_existing_workflow_admin_contract(
         )
         for collection in collection_paths
     }
+    # A single-leaf workflow has no edges. Admin advertises only useful
+    # collections, while the bounded reader still returns a complete empty page.
+    expected_actions = {collection: count > 0 for collection, count in counts.items()}
+    if progress.get("actions") != expected_actions:
+        raise DockerSmokeError("existing workflow admin actions differ from available collections")
     graph_evidence = _workflow_admin_graph_evidence(
         graph,
         execution_state=str(execution.state),
@@ -1507,7 +1523,7 @@ def _verify_existing_workflow_admin_contract(
         "task_state": str(execution.state),
         "attempt_number": int(execution.attempt_number),
         "admin_routes": 6,
-        "admin_actions": len(expected_actions),
+        "admin_actions": sum(expected_actions.values()),
         "topology_nodes": counts["topology_nodes"],
         "topology_edges": counts["topology_edges"],
         "node_details": counts["node_details"],

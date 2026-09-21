@@ -75,3 +75,47 @@ def test_complex_failure_refuses_a_successful_join_after_failed_map():
 def test_complex_success_refuses_an_empty_successful_projection():
     with pytest.raises(ValueError, match="split/join graph"):
         verify_complex_graph({"nodes": [], "edges": []}, failed=False)
+
+
+@pytest.mark.parametrize("outcome", ["success", "exhausted", "unlimited"])
+@pytest.mark.parametrize("corrupt", [None, "state", "edge", "preview", "progress"])
+def test_retry_qualification_checks_final_graph_and_detail(outcome, corrupt):
+    from qualification.application.workflow_fixtures import verify_retry_graph
+
+    failed = outcome == "exhausted"
+    leaf = {
+        "id": "0" if failed else "0.0",
+        "state": "FAILED" if failed else "SUCCEEDED",
+        "error": "retry qualification exhausted" if failed else None,
+        "output_preview": {"value": {"answer": 42}},
+        "message": "retry qualification",
+    }
+    graph = {
+        "nodes": [leaf] if failed else [leaf, {"id": "0.1", "state": "SUCCEEDED"}],
+        "edges": [] if failed else [{"source": "0.0", "target": "0.1"}],
+    }
+    details = [
+        {
+            "node_id": "0.0",
+            "progress": {"metrics": {"invocation": 3 if outcome == "unlimited" else 2}},
+        }
+    ]
+    if corrupt == "state":
+        leaf["state"] = "RUNNING"
+    elif corrupt == "edge":
+        graph["edges"] = [{"source": "foreign", "target": "0"}]
+    elif corrupt == "preview":
+        if failed:
+            leaf["error"] = "old failure"
+        else:
+            leaf["output_preview"] = {"value": None}
+    elif corrupt == "progress":
+        if failed:
+            leaf["error"] = None
+        else:
+            details[0]["progress"]["metrics"]["invocation"] = 1
+    if corrupt is None:
+        verify_retry_graph(graph, outcome=outcome, details=details)
+    else:
+        with pytest.raises(ValueError, match="Retry"):
+            verify_retry_graph(graph, outcome=outcome, details=details)

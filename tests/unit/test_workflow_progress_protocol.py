@@ -128,6 +128,11 @@ def _payloads() -> dict[WorkflowProgressEventKind, dict[str, Any]]:
             "label": "increment",
             "node_id": "node-a",
         },
+        WorkflowProgressEventKind.NODE_SETTLED: {
+            "node_id": "node-a",
+            "state": "SUCCEEDED",
+            "error": None,
+        },
         WorkflowProgressEventKind.PRODUCER_REPORT: {
             "schema_version": 1,
             "saturated": False,

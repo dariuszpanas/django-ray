@@ -10,7 +10,7 @@ from django_ray.workflow.admin_graph import (
     build_admin_workflow_graph,
     inspect_admin_workflow_graph_summary,
 )
-from qualification.application.workflow_http import read_full_workflow_graph
+from qualification.application.workflow_http import WorkflowHttpError, read_full_workflow_graph
 from tests.integration.test_admin_workflow_graph import _graph_case
 
 TASK_ID = "00000000-0000-4000-8000-000000000001"
@@ -101,6 +101,38 @@ def test_non_success_http_stops_observation(observation, status):
     with pytest.raises(ValueError, match="non-success HTTP"):
         read_full_workflow_graph(request, **arguments)
     assert request.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["summary", "topology_nodes", "topology_edges", "node_details", "admin_graph"]
+)
+def test_http_failure_identifies_only_fixed_endpoint_and_status(observation, endpoint):
+    request, arguments, values = observation
+    index = ["summary", "topology_nodes", "topology_edges", "node_details", "admin_graph"].index(
+        endpoint
+    )
+    failed_path = list(values)[index]
+    original = request.side_effect
+
+    def response(path, **kwargs):
+        return (503, b"private-response") if path == failed_path else original(path, **kwargs)
+
+    request.side_effect = response
+    with pytest.raises(WorkflowHttpError) as failure:
+        read_full_workflow_graph(request, **arguments)
+    assert vars(failure.value) == {"endpoint": endpoint, "status": 503}
+    assert "private-response" not in str(failure.value)
+    assert request.call_count == index + 1
+
+
+@pytest.mark.parametrize(
+    "endpoint,status",
+    [("private-path", 500), ("summary", "private-status"), ("summary", True), ("summary", 600)],
+)
+def test_http_failure_rejects_unbounded_diagnostic_fields(endpoint, status):
+    with pytest.raises(ValueError) as failure:
+        WorkflowHttpError(endpoint, status)
+    assert "private" not in str(failure.value)
 
 
 def test_rejects_changed_terminal_outcome(observation):

@@ -75,6 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid ingress. Structural data that cannot fit still fails explicitly. This
   bounds retained actor state; aggregate admission across producers and retries
   remains pending.
+- Settle workflow graph leaves from final Ray retry outcomes instead of retaining
+  the first transient failure. A separate bounded metadata result preserves the
+  successful invocation's preview and progress even when worker events arrive
+  late. Application values remain separate and callable exceptions retain Ray's
+  retry behavior. Uncertain metadata disables publication without replaying work.
 
 - Explain disabled workflow reporting on the Admin graph endpoint when the
   current attempt has no publication. Infer only a bounded valid current policy;

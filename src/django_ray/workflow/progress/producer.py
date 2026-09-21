@@ -63,6 +63,7 @@ class WorkflowProgressProducerSession:
         "_counters",
         "_finished_report",
         "_limits",
+        "_latest_wire",
         "_lock",
         "_node_id",
         "_outstanding",
@@ -90,6 +91,7 @@ class WorkflowProgressProducerSession:
         self._ack_poller = _poll_ray_ack if ack_poller is None else ack_poller
         self._outstanding: Any | None = None
         self._pending_wire: bytes | None = None
+        self._latest_wire: bytes | None = None
         self._available = True
         self._saturated = False
         self._terminal_handoff = _TERMINAL_HANDOFF_NOT_NEEDED
@@ -213,6 +215,7 @@ class WorkflowProgressProducerSession:
 
     def _offer_wire(self, wire: bytes) -> bool:
         """Queue a validated canonical event while owning the session lock."""
+        self._latest_wire = wire
         self._increment("offered")
 
         outstanding_pending = self._observe_outstanding()
@@ -230,6 +233,13 @@ class WorkflowProgressProducerSession:
         if candidate is None:  # pragma: no cover - assignment invariant
             raise AssertionError("workflow progress producer lost its pending wire")
         return self._submit(candidate, retain_ack=True)
+
+    def terminal_progress_wire(self) -> bytes | None:
+        """Return one bounded immutable value only after the session is sealed."""
+        with self._lock:
+            if self._finished_report is None:
+                raise RuntimeError("Workflow progress session is not sealed")
+            return self._latest_wire
 
     def finish(self) -> dict[str, Any]:
         """Seal the producer and hand off at most one latest buffered value."""
