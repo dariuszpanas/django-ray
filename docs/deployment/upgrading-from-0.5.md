@@ -5,7 +5,12 @@ an eventual release, not a release announcement or approval to deploy a candidat
 The planned next release is 0.6.0, tracked in
 [the release scope](https://github.com/dariuszpanas/django-ray/issues/508).
 Full reporting uses bounded terminal graphs by default in this candidate.
-Final source-matched qualification and upgrade acceptance remain pending.
+The candidate retained by [PR #587](https://github.com/dariuszpanas/django-ray/pull/587)
+passed source-matched public qualification and coordinated upgrade acceptance.
+The [acceptance record](https://github.com/dariuszpanas/django-ray/issues/526#issuecomment-5762967245)
+links the verified Linux, database, native recovery and cold-Ray application evidence.
+This qualifies that candidate source; 0.6.0 remains unpublished, and a later source
+or deployment change needs its applicable checks.
 
 ## Candidate changes
 
@@ -233,11 +238,13 @@ automatic replay, then exercises an explicit retry after old processes retire.
 
 These results cover the qualified source and fixture, not an inaccessible private
 deployment. Receipts deliberately retain `complete_upgrade_gate: false`.
-Final-candidate rendered workflow history, uncertain-side-effect reconciliation,
-execution retirement, applicable deployed cold-Ray observations and the operator's
-actual dashboard/proxy still require acceptance. Run the affected checks again
-when their source or deployment changes; do not relabel an old receipt as a new
-release result.
+The accepted candidate also passed rendered current/archived workflow history,
+execution retirement, defined uncertain-outcome recovery and required cold-Ray
+observations, including the fixture's configured Dashboard proxy. Operators must
+still reconcile their own uncertain effects, verify their backups and keys, and
+test their actual Dashboard/proxy before reopening submissions. Run the affected
+checks again when their source or deployment changes; do not relabel an old
+receipt as a new release result.
 
 
 ## Historical tasks without a RuntimeEnv snapshot
