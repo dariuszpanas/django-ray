@@ -28,6 +28,9 @@ class _HostileTimezone(tzinfo):
     def dst(self, _value: datetime | None) -> timedelta:
         raise RuntimeError("hostile timezone")
 
+    def tzname(self, _value: datetime | None) -> None:
+        return None
+
 
 def _claim() -> RayTaskTargetExecutionEvidenceClaim:
     return RayTaskTargetExecutionEvidenceClaim(

@@ -391,6 +391,9 @@ class _HostileTimezone(tzinfo):
     def dst(self, _value):
         return None
 
+    def tzname(self, _value: datetime | None) -> None:
+        return None
+
 
 @pytest.mark.parametrize(
     "timestamp_field",

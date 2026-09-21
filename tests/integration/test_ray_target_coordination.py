@@ -642,6 +642,9 @@ def test_hostile_timezone_errors_are_mapped_without_details(failure_call: int) -
         def dst(self, value: datetime | None) -> timedelta | None:
             return None
 
+        def tzname(self, _value: datetime | None) -> None:
+            return None
+
     registration = _register()
     attestation = _attestation(registration.expectation)
     hostile_now = NOW.replace(tzinfo=HostileTimezone())
@@ -784,6 +787,9 @@ def test_hostile_attestation_timestamps_are_fixed_refusals() -> None:
             raise RuntimeError("attestation-timezone-secret")
 
         def dst(self, value: datetime | None) -> timedelta | None:
+            return None
+
+        def tzname(self, _value: datetime | None) -> None:
             return None
 
     valid = _attestation(_expectation())

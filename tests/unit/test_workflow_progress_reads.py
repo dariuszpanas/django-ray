@@ -1857,6 +1857,9 @@ def test_invalid_generated_at_timezone_is_a_bounded_argument() -> None:
         def dst(self, _value):
             return None
 
+        def tzname(self, _value: datetime | None) -> None:
+            return None
+
     generated_at = datetime(2026, 7, 20, tzinfo=_BrokenTimezone())
 
     assert (
