@@ -340,10 +340,20 @@ external deployment evidence for rollout decisions. Provenance is diagnostic onl
 null includes legitimate historical/unreported values and any stored value that fails
 the fixed 128-byte public-read guard.
 
-The package now contains a private coordination primitive for a later supported
+### Historical migration coordination internals
+
+The following describes the retained `0019`/`0020` migration foundation and its
+private coordination primitive. It is not the current operational upgrade or
+rollback procedure. For a deployed 0.5.0 system moving to the 0.6.0 candidate,
+use [Upgrade from 0.5](deployment/upgrading-from-0.5.md) and the
+[coordinated Beta procedure](stability.md#coordinated-beta-upgrades). Historical
+policy/token compatibility does not authorize old execution carriers or a
+mixed-version worker deployment.
+
+The package contains a private coordination primitive for a later supported
 operator adapter. It is not an operator API: do not import or call it directly, and do
 not use SQL, model updates, Admin mutation, or manual token deletion as a substitute.
-Keep legacy admission open in this slice. The future adapter must compare-and-set the
+The original migration slice kept legacy admission open. A future adapter must compare-and-set the
 exact policy revision the operator reviewed within the database positive-bigint range
 and collect an explicit assertion that every capability-unaware web, API, and other
 enqueue producer has stopped. The database can serialize old inserts after that
@@ -375,18 +385,20 @@ already contains incompatible nonterminal work.
 Reopening is not by itself a rollback-readiness result: stop and reconcile upgraded
 task managers and verify the remaining artifacts and remote work separately.
 
-The supported migration source is the exact published 0.4.0 baseline at migration
+The historical migration source was the exact published 0.4.0 baseline at migration
 `0018`. Before applying `0019`, confirm every producer and task manager that may have
 written retained nonterminal work was running 0.4.0. If any live row was written directly
 by pre-0.4 code, drain or cancel it, or complete an application-specific audit; the new
 columns cannot reconstruct its original execution contract. Do not treat an `0018`
 migration record alone as proof of the writer version.
 
-For a code-only rollback, keep both `0019` and `0020` applied, keep policy protocol `1`
-and legacy admission open, verify all nonterminal work is protocol `1`, and stop and
-reconcile upgraded task managers before starting exact 0.4.0 code. Reverse `0020` and
-then `0019` only as a separate stopped-writer maintenance operation after accepting the
-loss of their protocol, provenance, capability, policy, token, and fencing data.
+The original code-only rollback contract kept both `0019` and `0020` applied,
+policy protocol `1`, and legacy admission open. It required all nonterminal work
+to use protocol `1` and upgraded task managers to stop and reconcile before exact
+0.4.0 code started. Reversing `0020` and then `0019` was a separate stopped-writer
+maintenance operation that lost protocol, provenance, capability, policy, token,
+and fencing data. These historical preconditions are not a rollback recipe for
+the current candidate; use its documented independent backup/restore procedure.
 
 ## Useful Queries
 
