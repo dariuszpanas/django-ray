@@ -186,6 +186,41 @@ Use the [coordinated Beta procedure](../stability.md#coordinated-beta-upgrades):
 Never replace the original backup during a rollback experiment. Preserve keys and
 referenced artifacts together with the matching database state.
 
+For a candidate containing migration `0027`, reversing that migration removes
+`WorkflowProgressRunStorage.reporting_diagnostics_json` and discards the stored
+reporting measurements. The nullable column has no reverse guard that refuses
+removal when measurements exist. Applying it again creates an empty column; it
+does not reconstruct those measurements. Export any required diagnostics and
+verify the matching backup before choosing schema reversal. The public old-code
+read rehearsal retains candidate migrations and therefore does not prove this
+reversal is lossless or authorize restarting old writers.
+
+## Retain the final candidate evidence
+
+Record the evidence for the exact candidate that will be deployed, including its
+package version, source revision and source tree, installed-wheel identity and
+runtime versions. A passing development tree with the previous package version
+does not establish qualification of a later versioned candidate.
+
+Keep one reviewable record linking:
+
+- the final Linux CI result and each applicable qualification receipt;
+- the stopped-producer/writer inventory, completed drain and explicit disposition
+  of uncertain work, including any effects that database restoration cannot undo;
+- independently verified database, artifact and encryption-key backups, the
+  reviewed migration plan and the selected rollback boundary;
+- historical reads, bounded current task/API smoke, rendered workflow history and
+  the actual task Dashboard link through the deployment's configured proxy;
+- the explicit cold-Ray decision, source-tree match, preservation outcomes and
+  observed cleanup of the qualification's owned resources.
+
+Read each receipt's scope and exclusions. Individual receipts marked
+`complete_application_gate: false` or `complete_upgrade_gate: false` are useful
+stage evidence, not complete release acceptance. A missing, failed or mismatched
+required stage leaves acceptance incomplete. Keep diagnostic artifacts separate
+from durable release notes, and never include credentials or unbounded logs in
+the record.
+
 ## What the public evidence establishes
 
 The [public upgrade recipes](https://github.com/dariuszpanas/django-ray/blob/main/qualification/upgrade/README.md) export the
