@@ -549,7 +549,7 @@ and [JSON](benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.js
 record all six `production-topology` cases at the exact issue-#141 implementation
 revision. Bounded-phase memory plateaued after V1 retention caps while spill grew with
 observed node and edge identity state. The separate end-to-end fields and legacy-ID
-counts preserve #142's remaining O(observed) compatibility boundary.
+counts preserve the remaining O(observed) compatibility boundary tracked by #156/#157.
 
 In `production-topology` reports, detail fields are `null`, spill-item counts cover
 only nodes and edges, and `legacy_observed_node_ids` records the compatibility set
@@ -558,7 +558,8 @@ captured after observation, selection, and page construction but before that set
 materialized. The legacy peak fields and their `end_to_end_*` aliases include the
 later O(observed) compatibility detachment. Compare those two phases separately.
 Issue #141 removes complete Python node/edge validation collections, but it does not
-claim that the legacy returned value is O(retained); issue #142 owns that final bound.
+claim that the legacy returned value is O(retained); #156/#157 own that final bound.
+Their former umbrella #142 was closed as superseded, not as implemented.
 
 ## Control Fan-Out
 
@@ -722,7 +723,7 @@ and has a zero cross-schedule graph-cache hit rate. The current probe covers the
 `direct-ray-core` submission transport; the production Ray Client-submitted nested
 owner has a distinct compatibility identity and remains gated on separate live-cluster
 lifetime evidence. See
-[ADR-0002](design/adr-0002-compiled-session-ownership.md) for the process matrix,
+[ADR-0002](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0002-compiled-session-ownership.md) for the process matrix,
 resource budget, cancellation, and drain requirements.
 Compatibility evidence must also pin the specific container and immutable
 deployment/image identity and record explicit shared-memory and Ray object-store

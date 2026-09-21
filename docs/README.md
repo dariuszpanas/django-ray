@@ -65,20 +65,6 @@ project resources, task stats, and a smoke-task trigger:
 - [Architecture](architecture.md) - System design overview
 - [Workflow Plan Contract](workflow-plans.md) - Versioned plan vocabulary,
   classification, identity, and strategy eligibility
-- [ADR-0001: Workflow Plans](design/adr-0001-workflow-plan-contract.md) - Why
-  execution plans and strategies remain separate from Django task identity
-- [ADR-0002: Compiled Sessions](design/adr-0002-compiled-session-ownership.md) -
-  Initial local/direct CPU-pilot owner, deferred production topology, within-run reuse,
-  admission, invalidation, and drain rules
-- [ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md) -
-  Ray-free session/invocation reducer, absolute deadlines, fallback and replay cutoffs,
-  one-shot output ownership, and bounded cleanup diagnostics
-- [ADR-0004: Bounded Workflow Progress](design/adr-0004-bounded-workflow-progress.md) -
-  Always-bounded summaries, immutable topology pages, normalized latest-state detail,
-  fenced publication, pagination, retention, and legacy snapshot rollout
-- [ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md) -
-  Selected contract, prototype, and #141 spill-backed production topology adapter for
-  exact one-shot preparation; #142 owns the remaining composite topology/detail lifetime
 - [Ray Serve Integration Boundary](design/ray-serve-boundary.md) - Deferred ownership,
   lifecycle, security, and packaging decision
 - [Changelog](changelog.md) - Release history

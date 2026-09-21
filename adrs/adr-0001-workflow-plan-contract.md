@@ -1,9 +1,42 @@
 # ADR-0001: Workflow Plans and Execution Strategies
 
-- **Status:** Accepted
+> Historical decision record. The status below describes the decision when
+> recorded, not current implementation or support. Later changes may have
+> superseded it without another ADR. See the [archive context](README.md).
+
+## Tracking
+
+| Field | Value |
+| --- | --- |
+| Decision status | Accepted historically; current applicability unverified |
+| Implementation status | Partial; see the scoped evidence below |
+| Decision review | [Original merged PR #89](https://github.com/dariuszpanas/django-ray/pull/89); not a current implementation approval |
+| Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
+| Supersedes | Not reconstructed |
+| Superseded by | No replacement ADR identified; later divergences are recorded below |
+| Last verified | 2026-09-21; source and issue audit at `273e987` |
+
+## Current implementation and evidence
+
+Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+not a new native execution qualification.
+
+| Requirement | Current finding | Evidence and remaining work |
+| --- | --- | --- |
+| Immutable, secret-free plan boundary | Implemented | [plans.py](../src/django_ray/workflow/plans.py), [plan tests](../tests/unit/test_workflow_plans.py), and [plan migration](../src/django_ray/migrations/0011_raytaskexecution_workflow_plan.py) |
+| Whole-plan strategy integration | Partial | [Issue #70](https://github.com/dariuszpanas/django-ray/issues/70) remains open |
+| Compiled Graph execution strategy | Not delivered as a supported strategy | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72); the verified capability set in [compiled_graph.py](../src/django_ray/runtime/compiled_graph.py) is empty |
+
+The plan contract survives. Acceptance did not activate every proposed strategy.
+No replacement ADR was identified in this five-record archive; that is not proof
+that every historical detail remains current.
+
+## Historical decision
+
+- **Historical status (not revalidated):** Accepted
 - **Date:** 2026-07-19
 - **Decision owners:** django-ray maintainers
-- **Related contract:** [Workflow Plans and Execution Strategies](../workflow-plans.md)
+- **Related contract:** [Workflow Plans and Execution Strategies](../docs/workflow-plans.md)
 
 ## Context
 
@@ -179,7 +212,7 @@ an additive compatibility reader. No persisted beta reference is introduced.
 ## Validation required of later implementations
 
 The implementation must satisfy the stable `PLAN-01` through `PLAN-14` requirements in
-the [workflow-plan contract](../workflow-plans.md#acceptance-contract-for-plan-snapshot-implementation).
+the [workflow-plan contract](../docs/workflow-plans.md#acceptance-contract-for-plan-snapshot-implementation).
 In particular, it must prove canonical equality and invalidation, deep immutability,
 secret exclusion, per-step RuntimeEnv resolution, retry pinning, structured eligibility,
 run-scoped observability, and result parity for existing workflow APIs.

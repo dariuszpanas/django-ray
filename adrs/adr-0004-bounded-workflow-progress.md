@@ -1,9 +1,45 @@
 # ADR-0004: Bounded Workflow Progress Storage
 
-- **Status:** Accepted; bounded storage/readers and strict terminal pilot implemented; general/default producer activation pending
+> Historical decision record. The status below describes the decision when
+> recorded, not current implementation or support. Later changes may have
+> superseded it without another ADR. See the [archive context](README.md).
+
+## Tracking
+
+| Field | Value |
+| --- | --- |
+| Decision status | Accepted historically; current applicability unverified |
+| Implementation status | Partial; see the scoped evidence below |
+| Decision review | [Original merged PR #128](https://github.com/dariuszpanas/django-ray/pull/128); not a current implementation approval |
+| Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
+| Supersedes | Not reconstructed |
+| Superseded by | No replacement ADR identified; later divergences are recorded below |
+| Last verified | 2026-09-21; source and issue audit at `273e987` |
+
+## Current implementation and evidence
+
+Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+not a new deployed qualification.
+
+| Requirement | Current finding | Evidence and remaining work |
+| --- | --- | --- |
+| Bounded durable storage and authorized reads | Implemented | [Storage](../src/django_ray/workflow/progress/storage.py) and [read services](../src/django_ray/workflow/progress/reads.py) |
+| Default terminal graph publication | Implemented; historical pending status is stale | [Publication](../src/django_ray/workflow/progress/publication.py), [terminal admission tests](../tests/unit/test_workflow_terminal_admission.py), and [default activation commit](https://github.com/dariuszpanas/django-ray/commit/3c97a30) |
+| General live reporting and cost proof | Still separate work | [Issue #79](https://github.com/dariuszpanas/django-ray/issues/79) remains open |
+| General composite preparation and spill admission | Pending | [#156](https://github.com/dariuszpanas/django-ray/issues/156), [#157](https://github.com/dariuszpanas/django-ray/issues/157), and [#158](https://github.com/dariuszpanas/django-ray/issues/158) remain open |
+
+The storage decision remains represented in source, but its original activation
+plan no longer describes default terminal publication. Terminal publication uses
+finite admission and bounded materialized preparation; it does not wait for the
+general spill-backed path. These later changes have no replacement ADR in this
+archive. See [current workflow guidance](../docs/workflows.md).
+
+## Historical decision
+
+- **Historical status (not revalidated):** Accepted; bounded storage/readers and strict terminal pilot implemented; general/default producer activation pending
 - **Date:** 2026-07-20
 - **Decision owners:** django-ray maintainers
-- **Related contracts:** [Ray-Native Workflows](../workflows.md),
+- **Related contracts:** [Ray-Native Workflows](../docs/workflows.md),
   [ADR-0001](adr-0001-workflow-plan-contract.md),
   [ADR-0003](adr-0003-compiled-invocation-lifecycle.md)
 
@@ -126,8 +162,8 @@ bytes in four batched statements. Append-only deltas were slightly smaller at
 195,048 bytes but would add compaction and replay state that this observational
 protocol does not need. The representative JSONB probe recorded row, relation, and
 WAL evidence and cleaned up its transient table; it does not claim production
-throughput. See the committed [summary](../benchmarks/workflow-progress-storage-postgresql17-windows-2026-07-20.md)
-and [raw JSON](../benchmarks/workflow-progress-storage-postgresql17-windows-2026-07-20.json).
+throughput. See the committed [summary](../docs/benchmarks/workflow-progress-storage-postgresql17-windows-2026-07-20.md)
+and [raw JSON](../docs/benchmarks/workflow-progress-storage-postgresql17-windows-2026-07-20.json).
 
 That evidence selects normalized latest state for mutable node detail while retaining
 immutable pages for topology that normally publishes once. A node-detail row is not a

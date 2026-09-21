@@ -1,9 +1,43 @@
 # ADR-0002: Compiled Session Ownership and Reuse
 
-- **Status:** Accepted for initial local/direct CPU-pilot evidence
+> Historical decision record. The status below describes the decision when
+> recorded, not current implementation or support. Later changes may have
+> superseded it without another ADR. See the [archive context](README.md).
+
+## Tracking
+
+| Field | Value |
+| --- | --- |
+| Decision status | Accepted historically; current applicability unverified |
+| Implementation status | Partial; see the scoped evidence below |
+| Decision review | [Original merged PR #98](https://github.com/dariuszpanas/django-ray/pull/98); not a current implementation approval |
+| Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
+| Supersedes | Not reconstructed |
+| Superseded by | No replacement ADR identified; later divergences are recorded below |
+| Last verified | 2026-09-21; source and issue audit at `273e987` |
+
+## Current implementation and evidence
+
+Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+not a new native execution qualification.
+
+| Requirement | Current finding | Evidence and remaining work |
+| --- | --- | --- |
+| Explicit topology and capability checks | Implemented | [Compatibility policy](../src/django_ray/runtime/compiled_graph.py) and [policy tests](../tests/unit/test_compiled_graph.py) |
+| Ownership investigation | Probe tooling exists | [Topology probe tests](../tests/unit/test_compiled_session_topology_probe.py); tooling is not product activation evidence |
+| Application session owner and native strategy | Pending integration and activation | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72) remains open; `_VERIFIED_CAPABILITIES` is empty |
+
+The historical pilot decision does not establish a supported native topology.
+Use [current compatibility guidance](../docs/compiled-graph-compatibility.md)
+for the current capability boundary. No replacement ADR was identified in the
+archive; later issue-level restrictions must also be considered.
+
+## Historical decision
+
+- **Historical status (not revalidated):** Accepted for initial local/direct CPU-pilot evidence
 - **Date:** 2026-07-19
 - **Decision owners:** django-ray maintainers
-- **Related contracts:** [Workflow Plans and Execution Strategies](../workflow-plans.md),
+- **Related contracts:** [Workflow Plans and Execution Strategies](../docs/workflow-plans.md),
   [ADR-0001](adr-0001-workflow-plan-contract.md)
 
 ## Context

@@ -42,22 +42,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Workflow plan contract](https://django-ray.readthedocs.io/en/latest/workflow-plans/):
   definitions versus immutable plans, workload classification, fingerprints, run
   identity, and execution-strategy eligibility.
-- [Compiled session ownership](https://django-ray.readthedocs.io/en/latest/design/adr-0002-compiled-session-ownership/):
-  initial local/direct CPU-pilot process boundary, deferred Ray Client-submitted
-  topology, within-run reuse, routing, admission, and drain.
-- [Compiled invocation lifecycle](https://django-ray.readthedocs.io/en/latest/design/adr-0003-compiled-invocation-lifecycle/):
-  Ray-free session/invocation reducer, absolute deadlines, fallback and replay
-  cutoffs, one-shot outputs, reuse health, and bounded cleanup diagnostics.
-- [Bounded workflow progress](https://django-ray.readthedocs.io/en/latest/design/adr-0004-bounded-workflow-progress/):
-  Always-bounded summaries, immutable topology pages, normalized latest-state detail,
-  fenced publication, pagination, retention, and legacy snapshot rollout.
-- [Bounded workflow progress preparation](https://django-ray.readthedocs.io/en/latest/design/adr-0005-bounded-workflow-preparation/):
-  Selected contract, prototype, and #141 spill-backed production topology adapter for
-  exact one-shot preparation; #142 owns the remaining composite topology/detail
-  lifetime.
-- [Compiled Graph compatibility](https://django-ray.readthedocs.io/en/latest/compiled-graph-compatibility/):
-  fail-closed candidate and verified tuples, native probe outcomes, topology,
-  transport, dependencies, and canary maintenance.
+- [Historical decision archive](https://github.com/dariuszpanas/django-ray/tree/main/adrs):
+  incomplete historical records; accepted decisions are not evidence of current
+  implementation, support, or release readiness.
 - [Runtime environments](https://django-ray.readthedocs.io/en/latest/runtime-environments/):
   named profiles, code delivery, cache behavior, and security boundaries.
 - [Ray Serve integration boundary](https://django-ray.readthedocs.io/en/latest/design/ray-serve-boundary/):

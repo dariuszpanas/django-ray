@@ -1,10 +1,47 @@
 # ADR-0005: Bounded Workflow Progress Preparation
 
-- **Status:** Accepted; production topology integrated, composite detail pending
+> Historical decision record. The status below describes the decision when
+> recorded, not current implementation or support. Later changes may have
+> superseded it without another ADR. See the [archive context](README.md).
+
+## Tracking
+
+| Field | Value |
+| --- | --- |
+| Decision status | Accepted historically; current applicability unverified |
+| Implementation status | Partial; see the scoped evidence below |
+| Decision review | [Original merged PR #143](https://github.com/dariuszpanas/django-ray/pull/143); not a current implementation approval |
+| Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
+| Supersedes | Not reconstructed |
+| Superseded by | No replacement ADR identified; later divergences are recorded below |
+| Last verified | 2026-09-21; source and issue audit at `273e987` |
+
+## Current implementation and evidence
+
+Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+not a new preparation benchmark or deployed qualification.
+
+| Requirement | Current finding | Evidence and remaining work |
+| --- | --- | --- |
+| Spill-backed topology preparation | Implemented with a legacy boundary | [preparation.py](../src/django_ray/workflow/progress/preparation.py) still materializes legacy `observed_node_ids`; see [preparation tests](../tests/unit/test_workflow_progress_preparation.py) |
+| General composite topology/detail engine | Pending | [#156](https://github.com/dariuszpanas/django-ray/issues/156) and [#157](https://github.com/dariuszpanas/django-ray/issues/157) are open |
+| Aggregate spill admission/reclamation | Pending | [#158](https://github.com/dariuszpanas/django-ray/issues/158) remains open |
+| Default terminal publication preparation | Uses a later bounded in-memory path | [Terminal admission](../src/django_ray/workflow/progress/terminal_input.py), [publication](../src/django_ray/workflow/progress/publication.py), and [admission tests](../tests/unit/test_workflow_terminal_input.py) |
+
+[#142](https://github.com/dariuszpanas/django-ray/issues/142) was closed as
+superseded by #156/#157, not as implemented. The default terminal path admits at
+most 4 MiB, 131,072 primitive values and depth 16 before materialized preparation.
+Its activation does not prove the proposed general composite spill lifetime.
+No replacement ADR captures that narrower preparation choice; this audit records
+the divergence without rewriting the original proposal as if it had shipped.
+
+## Historical decision
+
+- **Historical status (not revalidated):** Accepted; production topology integrated, composite detail pending
 - **Date:** 2026-07-21
 - **Decision owners:** django-ray maintainers
 - **Related contracts:** [ADR-0004](adr-0004-bounded-workflow-progress.md),
-  [Ray-Native Workflows](../workflows.md),
+  [Ray-Native Workflows](../docs/workflows.md),
   [ADR-0003](adr-0003-compiled-invocation-lifecycle.md)
 
 ## Context
@@ -515,8 +552,8 @@ accepted only when increasing observed cardinality beyond retained caps does not
 Python identity collections and measured resident growth is explained by the fixed
 cache, batch, and retained-output budgets rather than total observed identities.
 
-The required 2026-07-21 WSL2 Linux [evidence summary](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
-and [authoritative JSON](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json),
+The required 2026-07-21 WSL2 Linux [evidence summary](../docs/benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
+and [authoritative JSON](../docs/benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json),
 together with the focused canonical and lifecycle suite, satisfy this gate for the
 issue-#140 prototype at revision `c42fb22634712e52d8aee74c86a62fea459da5e8`.
 Sparse and high-edge memory peaks plateaued after retained caps while the external spill
@@ -526,8 +563,8 @@ This accepts the preparation contract only; by itself it does not satisfy #141, 
 schema-v3 activation gate.
 
 The issue-#141 production adapter has its own required WSL2 Linux
-[evidence summary](../benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.md)
-and [authoritative JSON](../benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.json).
+[evidence summary](../docs/benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.md)
+and [authoritative JSON](../docs/benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.json).
 At clean revision `fd08ab21373c0bf1e0586e54ec0a564e3d4ce4d5`, all six
 production-topology cases, exact source checks, schema-v2 phase evidence, normal
 cleanup paths, and forced-termination cleanup passed. Sparse bounded-phase
@@ -630,5 +667,5 @@ must remain local and package-owned.
 - [GitHub issue #140: Select bounded workflow-progress preparation contract](https://github.com/dariuszpanas/django-ray/issues/140)
 - [GitHub issue #141: Stream workflow topology preparation through bounded spill](https://github.com/dariuszpanas/django-ray/issues/141)
 - [GitHub issue #142: Compose bounded topology and detail preparation](https://github.com/dariuszpanas/django-ray/issues/142)
-- [WSL2 Linux preparation evidence summary](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
-- [Authoritative preparation evidence JSON](../benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json)
+- [WSL2 Linux preparation evidence summary](../docs/benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
+- [Authoritative preparation evidence JSON](../docs/benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json)

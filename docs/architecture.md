@@ -100,13 +100,13 @@ identity, topology, physical layout, resolved RuntimeEnv identity, resources, bo
 transport, lifecycle, and compatibility inputs. Current inventory, task arguments,
 credentials, and other per-invocation values are bound separately. See
 [Workflow Plans and Execution Strategies](workflow-plans.md) and
-[ADR-0001](design/adr-0001-workflow-plan-contract.md). The first experimental
+[ADR-0001](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0001-workflow-plan-contract.md). The first experimental
 Compiled Graph session is owned by one Ray Core outer-task process for one durable run;
 it does not survive a scheduled task. Current evidence is limited to the
 `direct-ray-core` submission transport. The compatibility identity records submission
 transport separately, so django-ray's production Ray Client-submitted path cannot
 inherit that row and still needs a live-cluster lifetime probe. See
-[ADR-0002](design/adr-0002-compiled-session-ownership.md).
+[ADR-0002](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0002-compiled-session-ownership.md).
 That identity also fails closed unless it names a specific container, immutable
 deployment/image digest, and explicit shared-memory and object-store profiles; a
 generic host or container observation cannot authorize native compilation.
@@ -124,7 +124,7 @@ primary outcome, effect certainty, graph health, future durable-retry dispositio
 cleanup diagnostics separate. Its bounded snapshot contains no Ray handles or result
 values. The exact protocol version is a fingerprinted plan requirement at
 `strategy_requirements.compiled_graph.lifecycle_protocol_version`. See
-[ADR-0003](design/adr-0003-compiled-invocation-lifecycle.md). No native execution
+[ADR-0003](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0003-compiled-invocation-lifecycle.md). No native execution
 adapter or verified Compiled Graph capability is introduced by this state machine.
 
 Workflow progress storage has a separate strategy-neutral decision. ADR-0004 replaces
@@ -167,8 +167,8 @@ summary. Full remains the default, and authorized paginated services are impleme
 Terminal-only is not a substitute for the remaining full-mode live-ingestion,
 composite-preparation, aggregate-spill, capacity, migration, and old-writer-drain
 work. See
-[ADR-0004](design/adr-0004-bounded-workflow-progress.md) and
-[ADR-0005](design/adr-0005-bounded-workflow-preparation.md).
+[ADR-0004](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0004-bounded-workflow-progress.md) and
+[ADR-0005](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md).
 
 ### Database
 
@@ -437,14 +437,16 @@ or summary conflict rolls back the current-state mutation instead of exposing pa
 detail.
 
 Those durable-storage bounds are now paired with spill-backed production topology
-preparation. [ADR-0005](design/adr-0005-bounded-workflow-preparation.md) uses a
+preparation. [ADR-0005](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md) uses a
 package-owned, private SQLite workspace for exact one-shot node/edge duplicate and
 reference validation, canonical selection, and cleanup before capability issuance.
 Only retained topology and bounded batches enter Python during that phase. The public
 prepared value still materializes the complete `observed_node_ids` compatibility set
 needed by initial detail, so this is not yet an end-to-end O(retained) preparation
-claim. #142 completes composite detail preparation under
-[issue #132](https://github.com/dariuszpanas/django-ray/issues/132). #79 separately
+claim. Composite detail preparation remains tracked by
+[#156](https://github.com/dariuszpanas/django-ray/issues/156) and
+[#157](https://github.com/dariuszpanas/django-ray/issues/157); the former umbrella
+#142 was closed as superseded. #79 separately
 owns sampled/coalesced reporting, live wire and cost attribution, aggregate
 producer/mailbox admission, producer backpressure, bounded actor-to-preparer draining,
 and large-fan-out slow-consumer evidence.
@@ -1322,10 +1324,10 @@ complete an upgrade; first prove its exact remote identity and quiescence.
 - [Worker Modes](worker-modes.md)
 - [Ray-Native Workflows](workflows.md)
 - [Workflow Plans and Execution Strategies](workflow-plans.md)
-- [ADR-0001: Workflow Plans and Execution Strategies](design/adr-0001-workflow-plan-contract.md)
-- [ADR-0002: Compiled Session Ownership and Reuse](design/adr-0002-compiled-session-ownership.md)
-- [ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
-- [ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md)
-- [ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md)
+- [ADR-0001: Workflow Plans and Execution Strategies](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0001-workflow-plan-contract.md)
+- [ADR-0002: Compiled Session Ownership and Reuse](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0002-compiled-session-ownership.md)
+- [ADR-0003: Compiled Invocation Lifecycle](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0003-compiled-invocation-lifecycle.md)
+- [ADR-0004: Bounded Workflow Progress Storage](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0004-bounded-workflow-progress.md)
+- [ADR-0005: Bounded Workflow Progress Preparation](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)
