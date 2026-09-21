@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Add an always-present Qualification Gate that requires complete current-PR
+  success for applicable application, native upgrade and latency workflows while
+  retaining their path filters and reporting explicit non-applicability.
+
 - Make application, native upgrade and latency qualification follow the latest
   exact-source CI workflow attempt rather than an obsolete aggregate check.
   Preserve failure blocking, avoid draft-to-ready cancellation races, and log

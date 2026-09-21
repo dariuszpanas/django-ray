@@ -1,18 +1,7 @@
 name: Application Qualification
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - scripts/wait_for_ci_checkpoint.py
-      - '.github/workflows/application-qualification.yml'
-      - 'qualification/application/**'
-      - 'testproject/**'
-      - 'src/django_ray/**'
-      - 'Dockerfile'
-      - 'docker-entrypoint.sh'
-      - 'pyproject.toml'
-      - 'uv.lock'
+  workflow_call:
   workflow_dispatch:
     inputs:
       mode:

@@ -1,16 +1,7 @@
 name: Job Latency Qualification
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - scripts/wait_for_ci_checkpoint.py
-      - .github/workflows/latency-qualification.yml
-      - qualification/latency/**
-      - qualification/transactions/Dockerfile
-      - tests/unit/test_latency_cost.py
-      - tests/unit/test_latency_phases.py
-      - tests/unit/test_latency_qualification.py
+  workflow_call:
   workflow_dispatch:
 
 permissions:

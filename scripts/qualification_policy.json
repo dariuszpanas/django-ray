@@ -1,0 +1,60 @@
+[
+  {
+    "workflow": "application-qualification.yml",
+    "paths": [
+      ".github/workflows/qualification-gate.yml",
+      "scripts/qualification_gate.py",
+      "scripts/qualification_policy.json",
+      "tests/unit/test_qualification_gate.py",
+      "scripts/wait_for_ci_checkpoint.py",
+      ".github/workflows/application-qualification.yml",
+      "qualification/application/**",
+      "testproject/**",
+      "src/django_ray/**",
+      "Dockerfile",
+      "docker-entrypoint.sh",
+      "pyproject.toml",
+      "uv.lock"
+    ],
+    "id": "application"
+  },
+  {
+    "workflow": "upgrade-native-qualification.yml",
+    "paths": [
+      ".github/workflows/qualification-gate.yml",
+      "scripts/qualification_gate.py",
+      "scripts/qualification_policy.json",
+      "tests/unit/test_qualification_gate.py",
+      "scripts/wait_for_ci_checkpoint.py",
+      ".github/workflows/upgrade-native-qualification.yml",
+      "qualification/upgrade/**",
+      "qualification/transactions/Dockerfile",
+      "qualification/transactions/probe.py",
+      "qualification/docker/scenario.py",
+      "src/django_ray/migrations/**",
+      "src/django_ray/backends.py",
+      "src/django_ray/input_storage.py",
+      "src/django_ray/result_storage.py",
+      "pyproject.toml",
+      "uv.lock"
+    ],
+    "id": "native"
+  },
+  {
+    "workflow": "latency-qualification.yml",
+    "paths": [
+      ".github/workflows/qualification-gate.yml",
+      "scripts/qualification_gate.py",
+      "scripts/qualification_policy.json",
+      "tests/unit/test_qualification_gate.py",
+      "scripts/wait_for_ci_checkpoint.py",
+      ".github/workflows/latency-qualification.yml",
+      "qualification/latency/**",
+      "qualification/transactions/Dockerfile",
+      "tests/unit/test_latency_cost.py",
+      "tests/unit/test_latency_phases.py",
+      "tests/unit/test_latency_qualification.py"
+    ],
+    "id": "latency"
+  }
+]
