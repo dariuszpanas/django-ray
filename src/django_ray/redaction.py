@@ -192,6 +192,8 @@ def _is_terminal_matching_control(character: str) -> bool:
 
 def _is_inert_terminal_text(value: str) -> bool:
     """Return whether text can bypass every terminal projection unchanged."""
+    if type(value) is str and value.isascii() and value.isprintable():
+        return True
     for character in value:
         if character in {"\t", "\n"}:
             continue

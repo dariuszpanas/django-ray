@@ -8,6 +8,7 @@ import pytest
 
 from django_ray.redaction import (
     REDACTED,
+    _is_inert_terminal_text,
     normalize_terminal_text,
     redact_exception,
     redact_text,
@@ -15,6 +16,12 @@ from django_ray.redaction import (
     result_metadata,
     safe_json_dumps,
 )
+
+
+@pytest.mark.parametrize("codepoint", range(128))
+def test_ascii_inert_scan_preserves_control_boundary(codepoint: int) -> None:
+    value = f"prefix{chr(codepoint)}suffix"
+    assert _is_inert_terminal_text(value) is (0x20 <= codepoint < 0x7F or codepoint in {0x09, 0x0A})
 
 
 @pytest.mark.parametrize(
