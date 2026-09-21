@@ -258,6 +258,10 @@ def main(argv: list[str] | None = None) -> int:
             probe_id, profile="thin", manager_prefix=args.manager_prefix
         )
         receipt.update(api=asdict(api), executions=[api_owner, probe_owner])
+        receipt["failed_stage"] = "dashboard_proxy"
+        from qualification.application.dashboard_browser import observe_dashboard
+
+        receipt["dashboard"] = observe_dashboard(request, api.task_id)
         receipt["failed_stage"] = "receipt"
         encoded = json.dumps(
             {**receipt, "status": "passed", "failed_stage": None}, sort_keys=True
@@ -270,6 +274,24 @@ def main(argv: list[str] | None = None) -> int:
         passed = True
     except Exception as exc:
         # No raw HTTP/DB/Ray responses, RuntimeEnv plaintext or credentials.
+        if receipt.get("failed_stage") == "dashboard_proxy":
+            from qualification.application.workflow_browser import BrowserObservationError
+
+            if isinstance(exc, BrowserObservationError) and exc.line is not None:
+                receipt["browser_failure_line"] = exc.line
+            trace = exc.__traceback__
+            while trace is not None:
+                module = trace.tb_frame.f_globals.get("__name__", "")
+                if module in {
+                    "qualification.application.dashboard_browser",
+                    "qualification.application.dashboard_proxy",
+                    "qualification.application.workflow_session",
+                }:
+                    receipt["dashboard_failure_location"] = {
+                        "module": module,
+                        "line": trace.tb_lineno,
+                    }
+                trace = trace.tb_next
         receipt["failure_code"] = (
             exc.code.value
             if isinstance(exc, CoreEvidenceError) and isinstance(exc.code, CoreEvidenceFailure)
