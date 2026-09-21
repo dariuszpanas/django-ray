@@ -26,7 +26,7 @@ spec:
             DATABASE_PORT: '5432'
             RAY_ADDRESS: ray://ray-head:10001
             RAY_STATE_API_ADDRESS: http://ray-head:8265
-            RAY_DASHBOARD_URL: http://ray-head:8265
+            RAY_DASHBOARD_URL: http://127.0.0.1:8765/ray
             DJANGO_RAY_RECOVERY_WORKING_DIR: /runtime/recovery.zip
             DJANGO_STATIC_ROOT: /static
             DJANGO_RAY_CONCURRENCY: '1'

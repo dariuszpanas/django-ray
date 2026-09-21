@@ -298,6 +298,20 @@ no-redirect transport with an explicit 1 MiB HTML response ceiling; ordinary API
 graph routes, terminal controls, diagnostic presentation and retained storage. Server-side
 fingerprints verify that viewing these surfaces preserves stored diagnostics and task history;
 neither raw diagnostics nor their fingerprints enter receipts.
+The Core assertion also opens the actual task's Admin Dashboard link in Chromium,
+before and after cold Ray replacement. A loopback GET-only proxy forwards the
+`/ray/` base path to the fixed Ray Dashboard service. The observer requires the
+matching job and task identity, a successful State API response, and a rendered
+`FINISHED` task detail with no JavaScript errors. Anonymous Admin access must be
+denied. A URL or HTTP success alone does not pass this assertion.
+
+The proxy permits four concurrent requests, limits each response to 8 MiB, and
+does not forward browser credentials. The browser subprocess has a 60-second
+deadline; its process group, temporary Admin session and proxy are removed on
+success and failure. The fixed receipt contains no cookies or page contents.
+This uses the existing assertion Job's resource limits and proves this fixture's
+base-path integration, not arbitrary ingress, authentication or production load.
+
 Anonymous API and graph requests must be denied. Credentials and workflow contents are omitted
 from receipts. The existing Job deadlines and resource limits also bound this stage.
 Terminal-only runs must have no stored detail rows, topology manifests or topology pages, including
