@@ -17,7 +17,7 @@ from uuid import UUID
 
 from qualification.application.api import TASK_FAILURE_STATES, validate_task_status_payload
 from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
-from qualification.application.run_api import ApplicationHttp, read_token
+from qualification.application.run_api import ApplicationHttp, ApplicationHttpError, read_token
 from qualification.application.workflow_admin import _protected_diagnostics, observe_admin_contract
 from qualification.application.workflow_browser import (
     BrowserObservationError,
@@ -416,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
         with args.receipt.open("xb") as stream:
             stream.write(encoded)
     except Exception as error:
+        if isinstance(error, ApplicationHttpError):
+            receipt["http_failure"] = error.diagnostic()
         if isinstance(error, WorkflowHttpError):
             receipt["http_failure"] = {"endpoint": error.endpoint, "status": error.status}
         if isinstance(error, BrowserObservationError) and error.line is not None:

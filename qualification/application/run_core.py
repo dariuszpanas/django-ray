@@ -17,7 +17,7 @@ from qualification.application.api import (
     validate_task_status_payload,
     verify_application_api,
 )
-from qualification.application.run_api import ApplicationHttp, read_token
+from qualification.application.run_api import ApplicationHttp, ApplicationHttpError, read_token
 
 
 class CoreEvidenceFailure(StrEnum):
@@ -274,6 +274,8 @@ def main(argv: list[str] | None = None) -> int:
         passed = True
     except Exception as exc:
         # No raw HTTP/DB/Ray responses, RuntimeEnv plaintext or credentials.
+        if isinstance(exc, ApplicationHttpError):
+            receipt["http_failure"] = exc.diagnostic()
         if receipt.get("failed_stage") == "dashboard_proxy":
             from qualification.application.workflow_browser import BrowserObservationError
 
