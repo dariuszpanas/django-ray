@@ -223,7 +223,7 @@ def test_runtime_probe_uses_existing_bounded_api_route(durable, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("classified", [False, True])
+@pytest.mark.parametrize("classified", [False, True, "http"])
 def test_core_failure_retains_safe_api_progress_without_private_response(
     tmp_path, monkeypatch, capsys, classified
 ):
@@ -237,6 +237,12 @@ def test_core_failure_retains_safe_api_progress_without_private_response(
         args[0].last_http_status = 200
         kwargs["evidence"].task_id = TASK_ID
         kwargs["evidence"].task_state = "FAILED"
+        if classified == "http":
+            from qualification.application.run_api import ApplicationHttpError, HttpFailureCode
+
+            raise ApplicationHttpError(
+                "private API response", code=HttpFailureCode.BODY_READ, status=200
+            )
         if classified:
             raise run_core.CoreEvidenceError(run_core.CoreEvidenceFailure.OWNER_HEARTBEAT)
         raise ValueError("private API response")
@@ -247,7 +253,9 @@ def test_core_failure_retains_safe_api_progress_without_private_response(
     output = capsys.readouterr().out
     assert "private" not in output
     failed = json.loads(output)
-    assert failed["failure_code"] == ("owner_heartbeat" if classified else "unclassified")
+    assert failed["failure_code"] == ("owner_heartbeat" if classified is True else "unclassified")
+    if classified == "http":
+        assert failed["http_failure"] == {"code": "body_read_failed", "status": 200}
     assert failed["failed_stage"] == "application_api"
     assert failed["api_diagnostics"]["requests"] == 11
     assert failed["api_diagnostics"]["last_http_status"] == 200

@@ -202,6 +202,70 @@ def test_http_failure_closes_connection_and_discards_private_exception(monkeypat
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None
     assert closed == [True]
+    assert caught.value.diagnostic() == {"code": "request_failed", "status": None}
+
+
+@pytest.mark.parametrize("stage", ["headers", "body"])
+def test_http_read_failures_keep_only_fixed_stage_and_status(monkeypatch, stage):
+    class Response:
+        status = 200
+
+        def getheader(self, _name):
+            return None
+
+        def read(self, _limit):
+            raise OSError("secret response body")
+
+    class Connection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            if stage == "headers":
+                raise http.client.RemoteDisconnected("secret header")
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", Connection)
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        run_api.ApplicationHttp("http://app")("/private", method="GET")
+    assert caught.value.diagnostic() == {
+        "code": "response_headers_failed" if stage == "headers" else "body_read_failed",
+        "status": None if stage == "headers" else 200,
+    }
+    assert "secret" not in str(caught.value)
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "options,code",
+    [
+        ({"required_response_headers": {"X-Test": "required"}}, "required_headers_mismatch"),
+        ({"required_cache_directives": frozenset({"no-store"})}, "cache_directives_mismatch"),
+        ({"required_media_types": frozenset({"application/json"})}, "media_type_mismatch"),
+        ({"response_limit": 1}, "body_limit_exceeded"),
+    ],
+)
+def test_http_contract_failure_categories_exclude_private_response(server, options, code):
+    origin, _, replies = server
+    replies.append((200, {"X-Test": "private-header"}, b"private-body"))
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        run_api.ApplicationHttp(origin)("/private", method="GET", **options)
+    assert caught.value.diagnostic() == {"code": code, "status": 200}
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.parametrize("status", [True, 99, 600, "private", None])
+def test_http_failure_discards_invalid_status(status):
+    error = run_api.ApplicationHttpError(
+        "failure", code=run_api.HttpFailureCode.REQUEST, status=status
+    )
+    assert error.diagnostic() == {"code": "request_failed", "status": None}
 
 
 @pytest.mark.parametrize("raw", [b"short", b"x" * 513, b"x" * 31 + b"\n", b"x" * 31 + b"\xff"])

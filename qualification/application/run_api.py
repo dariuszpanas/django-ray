@@ -9,6 +9,7 @@ import math
 import re
 import time
 from dataclasses import asdict
+from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -17,6 +18,32 @@ from qualification.application.api import ApiEvidence, verify_application_api
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_EXPLICIT_RESPONSE_BYTES = 1024 * 1024
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+={0,2}\Z")
+
+
+class HttpFailureCode(StrEnum):
+    """Fixed public categories; never include request or dependency text."""
+
+    REQUEST = "request_failed"
+    RESPONSE_HEADERS = "response_headers_failed"
+    BODY_READ = "body_read_failed"
+    REQUIRED_HEADERS = "required_headers_mismatch"
+    CACHE = "cache_directives_mismatch"
+    MEDIA_TYPE = "media_type_mismatch"
+    BODY_LIMIT = "body_limit_exceeded"
+
+
+class ApplicationHttpError(ValueError):
+    """An HTTP assertion failure with bounded, secret-free receipt fields."""
+
+    def __init__(self, message: str, *, code: HttpFailureCode, status: int | None) -> None:
+        super().__init__(message)
+        if not isinstance(code, HttpFailureCode):
+            raise ValueError("Invalid HTTP failure category")
+        self.code = code
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+
+    def diagnostic(self) -> dict[str, str | int | None]:
+        return {"code": self.code.value, "status": self.status}
 
 
 class ApplicationHttp:
@@ -85,8 +112,10 @@ class ApplicationHttp:
         self.last_http_status = None
         result: tuple[int, bytes] | None = None
         failure = "Application HTTP request failed"
+        failure_code = HttpFailureCode.REQUEST
         try:
             connection.request(method, path, headers=headers or {})
+            failure_code = HttpFailureCode.RESPONSE_HEADERS
             response = connection.getresponse()
             self.last_http_status = response.status
             if any(
@@ -94,20 +123,25 @@ class ApplicationHttp:
                 for name, value in (required_response_headers or {}).items()
             ):
                 failure = "Application HTTP response headers did not match"
+                failure_code = HttpFailureCode.REQUIRED_HEADERS
             elif not required_cache_directives.issubset(
                 part.strip().lower()
                 for part in (response.getheader("Cache-Control") or "").split(",")
             ):
                 failure = "Application HTTP response cache directives did not match"
+                failure_code = HttpFailureCode.CACHE
             elif required_media_types and (
                 (response.getheader("Content-Type") or "").partition(";")[0].strip().lower()
                 not in required_media_types
             ):
                 failure = "Application HTTP response media type did not match"
+                failure_code = HttpFailureCode.MEDIA_TYPE
             else:
+                failure_code = HttpFailureCode.BODY_READ
                 body = response.read(response_limit + 1)
                 if len(body) > response_limit:
                     failure = "Application HTTP response exceeded its byte limit"
+                    failure_code = HttpFailureCode.BODY_LIMIT
                 else:
                     result = response.status, body
         except (OSError, http.client.HTTPException, ValueError):
@@ -116,7 +150,7 @@ class ApplicationHttp:
         finally:
             connection.close()
         if result is None:
-            raise ValueError(failure)
+            raise ApplicationHttpError(failure, code=failure_code, status=self.last_http_status)
         return result
 
 

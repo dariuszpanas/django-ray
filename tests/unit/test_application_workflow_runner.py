@@ -45,6 +45,21 @@ def test_success_records_all_serial_cases_without_claiming_complete_gate(fixture
     assert [call.kwargs["case"] for call in execute.call_args_list] == list(runner.workflow_cases())
 
 
+def test_transport_failure_receipt_omits_private_exception(fixture_runner, capsys):
+    from qualification.application.run_api import ApplicationHttpError, HttpFailureCode
+
+    args, receipt, execute = fixture_runner
+    execute.side_effect = ApplicationHttpError(
+        "private header cookie token and body", code=HttpFailureCode.RESPONSE_HEADERS, status=None
+    )
+    assert runner.main(args) == 1
+    assert execute.call_count == 1
+    assert not receipt.exists()
+    output = capsys.readouterr().out
+    assert "private" not in output
+    assert json.loads(output)["http_failure"] == {"code": "response_headers_failed", "status": None}
+
+
 @pytest.mark.parametrize("failure_index", range(len(runner.workflow_cases())))
 @pytest.mark.parametrize("module_name", ["qualification.application.run_workflows", "__main__"])
 def test_failed_case_stops_submissions_and_omits_raw_error(
