@@ -1,5 +1,16 @@
 # Ray-Native Workflows
 
+Workflow graph leaves settle from their final Ray outcome after retries. A
+successful retry clears the transient error and retains the successful
+invocation's bounded output preview and progress. Delayed invocation events
+cannot overwrite settled detail. The coordinator observes a separate metadata
+reference, not the application result. Pending metadata is capped by the selected
+topology-node limit; each marker obeys the progress event byte limits. One
+producer retains at most one additional bounded latest event for that marker.
+Missing, invalid or uncertain metadata disables graph publication without
+cancelling or retrying successful application work. These bounds do not establish
+aggregate admission across live progress producers or activate graphs by default.
+
 django-ray workflows combine one durable Django task with low-overhead Ray-native
 steps. The outer task is queued, retried, cancelled, and recorded in the database.
 Internal workflow steps are submitted directly to Ray and exchange intermediate

@@ -2438,7 +2438,7 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
 
         def remote(self, *args, **kwargs):
             remote_calls.append(kwargs)
-            return _BadRef()
+            return _BadRef(), object()
 
     identity = _workflow_identity()
     actor = _IngestOnlyProgressActor()
@@ -2456,6 +2456,7 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
     assert remote_calls == [
         {
             "workflow_run_identity": identity.as_dict(),
+            "return_outcome_marker": True,
         }
     ]
     assert [event.kind for event in events] == [WorkflowProgressEventKind.NODE_REGISTERED]
@@ -2483,7 +2484,7 @@ def test_ray_executor_submits_explicit_output_preview_contract() -> None:
         def remote(self, *args, **kwargs):
             del args
             remote_calls.append(kwargs)
-            return _BadRef()
+            return _BadRef(), object()
 
     identity = _workflow_identity()
     actor = _IngestOnlyProgressActor()
@@ -2508,6 +2509,7 @@ def test_ray_executor_submits_explicit_output_preview_contract() -> None:
         {
             "output_preview_path": "tests.unit.test_workflows.preview_increment",
             "workflow_run_identity": identity.as_dict(),
+            "return_outcome_marker": True,
         }
     ]
     assert [event.kind for event in events] == [
@@ -2591,9 +2593,9 @@ def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
             del kwargs
             return self
 
-        def remote(self, *args: Any, **kwargs: Any) -> _Ref:
+        def remote(self, *args: Any, **kwargs: Any) -> tuple[_Ref, object]:
             remote_calls.append((args, kwargs))
-            return _Ref()
+            return _Ref(), object()
 
     signature = step(increment).with_output_preview(preview_increment)
     materialized = materialize_workflow_plan(
@@ -2719,7 +2721,7 @@ def test_ray_executor_submit_passes_strict_pilot_limits_to_remote_step() -> None
 
         def remote(self, *args, **kwargs):
             remote_calls.append(kwargs)
-            return _BadRef()
+            return _BadRef(), object()
 
     identity = _workflow_identity()
     executor = object.__new__(_RayExecutor)
@@ -2736,6 +2738,7 @@ def test_ray_executor_submit_passes_strict_pilot_limits_to_remote_step() -> None
         {
             "workflow_progress_limits": WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
             "workflow_run_identity": identity.as_dict(),
+            "return_outcome_marker": True,
         }
     ]
 
@@ -2756,7 +2759,7 @@ def test_ray_executor_submit_chunks_edges_and_uses_only_bounded_ingest() -> None
             return self
 
         def remote(self, *args, **kwargs):
-            return _GoodRef()
+            return _GoodRef(), object()
 
     identity = _workflow_identity()
     actor = _IngestOnlyProgressActor()
@@ -2814,7 +2817,7 @@ def test_ray_executor_invalid_internal_progress_never_calls_actor() -> None:
 
         def remote(self, *args, **kwargs):
             self.calls += 1
-            return _RefWithTaskId()
+            return _RefWithTaskId(), object()
 
     identity = _workflow_identity()
     actor = _IngestOnlyProgressActor()

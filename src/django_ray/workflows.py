@@ -605,6 +605,9 @@ class _RayExecutor(_Executor):
         self._last_progress_persisted_failed = False
         self.last_progress_flush_at = time.monotonic()
         self._pending_progress_snapshot_ref = None
+        self._pending_leaf_outcomes: dict[Any, str] = {}
+        self._leaf_outcome_dependencies: dict[str, tuple[str, ...]] = {}
+        self._leaf_final_outcomes: dict[str, bool] = {}
         self._progress_suppression_depth = 0
         self._map_progress_sent_at: dict[str, float] = {}
         self._map_progress_producers: dict[str, WorkflowProgressProducerSession] = {}
@@ -988,6 +991,23 @@ class _RayExecutor(_Executor):
                 binding=binding,
             )
         )
+        track_outcome = progress_actor is not None
+        if track_outcome:
+            self._poll_leaf_outcomes()
+            pending = getattr(self, "_pending_leaf_outcomes", None)
+            if pending is None:
+                pending = self._pending_leaf_outcomes = {}
+            if (
+                self.progress_actor is None
+                or len(pending) >= self.workflow_progress_limits.topology_node_max_items
+                or options.get("num_returns", 1) != 1
+            ):
+                self._disable_progress_reporting(reason="leaf_outcome_capacity")
+                progress_actor = None
+                track_outcome = False
+            else:
+                options["num_returns"] = 2
+                remote_progress_kwargs["return_outcome_marker"] = True
         object_ref = self.remote_step.options(**options).remote(
             signature.callable_path,
             signature.bootstrap_django,
@@ -1000,6 +1020,12 @@ class _RayExecutor(_Executor):
             *input_args,
             **remote_progress_kwargs,
         )
+        if track_outcome:
+            object_ref, outcome_ref = object_ref
+            self._pending_leaf_outcomes[outcome_ref] = node_id
+            if not hasattr(self, "_leaf_outcome_dependencies"):
+                self._leaf_outcome_dependencies = {}
+            self._leaf_outcome_dependencies[node_id] = dependencies
         if progress_actor is not None:
             try:
                 ray_task_id = object_ref.task_id().hex()
@@ -1016,6 +1042,90 @@ class _RayExecutor(_Executor):
                     },
                 )
         return object_ref
+
+    def _poll_leaf_outcomes(self) -> None:
+        """Observe bounded marker references, never fetch application values."""
+        pending = getattr(self, "_pending_leaf_outcomes", None)
+        if not pending or self.progress_actor is None:
+            return
+        from ray.exceptions import RayTaskError
+
+        from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
+
+        try:
+            ready, _ = self.ray.wait(list(pending), num_returns=len(pending), timeout=0)
+        except Exception:
+            self._disable_progress_reporting(reason="leaf_outcome_wait_failed")
+            return
+        ready_set = set(ready)
+        pending_nodes = set(pending.values())
+        # Submission order puts known dependencies before their consumers.
+        for ref in [item for item in pending if item in ready_set]:
+            node_id = pending[ref]
+            dependencies = getattr(self, "_leaf_outcome_dependencies", {}).get(node_id, ())
+            outcomes = getattr(self, "_leaf_final_outcomes", None)
+            if outcomes is None:
+                outcomes = self._leaf_final_outcomes = {}
+            if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
+                self._disable_progress_reporting(reason="leaf_outcome_capacity")
+                return
+            failure = None
+            try:
+                marker = self.ray.get(ref, timeout=0)
+            except RayTaskError as error:
+                if any(parent in pending_nodes for parent in dependencies):
+                    # Dependency metadata can become locally visible after its
+                    # consumer's failure reference. Do not guess its outcome.
+                    continue
+                if any(outcomes.get(parent) is False for parent in dependencies):
+                    # Ray flattens dependency exceptions. Recorded submission
+                    # edges, not exception nesting, identify unexecuted leaves.
+                    outcomes[node_id] = False
+                    del pending[ref]
+                    pending_nodes.discard(node_id)
+                    getattr(self, "_leaf_outcome_dependencies", {}).pop(node_id, None)
+                    continue
+                state = "FAILED"
+                try:
+                    failure = str(error.cause)
+                except Exception:
+                    failure = "Workflow task failed"
+            except Exception:
+                self._disable_progress_reporting(reason="leaf_outcome_unavailable")
+                return
+            else:
+                try:
+                    from django_ray.workflow.progress.protocol import decode_workflow_progress_event
+
+                    settled = decode_workflow_progress_event(
+                        marker,
+                        expected_run_identity=self.workflow_run_identity.as_dict(),
+                        limits=self.workflow_progress_limits,
+                    )
+                    if (
+                        settled.kind is not WorkflowProgressEventKind.NODE_SETTLED
+                        or settled.payload["node_id"] != node_id
+                        or settled.payload["state"] != "SUCCEEDED"
+                    ):
+                        raise ValueError("Unexpected final workflow outcome")
+                    self.progress_actor.ingest.remote(marker)
+                except Exception:
+                    self._disable_progress_reporting(reason="leaf_outcome_invalid")
+                    return
+                state = "SUCCEEDED"
+            if state == "FAILED" and not self._send_progress_event(
+                self.progress_actor,
+                WorkflowProgressEventKind.NODE_SETTLED,
+                {"node_id": node_id, "state": state, "error": failure},
+            ):
+                self._disable_progress_reporting(reason="leaf_outcome_send_failed")
+                return
+            if getattr(self, "_pending_progress_snapshot_ref", None) is not None:
+                self._pending_progress_snapshot_stale = True
+            outcomes[node_id] = state == "SUCCEEDED"
+            del pending[ref]
+            pending_nodes.discard(node_id)
+            getattr(self, "_leaf_outcome_dependencies", {}).pop(node_id, None)
 
     def collect(self, values: list[Any]) -> Any:
         # Each value is a top-level argument so Ray resolves dependencies
@@ -1075,6 +1185,11 @@ class _RayExecutor(_Executor):
         progress_actor = self.progress_actor
         self.progress_actor = None
         self._pending_progress_snapshot_ref = None
+        pending = getattr(self, "_pending_leaf_outcomes", None)
+        if pending is not None:
+            pending.clear()
+        getattr(self, "_leaf_outcome_dependencies", {}).clear()
+        getattr(self, "_leaf_final_outcomes", {}).clear()
         if reason is not None:
             self._progress_warning(
                 "Workflow progress reporting became unavailable",
@@ -1664,6 +1779,13 @@ class _RayExecutor(_Executor):
                 producer.finish()
             except BaseException:
                 pass
+        outcomes = getattr(self, "_leaf_final_outcomes", None)
+        if outcomes is None:
+            outcomes = self._leaf_final_outcomes = {}
+        if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
+            self._disable_progress_reporting(reason="leaf_outcome_capacity")
+            return
+        outcomes[node_id] = not failed
         self._send_progress_event(
             self.progress_actor,
             (WorkflowProgressEventKind.FAILED if failed else WorkflowProgressEventKind.COMPLETED),
@@ -1692,6 +1814,10 @@ class _RayExecutor(_Executor):
         if self.progress_actor is None or self.workflow_run_identity is None:
             return None
 
+        self._poll_leaf_outcomes()
+        if self.progress_actor is None:
+            return None
+
         from django_ray.conf.settings import get_settings
 
         now = time.monotonic()
@@ -1708,6 +1834,7 @@ class _RayExecutor(_Executor):
             if snapshot_ref is None:
                 snapshot_ref = self.progress_actor.snapshot.remote()
                 self._pending_progress_snapshot_ref = snapshot_ref
+                self._pending_progress_snapshot_stale = False
             ready, _ = self.ray.wait(
                 [snapshot_ref],
                 timeout=wait_timeout_seconds,
@@ -1721,6 +1848,13 @@ class _RayExecutor(_Executor):
         if not ready:
             return None
         self._pending_progress_snapshot_ref = None
+
+        if getattr(self, "_pending_progress_snapshot_stale", False):
+            # This request precedes a coordinator settlement. Consume its ready
+            # handle without persisting a pre-settlement terminal state, then
+            # obtain a new snapshot on the next bounded flush iteration.
+            self._pending_progress_snapshot_stale = False
+            return None
 
         try:
             snapshot = self.ray.get(ready[0])
@@ -1806,14 +1940,22 @@ class _RayExecutor(_Executor):
                     and isinstance(ingress, Mapping)
                     and bool(ingress.get("rejected") or ingress.get("truncated"))
                 )
-                failure_evidence_ready = failed and (
-                    not schema_v3_pilot_enabled
-                    or _failed_snapshot_has_causally_complete_ancestors(snapshot)
+                failure_evidence_ready = (
+                    failed
+                    and not getattr(self, "_pending_leaf_outcomes", None)
+                    and (
+                        not schema_v3_pilot_enabled
+                        or _failed_snapshot_has_causally_complete_ancestors(snapshot)
+                    )
                 )
                 if (
                     ingress_cannot_publish
                     or failure_evidence_ready
-                    or (not failed and terminal == snapshot["total_nodes"])
+                    or (
+                        not failed
+                        and not getattr(self, "_pending_leaf_outcomes", None)
+                        and terminal == snapshot["total_nodes"]
+                    )
                 ):
                     self._publish_terminal_progress(snapshot)
                     return

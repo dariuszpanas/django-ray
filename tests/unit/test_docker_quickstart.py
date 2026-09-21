@@ -632,9 +632,11 @@ def _admin_workflow_responses(
 
 
 @pytest.mark.parametrize("select_attempt", [False, True])
+@pytest.mark.parametrize("single_leaf", [False, True])
 def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     monkeypatch: pytest.MonkeyPatch,
     select_attempt: bool,
+    single_leaf: bool,
 ) -> None:
     execution = SimpleNamespace(
         pk=42,
@@ -648,6 +650,20 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         callable_path="testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
     )
     change_html, responses = _admin_workflow_responses(execution)
+    node_count, edge_count = (1, 0) if single_leaf else (3, 2)
+    if single_leaf:
+        for path, response in responses.items():
+            if "items" in response:
+                response["items"] = (
+                    [] if response["collection"] == "topology_edges" else response["items"][:1]
+                )
+                response["returned_count"] = len(response["items"])
+            elif "/workflow/graph/" in path:
+                response["nodes"] = response["nodes"][:1]
+                response["edges"] = []
+                response["counts"] = {"nodes": 1, "edges": 0}
+            elif "/workflow/diagnostics/" in path:
+                response["progress"]["actions"]["topology_edges"] = False
     cookie = "sessionid=private-admin-session"
     requested_paths: list[str] = []
     cleanup_events: list[str] = []
@@ -735,9 +751,9 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
     assert storage_calls == [
         {
             "execution": execution,
-            "topology_nodes": 3,
-            "topology_edges": 2,
-            "node_details": 3,
+            "topology_nodes": node_count,
+            "topology_edges": edge_count,
+            "node_details": node_count,
             "pending_nodes": 0,
             "running_nodes": 0,
             "failed_nodes": 0,
@@ -749,16 +765,16 @@ def test_existing_workflow_admin_reads_real_routes_and_returns_scalar_evidence(
         "task_state": "SUCCEEDED",
         "attempt_number": 1,
         "admin_routes": 6,
-        "admin_actions": 3,
-        "topology_nodes": 3,
-        "topology_edges": 2,
-        "node_details": 3,
+        "admin_actions": 2 if single_leaf else 3,
+        "topology_nodes": node_count,
+        "topology_edges": edge_count,
+        "node_details": node_count,
         "graph_status": "AVAILABLE",
-        "graph_nodes": 3,
-        "graph_edges": 2,
+        "graph_nodes": node_count,
+        "graph_edges": edge_count,
         "graph_pending_nodes": 0,
         "graph_running_nodes": 0,
-        "graph_succeeded_nodes": 3,
+        "graph_succeeded_nodes": node_count,
         "graph_failed_nodes": 0,
         "graph_failure_path_nodes": 0,
         "graph_failure_origins": 0,
@@ -1008,6 +1024,8 @@ def test_terminal_only_degraded_graph_rejects_extra_private_fields() -> None:
     [
         "unavailable_diagnostics",
         "empty_nodes",
+        "empty_details",
+        "hidden_nonempty_edges",
     ],
 )
 def test_existing_workflow_admin_rejects_unavailable_or_inconsistent_routes(
@@ -1031,6 +1049,12 @@ def test_existing_workflow_admin_rejects_unavailable_or_inconsistent_routes(
     if failure == "unavailable_diagnostics":
         responses[diagnostics_read_path]["progress"]["state"] = "MISSING"
         responses[diagnostics_read_path]["progress"]["availability"] = "MISSING"
+    elif failure == "empty_details":
+        detail_path = f"{root}/workflow/nodes/{query}"
+        responses[detail_path]["items"] = []
+        responses[detail_path]["returned_count"] = 0
+    elif failure == "hidden_nonempty_edges":
+        responses[diagnostics_read_path]["progress"]["actions"]["topology_edges"] = False
     else:
         responses[node_path]["items"] = []
         responses[node_path]["returned_count"] = 0
@@ -1151,8 +1175,12 @@ def test_failed_admin_graph_retains_incoming_failure_path_and_sibling_context() 
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("oversized", [False, True])
+@pytest.mark.parametrize("wrong_presentation", [False, True])
 def test_failed_workflow_admin_smoke_proves_persisted_and_presented_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
+    oversized: bool,
+    wrong_presentation: bool,
 ) -> None:
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 
@@ -1161,6 +1189,8 @@ def test_failed_workflow_admin_smoke_proves_persisted_and_presented_diagnostics(
         'File "/app/task.py", line 1\n'
         "ModuleNotFoundError: No module named 'django_ray'"
     )
+    if oversized:
+        traceback *= 100
     execution = RayTaskExecution.objects.create(
         task_id="docker-smoke-failed-diagnostics-001",
         callable_path="testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
@@ -1191,7 +1221,13 @@ def test_failed_workflow_admin_smoke_proves_persisted_and_presented_diagnostics(
     responses[f"{root}/workflow/graph/?attempt_number=1"] = graph
     diagnostic_markup = (
         '<link href="/static/django_ray/admin/diagnostics.css" rel="stylesheet">'
-        f'<span class="django-ray-diagnostic">{html.escape(traceback)}</span>'
+        '<span class="django-ray-diagnostic">'
+        + html.escape(
+            "Stored diagnostic omitted because it exceeds the ordinary Admin read limit."
+            if oversized != wrong_presentation
+            else traceback
+        )
+        + "</span>"
     )
     change_html += diagnostic_markup
     attempt_html = (
@@ -1233,6 +1269,13 @@ def test_failed_workflow_admin_smoke_proves_persisted_and_presented_diagnostics(
         },
     )
 
+    if wrong_presentation:
+        with pytest.raises(docker_smoke.DockerSmokeError, match="diagnostics were not presented"):
+            docker_smoke._verify_existing_workflow_admin_contract(
+                base_url="http://127.0.0.1:8000", deadline=100.0, execution=execution
+            )
+        return
+
     evidence = docker_smoke._verify_existing_workflow_admin_contract(
         base_url="http://127.0.0.1:8000",
         deadline=100.0,
@@ -1244,8 +1287,10 @@ def test_failed_workflow_admin_smoke_proves_persisted_and_presented_diagnostics(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("oversized", [False, True])
 def test_archived_failed_workflow_smoke_proves_attempt_diagnostic_presentation(
     monkeypatch: pytest.MonkeyPatch,
+    oversized: bool,
 ) -> None:
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 
@@ -1254,6 +1299,8 @@ def test_archived_failed_workflow_smoke_proves_attempt_diagnostic_presentation(
         'File "/app/src/django_ray/runtime/remote.py", line 81\n'
         "ModuleNotFoundError: No module named 'django_ray'"
     )
+    if oversized:
+        traceback *= 100
     parent = RayTaskExecution.objects.create(
         task_id=WORKFLOW_TASK_ID,
         callable_path="testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
@@ -1296,9 +1343,14 @@ def test_archived_failed_workflow_smoke_proves_attempt_diagnostic_presentation(
     change_html = (
         '<link href="/static/django_ray/admin/diagnostics.css" rel="stylesheet">' + change_html
     )
+    presented_traceback = (
+        "Stored diagnostic omitted because it exceeds the ordinary Admin read limit."
+        if oversized
+        else traceback
+    )
     diagnostic_markup = (
         '<link href="/static/django_ray/admin/diagnostics.css" rel="stylesheet">'
-        f'<span class="django-ray-diagnostic">{html.escape(traceback)}</span>'
+        f'<span class="django-ray-diagnostic">{html.escape(presented_traceback)}</span>'
     )
     attempt_html = (
         f'<div>Workflow graph</div><a href="{root}/workflow/graph/?attempt_number=1">'

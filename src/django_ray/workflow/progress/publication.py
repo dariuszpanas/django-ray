@@ -225,11 +225,13 @@ _HISTORICAL_ACCEPTED_EVENT_KINDS = frozenset(
     }
 )
 _NODE_KEYS_V2 = _NODE_KEYS_V1 | {"output_preview"}
-_ACCEPTED_EVENT_KINDS = _HISTORICAL_ACCEPTED_EVENT_KINDS | {"output_preview"}
+_ACCEPTED_EVENT_KINDS = _HISTORICAL_ACCEPTED_EVENT_KINDS | {"output_preview", "node_settled"}
 _ACCEPTED_EVENT_KIND_SHAPES = frozenset(
     {
         _ACCEPTED_EVENT_KINDS,
         _ACCEPTED_EVENT_KINDS - {"producer_report"},
+        _ACCEPTED_EVENT_KINDS - {"node_settled"},
+        _ACCEPTED_EVENT_KINDS - {"node_settled", "producer_report"},
         _HISTORICAL_ACCEPTED_EVENT_KINDS,
         _HISTORICAL_ACCEPTED_EVENT_KINDS - {"producer_report"},
     }
@@ -477,6 +479,7 @@ def _event_kind_counters(
     }
     counters.setdefault("producer_report", 0)
     counters.setdefault("output_preview", 0)
+    counters.setdefault("node_settled", 0)
     return counters
 
 

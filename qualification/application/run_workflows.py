@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from qualification.application.api import TASK_FAILURE_STATES, validate_task_status_payload
+from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
 from qualification.application.run_api import ApplicationHttp, read_token
 from qualification.application.workflow_admin import _protected_diagnostics, observe_admin_contract
 from qualification.application.workflow_browser import (
@@ -24,6 +25,7 @@ from qualification.application.workflow_browser import (
 )
 from qualification.application.workflow_display_limit import read_admin_display_limit
 from qualification.application.workflow_http import (
+    WorkflowHttpError,
     decode_workflow_object,
     read_disabled_workflow_graph,
     read_full_workflow_graph,
@@ -97,6 +99,19 @@ def workflow_cases() -> tuple[WorkflowCase, ...]:
             "testproject.apps.cluster_tasks.tasks.admin_display_limit_qualification",
         )
     )
+    for outcome in ("success", "exhausted", "unlimited"):
+        cases.append(
+            WorkflowCase(
+                f"retry-{outcome}",
+                "",
+                (),
+                # Leaf retries are nested inside the manager's three durable
+                # attempts. Inspect every exhausted attempt's retained graph.
+                ("FAILED", "FAILED", "FAILED") if outcome == "exhausted" else ("SUCCEEDED",),
+                "full",
+                f"testproject.apps.cluster_tasks.tasks.retry_{outcome}_qualification",
+            )
+        )
     return tuple(cases)
 
 
@@ -118,11 +133,17 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
             admin_display_limit_qualification,
             complex_workflow_benchmark,
             plan_overflow_workflow_qualification,
+            retry_exhausted_qualification,
+            retry_success_qualification,
+            retry_unlimited_qualification,
         )
 
         fixture_task = {
             "plan-overflow": plan_overflow_workflow_qualification,
             "admin-display-limit": admin_display_limit_qualification,
+            "retry-success": retry_success_qualification,
+            "retry-exhausted": retry_exhausted_qualification,
+            "retry-unlimited": retry_unlimited_qualification,
         }.get(case.name, complex_workflow_benchmark)
         result = enqueue_sample(fixture_task, **dict(case.options))
         enqueue = {"task_id": result.id, "args": result.args, "kwargs": result.kwargs}
@@ -173,12 +194,14 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
     row = RayTaskExecution.objects.only(
         "pk", "task_id", "state", "attempt_number", "callable_path"
     ).get(task_id=task_id)
-    if (
-        row.state != case.states[-1]
-        or row.attempt_number != len(case.states)
-        or row.callable_path != case.callable_path
-    ):
-        raise ValueError("Durable workflow differs from the requested fixture")
+    # Keep these checks separate: the secret-free failure location must identify
+    # which durable invariant failed without exporting task or exception data.
+    if row.state != case.states[-1]:
+        raise ValueError("Durable workflow terminal state differs")
+    if row.attempt_number != len(case.states):
+        raise ValueError("Durable workflow attempt count differs")
+    if row.callable_path != case.callable_path:
+        raise ValueError("Durable workflow callable differs")
     attempts = list(
         row.attempts.annotate(summary_size=Length("workflow_progress_summary_json"))
         .filter(Q(summary_size__lte=65536) | Q(workflow_progress_summary_json__isnull=True))
@@ -201,7 +224,7 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
     if status not in {401, 403}:
         raise ValueError("Anonymous workflow API access was not denied")
     if (
-        case.name == "admin-display-limit"
+        case.name in {"admin-display-limit", "retry-success", "retry-unlimited"}
         and not RayTaskExecution.objects.filter(pk=row.pk, result_data="42").exists()
     ):
         raise ValueError("Display-limit workflow changed its fixed result")
@@ -263,7 +286,10 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
                     admin_cookie=cookie,
                     reporting_policy=case.policy,
                     fixture=(
-                        case.name if case.name in {"recovery", "plan-overflow"} else "complex"
+                        case.name
+                        if case.name in {"recovery", "plan-overflow"}
+                        or case.name.startswith("retry-")
+                        else "complex"
                     ),
                 )
             )
@@ -383,11 +409,13 @@ def main(argv: list[str] | None = None) -> int:
             collector_pressure=pressure,
         )
         encoded = json.dumps(receipt, sort_keys=True).encode()
-        if len(encoded) > 16384:
+        if len(encoded) > WORKFLOW_RECEIPT_MAX_BYTES:
             raise ValueError("Workflow observation receipt exceeds its bound")
         with args.receipt.open("xb") as stream:
             stream.write(encoded)
     except Exception as error:
+        if isinstance(error, WorkflowHttpError):
+            receipt["http_failure"] = {"endpoint": error.endpoint, "status": error.status}
         if isinstance(error, BrowserObservationError) and error.line is not None:
             receipt["browser_failure_line"] = error.line
         if receipt["failed_stage"] is None:

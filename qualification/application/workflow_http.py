@@ -25,6 +25,19 @@ COLLECTIONS = {
 }
 
 
+class WorkflowHttpError(ValueError):
+    """Retain only a fixed endpoint category and numeric HTTP status."""
+
+    def __init__(self, endpoint: str, status: int):
+        if endpoint not in {"summary", "admin_graph", *COLLECTIONS}:
+            raise ValueError("Invalid workflow endpoint category")
+        if type(status) is not int or not 100 <= status <= 599:
+            raise ValueError("Invalid workflow HTTP status")
+        self.endpoint = endpoint
+        self.status = status
+        super().__init__("Workflow observation returned a non-success HTTP status")
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -76,7 +89,15 @@ def read_full_workflow_graph(
         raise ValueError("Workflow observation requires a terminal outcome")
     if reporting_policy not in {"full", "terminal_only"}:
         raise ValueError("Workflow observation requires a supported reporting policy")
-    if fixture not in {None, "complex", "recovery", "plan-overflow"}:
+    if fixture not in {
+        None,
+        "complex",
+        "recovery",
+        "plan-overflow",
+        "retry-success",
+        "retry-exhausted",
+        "retry-unlimited",
+    }:
         raise ValueError("Workflow observation requires a known fixture")
     full = reporting_policy == "full"
     attempt = run_identity.get("attempt_number")
@@ -85,7 +106,7 @@ def read_full_workflow_graph(
     if not token or not admin_cookie:
         raise ValueError("Workflow observation requires both API and Admin credentials")
 
-    def read(path: str, *, admin: bool = False) -> dict[str, Any]:
+    def read(path: str, *, endpoint: str, admin: bool = False) -> dict[str, Any]:
         status, body = request(
             path,
             method="GET",
@@ -99,11 +120,11 @@ def read_full_workflow_graph(
             required_cache_directives=frozenset({"no-store"}) if admin else frozenset(),
         )
         if status != 200:
-            raise ValueError("Workflow observation returned a non-success HTTP status")
+            raise WorkflowHttpError(endpoint, status)
         return decode_workflow_object(body)
 
     root = f"/api/cluster/workflows/{task_id}"
-    summary = read(f"{root}?attempt_number={attempt}")
+    summary = read(f"{root}?attempt_number={attempt}", endpoint="summary")
     _, publication = validate_workflow_envelope(
         summary,
         task_id=task_id,
@@ -165,7 +186,7 @@ def read_full_workflow_graph(
             raise ValueError("Terminal-only summary claimed graph storage or repeated publication")
     pages = {}
     for collection, suffix in COLLECTIONS.items():
-        page = read(f"{root}/{suffix}?limit=100&attempt_number={attempt}")
+        page = read(f"{root}/{suffix}?limit=100&attempt_number={attempt}", endpoint=collection)
         validate_workflow_envelope(
             page,
             task_id=task_id,
@@ -192,6 +213,7 @@ def read_full_workflow_graph(
     graph = read(
         f"/admin/django_ray/raytaskexecution/{execution_pk}/workflow/graph/"
         f"?attempt_number={attempt}",
+        endpoint="admin_graph",
         admin=True,
     )
     if full and graph != expected_graph:
@@ -202,6 +224,12 @@ def read_full_workflow_graph(
         verify_plan_overflow_graph(graph)
     elif full and fixture == "recovery":
         verify_recovery_graph(graph, attempt=attempt)
+    elif full and fixture is not None and fixture.startswith("retry-"):
+        from qualification.application.workflow_fixtures import verify_retry_graph
+
+        verify_retry_graph(
+            graph, outcome=fixture.removeprefix("retry-"), details=pages["node_details"]["items"]
+        )
     if not full and (
         graph.get("schema") != "django-ray.admin-workflow-graph"
         or type(graph.get("schema_version")) is not int

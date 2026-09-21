@@ -83,12 +83,44 @@ def test_pressure_failure_prevents_passing_receipt(fixture_runner, monkeypatch, 
     assert "observations" not in result
 
 
+@pytest.mark.parametrize("size,success", [(20000, True), (32768, False)])
+def test_workflow_receipt_budget_preserves_complete_evidence(
+    fixture_runner, monkeypatch, capsys, size, success
+):
+    args, receipt, execute = fixture_runner
+    monkeypatch.setattr(runner, "workflow_cases", lambda: [SimpleNamespace(name="bounded")])
+    execute.return_value = [{"observation": "x" * size}]
+    assert runner.main(args) == (0 if success else 1)
+    value = json.loads(capsys.readouterr().out)
+    assert receipt.exists() is success
+    if success:
+        raw = receipt.read_bytes()
+        assert 16384 < len(raw) <= runner.WORKFLOW_RECEIPT_MAX_BYTES
+        assert json.loads(raw) == value
+    else:
+        assert value["failed_stage"] == "receipt"
+        assert "observations" not in value
+
+
 def test_receipt_cannot_overwrite_existing_evidence(fixture_runner, capsys):
     args, receipt, _ = fixture_runner
     receipt.write_text("existing")
     assert runner.main(args) == 1
     assert receipt.read_text() == "existing"
     assert json.loads(capsys.readouterr().out)["failed_stage"] == "receipt"
+
+
+def test_http_failure_receipt_keeps_only_bounded_diagnostics(fixture_runner, capsys):
+    args, receipt, execute = fixture_runner
+    error = runner.WorkflowHttpError("node_details", 500)
+    error.add_note("private-response-token")
+    execute.side_effect = error
+    assert runner.main(args) == 1
+    output = capsys.readouterr().out
+    assert "private-response-token" not in output
+    assert json.loads(output)["http_failure"] == {"endpoint": "node_details", "status": 500}
+    assert execute.call_count == 1
+    assert not receipt.exists()
 
 
 def test_wrong_settings_cannot_submit(fixture_runner, monkeypatch, capsys):
@@ -113,8 +145,9 @@ def test_default_publisher_is_not_misrepresented_as_pilot(fixture_runner, monkey
 
 @pytest.mark.parametrize("case", runner.workflow_cases(), ids=lambda case: case.name)
 @pytest.mark.parametrize("browser_mutates", [False, True])
+@pytest.mark.parametrize("mismatch", [None, "state", "attempt_number", "callable_path"])
 def test_execute_observes_each_durable_attempt_after_one_submission(
-    monkeypatch, case, browser_mutates
+    monkeypatch, case, browser_mutates, mismatch
 ):
     task_id = "f717c512-17d7-4b5e-b778-d614fb14427c"
     identities = [
@@ -196,6 +229,22 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
         expected["diagnostics_preserved"] = True
     expected_attempts = [dict(expected) for _ in case.states]
     expected_attempts[-1]["browser_contract"] = {"status": "passed", "diagnostics_preserved": True}
+    if mismatch is not None:
+        setattr(
+            row,
+            mismatch,
+            {"state": "QUEUED", "attempt_number": 99, "callable_path": "wrong"}[mismatch],
+        )
+        expected_failure = {
+            "state": "terminal state",
+            "attempt_number": "attempt count",
+            "callable_path": "callable",
+        }[mismatch]
+        with pytest.raises(ValueError, match=f"Durable workflow {expected_failure} differs"):
+            runner.execute_case(request, token="fixture-token", case=case)
+        graph.assert_not_called()
+        browser.assert_not_called()
+        return
     if browser_mutates:
         with pytest.raises(ValueError, match="Browser observation changed protected"):
             runner.execute_case(request, token="fixture-token", case=case)
@@ -233,7 +282,9 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
     assert [call.kwargs["run_identity"] for call in graph.call_args_list] == identities
     assert [call.kwargs["expected_state"] for call in graph.call_args_list] == list(case.states)
     assert [call.kwargs["fixture"] for call in graph.call_args_list] == [
-        case.name if case.name in {"recovery", "plan-overflow"} else "complex"
+        case.name
+        if case.name in {"recovery", "plan-overflow"} or case.name.startswith("retry-")
+        else "complex"
     ] * len(case.states)
     assert [call.kwargs["attempt"] for call in admin.call_args_list] == [
         *range(1, len(case.states)),
@@ -307,5 +358,10 @@ def test_combined_workload_retains_both_distinct_size_boundaries():
         "recovery",
         "plan-overflow",
         "admin-display-limit",
+        "retry-success",
+        "retry-exhausted",
+        "retry-unlimited",
     ]
-    assert sum(len(case.states) for case in cases) == 11
+    assert sum(len(case.states) for case in cases) == 16
+    exhausted = next(case for case in cases if case.name == "retry-exhausted")
+    assert exhausted.states == ("FAILED", "FAILED", "FAILED")

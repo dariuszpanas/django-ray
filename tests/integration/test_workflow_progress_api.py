@@ -108,6 +108,29 @@ def test_bounded_workflow_routes_apply_object_policy(client: Client, suffix: str
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("name", ["retry_success", "retry_exhausted", "retry_unlimited"])
+def test_retry_qualification_can_read_its_workflow_summary(
+    client, workflow_execution, monkeypatch, name
+):
+    from testproject import api
+
+    workflow_execution.callable_path = f"testproject.apps.cluster_tasks.tasks.{name}_qualification"
+    workflow_execution.save(update_fields=["callable_path"])
+    observed = []
+
+    def read(execution, *, authorize, **kwargs):
+        assert authorize(execution)
+        observed.append(execution.pk)
+        raise WorkflowProgressReadError(WorkflowProgressReadErrorCode.MISSING)
+
+    monkeypatch.setattr(api, "get_workflow_progress_summary", read)
+    response = client.get(f"/api/cluster/workflows/{workflow_execution.task_id}")
+    assert response.status_code == 409
+    assert response.json()["code"] == "MISSING"
+    assert observed == [workflow_execution.pk]
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "suffix",
     [

@@ -127,6 +127,7 @@ class WorkflowProgressEventKind(StrEnum):
     OUTPUT_PREVIEW = "output_preview"
     COMPLETED = "completed"
     FAILED = "failed"
+    NODE_SETTLED = "node_settled"
     PRODUCER_REPORT = "producer_report"
 
 
@@ -1051,6 +1052,56 @@ def _normalize_payload(
             ),
         }
         truncated = error_truncated or label_truncated
+    elif kind is WorkflowProgressEventKind.NODE_SETTLED:
+        fields = frozenset({"node_id", "state", "error"})
+        detail_fields = frozenset({"execution", "progress", "output_preview"})
+        if isinstance(value, Mapping) and set(value) == fields:
+            value = {**value, **dict.fromkeys(detail_fields)}
+        payload = _payload_mapping(value, fields | detail_fields, kind)
+        if type(payload["state"]) is not str or payload["state"] not in {"SUCCEEDED", "FAILED"}:
+            raise WorkflowProgressProtocolError("settled.state must be a terminal outcome")
+        error = None
+        if payload["state"] == "SUCCEEDED":
+            if payload["error"] is not None:
+                raise WorkflowProgressProtocolError("settled success cannot contain an error")
+        else:
+            error, truncated = _bounded_redacted_text(
+                payload["error"], "settled.error", maximum=limits.message_max_bytes
+            )
+        normalized = {
+            "node_id": _bounded_identity_text(
+                payload["node_id"],
+                "settled.node_id",
+                maximum=limits.node_id_max_bytes,
+            ),
+            "state": payload["state"],
+            "error": error,
+        }
+        execution = payload["execution"]
+        preview = payload["output_preview"]
+        progress = payload["progress"]
+        if payload["state"] == "FAILED" and any(
+            item is not None for item in (execution, preview, progress)
+        ):
+            raise WorkflowProgressProtocolError("settled failure cannot contain success detail")
+        normalized["execution"] = (
+            None if execution is None else _normalize_execution(execution, limits=limits)
+        )
+        try:
+            normalized["output_preview"] = (
+                None if preview is None else validate_workflow_output_preview(preview)
+            )
+        except WorkflowOutputPreviewError as error:
+            raise WorkflowProgressProtocolError("settled preview is invalid") from error
+        normalized["progress"] = None
+        if progress is not None:
+            progress, progress_truncated = _normalize_payload(
+                WorkflowProgressEventKind.APPLICATION_PROGRESS, progress, limits=limits
+            )
+            if progress["node_id"] != normalized["node_id"]:
+                raise WorkflowProgressProtocolError("settled progress belongs to another node")
+            normalized["progress"] = progress
+            truncated = truncated or progress_truncated
     elif kind is WorkflowProgressEventKind.PRODUCER_REPORT:
         normalized = _normalize_producer_report(
             value,

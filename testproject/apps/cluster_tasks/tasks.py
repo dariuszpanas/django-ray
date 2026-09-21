@@ -736,3 +736,30 @@ def plan_overflow_workflow_qualification() -> int:
 def admin_display_limit_qualification() -> int:
     """Run exactly 101 serial identity leaves under explicit full reporting."""
     return build_admin_limit_workflow().with_progress_reporting("full").run(42, use_ray=True)
+
+
+@task(queue_name="default")
+@bounded_sample_task
+def retry_success_qualification() -> int:
+    """Qualify one transient leaf failure followed by a successful chain."""
+    from testproject.apps.cluster_tasks.retry_qualification import run_retry_qualification
+
+    return run_retry_qualification()
+
+
+@task(queue_name="default")
+@bounded_sample_task
+def retry_exhausted_qualification() -> int:
+    """Qualify a leaf whose finite retry allowance is exhausted."""
+    from testproject.apps.cluster_tasks.retry_qualification import run_retry_qualification
+
+    return run_retry_qualification(exhausted=True)
+
+
+@task(queue_name="default")
+@bounded_sample_task
+def retry_unlimited_qualification() -> int:
+    """Qualify unlimited retries that deterministically succeed on invocation three."""
+    from testproject.apps.cluster_tasks.retry_qualification import run_retry_qualification
+
+    return run_retry_qualification(unlimited=True)
