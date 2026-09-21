@@ -189,23 +189,14 @@ def test_repository_does_not_use_removed_workflow_imports() -> None:
 
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        imported_modules = {
-            name.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for name in node.names
-        }
-        imported_modules.update(
-            node.module
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module is not None
-        )
-        imported_modules.update(
-            f"django_ray.{name.name}"
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "django_ray"
-            for name in node.names
-        )
+        imported_modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(name.name for name in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported_modules.add(node.module)
+                if node.module == "django_ray":
+                    imported_modules.update(f"django_ray.{name.name}" for name in node.names)
         for removed_import in REMOVED_WORKFLOW_IMPORTS:
             assert removed_import not in imported_modules, (
                 f"{path.relative_to(ROOT)} imports removed private module {removed_import}"
