@@ -480,6 +480,9 @@ def test_identity_validation_rejects_nul_and_hostile_timezone_without_leaking() 
         def dst(self, _value: datetime | None) -> timedelta:
             return timedelta(0)
 
+        def tzname(self, _value: datetime | None) -> None:
+            return None
+
     hostile = replace(
         identity,
         started_at=datetime(2026, 8, 15, 20, 59, tzinfo=PoisonTimezone()),
@@ -494,6 +497,9 @@ def test_identity_validation_rejects_nul_and_hostile_timezone_without_leaking() 
 
         def dst(self, _value: datetime | None) -> timedelta:
             return timedelta(0)
+
+        def tzname(self, _value: datetime | None) -> None:
+            return None
 
     missing_offset = replace(
         identity,
@@ -534,6 +540,9 @@ def test_identity_normalization_does_not_reuse_a_stateful_timezone() -> None:
         def dst(self, _value: datetime | None) -> timedelta:
             return timedelta(0)
 
+        def tzname(self, _value: datetime | None) -> None:
+            return None
+
     stateful = StatefulTimezone()
     equivalent = identity.started_at + timedelta(hours=1)
     stateful_identity = replace(
@@ -567,6 +576,9 @@ def test_now_validation_maps_hostile_timezone_without_leaking() -> None:
 
         def dst(self, _value: datetime | None) -> timedelta:
             return timedelta(0)
+
+        def tzname(self, _value: datetime | None) -> None:
+            return None
 
     hostile_now = datetime(2026, 8, 15, 21, 0, tzinfo=PoisonTimezone())
     with pytest.raises(InvalidRayWorkerTargetCapabilityArgumentError) as error:
