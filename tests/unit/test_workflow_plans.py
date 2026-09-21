@@ -2375,6 +2375,7 @@ def test_terminal_only_result_serialization_failure_publishes_only_failed_summar
 
 @pytest.mark.django_db
 def test_ray_bind_plan_creates_actor_from_one_fenced_initialized_event() -> None:
+    from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
     from django_ray.workflows import _RayExecutor
 
     execution = RayTaskExecution.objects.create(
@@ -2396,7 +2397,8 @@ def test_ray_bind_plan_creates_actor_from_one_fenced_initialized_event() -> None
 
     class ProgressActor:
         @staticmethod
-        def remote(initialized_event: bytes):
+        def remote(initialized_event: bytes, *, limits):
+            assert limits is WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
             actor_inputs.append(initialized_event)
             return actor
 

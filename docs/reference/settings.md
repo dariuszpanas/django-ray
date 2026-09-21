@@ -487,18 +487,20 @@ separate from keyword arguments forwarded to the root application callable.
 "WORKFLOW_PROGRESS_REPORTING_POLICY": "terminal_only"
 ```
 
-### WORKFLOW_PROGRESS_SCHEMA_V3_PILOT
+### Removed workflow publisher setting {#workflow_progress_schema_v3_pilot}
 
-- **Type**: `bool`
-- **Default**: `False`
+Delete `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` from `DJANGO_RAY`, including an explicit `False`.
+Configuration validation rejects it with migration guidance. Choose
+`WORKFLOW_PROGRESS_REPORTING_POLICY` instead: `full` requests bounded terminal
+workflow graphs, `terminal_only` retains a terminal summary without graph detail,
+and `disabled` retains no workflow reporting data.
 
-Experimental terminal publication of admitted full-reporting workflow progress into
-the schema-v3 summary, topology, and normalized node-detail storage. The package
-default is disabled. A value such as `1`, `"true"`, or `None` is not accepted in
-`DJANGO_RAY`; configure a real Python boolean.
+Full reporting uses the same bounded terminal publication path in the package and
+the bundled testproject. It does not stream live graph updates or maintain a
+parallel schema-v2 snapshot writer. Historical schema-v2 and schema-v3 data remains
+readable; missing historical graphs are not reconstructed.
 
-When enabled, both the progress actor and the terminal publication adapter use the
-fixed `schema-v3-pilot-v1` admission profile:
+The initial terminal graph profile has these limits:
 
 | Evidence | Maximum items | Maximum encoded bytes | Maximum decoded bytes |
 |---|---:|---:|---:|
@@ -507,43 +509,32 @@ fixed `schema-v3-pilot-v1` admission profile:
 | Node detail | 512 | 1 MiB | 1 MiB |
 | Combined topology and detail | — | 4 MiB | 4 MiB |
 
-The adapter makes one best-effort publication attempt from a complete terminal actor
-snapshot while the exact task, attempt, execution generation, and workflow run still
-own the `RUNNING` fence. It derives policy, strategy, and plan identity from the pinned
-effective selection. Any rejected or truncated ingress, malformed cross-field
-evidence, admission overflow, preparation truncation, stale fence, or atomic storage
-failure refuses schema-v3 publication instead of presenting an incomplete graph as
-complete. Publication failure does not change the workflow result. Full mode continues
-to write bounded schema-v2 `progress_data` snapshots for live and rolling
-compatibility; disabled reporting still creates no progress actor and publishes no
-progress data.
+Admission applies over the workflow lifetime; finishing nodes does not replenish
+it. Exceeding the node or edge limit preserves the application outcome and reports
+`LIMIT_EXCEEDED` without presenting a partial graph as complete. Publication is
+best effort and fenced to the exact task, attempt, execution generation and run.
+Storage failure, invalid evidence or a lost ownership fence cannot justify
+replaying application work to recover a graph.
 
-The bundled testproject is intentionally different from the package default:
-`DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` defaults to enabled there so the sample
-workflow and guarded local KubeRay gate exercise the real producer path. Set that
-environment variable to a false value to test the package's ordinary default-off
-behavior.
-
-This pilot is not support for workloads near the hard protocol-v1 ceilings or for
-arbitrary concurrent publication. Keep it disabled unless the workload fits the
-documented profile and the deployment has been validated.
-
-```python
-"WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True
-```
+Remove the sample's old `DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` environment
+variable as well; the testproject no longer reads it. Validate the selected
+reporting policy and actual terminal Admin/API behavior during the coordinated
+upgrade. The implementation's Linux and deployed acceptance remains required before
+release; an enabled setting or successful task alone is not graph qualification.
 
 #### Temporary storage for full workflow publication
 
-The current full-detail publisher prepares topology in a private SQLite workspace,
-including for small graphs. Its temporary parent must be writable and have safe
-ownership and permissions. A worker-owned private directory with mode `0700` satisfies
+The default small terminal publisher prepares admitted graphs in memory and does
+not acquire a SQLite workspace. The general large-topology preparation tools use a
+private SQLite workspace whose temporary parent must have safe ownership and permissions. A worker-owned private directory with mode `0700` satisfies
 that check; a root-owned shared directory needs the sticky bit, as with a conventional
 mode-`1777` `/tmp`.
 
 A Kubernetes `emptyDir` mounted at `/tmp` with `fsGroup` can instead be root-owned and
 mode `2777`. That is not sticky storage, and the publisher refuses it. The workflow can
-still succeed while its terminal graph is missing. A `publication_failed` warning can
-have other causes too; it does not by itself identify a permissions failure.
+still succeed if an independently selected preparation tool refuses its workspace.
+A `publication_failed` warning can have other causes; it does not identify a
+permissions failure in the default in-memory path.
 
 For a non-root Ray deployment, initialize a private directory on the existing writable
 scratch volume before Ray starts. Run the init container as the same UID as the Ray
@@ -568,14 +559,11 @@ enable the publisher, backfill history, or qualify concurrent publication.
 - **Default**: `1`
 - **Allowed**: `1` to `300`
 
-Minimum interval between database writes of an active full-reporting Ray-native
-workflow's progress snapshot. Leaf events are collected by a per-workflow Ray actor.
-This setting limits snapshot write frequency; it is not a sampling or producer
-backpressure interval. Per-leaf application progress is independently contained by one
-outstanding acknowledgement and one canonical latest-value slot, but this setting
-does not bound aggregate RPC count, actor mailbox depth, or actor memory across forked
-handles. Every write is conditional on the current task attempt, execution generation,
-lifecycle state, and workflow run ID.
+Minimum interval between coordinator reads of the full-reporting collector snapshot.
+Terminal completion bypasses this interval. This setting neither writes live progress
+to the database nor enables a live graph. It is not a sampling or producer-backpressure
+interval and does not limit physical Ray mailbox memory. Publication remains fenced
+to the task attempt, execution generation, lifecycle state and workflow run ID.
 
 ```python
 "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1
@@ -1040,7 +1028,6 @@ DJANGO_RAY = {
     "WORKER_HEARTBEAT_SECONDS": 15,
     "TASK_MONITOR_HEARTBEAT_SECONDS": 15,
     "WORKFLOW_PROGRESS_REPORTING_POLICY": "full",
-    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
     "WORKFLOW_PROGRESS_FLUSH_SECONDS": 1,
     "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 15,
     "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 7,

@@ -97,6 +97,7 @@ class WorkflowProgressDetailAvailability(StrEnum):
     """Exact durable detail-availability vocabulary from ADR-0004."""
 
     NOT_REPORTED = "NOT_REPORTED"
+    LIMIT_EXCEEDED = "LIMIT_EXCEEDED"
     AVAILABLE = "AVAILABLE"
     TRUNCATED = "TRUNCATED"
     OMITTED_BY_POLICY = "OMITTED_BY_POLICY"

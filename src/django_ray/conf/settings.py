@@ -90,13 +90,11 @@ def validate_settings(config: dict[str, Any] | None = None) -> None:
             f"{valid_policies}, got {reporting_policy!r}"
         )
 
-    schema_v3_pilot = config.get(
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT",
-        DEFAULTS["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"],
-    )
-    if type(schema_v3_pilot) is not bool:
+    if "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT" in config:
         raise ImproperlyConfigured(
-            "django-ray: WORKFLOW_PROGRESS_SCHEMA_V3_PILOT must be a boolean"
+            "django-ray: WORKFLOW_PROGRESS_SCHEMA_V3_PILOT has been removed. "
+            "Full reporting publishes bounded terminal graphs by default; "
+            "configure WORKFLOW_PROGRESS_REPORTING_POLICY instead."
         )
 
     task_attempt_admin_mode = config.get(

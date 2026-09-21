@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from django_ray.conf.defaults import DEFAULTS
+
 ROOT = Path(os.environ["DJANGO_RAY_UPGRADE_ROOT"])
 CONFIG = json.loads(os.environ["DJANGO_RAY_UPGRADE_CONFIG"])
 SECRET_KEY = "disposable-native-upgrade"
@@ -24,7 +26,6 @@ DJANGO_RAY = {
     "DEFAULT_CONCURRENCY": 1,
     "MAX_TASK_ATTEMPTS": 3 if CONFIG.get("legacy_failure_probe", False) else 1,
     "WORKER_HEARTBEAT_SECONDS": 2,
-    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     "MAX_INLINE_INPUT_SIZE_BYTES": 1024,
     "INPUT_STORAGE_BACKEND": "filesystem",
     "INPUT_STORAGE_FILESYSTEM_PATH": str(Path(CONFIG["artifacts"]) / "inputs"),
@@ -55,3 +56,9 @@ if RUNNER == "ray_job":
             "QUALIFICATION_RUNTIME_MARKER": "delivered",
         },
     }
+
+# The installed 0.5 baseline needs its historical opt-in. The candidate must
+# qualify its actual package default and rejects this retired setting.
+
+if "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT" in DEFAULTS:
+    DJANGO_RAY["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"] = True

@@ -46,6 +46,9 @@ WORKFLOW_PROGRESS_MODULES = {
     "storage.py",
     "summary.py",
     "terminal_input.py",
+    "capture_diagnostics.py",
+    "reporting_diagnostics.py",
+    "terminal_capture.py",
 }
 PUBLIC_WORKFLOW_FACADE_SYMBOLS = (
     "Chain",

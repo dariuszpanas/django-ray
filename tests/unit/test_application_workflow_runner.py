@@ -21,7 +21,7 @@ def fixture_runner(monkeypatch, tmp_path):
     monkeypatch.setattr("django.setup", lambda: None)
     monkeypatch.setattr(
         "django_ray.conf.settings.get_settings",
-        lambda: {"WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True},
+        lambda: {"WORKFLOW_PROGRESS_REPORTING_POLICY": "full"},
     )
     monkeypatch.setattr(runner, "ApplicationHttp", Mock())
     monkeypatch.setattr(runner, "read_token", lambda _path: "fixture-token")
@@ -40,7 +40,7 @@ def test_success_records_all_serial_cases_without_claiming_complete_gate(fixture
     assert value == json.loads(capsys.readouterr().out)
     assert value["status"] == "passed"
     assert value["complete_workflow_gate"] is False
-    assert value["publisher"] == "pilot"
+    assert value["publisher"] == "default_terminal"
     assert value["collector_pressure"] == {"actors_removed": True}
     assert [call.kwargs["case"] for call in execute.call_args_list] == list(runner.workflow_cases())
 
@@ -132,7 +132,7 @@ def test_wrong_settings_cannot_submit(fixture_runner, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["failed_stage"] == "configuration"
 
 
-def test_default_publisher_is_not_misrepresented_as_pilot(fixture_runner, monkeypatch):
+def test_retired_pilot_override_cannot_qualify_package_defaults(fixture_runner, monkeypatch):
     args, receipt, execute = fixture_runner
     monkeypatch.setattr(
         "django_ray.conf.settings.get_settings",

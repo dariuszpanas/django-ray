@@ -3553,6 +3553,8 @@ def persist_workflow_progress_publication(
     prepared_detail: PreparedWorkflowProgressDetail | None = None,
     detail_records: Iterable[PreparedWorkflowProgressNodeDetail] = (),
     remove_node_ids: Iterable[str] = (),
+    reporting_ingress: Mapping[str, Any] | None = None,
+    reporting_snapshot_revision: int | None = None,
     using: str = "default",
 ) -> WorkflowProgressPublicationResult:
     """Atomically publish topology, sparse latest-state detail, and summary pointer."""
@@ -4100,6 +4102,23 @@ def persist_workflow_progress_publication(
                 prepared_detail.observed_count if prepared_detail is not None else None
             ),
         )
+        diagnostics = None
+        if reporting_ingress is not None or reporting_snapshot_revision is not None:
+            from django_ray.workflow.progress.reporting_diagnostics import (
+                serialize_reporting_diagnostics,
+            )
+
+            if reporting_ingress is None or reporting_snapshot_revision is None:
+                raise WorkflowProgressStorageError("Reporting diagnostics are incomplete")
+            try:
+                diagnostics = serialize_reporting_diagnostics(
+                    identity,
+                    detail_revision=detail_revision,
+                    snapshot_revision=reporting_snapshot_revision,
+                    ingress=reporting_ingress,
+                )
+            except (ValueError, TypeError) as error:
+                raise WorkflowProgressStorageError("Invalid reporting diagnostics") from error
         if delete_ids:
             WorkflowProgressNodeDetail.objects.using(using).filter(pk__in=delete_ids).delete()
         if to_update:
@@ -4140,6 +4159,7 @@ def persist_workflow_progress_publication(
         )
         run_storage.updated_at = now
         run_storage.cleanup_error = None
+        run_storage.reporting_diagnostics_json = diagnostics
         run_storage.save(
             update_fields=[
                 "detail_revision",
@@ -4154,6 +4174,7 @@ def persist_workflow_progress_publication(
                 "detail_expires_at",
                 "updated_at",
                 "cleanup_error",
+                "reporting_diagnostics_json",
             ]
         )
 

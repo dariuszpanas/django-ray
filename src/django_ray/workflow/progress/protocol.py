@@ -1055,6 +1055,17 @@ def _normalize_payload(
     elif kind is WorkflowProgressEventKind.NODE_SETTLED:
         fields = frozenset({"node_id", "state", "error"})
         detail_fields = frozenset({"execution", "progress", "output_preview"})
+        capture_report = None
+        if isinstance(value, Mapping) and "capture_report" in value:
+            from django_ray.workflow.progress.capture_diagnostics import normalize_capture_report
+
+            if value.get("state") != "SUCCEEDED":
+                raise WorkflowProgressProtocolError("capture report requires successful settlement")
+            try:
+                capture_report = normalize_capture_report(value["capture_report"], limits=limits)
+            except ValueError as error:
+                raise WorkflowProgressProtocolError("invalid terminal capture report") from error
+            value = {key: item for key, item in value.items() if key != "capture_report"}
         if isinstance(value, Mapping) and set(value) == fields:
             value = {**value, **dict.fromkeys(detail_fields)}
         payload = _payload_mapping(value, fields | detail_fields, kind)
@@ -1102,6 +1113,8 @@ def _normalize_payload(
                 raise WorkflowProgressProtocolError("settled progress belongs to another node")
             normalized["progress"] = progress
             truncated = truncated or progress_truncated
+        if capture_report is not None:
+            normalized["capture_report"] = capture_report
     elif kind is WorkflowProgressEventKind.PRODUCER_REPORT:
         normalized = _normalize_producer_report(
             value,

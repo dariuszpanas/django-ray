@@ -174,7 +174,6 @@ single worker loop. It does not change at-least-once execution or retry eligibil
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
 | `WORKFLOW_PROGRESS_REPORTING_POLICY` | `str` | `"full"` | Default Ray workflow progress policy: `"full"`, `"terminal_only"`, or `"disabled"` |
-| `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` | `bool` | `False` | Experimental terminal schema-v3 publication for admitted full-reporting workflows |
 | `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between full-mode workflow progress snapshot writes |
 | `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS` | `int` | `15` | Total deadline for the final full-mode snapshot while a progress actor starts or drains (`1`-`60` seconds) |
 | `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS` | `int` | `7` | Terminal workflow topology and node-detail retention (`0`-`30` days) |
@@ -187,27 +186,19 @@ persisted Ray Job handles from inactive workers, another worker will first try t
 reconcile or adopt the existing job before timeout-based stuck recovery marks it lost.
 Task monitor heartbeats are batched into one update for all in-flight tasks and
 throttled by `TASK_MONITOR_HEARTBEAT_SECONDS`.
-Ray-native workflow progress defaults to `"full"`. Full mode collects node events in
-memory and writes a schema-v2 compatibility snapshot no more often than
-`WORKFLOW_PROGRESS_FLUSH_SECONDS`; the interval limits database write frequency, not
-producer admission or actor memory. Each reporting leaf invocation accepts validated
-application progress into a best-effort session with at most one outstanding actor
-acknowledgement and one canonical latest-value slot. A slow acknowledgement causes
-later application updates to replace the slot; leaf exit makes at most one bounded
-handoff before the non-coalesced `COMPLETED` or `FAILED` event. This is
-acknowledgement-driven containment, not time-based sampling, and no `sampled` policy
-is available.
+Ray-native workflow progress defaults to `"full"`. Full mode retains a bounded
+terminal graph. Leaves capture application progress locally without collector
+handles; final Ray metadata supplies the last successful invocation's value.
+`WORKFLOW_PROGRESS_FLUSH_SECONDS` spaces collector snapshot reads, not database
+writes. There is no live or sampled reporting policy.
 
-A schema-v2 snapshot may include one versioned, fixed-shape producer
-aggregate. It counts actor-accepted leaf-invocation reports, valid offers, submissions,
-superseded and locally dropped values, producer-observed acknowledgement outcomes,
-and terminal-handoff outcomes without retaining producer identities or application
-values. A pending acknowledgement means that the leaf had not observed its result
-when it sealed the report; it does not prove the actor failed to process the call.
-A physical Ray leaf retry or another forked actor handle within the same run can still
-create another independently bounded leaf session. An outer durable-task retry uses a
-new run identity and actor. Aggregate workflow-wide mailbox admission and coalescing
-therefore remain open prerequisites for a future sampled policy.
+Coordinator map producers have one outstanding replaceable call and one bounded
+terminal handoff per admitted map. Lifetime node admission bounds their aggregate
+pending calls. Durable diagnostics distinguish those producer counters from local
+capture counters, which cover only successful final invocations. A pending
+acknowledgement means its result was not observed when the report was sealed; it
+does not prove processing failed. See [performance](performance.md) for the measured
+and unavailable scopes and the distinction between logical bytes and physical memory.
 
 Use `"terminal_only"` when the outer task needs one bounded terminal observability
 record without live node reporting. This mode creates no progress actor, sends no node
@@ -229,44 +220,29 @@ publication. Calling
 setting for one invocation without reserving an application task keyword. Local
 execution remains actor-free and is recorded as disabled.
 
-`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` is an experimental, default-off bridge from one
-terminal full-reporting actor snapshot into the bounded schema-v3 summary, topology,
-and node-detail storage. Enabling it applies the fixed `schema-v3-pilot-v1` profile to
-both actor collection and publication: at most 512 nodes, 2,048 edges, 2 MiB of
-topology, 1 MiB of detail, and 4 MiB combined, with the byte ceilings enforced for
-both encoded and decoded evidence. This is deliberately below the hard protocol-v1
-limits and is not a high-scale readiness claim.
+Full reporting uses bounded terminal schema-v3 publication by default. The fixed
+profile admits at most 512 nodes and 2,048 edges per run, with 2 MiB of topology,
+1 MiB of detail, and 4 MiB combined encoded/decoded limits. Node admission is never
+refunded within a run. Leaves retain one canonical latest progress value locally;
+the coordinator receives final metadata after Ray retries settle. No live schema-v2
+`progress_data` writes are made. Historical snapshots remain readable.
 
-The pilot flag applies only to full reporting. Terminal-only publication is already
-summary-only, never starts the live actor, and does not opt into pilot topology or
-node-detail collection.
+Admission overflow attempts a summary with `LIMIT_EXCEEDED` detail availability.
+Invalid evidence, stale ownership, or an atomic storage failure refuses graph
+publication without changing the application result. A partial graph is never
+presented as complete. Terminal-only remains summary-only and disabled remains
+publication-free; neither starts a collector.
 
-Publication fails closed if actor ingress rejected or truncated an event, the
-snapshot or pinned plan is inconsistent, a pilot admission or preparation limit is
-exceeded, the exact run fence is stale, or storage cannot publish atomically. No
-partial schema-v3 graph is exposed, and the workflow's application result is
-unchanged. A staged topology candidate is discarded after a rejected or failed
-publication, with cleanup failure reported explicitly. The bounded schema-v2
-`progress_data` snapshots remain the live and rolling compatibility path regardless
-of whether terminal schema-v3 publication succeeds.
-
-The bundled testproject deliberately enables the pilot so its real workflow topology
-can be exercised. Its
-`DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` environment variable controls that
-exception and defaults to enabled; the
-[guarded local KubeRay stack](deployment/local-kuberay-gate.md) uses the same
-testproject setting and verifies the resulting summary, topology nodes, edges, and node
-detail. The same gate separately exercises terminal-only success and failure with a
-null legacy snapshot and no detail storage; that summary-only path does not depend on
-the pilot setting. Production projects must opt into the full-detail pilot explicitly
-after checking its limits against their workloads.
+Remove `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` from application settings, including an
+explicit `False`, and remove the old sample environment toggle. The sample now uses
+the same default path as applications. Apply migration 0027 and drain old workers as
+described in [upgrading from 0.5](deployment/upgrading-from-0.5.md).
 
 When a workflow finishes, the coordinator retries one pending actor snapshot for up to
 `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS`. Exhausting that bounded deadline
 leaves task execution unaffected and emits a structured warning instead of silently
 abandoning a requested full-reporting snapshot. This coordinator deadline is separate
-from each leaf producer's one bounded terminal latest-value handoff before its
-non-coalesced terminal event.
+from coordinator map producers' bounded final handoffs. Leaf capture makes no actor call.
 Terminal topology and node detail become eligible for cleanup after
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`; `0` makes them eligible as soon as the
 terminal state is durably archived. Active current detail is not expired by this

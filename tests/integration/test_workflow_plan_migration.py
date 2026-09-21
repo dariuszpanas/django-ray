@@ -59,5 +59,5 @@ def test_existing_and_rolling_writer_rows_gain_nullable_plan_fields() -> None:
         }
     finally:
         MigrationExecutor(connection).migrate(
-            [("django_ray", "0026_ray_task_target_execution_evidence")]
+            [("django_ray", "0027_workflow_reporting_diagnostics")]
         )

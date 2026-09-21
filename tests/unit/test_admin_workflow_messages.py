@@ -18,6 +18,7 @@ from django_ray.workflow.admin_graph import (
         ("SUCCEEDED", "OMITTED_BY_POLICY", "UNAVAILABLE", "terminal-only reporting"),
         ("FAILED", "EXPIRED", "UNAVAILABLE", "have expired"),
         ("FAILED", "MISSING", "UNAVAILABLE", "are missing"),
+        ("SUCCEEDED", "LIMIT_EXCEEDED", "LIMIT_EXCEEDED", "no graph details were saved"),
     ],
 )
 def test_observed_summary_reason_reaches_admin_response(state, availability, status, phrase):

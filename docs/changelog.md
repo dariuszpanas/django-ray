@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Full workflow reporting publishes bounded terminal graphs by
+  default and no longer writes live schema-v2 snapshots. Remove
+  `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT`, including explicit `False`, apply migration
+  `0027`, and drain old workers. Historical readers remain supported. Lifetime
+  admission is capped at 512 nodes and 2,048 edges; overflow preserves the task
+  outcome and attempts a summary with unavailable detail instead of a partial graph.
+  Leaves capture one latest progress value locally; final Ray outcomes settle the
+  graph after retries. Terminal-only and disabled remain actor-free. Live and
+  higher-scale reporting remain separate work.
+- Store bounded terminal reporting counters atomically with graph detail. Benchmark
+  schema 4 reads these counters without a legacy snapshot and distinguishes map
+  producer traffic from successful final leaf captures. Missing historical counters
+  are unavailable evidence, not zero cost; logical bytes do not measure physical
+  Ray mailbox memory or network traffic.
 - **Breaking:** Bound current task completions no longer fall back to an
   identity-free legacy outcome when strict encoding fails. Nonfinite results or
   unrepresentable diagnostics produce a fixed, identity-bearing failure without
@@ -43,8 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound small terminal workflow graph preparation to finite input bytes, values,
   depth, nodes and edges, and use the canonical in-memory preparer instead of
   acquiring SQLite spill storage. Preserve stored topology/detail, redaction and
-  attempt ownership. This improves the opt-in publisher; default graph activation
-  and workflow-wide producer admission remain pending.
+  attempt ownership. The default terminal publisher uses this preparation path;
+  its lifetime admission bounds are described above.
 - **Breaking:** Admin dashboard links now require an explicit Django
   `RAY_DASHBOARD_URL` setting. The implicit localhost fallback is removed.
   Configure an address reachable from the operator's browser; local port-forward
@@ -120,8 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add a fixed 65-step workflow qualification case that crosses the saved-plan
   node limit while checking complete authenticated API/Admin graph output.
-  This covers plan overflow; default graph activation, rendered browser behavior
-  and the separate Admin graph ceiling remain pending.
+  This covers the saved-plan limit; the separate 101-node case below covers the
+  Admin graph ceiling, and Chromium observations cover rendered behavior.
 
 
 - Add a fixed 101-node application qualification case for Admin display limits,

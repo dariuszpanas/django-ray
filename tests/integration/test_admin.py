@@ -1700,6 +1700,7 @@ class TestRayTaskExecutionAdmin:
             ("available", TaskState.RUNNING, "full", "AVAILABLE", "available"),
             ("truncated", TaskState.RUNNING, "full", "TRUNCATED", "truncated"),
             ("expired", TaskState.SUCCEEDED, "full", "EXPIRED", "expired"),
+            ("limit", TaskState.SUCCEEDED, "full", "LIMIT_EXCEEDED", "limit"),
             ("missing", TaskState.RUNNING, "full", "MISSING", "missing"),
             ("corrupt", TaskState.RUNNING, "full", "CORRUPT", "corrupt"),
         ]
@@ -1741,7 +1742,7 @@ class TestRayTaskExecutionAdmin:
                 execution.workflow_progress_summary_json = '{"private":"corrupt-progress-secret"'
                 execution.save(update_fields=["workflow_progress_summary_json"])
             elif summary_case is not None:
-                terminal = summary_case == "expired"
+                terminal = summary_case in {"expired", "limit"}
                 summary = workflow_progress_summary(
                     execution,
                     published_detail=(
@@ -1768,9 +1769,11 @@ class TestRayTaskExecutionAdmin:
                         "discovered": 1,
                         "retained_topology": 1,
                     }
-                elif summary_case in {"missing", "expired"}:
+                elif summary_case in {"missing", "expired", "limit"}:
                     summary["detail"] = {
-                        "availability": summary_case.upper(),
+                        "availability": "LIMIT_EXCEEDED"
+                        if summary_case == "limit"
+                        else summary_case.upper(),
                         "complete": False,
                         "truncation_reasons": [],
                     }
@@ -1805,6 +1808,7 @@ class TestRayTaskExecutionAdmin:
             "DISABLED",
             "OMITTED_BY_POLICY",
             "EXPIRED",
+            "LIMIT_EXCEEDED",
             "MISSING",
             "CORRUPT",
         ):
@@ -1816,6 +1820,7 @@ class TestRayTaskExecutionAdmin:
             "node_details": True,
         }
         assert observed["AVAILABLE"]["complete"] is True
+        assert "no graph details were saved" in observed["LIMIT_EXCEEDED"]["message"]
         assert observed["TRUNCATED"]["actions"] == {
             "topology_nodes": True,
             "topology_edges": True,

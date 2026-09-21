@@ -141,16 +141,17 @@ storage writer, and retention cleanup are implemented. The standalone summary wr
 rejects topology/detail pointers. The package-owned storage transaction alone may
 promote a verified pending manifest, apply sparse latest-state changes, and advance
 the summary pointer together. A summary-only `DISABLED` or `OMITTED_BY_POLICY` update
-creates no topology or detail rows. The current workflow actor deliberately continues
-to publish schema v2 during full-mode execution. When
-`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` is explicitly enabled, the actor and one terminal
-publication attempt use the narrower `schema-v3-pilot-v1` profile. The adapter
-revalidates the pinned plan, complete snapshot, ingress evidence, and exact run fence,
-then stages and atomically promotes topology, detail, and summary. Any rejected or
-truncated ingress, invalid or over-limit evidence, preparation truncation, stale
-ownership, or storage failure refuses publication without changing the application
-result or removing schema-v2 compatibility evidence. The package default remains
-disabled.
+creates no topology or detail rows. Full reporting uses the bounded terminal profile
+by default: leaves capture one local latest progress value, and the coordinator
+settles graph nodes from final Ray metadata after retries. Lifetime admission is
+limited to 512 nodes and 2,048 edges; it is never refunded after settlement.
+
+The terminal adapter validates the pinned plan, complete snapshot, ingress evidence,
+and exact run fence, then atomically promotes topology, detail, summary and bounded
+reporting counters. Admission overflow attempts a `LIMIT_EXCEEDED` summary; invalid
+evidence or storage failure refuses graph publication without changing the application
+outcome. New runs do not write schema-v2 compatibility snapshots; historical readers
+remain supported. This terminal path does not provide live graph updates.
 
 An invocation can instead select terminal-only reporting. Its versioned bounded plan
 selection retains the effective policy and execution strategy, while no progress
@@ -197,7 +198,7 @@ Primary execution record for one task attempt chain.
 | `result_data` | Inline JSON result when under size limit |
 | `result_reference` | Pointer used when result exceeds `MAX_RESULT_SIZE_BYTES` (`digest`, `filesystem`, `s3`, `gcs`) |
 | `progress_data` | Current schema-v1/v2 compatibility snapshot of retained actor state; actor-side rejection/truncation and fixed-shape, secret-free cost diagnostics remain in the envelope |
-| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence, one accepted terminal-only summary, or an accepted default-off terminal-pilot publication |
+| `workflow_progress_summary_json` | Nullable canonical schema-v3 summary, capped at 16 KiB encoded; may hold lifecycle-authored evidence, one accepted terminal-only summary, or an accepted bounded terminal graph publication |
 | `workflow_run_id` | Current workflow run allowed to update either progress representation |
 | `workflow_run_namespace` | Nullable opaque 63-bit namespace reserved under a database uniqueness constraint when the row first allocates a fresh workflow run; legacy rows remain null until then |
 | `workflow_run_sequence` | Internal non-resetting 59-bit fresh-allocation counter combined injectively with the row namespace in each new workflow UUIDv8 |
@@ -447,10 +448,10 @@ claim. #142 completes composite detail preparation under
 owns sampled/coalesced reporting, live wire and cost attribution, aggregate
 producer/mailbox admission, producer backpressure, bounded actor-to-preparer draining,
 and large-fan-out slow-consumer evidence.
-The current pilot avoids claiming those broader boundaries by using a fixed profile of
-512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of detail, and 4 MiB combined.
-Default or higher-scale schema-v3 activation must compose all of the remaining
-boundaries.
+The default terminal adapter uses the narrower profile of 512 nodes, 2,048 edges,
+2 MiB topology, 1 MiB detail and 4 MiB combined. Lifetime admission and local leaf
+capture bound this path. Higher-scale and live reporting still require the broader
+boundaries above; this adapter does not establish their readiness.
 
 Terminal detail expiry is derived from the canonical terminal timestamp and
 `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS`. Every accepted detail publication records
@@ -603,7 +604,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0026_ray_task_target_execution_evidence` before starting upgraded workers:
+`0027_workflow_reporting_diagnostics` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -619,6 +620,13 @@ capability row as capacity. Migration `0026` adds unseeded, immutable per-genera
 and an optional create-once outcome without a production writer or reader. Existing exact-lease
 deletion may only fail-closed cascade-withdraw an otherwise unreachable capability row; none of
 these migrations alone authorizes claims, activates routing, or enables protocol-2 writes.
+
+Migration `0027` adds nullable terminal reporting diagnostics to workflow-run storage.
+It preserves existing summaries, graph detail and legacy snapshots without inventing
+historical counters. New full-reporting publications save the bounded diagnostics
+with their exact detail revision. Drain older workers during the default-terminal-path
+upgrade; the additive column accepts old inserts but does not make mixed writer
+behavior the supported final deployment.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -647,16 +655,14 @@ writers can continue inserting rows during the rollout.
 
 Migrations `0012` and `0013` implement the additive reader-first progress-storage
 boundary: nullable schema-v3 summaries followed by package-owned topology and detail
-tables. Existing rows and older writers continue using `progress_data`; `0013` does
-not backfill or reinterpret legacy snapshots. Schema v2 remains the live compatibility
-writer for full mode. Terminal-only can add one summary-only schema-v3 record without
-enabling topology/detail production, changing the database schema, or reinterpreting
-legacy rows. The full-detail schema-v3 producer remains disabled by default and may be
-enabled only as the strict terminal pilot after authorized bounded readers and storage
-are deployed; enabling it applies the smaller actor and publication profile and does
-not make hard-V1-scale production supported. Reversing
-`0013` discards normalized detail tables, while reversing `0012` drops the summary
-columns. Export any retained schema-v3 data needed for audit before either rollback;
+tables. Those migrations do not backfill or reinterpret legacy snapshots. Historical
+schema-v2 readers remain supported, but the current full-mode writer publishes bounded
+terminal schema-v3 graphs by default. Terminal-only adds one summary without detail.
+Drain old workers before relying on the new writer behavior; migration 0027 adds
+nullable reporting counters without reconstructing historical evidence.
+
+Reversing `0013` discards normalized detail tables, while reversing `0012` drops
+summary columns. Export retained schema-v3 data needed for audit before rollback;
 legacy progress remains unchanged.
 
 Migration `0014` adds a nullable immutable Ray Job routing target without rewriting
@@ -1266,13 +1272,12 @@ complete an upgrade; first prove its exact remote identity and quiescence.
 - Worker lease heartbeat + cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
-- Per-workflow in-memory progress coordination emits revision-based schema-v2
-  compatibility snapshots of retained actor state. Bounded schema-v3 summary/detail
-  storage and authorized readers are present, with a default-off, stricter terminal
-  publication pilot. Terminal-only reporting bypasses the actor and legacy writer,
-  then attempts one fenced summary-only terminal publication. Default and higher-scale
-  full-detail activation still wait for the remaining ingestion, preparation,
-  capacity, migration, and old-writer-drain work.
+- Bounded terminal graph publication with lifetime admission and final Ray outcome
+  settlement. Leaves capture their latest progress locally, without collector handles.
+  Atomic schema-v3 publication preserves exact run ownership. Terminal-only bypasses
+  the collector and attempts one fenced summary; disabled makes no publication.
+  Higher-scale and live reporting remain separate qualification work.
+
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.

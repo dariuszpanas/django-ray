@@ -1422,7 +1422,7 @@ def test_ray_executor_throttles_high_cardinality_progress_snapshots(
     executor._flush_progress(bypass_interval=True)
 
     assert snapshot_calls == 2
-    assert len(persisted) == 1
+    assert persisted == []
 
 
 def test_flush_progress_reuses_pending_actor_snapshot_request(monkeypatch) -> None:
@@ -1474,7 +1474,7 @@ def test_flush_progress_reuses_pending_actor_snapshot_request(monkeypatch) -> No
 
     assert snapshot_calls == 1
     assert wait_calls == 2
-    assert persisted == [snapshot]
+    assert persisted == []
     assert executor._pending_progress_snapshot_ref is None
 
 
@@ -1506,7 +1506,7 @@ def test_flush_progress_does_not_rewrite_one_unchanged_failed_snapshot(monkeypat
     assert executor._flush_progress(bypass_interval=True, failed=True) is not None
     assert executor._flush_progress(bypass_interval=True, failed=True) is not None
 
-    assert persisted == [{**snapshot, "state": "FAILED"}]
+    assert persisted == []
 
 
 def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch) -> None:
@@ -1551,7 +1551,7 @@ def test_finish_progress_polls_without_rewriting_unchanged_snapshot(monkeypatch)
     executor.finish_progress()
 
     assert snapshot_calls == 3
-    assert [snapshot["revision"] for snapshot in persisted] == [3, 4]
+    assert persisted == []
     assert sleeps == [0.05, 0.05]
 
 
@@ -1615,6 +1615,10 @@ def test_finish_progress_reports_permanent_snapshot_unavailability(
     monkeypatch.setattr("django_ray.workflows.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("django_ray.workflows.time.sleep", sleep)
 
+    monkeypatch.setattr(
+        "django_ray.workflow.progress.publication.publish_unavailable_terminal_workflow_progress",
+        lambda *args, **kwargs: True,
+    )
     executor.finish_progress()
 
     assert flush_calls == 2
@@ -1684,6 +1688,7 @@ def test_finish_progress_stops_immediately_after_permanent_actor_failure(
     snapshot_ref = object()
     snapshot_calls = 0
     sleeps: list[float] = []
+    fallback_calls = []
 
     class _SnapshotMethod:
         def remote(self):
@@ -1705,11 +1710,17 @@ def test_finish_progress_stops_immediately_after_permanent_actor_failure(
         get=lambda ref: (_ for _ in ()).throw(RuntimeError("actor died")),
     )
     monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
+    monkeypatch.setattr(
+        executor,
+        "_publish_unavailable_terminal_progress",
+        lambda **kwargs: fallback_calls.append(kwargs),
+    )
 
     executor.finish_progress()
 
     assert snapshot_calls == 1
     assert sleeps == []
+    assert fallback_calls == [{"failed": False, "limit_exceeded": False}]
     assert executor.progress_actor is None
     assert workflow_progress_warning_records == [
         {
@@ -1730,12 +1741,12 @@ def test_finish_progress_contains_persistence_failure_without_leaking_exception(
     disabled: list[bool] = []
     sleeps: list[float] = []
 
-    def persist(reported_identity, snapshot):
+    def persist(reported_identity, snapshot, **kwargs):
         del reported_identity, snapshot
         raise RuntimeError("password=do-not-leak")
 
     monkeypatch.setattr(
-        "django_ray.workflow.progress.runs.persist_workflow_progress",
+        "django_ray.workflow.progress.publication.publish_terminal_workflow_progress",
         persist,
     )
     executor = object.__new__(_RayExecutor)
@@ -1762,18 +1773,22 @@ def test_finish_progress_contains_persistence_failure_without_leaking_exception(
     )
     monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
 
+    monkeypatch.setattr(
+        "django_ray.workflow.progress.publication.publish_unavailable_terminal_workflow_progress",
+        lambda *args, **kwargs: True,
+    )
     executor.finish_progress()
 
-    assert executor.progress_actor is None
-    assert disabled == [True]
+    assert executor.progress_actor is not None
+    assert disabled == []
     assert sleeps == []
     assert workflow_progress_warning_records == [
         {
-            "message": "Workflow progress reporting became unavailable",
+            "message": "Workflow terminal publication was not completed",
             "component": "workflow_progress",
             "task_execution_pk": 8,
             "workflow_run_id": "terminal-persistence-failure",
-            "reason": "snapshot_persistence_failed",
+            "reason": "publication_failed",
         }
     ]
     assert "do-not-leak" not in json.dumps(workflow_progress_warning_records)
@@ -1845,7 +1860,6 @@ def test_finish_progress_waits_for_failed_node_evidence_when_pilot_enabled(
 ) -> None:
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
     executor = object.__new__(_RayExecutor)
     executor.progress_actor = object()
@@ -1982,7 +1996,6 @@ def test_finish_progress_causal_fence_fails_closed_at_existing_deadline(
 ) -> None:
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
         "WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS": 1,
     }
     snapshot = {
@@ -2026,6 +2039,10 @@ def test_finish_progress_causal_fence_fails_closed_at_existing_deadline(
     monkeypatch.setattr("django_ray.workflows.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("django_ray.workflows.time.sleep", sleep)
 
+    monkeypatch.setattr(
+        "django_ray.workflow.progress.publication.publish_unavailable_terminal_workflow_progress",
+        lambda *args, **kwargs: True,
+    )
     executor.finish_progress(failed=True)
 
     assert clock[0] == pytest.approx(1.0)
@@ -2044,34 +2061,6 @@ def test_finish_progress_causal_fence_fails_closed_at_existing_deadline(
     ]
 
 
-def test_finish_progress_preserves_immediate_failure_flush_when_pilot_disabled(
-    monkeypatch,
-    settings,
-) -> None:
-    settings.DJANGO_RAY = {
-        **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
-    }
-    executor = object.__new__(_RayExecutor)
-    executor.progress_actor = object()
-    executor.workflow_run_identity = None
-    sleeps: list[float] = []
-    monkeypatch.setattr(
-        executor,
-        "_flush_progress",
-        lambda **kwargs: {
-            "completed_nodes": 0,
-            "failed_nodes": 0,
-            "total_nodes": 2,
-        },
-    )
-    monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
-
-    executor.finish_progress(failed=True)
-
-    assert sleeps == []
-
-
 @pytest.mark.parametrize("failed", [False, True])
 @pytest.mark.parametrize("ingress_field", ["rejected", "truncated"])
 def test_finish_progress_reports_unpublishable_ingress_without_waiting(
@@ -2082,7 +2071,6 @@ def test_finish_progress_reports_unpublishable_ingress_without_waiting(
 ) -> None:
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
     snapshot = {
         "completed_nodes": 0,
@@ -2112,13 +2100,12 @@ def test_finish_progress_reports_unpublishable_ingress_without_waiting(
     assert sleeps == []
 
 
-def test_finish_progress_preserves_pilot_disabled_success_retry_with_rejected_ingress(
+def test_finish_progress_reports_rejected_ingress_without_legacy_fallback(
     monkeypatch,
     settings,
 ) -> None:
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
     }
     snapshots = iter(
         [
@@ -2145,10 +2132,10 @@ def test_finish_progress_preserves_pilot_disabled_success_retry_with_rejected_in
 
     executor.finish_progress()
 
-    assert sleeps == [0.05]
+    assert sleeps == []
 
 
-def test_terminal_schema_v3_publication_is_default_off(
+def test_terminal_publication_is_default_and_failure_is_observational(
     monkeypatch,
     settings,
 ) -> None:
@@ -2156,13 +2143,12 @@ def test_terminal_schema_v3_publication_is_default_off(
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
     }
     publications: list[tuple[object, object, dict[str, Any]]] = []
 
     def publish(identity, snapshot, **kwargs):
         publications.append((identity, snapshot, kwargs))
-        raise AssertionError("the default-off pilot must not invoke its publisher")
+        raise AssertionError("fixture publication failure")
 
     monkeypatch.setattr(
         publication_module,
@@ -2178,8 +2164,8 @@ def test_terminal_schema_v3_publication_is_default_off(
 
     executor.finish_progress()
 
-    assert publications == []
-    assert executor._terminal_progress_publication_attempted is False
+    assert len(publications) == 1
+    assert executor._terminal_progress_publication_attempted is True
 
 
 def test_enabled_terminal_schema_v3_publication_is_attempted_exactly_once(
@@ -2190,7 +2176,6 @@ def test_enabled_terminal_schema_v3_publication_is_attempted_exactly_once(
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
         "WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS": 9,
     }
     identity = _workflow_identity()
@@ -2263,7 +2248,6 @@ def test_terminal_schema_v3_publication_failures_are_bounded_and_best_effort(
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
     identity = _workflow_identity()
     calls = 0
@@ -2294,7 +2278,7 @@ def test_terminal_schema_v3_publication_failures_are_bounded_and_best_effort(
     assert calls == 1
     assert workflow_progress_warning_records == [
         {
-            "message": "Workflow schema-v3 pilot publication was not completed",
+            "message": "Workflow terminal publication was not completed",
             "component": "workflow_progress",
             "task_execution_pk": identity.task_execution_pk,
             "workflow_run_id": identity.run_id,
@@ -2317,7 +2301,6 @@ def test_schema_v3_pilot_passes_strict_limits_to_the_progress_actor(
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
     execution = RayTaskExecution.objects.create(
         task_id="workflow-progress-pilot-limits",
@@ -2379,7 +2362,6 @@ def test_terminal_only_bind_claims_plan_without_creating_progress_actor(
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
     execution = RayTaskExecution.objects.create(
         task_id="workflow-terminal-only-bind",
@@ -2891,6 +2873,7 @@ def test_ray_executor_map_lifecycle_uses_only_bounded_ingest(
         WorkflowProgressEventKind.EDGES_REGISTERED,
         WorkflowProgressEventKind.MAP_PROGRESS,
         WorkflowProgressEventKind.MAP_PROGRESS,
+        WorkflowProgressEventKind.PRODUCER_REPORT,
         terminal_kind,
     ]
     assert [
@@ -2898,7 +2881,7 @@ def test_ray_executor_map_lifecycle_uses_only_bounded_ingest(
         for event in events
         if event.kind is WorkflowProgressEventKind.EDGES_REGISTERED
     ] == [32, 32, 1]
-    assert events[-2].payload == {
+    assert events[-3].payload == {
         "completed": 4 if not failed else 2,
         "input_exhausted": True,
         "label": "map:increment",
@@ -2912,6 +2895,16 @@ def test_ray_executor_map_lifecycle_uses_only_bounded_ingest(
     if failed:
         expected_terminal["error"] = "bounded map failed"
     assert events[-1].payload == expected_terminal
+    assert events[-2].payload["offered"] == 2
+    executor.map_finished(
+        "0.1",
+        "map:increment",
+        submitted=4,
+        completed=4 if not failed else 2,
+        input_exhausted=True,
+        failed=failed,
+    )
+    assert _decoded_ingests(actor, identity) == events
 
 
 def test_progress_actor_requires_complete_run_identity() -> None:
@@ -3014,11 +3007,11 @@ def test_ray_executor_flushes_failed_progress_snapshot() -> None:
     assert flushed["state"] == "FAILED"
 
     execution.refresh_from_db()
-    assert json.loads(execution.progress_data)["state"] == "FAILED"
+    assert execution.progress_data is None
 
 
 @pytest.mark.django_db
-def test_ray_executor_disables_reporter_after_stale_write(
+def test_ray_executor_does_not_write_legacy_snapshot_after_cancellation(
     monkeypatch,
     workflow_progress_warning_records,
 ) -> None:
@@ -3069,20 +3062,14 @@ def test_ray_executor_disables_reporter_after_stale_write(
     sleeps: list[float] = []
     monkeypatch.setattr("django_ray.workflows.time.sleep", sleeps.append)
 
-    executor.finish_progress()
+    assert executor._flush_progress(bypass_interval=True) == snapshot
 
-    assert executor.progress_actor is None
-    assert disabled == [True]
+    execution.refresh_from_db()
+    assert execution.state == TaskState.CANCELLED
+    assert execution.progress_data is None
+    assert disabled == []
     assert sleeps == []
-    assert workflow_progress_warning_records == [
-        {
-            "message": "Workflow progress reporting became unavailable",
-            "component": "workflow_progress",
-            "task_execution_pk": execution.pk,
-            "workflow_run_id": identity.run_id,
-            "reason": "snapshot_fence_rejected",
-        }
-    ]
+    assert workflow_progress_warning_records == []
 
 
 @pytest.mark.real_ray
@@ -3110,7 +3097,6 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
 
     policies = ("terminal_only", "disabled")
@@ -3304,7 +3290,6 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
         "WORKFLOW_PROGRESS_FLUSH_SECONDS": 300,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": False,
     }
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-workflow-graph",
@@ -3338,22 +3323,38 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
     finally:
         ray.shutdown()
 
-    execution.refresh_from_db()
-    progress = json.loads(execution.progress_data)
-    nodes = progress["graph"]["nodes"]
+    from django_ray.workflow.progress.reads import (
+        get_workflow_node_detail,
+        get_workflow_progress_summary,
+        list_workflow_topology_edges,
+        list_workflow_topology_nodes,
+    )
 
-    assert progress["state"] == "SUCCEEDED"
-    assert progress["schema_version"] == WORKFLOW_PROGRESS_SCHEMA_VERSION
-    assert execution.workflow_progress_summary_json is None
-    assert progress["run_identity"]["attempt_number"] == 1
-    assert progress["run_identity"]["execution_generation"] == 1
-    assert progress["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
-    assert nodes[0]["runtime_env"]["mode"] == "inherit"
-    assert nodes[0]["runtime_env"]["profile"] == "test"
-    assert nodes[0]["runtime_env"]["hash"].startswith("sha256:")
-    assert nodes[0]["execution"]["ray_task_id"]
-    assert nodes[0]["execution"]["ray_node_id"]
-    assert not WorkflowProgressRunStorage.objects.filter(execution=execution).exists()
+    execution.refresh_from_db()
+    assert execution.progress_data is None
+
+    def authorize(candidate):
+        return candidate.pk == execution.pk
+
+    summary = get_workflow_progress_summary(execution, authorize=authorize)
+    edges = list_workflow_topology_edges(execution, authorize=authorize)
+    node = get_workflow_node_detail(execution, "0.0", authorize=authorize)["item"]
+    assert summary["source_schema_version"] == 3
+    assert summary["availability"] == "AVAILABLE"
+    stored_summary = json.loads(execution.workflow_progress_summary_json)
+    assert stored_summary["state"] == "SUCCEEDED"
+    assert stored_summary["run_identity"]["attempt_number"] == 1
+    assert stored_summary["run_identity"]["execution_generation"] == 1
+    assert edges["items"] == [{"source": "0.0", "target": "0.1"}]
+    assert node["state"] == "SUCCEEDED"
+    topology = list_workflow_topology_nodes(execution, authorize=authorize)
+    declaration = next(item for item in topology["items"] if item["node_id"] == "0.0")
+    assert declaration["runtime_env"]["mode"] == "inherit"
+    assert declaration["runtime_env"]["profile"] == "test"
+    assert declaration["runtime_env"]["hash"].startswith("sha256:")
+    assert node["execution"]["ray_task_id"]
+    assert node["execution"]["ray_node_id"]
+    assert WorkflowProgressRunStorage.objects.filter(execution=execution).count() == 1
 
 
 @pytest.mark.real_ray
@@ -3372,9 +3373,6 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         WorkflowProgressTopologyPage,
         WorkflowProgressTopologySlot,
     )
-    from django_ray.workflow.progress.limits import (
-        WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS,
-    )
     from django_ray.workflow.progress.publication import (
         WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
     )
@@ -3384,11 +3382,11 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         list_workflow_topology_edges,
         list_workflow_topology_nodes,
     )
+    from django_ray.workflow.progress.reporting_diagnostics import load_reporting_diagnostics
     from django_ray.workflow.progress.summary import deserialize_workflow_progress_summary
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
 
     execution = RayTaskExecution.objects.create(
@@ -3418,24 +3416,31 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         ray.shutdown()
 
     execution.refresh_from_db()
-    progress = json.loads(execution.progress_data)
-    nodes = progress["graph"]["nodes"]
-    nodes_by_id = {node["node_id"]: node for node in nodes}
-    root_node = nodes_by_id["0.0"]
-    map_node = nodes_by_id["0.1"]
-    ingress = progress["ingress"]
+    assert execution.progress_data is None
+    summary = deserialize_workflow_progress_summary(execution.workflow_progress_summary_json)
+    identity = WorkflowRunIdentity(
+        task_execution_pk=execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+        run_id=str(execution.workflow_run_id),
+    )
+    diagnostics = load_reporting_diagnostics(identity, detail_revision=summary["detail_revision"])
+    ingress = diagnostics["ingress"]
 
-    assert progress["state"] == "SUCCEEDED"
-    assert progress["schema_version"] == WORKFLOW_PROGRESS_SCHEMA_VERSION
-    assert progress["run_identity"]["attempt_number"] == 1
-    assert progress["run_identity"]["execution_generation"] == 1
-    assert progress["total_nodes"] == 2
-    assert set(nodes_by_id) == {"0.0", "0.1"}
-    assert progress["graph"]["edges"] == [{"source": "0.0", "target": "0.1"}]
+    def authorize(candidate):
+        return candidate.pk == execution.pk
+
+    root_node = get_workflow_node_detail(execution, "0.0", authorize=authorize)["item"]
+    map_node = get_workflow_node_detail(execution, "0.1", authorize=authorize)["item"]
+    assert summary["state"] == "SUCCEEDED"
+    assert summary["run_identity"] == identity.as_dict()
+    assert diagnostics["snapshot_revision"] > 0
     assert root_node["progress"]["message"] == "Preparing bounded fan-out"
     assert root_node["progress"]["metrics"] == {"items": 6}
     assert map_node["node_id"] == "0.1"
-    assert map_node["kind"] == "map"
+    topology = list_workflow_topology_nodes(execution, authorize=authorize)
+    map_declaration = next(item for item in topology["items"] if item["node_id"] == "0.1")
+    assert map_declaration["kind"] == "map"
     assert map_node["fanout"]["max_concurrency"] == 2
     assert map_node["fanout"]["max_items"] == 10
     assert map_node["fanout"]["submitted_items"] == 6
@@ -3449,8 +3454,7 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         WorkflowProgressEventKind.EDGES_REGISTERED,
         WorkflowProgressEventKind.MAP_REGISTERED,
         WorkflowProgressEventKind.SUBMITTED,
-        WorkflowProgressEventKind.STARTED,
-        WorkflowProgressEventKind.APPLICATION_PROGRESS,
+        WorkflowProgressEventKind.NODE_SETTLED,
         WorkflowProgressEventKind.PRODUCER_REPORT,
         WorkflowProgressEventKind.MAP_PROGRESS,
         WorkflowProgressEventKind.COMPLETED,
@@ -3458,6 +3462,8 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
     assert set(ingress["accepted_by_kind"]) == {kind.value for kind in WorkflowProgressEventKind}
     assert all(ingress["accepted_by_kind"][kind.value] >= 1 for kind in expected_kinds)
     assert ingress["accepted_by_kind"][WorkflowProgressEventKind.FAILED.value] == 0
+    assert ingress["accepted_by_kind"][WorkflowProgressEventKind.STARTED.value] == 0
+    assert ingress["accepted_by_kind"][WorkflowProgressEventKind.APPLICATION_PROGRESS.value] == 0
     assert ingress["accepted"] == sum(ingress["accepted_by_kind"].values())
     assert ingress["rejected"] == 0
     assert ingress["truncated"] == 0
@@ -3480,20 +3486,34 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
     assert producer["schema_version"] == 1
     assert producer["saturated"] is False
     assert producer["reports"] == 1
-    assert producer["offered"] == 1
-    assert producer["submitted"] == 1
-    assert producer["superseded"] == 0
+    assert producer["offered"] >= 1
+    assert producer["submitted"] >= 1
     assert producer["locally_dropped"] == 0
-    assert producer["acknowledged"] + producer["pending_acknowledgements"] == 1
+    assert producer["offered"] == producer["submitted"] + producer["superseded"]
+    assert producer["acknowledged"] + producer["pending_acknowledgements"] == producer["submitted"]
+    assert producer["pending_acknowledgements"] <= 2
     assert producer["actor_rejected"] == 0
     assert producer["ack_failed"] == 0
-    assert producer["terminal_handoffs"] == {
-        "not_needed": 1,
-        "submitted": 0,
-        "failed": 0,
-        "actor_unavailable": 0,
-    }
-    assert 0 < len(progress["recent_events"]) <= WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS
+    assert producer["terminal_handoffs"]["failed"] == 0
+    assert producer["terminal_handoffs"]["actor_unavailable"] == 0
+    assert sum(producer["terminal_handoffs"].values()) == 1
+    assert (
+        ingress["accepted_by_kind"][WorkflowProgressEventKind.MAP_PROGRESS.value]
+        == producer["submitted"]
+    )
+    capture = ingress["capture"]
+    assert capture["scope"] == "successful_final_invocations"
+    assert (
+        capture["reports"] == capture["offered"] == capture["accepted"] == capture["retained"] == 1
+    )
+    assert capture["rejected"] == capture["superseded"] == 0
+    assert capture["saturated"] is False
+    assert (
+        0
+        < capture["retained_bytes"]
+        == capture["canonical_bytes"]
+        <= WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS.event_wire_max_bytes
+    )
     cost = ingress["cost"]
     assert set(cost) == {
         "schema_version",
@@ -3693,7 +3713,6 @@ def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None
 
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
-        "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": True,
     }
     execution = RayTaskExecution.objects.create(
         task_id="real-ray-failed-workflow-graph",

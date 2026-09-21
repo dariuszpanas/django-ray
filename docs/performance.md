@@ -58,9 +58,9 @@ The best batch size sits between those constraints.
 
 A workflow creates one `RayTaskExecution` for the outer Django task. Internal leaves
 exchange Ray object references. With the default
-`WORKFLOW_PROGRESS_REPORTING_POLICY="full"`, they also report events to an in-memory
-progress actor and django-ray writes a schema-v2 compatibility snapshot of retained
-actor state when a changed revision is flushed. Each data event is canonical,
+`WORKFLOW_PROGRESS_REPORTING_POLICY="full"`, leaves capture progress locally and the
+coordinator reports final outcomes to an in-memory collector. Terminal publication
+attaches one bounded schema-v3 graph. Each data event is canonical,
 identity-fenced, and bounded before its Ray call: payloads are at most 16 KiB, complete
 wire and decoded envelopes are at most 32 KiB, and dependency edges are sent in batches
 of at most 32. The actor revalidates the envelope and caps retained nodes, edges, recent
@@ -68,46 +68,33 @@ events, and bytes. Its snapshots also carry a versioned, fixed-shape cost block 
 saturating counters for logical event calls/bytes received, decoded calls by the fixed
 event-kind enum, producer-to-actor delivery delay, handler wall/process CPU time, and
 snapshot-build wall/process CPU time. The block retains no producer identifiers,
-payloads, labels, errors, metric names, or other application data. Package-default
-execution uses the durable V1 profile and remains a schema-v2 writer. A terminal
-snapshot can also carry a fixed-shape aggregate of actor-accepted leaf-invocation
-producer reports: valid offers, submissions, superseded and locally dropped values,
-producer-observed acknowledgement outcomes, and terminal-handoff outcomes. It
-retains neither producer identities nor application values.
+payloads, labels, errors, metric names, or other application data. Full reporting uses
+the bounded terminal profile by default and does not write live schema-v2 snapshots.
+The terminal snapshot records coordinator map-producer reports separately from local
+capture counters for successful final leaf invocations. Failed retry invocations do
+not return their capture counters and must not be inferred from the successful total.
 
-`WORKFLOW_PROGRESS_FLUSH_SECONDS` limits write frequency, but it does not bound the
-aggregate Ray actor mailbox, queued bytes, or transient snapshot and drain
-allocations. During one leaf invocation, full reporting retains at most one outstanding
-application-progress acknowledgement and one canonical latest-value slot. A slow
-acknowledgement coalesces later application values into that slot; leaf exit makes at
-most one bounded terminal handoff before its non-coalesced terminal event. When
-acknowledgements keep up, every accepted update may still be submitted. This is
-acknowledgement-driven containment, not time-based sampling.
+Each leaf retains one canonical latest value locally and has no collector handle.
+Only final Ray metadata carries that value to the coordinator. Map progress remains
+coordinator-owned and acknowledgement-driven: at most one outstanding replaceable
+call plus one terminal handoff per admitted map. Lifetime admission of at most 512
+nodes therefore bounds pending replaceable calls by 1,024 and their canonical bytes
+by 32 MiB. These are logical pending-call bounds, not cumulative traffic or measured
+physical Ray mailbox memory. Acknowledged updates can continue throughout execution.
 
-A physical Ray leaf retry or another forked actor handle within the same run can still
-contribute another independently bounded leaf session. An outer durable-task retry
-uses a new run identity and actor. Aggregate workflow-wide admission, call/byte limits,
-and mailbox coalescing therefore remain separate scale work, as does the bounded
-actor-to-preparer drain. Those gaps prevent treating the hard V1 ceilings as a safe
-default production profile or offering a truthful sampled policy.
+The fixed profile allows 512 nodes, 2,048 edges, 2 MiB topology, 1 MiB detail and 4 MiB
+combined encoded/decoded evidence. Admission is never refunded within a run. Overflow
+preserves the application outcome and attempts a `LIMIT_EXCEEDED` summary instead of
+publishing a partial graph. Other publication failures also preserve application
+results. `WORKFLOW_PROGRESS_FLUSH_SECONDS` spaces collector snapshot reads; it does
+not schedule database writes or promise live updates.
 
-`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT=True` selects the intentionally smaller
-`schema-v3-pilot-v1` profile for both actor retention and one terminal schema-v3
-publication attempt: at most 512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of
-detail, and 4 MiB combined, with encoded and decoded byte ceilings. It does not add a
-schema-v3 database write to every live flush. A rejected or truncated event, invalid
-snapshot, admission/preparation failure, stale fence, or storage failure refuses the
-terminal publication while preserving the application result and schema-v2
-compatibility snapshots. This strict fail-closed path is a bounded integration pilot,
-not evidence for hard-V1-scale or arbitrary concurrent workloads.
-
-The bundled testproject enables the pilot so its nested workflow and the guarded local
-KubeRay gate exercise real topology publication. Benchmark package-default behavior
-with the setting explicitly disabled unless the pilot itself is the subject of the
-measurement. The gate also runs terminal-only success and failure separately to prove
-null legacy progress, one summary-only publication, and no retained detail. Focused
-unit tests prove the actor is not constructed and progress transport metadata is not
-sent; those checks do not turn on pilot detail for the terminal-only invocation.
+The sample uses the same default path as applications. Remove the retired pilot flag
+before benchmarking this version. The deployed gate must cover the full graph path
+and separately prove terminal-only success/failure with no legacy or detail writes.
+No throughput improvement is established by these bounds alone; use source-matched
+benchmark evidence and keep physical mailbox, process-memory and database attribution
+separate from logical counters.
 
 For workloads that need a durable terminal outcome but not live per-node telemetry,
 select `"terminal_only"` globally or call
@@ -128,12 +115,12 @@ RPCs, and writes no `progress_data`; task lifecycle, retry, cancellation, result
 persistence, and monitor heartbeats remain active. Measure before making this a
 deployment-wide default because node-level live progress is intentionally unavailable.
 
-Terminal-only avoids the current full-mode producer and mailbox cost; it does not make
-those costs workflow-wide bounded for workflows that still choose full reporting.
-Aggregate producer/mailbox admission and coalescing across forked handles, the sampled
-policy that depends on that aggregate bound, bounded actor-to-preparer draining, the
-still-unavailable network/database and lifetime-resource cost layers, and large-fan-out
-slow-consumer evidence remain separate #79 work.
+Terminal-only avoids the full-mode collector and publication costs. Full mode has the
+logical pending-call bound described above, but that does not measure physical Ray
+mailbox memory, network traffic, database attribution or total process lifetime cost.
+Broader preparation and large-fan-out support remain separate #79 work; the current
+terminal profile does not activate the larger storage-protocol ceilings or a sampled
+reporting policy.
 
 The bundled `ObservabilityDemoUser` makes the three shipped policies directly
 comparable without becoming a load benchmark. `make loadtest-demo` runs one tiny
@@ -186,12 +173,19 @@ The three-repetition default runs nine tiny workflows. Each cycle rotates the or
 three so they repeat that complete Latin square without introducing concurrent
 benchmark tasks. Progress is written to stderr and one versioned JSON report is written
 to stdout, so redirect stdout to an ignored artifact when retaining evidence. The
-benchmark report schema is version 3. It records the command implementation digest,
+benchmark report schema is version 4. It records the command implementation digest,
 package and database versions, the one stable workflow-plan fingerprint, exact
-workload fingerprint, and whether the testproject's workflow-progress schema-v3 pilot
-was enabled. These are independent schema versions. Checkout-to-deployment source-tree
+workload fingerprint, and the default terminal reporting path. Apply migration 0027
+before running it. Earlier histories have no reporting diagnostics and cannot be
+used as new measurements. Checkout-to-deployment source-tree
 attestation remains the responsibility of the guarded local KubeRay gate and is
 labeled that way rather than fabricated by the in-pod command.
+
+Plan identity is checked through the validated binding API against the bounded
+stored manifest. The redacted presentation API is not an identity source: its
+work budget or configured patterns may omit otherwise valid selection metadata.
+The report exposes only the plan fingerprint, policy, strategy and node/edge counts,
+not the raw manifest or selection payload.
 
 Primary comparisons use the durable database timestamps for queue wait, outer
 execution, and end-to-end time. The workload also returns its bounded coordinator
@@ -203,8 +197,12 @@ reporting. Full-mode actor-cost aggregates retain the fixed initialization, inge
 delivery-delay, and snapshot groups. Every numeric field, including per-kind decoded
 counts and negative-clock samples, has its own distribution. Full-mode
 `producer_progress` aggregates do the same for fixed producer counters and
-terminal-handoff outcomes. Terminal-only and disabled report producer progress as
-`not_applicable`.
+terminal-handoff outcomes for coordinator map producers. `terminal_leaf_capture`
+separately records successful final leaf invocations; it does not count failed retry
+invocations. This fixed fixture has six surrounding leaves and two bounded maps,
+represented by eight graph nodes and eight edges. Reporting inside bounded map
+children is suppressed, so their application progress does not become capture or
+actor traffic. Terminal-only and disabled report both groups as `not_applicable`.
 
 The fixed cost fields retain their source units in both samples and aggregates:
 
@@ -226,9 +224,9 @@ All `producer_progress` values use the explicit unit `"count"`:
 
 | Producer field | Meaning |
 | --- | --- |
-| `reports` | Fixed-shape producer reports accepted and aggregated by the collector; at most one per reporting leaf invocation with a valid offer |
-| `offered` | Valid application-progress values accepted into leaf producer sessions |
-| `submitted` | Application-progress actor calls submitted by those sessions |
+| `reports` | Fixed-shape coordinator map reports accepted by the collector; at most one per finished map with a valid offer |
+| `offered` | Valid map-progress values accepted into coordinator producer sessions |
+| `submitted` | Map-progress actor calls submitted by those sessions |
 | `superseded` | Canonical latest-slot values replaced before submission |
 | `locally_dropped` | Accepted values that could not be submitted locally |
 | `acknowledged` | Submitted calls whose successful acknowledgement the producer observed |
@@ -241,15 +239,17 @@ The benchmark validates the unsaturated reconciliation equations
 `offered = submitted + superseded + locally_dropped` and
 `submitted = acknowledged + actor_rejected + ack_failed + pending_acknowledgements`.
 A full sample also requires
-`acknowledged <= actor-accepted application progress <= submitted - actor_rejected`.
+`acknowledged <= actor-accepted map progress <= submitted - actor_rejected`.
 Failed and still-pending acknowledgements remain intentionally uncertain within that
 range.
 A pending acknowledgement is producer-local evidence at report time; actor ordering
-can still process that application-progress call before it processes the report.
+can still process that map-progress call before it processes the report.
 
 For full mode, the report exposes only allowlisted terminal ingress counters:
 accepted events by kind, rejections by reason, truncation, retained logical
-bytes/nodes/edges, the actor-authored cost block, and the fixed producer aggregate.
+bytes/nodes/edges, the actor-authored cost block, and separate map-producer and leaf-capture
+aggregates. Capture counters report offers, accepted/rejected values, supersession,
+retained values and canonical bytes. They describe local capture, not actor calls.
 The collector's accepted total includes its constructor's one `initialized` event, so
 `processed_ingest_events` subtracts exactly that event. Each accepted
 `producer_report` is also an ingress event, but it contains only fixed-cardinality
@@ -266,15 +266,16 @@ Handler and snapshot-build wall/process CPU totals cover only work observed thro
 the retained terminal snapshot. Snapshot-call counts include that returned snapshot;
 later calls and a `disable` made after it cannot appear. Every counter saturates at the
 signed 64-bit protocol ceiling, and the benchmark fails instead of aggregating a
-saturated run. Before recording the evidence, the command reuses the bounded
-terminal-publication validator even when the schema-v3 pilot is disabled, then checks
-the exact run identity, terminal success, plan fingerprint, expanded fixture topology,
+saturated run. Before recording the evidence, the command validates the bounded
+diagnostics record saved atomically with terminal detail, then checks
+the exact run and detail revision, terminal success, plan fingerprint, bounded fixture topology,
 zero ingress rejection/truncation, fixed cost shape and arithmetic, and retained
 node/edge agreement.
 
 Durable evidence separates reporting-specific storage from the shared task lifecycle:
 
-- reporting storage includes only UTF-8 byte lengths for `progress_data`, the
+- reporting storage requires empty legacy `progress_data` and includes byte lengths for the
+  bounded diagnostics record, the
   execution and archived-attempt copies of the bounded summary, plus normalized run,
   topology, link, and node-detail row/byte counters for the exact run identity;
 - shared storage reports only row counts and encoded lengths for task arguments,
@@ -291,10 +292,10 @@ rows. The report exposes child totals for integrity checking, but those pairs mu
 be added together. None of these logical protocol sizes represents PostgreSQL table,
 index, MVCC, statement, latency, or WAL bytes.
 
-Application-progress submissions are now partially attributable through accepted leaf
+Map-progress submissions are partially attributable through accepted coordinator
 reports, including producer-observed synchronous/acknowledgement failures and
 still-pending acknowledgements. A terminal latest-value handoff is an
-application-progress submission and is included. Structural and lifecycle events,
+map-progress submission and is included. Structural and lifecycle events,
 producer reports, and coordinator snapshot/disable calls are excluded; a producer
 report that never reaches the actor is also absent. Actual Ray/network traffic,
 aggregate mailbox depth or pure queue latency, complete actor-lifetime RSS/process
@@ -308,8 +309,7 @@ time.
 
 Successful runs retain their bounded task rows by default and include an Admin path
 for each execution. This makes the policy-specific summaries available for inspection;
-the full workflow graph is also available when the testproject's schema-v3 pilot is
-enabled. Pass `--cleanup --output-json <new-path>` when evidence should be ephemeral.
+the full workflow graph is available after a successful bounded terminal publication. Pass `--cleanup --output-json <new-path>` when evidence should be ephemeral.
 The command first writes the complete report, then deletes only the exact execution
 primary keys it created and their cascading attempt/progress rows, and finally replaces
 the artifact atomically with the completed cleanup receipt. Cleanup is intentionally

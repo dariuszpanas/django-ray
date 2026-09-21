@@ -271,6 +271,8 @@ def workflow_step_execution(
     node_id: str,
     run_identity: dict[str, Any] | None = None,
     progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
+    *,
+    capture_terminal: bool = False,
 ) -> Iterator[WorkflowStepContext | None]:
     """Expose the progress actor to code running inside one workflow step."""
     if progress_actor is None and run_identity is None:
@@ -278,7 +280,11 @@ def workflow_step_execution(
         return
 
     producer = None
-    if progress_actor is not None and run_identity is not None:
+    if capture_terminal and run_identity is not None:
+        from django_ray.workflow.progress.terminal_capture import TerminalWorkflowProgressCapture
+
+        producer = TerminalWorkflowProgressCapture(run_identity, node_id, limits=progress_limits)
+    elif progress_actor is not None and run_identity is not None:
         from django_ray.workflow.progress.producer import WorkflowProgressProducerSession
 
         producer = WorkflowProgressProducerSession(
@@ -301,7 +307,7 @@ def workflow_step_execution(
         try:
             if producer is not None:
                 report = producer.finish()
-                if report["offered"]:
+                if not capture_terminal and isinstance(report, dict) and report["offered"]:
                     from django_ray.workflow.progress.protocol import (
                         WorkflowProgressEventKind,
                         send_workflow_progress_event,
@@ -335,7 +341,7 @@ def report_workflow_progress(
 ) -> bool:
     """Report application-level progress from inside a workflow step."""
     context = _current_workflow_step.get()
-    if context is None or context.progress_actor is None:
+    if context is None or (context.progress_actor is None and context.producer is None):
         return False
     if context.run_identity is None:
         raise AssertionError("a workflow progress actor requires a complete run identity")

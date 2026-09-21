@@ -13,6 +13,7 @@ from typing import Any, cast
 from django_ray.runtime.context import (
     WORKFLOW_PROGRESS_SCHEMA_VERSION,
 )
+from django_ray.workflow.progress.capture_diagnostics import TerminalCaptureCounters
 from django_ray.workflow.progress.limits import (
     canonical_workflow_progress_retained_size,
     workflow_progress_retained_state_size,
@@ -651,6 +652,7 @@ def _execute_workflow_step(
             node_id,
             workflow_run_identity,
             workflow_progress_limits,
+            capture_terminal=return_outcome_marker and progress_actor is None,
         ) as step_context:
             result = callable_obj(*input_args, *bound_args, **kwargs)
     except BaseException as error:
@@ -740,6 +742,7 @@ def _execute_workflow_step(
         marker = None
         try:
             progress = None
+            capture_detail = {}
             if step_context is not None and step_context.producer is not None:
                 progress_wire = step_context.producer.terminal_progress_wire()
                 if progress_wire is not None:
@@ -751,6 +754,8 @@ def _execute_workflow_step(
                     if progress_event.truncated:
                         raise ValueError("Final workflow progress is incomplete")
                     progress = progress_event.payload
+                if progress_actor is None:
+                    capture_detail["capture_report"] = step_context.producer.finish()
             marker = prepare_workflow_progress_event(
                 workflow_run_identity,
                 WorkflowProgressEventKind.NODE_SETTLED,
@@ -761,6 +766,7 @@ def _execute_workflow_step(
                     "execution": execution,
                     "progress": progress,
                     "output_preview": output_preview,
+                    **capture_detail,
                 },
                 limits=workflow_progress_limits,
             )
@@ -901,6 +907,7 @@ class _WorkflowProgressCollector:
                 0,
             ),
         }
+        self._capture = TerminalCaptureCounters(limits=self._limits)
 
     @staticmethod
     def _empty_kind_counters() -> dict[str, int]:
@@ -1597,6 +1604,11 @@ class _WorkflowProgressCollector:
             if rejection is not None:
                 return self._reject(rejection)
             if event.kind is WorkflowProgressEventKind.NODE_SETTLED:
+                if (
+                    event.payload["node_id"] not in self._settled_nodes
+                    and "capture_report" in event.payload
+                ):
+                    self._capture.add(event.payload["capture_report"])
                 self._settled_nodes.add(event.payload["node_id"])
             return self._accept(event)
         finally:
@@ -1677,6 +1689,11 @@ class _WorkflowProgressCollector:
                 "retained_edges": len(self.edges),
                 "cost": cost,
                 "producer": copy.deepcopy(self._producer),
+                **(
+                    {"capture": self._capture.snapshot()}
+                    if self._capture.snapshot()["reports"]
+                    else {}
+                ),
                 "replaceable": dict(self._replaceable),
             },
         }
