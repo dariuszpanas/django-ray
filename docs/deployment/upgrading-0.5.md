@@ -1,20 +1,25 @@
-# Upgrade from 0.4.0 to the planned 0.5 release
+# Upgrade from 0.4.0 to 0.5.0
+
+This guide records the released 0.5.0 upgrade boundary. For the later 0.6.0
+candidate, follow [Upgrade from 0.5](upgrading-from-0.5.md), including its retired
+execution carriers and preserved-history requirements. The migration history
+below does not authorize old workers to execute against a newer deployment.
 
 Use the [coordinated Beta procedure](../stability.md#coordinated-beta-upgrades):
 drain with the old version, stop writers, preserve the database and referenced
 artifacts, then update the package and Ray/Python tuple together. This procedure
-describes the protocol-1 candidate. It does not activate the separately developed
+describes the protocol-1 release. It does not activate the separately developed
 cohort runtime or promise a mixed-version rolling upgrade.
 
-## Candidate boundary
+## Release boundary
 
 The released baseline is exactly 0.4.0 at library migration
-`0018_workflow_run_allocation`. The candidate adds migrations `0019` through
+`0018_workflow_run_allocation`. Release 0.5.0 adds migrations `0019` through
 `0026`; the sample app also adds `0001_sample_admission_budget`. The active write
 protocol remains 1. Creating dormant target tables does not enable target routing
 or move work between Ray sessions.
 
-Install matching Ray versions on managers, head and workers; the candidate requires
+Install matching Ray versions on managers, head and workers; 0.5.0 requires
 Ray 2.58.0 or newer. Preserve exact runtime matching required by the selected
 transport. The [Ray Client startup limitation](../compatibility.md#ray-client-startup-limitation)
 remains unresolved by the version increase.
