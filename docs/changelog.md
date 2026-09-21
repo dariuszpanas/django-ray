@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-09-21
-
 ### Changed
 
 - **Breaking:** Full workflow reporting publishes bounded terminal graphs by
@@ -1806,8 +1804,7 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/dariuszpanas/django-ray/compare/v0.5.0...v0.6.0
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1

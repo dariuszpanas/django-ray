@@ -1,6 +1,6 @@
-# Upgrade from 0.5.0 to 0.6.0
+# Upgrade from 0.5.0 to the unreleased 0.6.0 candidate
 
-This page describes the coordinated upgrade from 0.5.0 to 0.6.0, tracked in
+0.6.0 is unreleased. This page describes the planned coordinated upgrade from 0.5.0, tracked in
 [the release scope](https://github.com/dariuszpanas/django-ray/issues/508).
 Confirm published artifacts on the
 [releases page](https://github.com/dariuszpanas/django-ray/releases) before deploying;
