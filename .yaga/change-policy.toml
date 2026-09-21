@@ -1,0 +1,6 @@
+change-policy-version = 1
+
+[[rules]]
+name = "policy-needs-contributor-guidance"
+when-any = [".yaga.toml", ".yaga/*.toml", ".yaga/checks/*.toml"]
+require-any = ["CONTRIBUTING.md", "docs/contributing.md"]

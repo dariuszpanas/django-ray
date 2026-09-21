@@ -72,7 +72,7 @@ jobs:
           fi
           git archive --format=tar HEAD > "$RUNNER_TEMP/application-build/source.tar"
           tar -xf "$RUNNER_TEMP/application-build/source.tar" -C "$RUNNER_TEMP/application-source"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/application-build/source.txt"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/application-build/source.txt"
           sha256sum "$RUNNER_TEMP/application-build/source.tar" > "$RUNNER_TEMP/application-build/source.sha256"
           docker build --platform linux/amd64 --provenance=false -t localhost:5001/application-base:candidate "$RUNNER_TEMP/application-source"
           docker push localhost:5001/application-base:candidate

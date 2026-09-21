@@ -10,6 +10,7 @@
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve workflow-check spelling-check
 .PHONY: linux-test-catalogue linux-test-stage linux-test-aggregate
+.PHONY: repository-check pre-push-check workflow-lint
 
 # Include optional modules (comment out if not needed)
 -include mk/docker.mk
@@ -86,6 +87,19 @@ YAGA ?= uvx --from yaga-cli==0.2.0 --with typos==1.50.2 yaga
 YAGA_FORMAT ?= text
 workflow-check:
 	$(YAGA) repo check --plan .yaga/checks/workflows.toml --format $(YAGA_FORMAT)
+
+# Requires an explicitly admitted Docker daemon; always run on hosted CI.
+workflow-lint:
+	$(YAGA) workflow lint .github/workflows --format $(YAGA_FORMAT)
+
+# Commit first: tree and changed-path checks deliberately inspect Git objects.
+repository-check:
+	python scripts/check_repository_policy.py
+
+pre-push-check:
+	$(MAKE) check
+	$(MAKE) repository-check
+	$(MAKE) commit-check
 
 # The same isolated, pinned spelling check runs locally and in CI.
 spelling-check:
@@ -219,6 +233,7 @@ coverage-debt:
 
 # Run formatting, lint, and type checks without modifying files
 check:
+	$(MAKE) workflow-check
 	$(MAKE) spelling-check
 	$(MAKE) commit-policy-test
 	ruff format --check .
@@ -229,6 +244,7 @@ check:
 # Invoke as `uv run make ci` so Ray inherits one uv-managed environment.
 ci:
 	python scripts/require_linux.py
+	$(MAKE) workflow-check
 	$(MAKE) spelling-check
 	$(MAKE) commit-policy-test
 	ruff format --check .

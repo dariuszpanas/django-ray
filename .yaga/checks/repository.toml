@@ -1,0 +1,8 @@
+plan-version = 2
+checks = ["workflow", "workflow-security", "mode", "path", "size", "tree"]
+workflow-paths = [".github/workflows"]
+workflow-security-profile = "recommended-v3"
+mode-policy = ".yaga/mode-policy.toml"
+path-policy = ".yaga/path-policy.toml"
+size-policy = ".yaga/size-policy.toml"
+tree-policy = ".yaga/tree-policy.toml"

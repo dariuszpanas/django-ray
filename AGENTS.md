@@ -61,7 +61,7 @@ and hook configuration in an existing environment. Write commit messages in an e
 message file. Do not assemble prose with repeated `-m` flags, and do not bypass the hook with
 `--no-verify`. See `CONTRIBUTING.md` for examples and the canonical `.gitmessage` template.
 
-Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
+Before ordinary pushes, run `uv run make pre-push-check` plus the narrowest affected tests and applicable
 schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
 hosted CI matrix. A PR changing executable package or runtime behavior needs a full Linux validation
 checkpoint once before final review or auto-merge. It is also required for release candidates, break-glass
