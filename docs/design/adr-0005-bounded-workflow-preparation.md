@@ -45,10 +45,11 @@ producer that issued it. A general one-shot contract must therefore externalize
 exact state or weaken an existing invariant. This decision preserves the
 invariants.
 
-The runtime workflow actor persists schema-v2 compatibility snapshots of retained
-bounded state. Schema-v3 storage and readers are deployed, and a default-off stricter
-pilot may publish one admitted terminal snapshot. General writer activation still
-waits for this preparation boundary and the remaining documented gates.
+The bounded terminal profile uses in-memory preparation for at most 512 nodes and
+2,048 edges and publishes terminal schema-v3 detail by default. It no longer writes
+schema-v2 compatibility snapshots. This deliberately smaller profile does not
+activate the general streaming preparation contract described here or workflows
+near the larger storage-protocol ceilings.
 
 ## Decision
 
@@ -390,14 +391,14 @@ no candidate; it does not silently select a smaller topology. Raising or lowerin
 workspace resource limit requires evidence and release documentation but no migration
 or storage-protocol bump unless canonical durable behavior also changes.
 
-General/default schema-v3 producer activation remains disabled while issue #142
-completes bounded composite preparation. After #142 proves that boundary, activation
-still waits for #79's aggregate mailbox admission/coalescing, sampled reporting
-policy, and workspace admission behavior, plus the ADR-0004 reader-first writer drain.
-The producer-local session is bounded, but many forked handles can each create one
-such session. The default-off strict terminal pilot is the only current producer
-exception; neither this ADR nor a successful preparation benchmark authorizes broader
-production writer activation.
+Broader producer activation remains deferred while issue #142 completes bounded
+composite preparation. It also requires matching ingress and workspace admission
+evidence under #79 and the ADR-0004 coordinated writer drain. The default terminal
+profile instead keeps ordinary leaf capture local, bounds lifetime node/edge
+admission and uses the smaller in-memory preparation path. Its logical pending-call
+bound does not establish physical mailbox or spill-capacity bounds. Neither this
+ADR nor a successful preparation benchmark authorizes larger workloads, live graph
+updates or a sampled reporting policy.
 
 ## Prototype boundary
 

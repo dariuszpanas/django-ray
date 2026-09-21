@@ -545,6 +545,12 @@ class WorkflowProgressRunStorage(models.Model):
         on_delete=models.CASCADE,
         related_name="workflow_progress_runs",
     )
+    reporting_diagnostics_json = models.CharField(
+        max_length=16 * 1024,
+        null=True,
+        blank=True,
+        editable=False,
+    )
     attempt_number = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     execution_generation = models.PositiveBigIntegerField()
     run_id = models.UUIDField()

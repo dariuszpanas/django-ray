@@ -664,11 +664,10 @@ manually delete current manifests or referenced pages; their references are part
 the atomic publication and integrity contract.
 
 Apply migration `0013_workflow_progress_detail_storage` before scheduling the command.
-It is safe to establish the cleanup schedule while general/default schema-v3 runtime
-publication remains disabled for the reader-first rollout, #79 live-ingestion bound,
-and #142 composite preparation. The default-off strict terminal pilot may already
-create admitted bounded rows, which the same retention contract covers. Start with
-dry-run monitoring, then use bounded `--delete` passes at a cadence appropriate to
+Default full reporting creates bounded terminal detail rows, so include their
+retention cleanup in the deployment's operating schedule. The same retention
+contract covers historical pilot publications. Start with dry-run monitoring, then
+use bounded `--delete` passes at a cadence appropriate to
 database growth and the configured retention window. Alert on a nonzero exit and on an
 eligible count that does not fall across repeated successful passes.
 

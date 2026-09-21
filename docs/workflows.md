@@ -120,38 +120,32 @@ steps run within that task; they do not each create a Django task row with a
 separate retry or result lifecycle. Inspect the outer task for its durable state,
 attempt and final result. Open **Workflow execution** for workflow diagnostics.
 
-In the current release, the execution graph is a **terminal** view, not a live
-graph of a running workflow. Default full reporting alone does not produce that
-view. The sample application enables an experimental publisher that ordinary
-package installations leave disabled, so reproducing the sample's settings is a
-separate deployment decision.
+With default `full` reporting, the execution graph becomes available after the
+workflow finishes and its bounded publication succeeds. It is a **terminal** view;
+running workflows do not expose a live execution graph. Ordinary package and sample
+installations use the same publication path without a schema-selection setting.
 
 If a graph is missing, check these conditions in order:
 
 1. The task ran a django-ray workflow in Ray. Sync/local-fallback execution does
    not publish the Ray workflow graph, and an ordinary task is not a workflow.
-2. The workflow has finished. During execution, task status and available progress
-   diagnostics are the current observation surfaces.
+2. The workflow has finished. During execution, task status remains available.
 3. The run used `full` reporting. `terminal_only` intentionally provides a summary
    without node detail; `disabled` provides no workflow progress publication.
-4. Full-detail terminal publication was enabled **for that run** through
-   `DJANGO_RAY["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"]`. This is an experimental,
-   bounded opt-in: review its [admission profile and deployment requirements](reference/settings.md#workflow_progress_schema_v3_pilot)
-   before enabling it. Turning it on later does not backfill earlier runs.
-5. Publication completed and retained complete detail within the Admin limits:
+4. Publication completed and retained complete detail within the Admin limits:
    100 nodes, 256 edges, 100 detail records and a 128 KiB response. Missing,
    expired, truncated or oversized data does not produce a partial graph.
-6. You are viewing the intended attempt. After a retry starts, reload the page;
-   historical graphs require a retained terminal publication for that attempt.
+5. You are viewing the intended attempt. Historical graphs require a retained
+   terminal publication for that attempt; upgrading does not backfill older runs.
 
 A successful task with no graph is possible: observability publication is
 best-effort and does not replace the task result. Do not rerun a side-effecting
 task solely to recover a visualization without checking its idempotency.
-If the worker reports `publication_failed`, also check the publisher's
+A `publication_failed` warning identifies an observation failure, not a failed
+application result. Inspect its bounded diagnostic and storage availability. The
+small default terminal adapter prepares admitted graphs in memory; it does not
+require a SQLite temporary workspace. Larger preparation tools have separate
 [temporary-storage requirements](reference/settings.md#temporary-storage-for-full-workflow-publication).
-In particular, a non-root Kubernetes worker may be able to execute tasks while its
-shared `/tmp` permissions prevent terminal graph preparation. Fixing storage affects
-future publications; it does not reconstruct a missing historical graph.
 
 When the saved summary identifies the reason, Admin explains whether the workflow
 is unfinished, reporting was disabled or terminal-only, or detail expired or went
@@ -159,11 +153,9 @@ missing. If no supported summary exists, Admin cannot infer which reporting sett
 were active for that attempt. It shows the general publication checklist instead of
 promising that waiting or changing today's settings will recover an old graph.
 
-The [progress contract](#graph-and-progress-schema) describes the stored formats and
-diagnostic availability in detail. Making the default graph path supported and
-removing schema/pilot choices from ordinary setup is tracked in
-[#507](https://github.com/dariuszpanas/django-ray/issues/507); this limitation has
-not been resolved by a documentation or transport change.
+The [progress contract](#graph-and-progress-schema) describes historical reads,
+retention and incomplete-publication states. Changing today's settings cannot
+recover detail that an earlier run did not retain.
 
 ## Bound Dynamic Fan-Out
 
@@ -541,26 +533,27 @@ def normalize_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 `report_progress()` is a no-op that returns `False` during local or actor-free
 workflow execution. In full-reporting Ray execution, `True` means that the validated
-value was accepted into the leaf's best-effort producer session. It is not proof that
-the progress actor processed the value or that Django persisted it.
+value was accepted into the leaf's local latest-value slot. It is not proof that
+the coordinator received the value or that Django persisted it.
 
-Each reporting leaf invocation retains at most one outstanding application-progress
-acknowledgement and one canonical latest-value replacement slot. When the
-acknowledgement is still pending, another valid call replaces that slot instead of
-adding another actor call. At leaf exit, the producer makes at most one bounded
-latest-value handoff before sending `COMPLETED` or `FAILED`. Structural and lifecycle
-events, including `STARTED`, `COMPLETED`, and `FAILED`, are never coalesced. Producer,
-acknowledgement, or diagnostic failure remains observational and cannot replace the
-callable's result or exception.
+Each reporting leaf invocation retains one bounded canonical latest value and has
+no progress-actor handle. Another valid call replaces that local value without
+adding a Ray call. The successful final invocation returns its value and fixed
+capture counters through separate Ray metadata; the coordinator settles the node
+after Ray retries finish. Failed retry invocations do not contribute capture
+counters to that successful final record. Reporting or diagnostic failure remains
+observational and cannot replace the callable's result or exception.
 
-Coordinator map counters use the same per-producer bound, including forced
-updates. Time throttling still applies to ordinary updates, but a stalled actor
-does not accumulate another call on each interval. The final handoff can leave
-two unacknowledged replaceable calls: the original call and one latest value.
-Map registration, edges and terminal lifecycle events remain non-coalesced.
-These are per-producer limits, not a workflow-wide bound across maps, forked
-leaves or retries; aggregate admission remains tracked in
-[issue #261](https://github.com/dariuszpanas/django-ray/issues/261).
+Coordinator map counters remain acknowledgement-driven, including forced updates.
+Time throttling applies to ordinary updates, and each admitted map retains at most
+one outstanding replaceable call plus one terminal latest-value handoff. Map
+registration, edges and terminal lifecycle events remain non-coalesced. Lifetime
+admission is capped at 512 nodes and 2,048 edges and is never refunded after
+settlement. With at most 512 admitted map producers and a 32 KiB event limit, the
+aggregate bound is 1,024 pending replaceable calls and 32 MiB of canonical data.
+These are logical pending-call bounds, not cumulative traffic or a physical Ray
+mailbox-memory limit. See
+[reporting costs and limits](performance.md#keep-database-traffic-at-the-outer-boundary).
 
 Metrics are bounded operational metadata: use at most 32 scalar string, number,
 boolean, or null values. Keys are capped at 64 UTF-8 bytes, strings at 256 UTF-8
@@ -569,8 +562,13 @@ redacted or replaced before a value can enter the replacement slot or cross Ray.
 
 ## Graph and Progress Schema
 
-During execution, full reporting writes a versioned schema-v2 compatibility snapshot
-suitable for a custom task-tracking UI:
+Full reporting publishes terminal schema-v3 summaries and paginated detail. New runs
+do not write live graph snapshots. Custom tracking UIs should use the authorized
+summary and detail readers described below rather than expect changing graph data
+in `progress_data`.
+
+Historical schema-v2 snapshots have the following shape. This is a compatibility
+example, not an output produced by current workers:
 
 ```json
 {
@@ -610,19 +608,16 @@ suitable for a custom task-tracking UI:
 }
 ```
 
-Node IDs are stable for one workflow expansion. Dynamic map nodes appear after
-their input iterable resolves, so clients should redraw when `revision` changes.
-Revisions are monotonic only within one `run_identity.run_id` and restart when a
-new invocation claims progress ownership. Clients must reset their stored graph
-before applying a revision from a different run ID, attempt, or execution
-generation. Database writes occur only when the coordinator revision changes and
-the task is still `RUNNING` with that exact attempt, generation, and run ID. The
-independent task-monitor heartbeat still proves that the owning worker is alive.
+In historical snapshots, node IDs identify one workflow expansion and revisions are
+monotonic only within one `run_identity.run_id`. Never combine snapshots from
+different run IDs, attempts or execution generations. Current publication and
+paginated readers retain the same exact-run ownership fence. The independent
+task-monitor heartbeat remains separate from graph publication.
 
-When `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT=True`, one complete terminal schema-v2 actor
-snapshot may also be normalized into the bounded schema-v3 summary, immutable topology
-pages, and latest-state node detail. A successful publication becomes the preferred
-source for authorized bounded readers; it does not replace the live schema-v2 writes.
+Full reporting normalizes one terminal collector snapshot into the bounded summary,
+immutable topology pages and latest-state node detail. New runs do not write legacy
+live snapshots. Historical schema-v1/v2 data remains readable through the bounded
+compatibility reader; it is not converted into a new terminal graph.
 
 The task Admin can project one coherent terminal schema-v3 publication into an accessible
 execution graph. The section stays collapsed and performs no graph request until an
@@ -802,109 +797,58 @@ terminal full or terminal-only run without its expected schema-v3 publication is
 regardless of the configured Ray reporting default.
 
 `"full"`, `"terminal_only"`, and `"disabled"` are executable policies. Sampled
-reporting remains later #79 work. The schema-v3 pilot still applies only to full mode:
-it collects live actor evidence and changes terminal publication, while terminal-only
-mode publishes its bounded summary without enabling the pilot. Changing
-`WORKFLOW_PROGRESS_FLUSH_SECONDS` only throttles full-mode database snapshots and does
-not remove producer or actor overhead.
+and live reporting remain later work. `WORKFLOW_PROGRESS_FLUSH_SECONDS` controls
+coordinator snapshot-read cadence; it does not enable live database publication.
 
-Full reporting prepares every data event as canonical identity-bound JSON before the
-Ray call. Event payloads are capped at 16 KiB, complete wire and decoded envelopes at
-32 KiB, and dependency-edge batches at 32 edges. The actor revalidates the complete
-task, attempt, generation, and workflow-run fence before mutation. With the schema-v3
-pilot disabled, its node, edge, recent-event, and retained-byte state uses the durable
-V1 limits. Enabling the pilot narrows actor collection and publication to the fixed
-`schema-v3-pilot-v1` profile: 512 nodes, 2,048 edges, 2 MiB of topology, 1 MiB of
-detail, and 4 MiB combined, with the byte ceilings applied to encoded and decoded
-evidence. Descriptive metadata is redacted before it crosses Ray.
+Full reporting admits at most 512 nodes and 2,048 edges over the workflow lifetime.
+Completed nodes do not return admission capacity. Exceeding either limit preserves
+the application outcome and attempts a `LIMIT_EXCEEDED` summary without a partial
+graph. Topology is capped at 2 MiB, detail at 1 MiB and their combination at 4 MiB,
+for both encoded and decoded evidence. Events are canonical identity-bound JSON:
+payloads are capped at 16 KiB, complete envelopes at 32 KiB and edge batches at 32
+edges. Descriptive metadata is redacted before transport.
 
-Full reporting is acknowledgement-driven, not time-sampled. When acknowledgements
-keep up, it may submit every accepted application update. Under a slow acknowledgement,
-one leaf invocation coalesces replaceable application progress into its one latest-value slot.
-There is no selectable `sampled` policy or sampling interval.
+A reporting leaf retains one local latest-value slot and returns final metadata;
+it receives no collector handle and submits no application-progress actor calls.
+Failed retry invocations do not contribute successful-final-invocation capture
+counters. Bounded map children have reporting suppressed and are represented by
+their map node. Coordinator map producers retain one outstanding call and one
+bounded final handoff. Lifetime admission limits their aggregate outstanding
+replaceable calls to at most 1,024 and their canonical offered bytes to 32 MiB.
+These are logical outstanding bounds, not cumulative traffic or physical Ray
+mailbox, network-buffer, serialization-copy or application-memory limits.
 
-These bounds close the individual envelope, retained collector, and per-leaf
-application-progress state gaps for full reporting. They do not bound the aggregate
-number of independently bounded sessions created by forked actor handles, their
-combined calls or bytes, or the actor mailbox across a whole workflow. Aggregate
-admission/coalescing must be proven before sampled reporting can be introduced.
-Bounded actor-to-preparation draining at the hard V1 ceilings also remains separate
-scale and default-activation work. The stricter full-detail producer pilot is
-therefore experimental and default-off rather than a general V1-scale claim. If actor
-ingress records any rejection or accepted truncation, the terminal adapter refuses
-schema-v3 publication instead of claiming that an incomplete graph is complete. A
-bounded event or actor snapshot is observational state, not a recovery protocol.
+Structural and lifecycle evidence is not coalesced. Invalid, rejected or incomplete
+evidence cannot be advertised as a complete graph. Publication is observational:
+its failure never authorizes replaying application work. Large-scale preparation,
+sampled reporting and live visualization have separate qualification requirements.
 
 ## Durability Semantics
 
 The outer Django task is the durability and retry boundary:
 
 - Internal steps do not create individual Django tasks.
-- In full reporting mode, an in-memory Ray coordinator collects node events. The outer
-  task writes a schema-v2 compatibility snapshot of the actor's retained bounded state
-  to `RayTaskExecution.progress_data` at `WORKFLOW_PROGRESS_FLUSH_SECONDS` intervals.
-  Individual producer envelopes and retained actor nodes, edges, events, and bytes are
-  bounded. Each reporting leaf invocation also holds no more than one outstanding mutable
-  application-progress acknowledgement and one canonical latest-value slot during
-  execution, followed by one bounded terminal handoff/report. Structural and lifecycle
-  evidence is never coalesced. Actor ingress diagnostics report actor-side rejection
-  counts, accepted events marked truncated, a versioned fixed-shape cost block, and an
-  optional fixed-shape aggregate of accepted leaf producer reports. The producer
-  aggregate counts valid offers, submissions, superseded and locally dropped values,
-  producer-observed acknowledgement outcomes, and terminal-handoff outcomes. It
-  contains no producer identities or application values. A pending acknowledgement
-  means only that the leaf had not observed its result when it sealed the report; the
-  actor may still process that application-progress call before the report.
-  Under retained-byte pressure, the collector can discard display progress and
-  recent `PROGRESS` events to admit structural or lifecycle data. It keeps map
-  fanout counts, task states, topology and failure details. Map numeric growth is
-  reserved when retained, so a later counter update cannot displace lifecycle
-  evidence. Fixed `replaceable` counters distinguish evicted node displays,
-  evicted progress events and dropped updates from invalid ingress. Valid display
-  drops do not invalidate a complete terminal publication. If structural data or
-  observed map counts cannot fit without display progress, rejection remains
-  explicit; the collector does not claim a complete graph or exceed its budget.
-  The actor-cost block uses
-  saturating counters for actor-received logical calls/bytes, calls decoded under the
-  exact run fence by fixed event kind, end-to-end processed delivery delay, ingest
-  handler wall/process CPU
-  time, and snapshot-build wall/process CPU time through the retained snapshot. It
-  contains no application payloads or variable-cardinality producer labels. A
-  producer-side failure before actor submission cannot appear in those counters, and
-  processed delivery delay includes transport, scheduling, queueing, and clock effects
-  rather than isolating mailbox lag. The aggregate Ray mailbox across forked handles,
-  snapshot-to-preparer drain, and transient snapshot materialization are not yet
-  governed by the later admission/backpressure contract. Terminal-only and disabled
-  modes bypass that live coordinator, event codec, actor, producer session, and
-  snapshot path while leaving the durable outer-task boundary intact. Terminal-only
-  still makes its one bounded best-effort summary publication after the application
-  reaches success or failure; disabled does not.
-- A separate nullable `workflow_progress_summary_json` field and schema-v3 codec are
-  deployed reader-first. The field is fixed-shape and capped at 16 KiB of canonical
-  UTF-8 JSON. Package-owned topology/detail tables and the internal storage writer can
-  now publish a verified immutable topology, sparse normalized latest-state detail,
-  and that summary pointer in one transaction. The standalone schema-v3 writer rejects
-  topology/detail pointers; it is the only path for an intentional summary-only
-  `DISABLED` or `OMITTED_BY_POLICY` record, which creates no empty detail storage.
-  Terminal-only execution now uses the omitted-by-policy path for one terminal summary
-  without a live actor. Authorized public readers are implemented. The default-off
-  pilot makes one
-  best-effort terminal publication from an internally consistent full-reporting actor
-  snapshot, revalidates the pinned plan and exact run fence, then stages and atomically
-  promotes topology, detail, and summary. For a failed run, the coordinator keeps
-  polling within the existing terminal flush deadline until every transitive ancestor
-  of each failed node is reported succeeded. This closes cross-sender actor delivery
-  races without inferring a completion event; if the causal fence does not close,
-  schema v3 remains unpublished. Rejected or truncated ingress, invalid cross-field
-  evidence, admission overflow, preparation truncation, a stale fence, or storage
-  failure likewise leaves schema v3 unpublished and emits a stable bounded diagnostic;
-  it never changes the application result. The periodic schema-v2 writer remains
-  active for rolling compatibility. Terminal-only does not solve or weaken the
-  remaining full-reporting boundaries: aggregate producer/mailbox admission and
-  coalescing across forked handles, the sampled policy that depends on that aggregate
-  bound, bounded actor-to-preparer draining, remaining live cost attribution,
-  large-fan-out slow-consumer evidence, default schema-v3 activation, and old-writer
-  drain remain #79 and its dependent deliveries.
+- Full reporting collects bounded coordinator events and final leaf outcomes, then
+  makes one best-effort terminal publication. It revalidates the pinned plan and
+  exact run fence before atomically promoting topology, detail and the bounded
+  summary. New runs leave legacy `progress_data` empty.
+- The public summary is capped at 16 KiB. Separate nullable run diagnostics retain
+  fixed actor-cost, map-producer and successful-final-leaf capture counters in at most
+  16 KiB of canonical ASCII JSON. They share the exact detail revision and run cleanup
+  lifetime; they contain no progress values, graph or producer identities. They do
+  not measure physical network traffic or Ray mailbox memory. Older runs lack these
+  counters, which means unavailable evidence rather than zero cost.
+- Terminal-only execution publishes one bounded summary without an actor or detail
+  storage. Disabled execution publishes neither. Both preserve the outer task's
+  result, exception, cancellation and retry behavior.
+- Missing outcomes, preparation failure or stale ownership cannot produce a complete
+  graph. The coordinator attempts an honest unavailable or limit-exceeded terminal
+  summary where its ownership fence still permits publication. A lost fence or
+  database failure can leave publication missing; neither changes application success.
+- Under retained-byte pressure, discard replaceable display progress before
+  rejecting structural or lifecycle evidence. Preserve map counts, topology,
+  task states and failure detail. Fixed replaceable counters distinguish
+  display eviction and dropped updates from invalid ingress.
 - A workflow invocation atomically claims `workflow_run_id`. Retry, cancellation,
   timeout, LOST recovery, and a newer invocation prevent its old coordinator from
   writing again; rejected reporters drain later leaf events without persisting them.
@@ -950,17 +894,16 @@ monotonic exact-run writer primitive, bounded rolling reader, and lifecycle arch
 Its second delivery adds the run-scoped topology manifests/pages, normalized
 latest-state rows, bounded staging and integrity verification, sparse atomic
 publication, terminal expiry, and retention/orphan cleanup. Public detail services are
-implemented. The runtime producer continues to write schema-v2 compatibility snapshots
-of retained actor state and may additionally publish one terminal schema-v3 record only
-when the stricter pilot is explicitly enabled and admitted.
+implemented. The runtime publishes admitted terminal detail by default and retains
+bounded legacy readers for older snapshots.
 The small terminal adapter admits an exact primitive snapshot before normalization:
 at most 4 MiB of canonical UTF-8 JSON, 131,072 values including keys, and depth 16.
 Its existing 512-node and 2,048-edge profile bounds materialized identity state.
 It uses the canonical in-memory topology/detail preparation path without acquiring
 a SQLite spill workspace. Oversized or invalid snapshots are refused without a
 durable candidate. These are preparation bounds, not a claim about Ray mailbox or
-deserialization memory. The pilot remains opt-in; this preparation change alone
-does not establish the supported default graph contract or live visualization.
+deserialization memory. This small terminal path does not enable live visualization
+or admit workloads near the larger storage-protocol ceilings.
 ADR-0005's production topology phase now externalizes exact node/edge identity,
 duplicate, reference, and selection state into a private bounded SQLite workspace and
 removes it before returning prepared evidence. The unchanged result still includes
@@ -982,21 +925,21 @@ See [Workflow Plans and Execution Strategies](workflow-plans.md).
 Apply database migrations before starting upgraded workers. Migration
 `0012_workflow_progress_summary` adds nullable summary fields, and migration
 `0013_workflow_progress_detail_storage` adds package-owned topology and detail
-tables. Neither migration rewrites existing `progress_data`; older writers continue to
-work and upgraded readers retain the 64 MiB schema-v1/v2 compatibility cap. The
-package-level pilot remains disabled unless explicitly configured. Deploy the
-authorized public facade and bounded storage before opting in, keep old workflow
-writers compatible through the rollout, and complete the remaining mailbox,
-preparation, aggregate-spill, and migration work before enabling schema v3 by default
-or admitting workloads near the hard V1 ceilings.
+tables. Neither migration rewrites existing `progress_data`; upgraded readers retain
+the 64 MiB schema-v1/v2 compatibility cap. The
+old pilot setting is removed: delete it before startup. Migration 0027 adds nullable
+run diagnostics without backfilling historical measurements. Drain older workers
+under the coordinated upgrade procedure so their live writer does not overlap the
+new terminal path. Validate defaults, archived graphs and reporting policies against
+the selected source before rollout.
 
-Existing rows start with `workflow_run_id = NULL` and a nullable plan identity so an
-older writer can still insert during the rollout; the first upgraded, fully identified
-workflow invocation claims a UUID and pins its plan. Prepared actors or graphs in later
-strategies must drain when that fingerprint changes. Custom uses of
-`durable_task_execution()` that omit the attempt or execution generation continue to
-run their workflow but intentionally do not persist the plan or progress because their
-writes cannot be fenced safely.
+Historical rows may have `workflow_run_id = NULL` and a nullable plan identity. A
+current, fully identified workflow invocation claims a UUID and pins its plan;
+upgrading does not fabricate identities for old rows. Prepared actors or graphs in
+later strategies must drain when that fingerprint changes. Use the supported durable
+task entrypoints to supply the strict execution request and attempt fence. A custom
+`durable_task_execution()` context alone does not authorize nested Ray execution:
+unbound durable contexts are rejected before creating workflow remotes.
 
 The drain statement is a contract for those later strategies. The current release
 provides fingerprint comparison and stale-owner helper functions but has no resident
@@ -1081,8 +1024,8 @@ vocabulary is `external_result_not_loaded`, `stored_result_exceeds_poll_limit`,
 the corresponding value is available. Included values still pass through the normal
 presentation-redaction policy.
 
-The bundled testproject enables `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` by default, so an
-admitted terminal run becomes available through the bounded summary, topology-node,
+The bundled testproject uses the package default terminal path, so an admitted
+terminal run becomes available through the bounded summary, topology-node,
 topology-edge, and node-detail routes above. The guarded local KubeRay gate exercises
 those routes against the real producer path and requires non-empty, mutually consistent
 topology and detail.

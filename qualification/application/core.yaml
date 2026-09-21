@@ -1270,3 +1270,111 @@ spec:
             name: assert-after
           status:
             succeeded: 1
+
+  - name: measure-reporting-policies
+    try:
+    - create:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: reporting-benchmark
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 600
+            parallelism: 1
+            completions: 1
+            template:
+              metadata:
+                labels:
+                  app: reporting-benchmark
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Never
+                terminationGracePeriodSeconds: 30
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                  runAsGroup: 1000
+                  fsGroup: 1000
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                - name: assertions
+                  image: ($values.applicationImage)
+                  resources:
+                    requests:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 256Mi
+                    limits:
+                      cpu: 200m
+                      memory: 512Mi
+                      ephemeral-storage: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop:
+                      - ALL
+                  envFrom:
+                  - configMapRef:
+                      name: application-config
+                  - secretRef:
+                      name: application-credentials
+                  env:
+                  - name: DJANGO_SECRET_KEY_PART_ONE
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_ONE
+                  - name: DJANGO_SECRET_KEY_PART_TWO
+                    valueFrom:
+                      secretKeyRef:
+                        name: application-credentials
+                        key: DJANGO_SECRET_KEY_PART_TWO
+                  - name: DJANGO_SECRET_KEY
+                    value: $(DJANGO_SECRET_KEY_PART_ONE)$(DJANGO_SECRET_KEY_PART_TWO)
+                  command:
+                  - /bin/sh
+                  - -ec
+                  - python -m qualification.application.run_reporting_benchmark --output /receipts/reporting-benchmark-raw.json
+                  volumeMounts:
+                  - name: runtime
+                    mountPath: /runtime
+                    readOnly: true
+                  - name: receipts
+                    mountPath: /receipts
+                    readOnly: false
+                  - name: credentials
+                    mountPath: /credentials
+                    readOnly: true
+                  - name: tmp
+                    mountPath: /tmp
+                    readOnly: false
+                volumes:
+                - name: runtime
+                  persistentVolumeClaim:
+                    claimName: runtime
+                - name: receipts
+                  persistentVolumeClaim:
+                    claimName: receipts
+                - name: credentials
+                  secret:
+                    secretName: application-credentials
+                    defaultMode: 288
+                    items:
+                    - key: DJANGO_API_TOKEN
+                      path: DJANGO_API_TOKEN
+                - name: tmp
+                  emptyDir:
+                    sizeLimit: 256Mi
+                    medium: ''
+    - assert:
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: reporting-benchmark
+          status:
+            succeeded: 1

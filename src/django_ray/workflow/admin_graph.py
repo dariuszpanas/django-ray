@@ -111,6 +111,11 @@ _STATUS_MESSAGES = {
 }
 _DEGRADED_STATUSES = frozenset(_STATUS_MESSAGES) - {"AVAILABLE"}
 _REASON_MESSAGES = {
+    ("LIMIT_EXCEEDED", "PUBLICATION_LIMIT"): (
+        "This workflow exceeded the reporting limits, so no graph details were saved. "
+        "Its task outcome is unchanged. Use smaller workflows or terminal-only reporting "
+        "for future runs."
+    ),
     ("NOT_REPORTED", "RUNNING"): (
         "This workflow has not finished. Admin graphs are available only after completion; "
         "check again after it finishes."
@@ -276,6 +281,8 @@ def inspect_admin_workflow_graph_summary(
         raise AdminWorkflowGraphError("NOT_REPORTED", reason="RUNNING")
 
     availability = envelope.get("availability")
+    if availability == "LIMIT_EXCEEDED":
+        raise AdminWorkflowGraphError("LIMIT_EXCEEDED", reason="PUBLICATION_LIMIT")
     if availability == "TRUNCATED":
         raise AdminWorkflowGraphError("TRUNCATED")
     if availability in {

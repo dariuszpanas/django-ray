@@ -155,7 +155,6 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
     edges.extend(
         [
             {"source": "node-0", "target": "node-2"},
-            {"source": "node-1", "target": "node-3"},
         ]
     )
     inbound: dict[str, list[str]] = {f"node-{index}": [] for index in range(expected_nodes)}
@@ -164,13 +163,16 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
     accepted_by_kind = dict.fromkeys(benchmark._EXPECTED_INGRESS_KINDS, 0)
     accepted_by_kind.update(
         initialized=1,
-        node_registered=expected_nodes,
+        node_registered=6,
+        map_registered=2,
         edges_registered=expected_nodes - 1,
-        submitted=expected_nodes,
-        started=expected_nodes,
-        application_progress=3,
-        completed=expected_nodes,
-        producer_report=3,
+        submitted=6,
+        started=0,
+        application_progress=0,
+        map_progress=3,
+        completed=2,
+        node_settled=6,
+        producer_report=2,
     )
     accepted = sum(accepted_by_kind.values())
     decoded_by_kind = dict(accepted_by_kind)
@@ -223,6 +225,7 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
         },
         "recent_events": [],
         "ingress": {
+            "replaceable": {"evicted_nodes": 0, "evicted_events": 0, "dropped_updates": 0},
             "accepted": accepted,
             "rejected": 0,
             "truncated": 0,
@@ -270,7 +273,7 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
             "producer": {
                 "schema_version": 1,
                 "saturated": False,
-                "reports": 3,
+                "reports": 2,
                 "offered": 9,
                 "submitted": 3,
                 "superseded": 6,
@@ -280,11 +283,24 @@ def _ingress_progress_for(execution: RayTaskExecution) -> str:
                 "ack_failed": 0,
                 "pending_acknowledgements": 0,
                 "terminal_handoffs": {
-                    "not_needed": 3,
+                    "not_needed": 2,
                     "submitted": 0,
                     "failed": 0,
                     "actor_unavailable": 0,
                 },
+            },
+            "capture": {
+                "schema_version": 1,
+                "scope": "successful_final_invocations",
+                "reports": 6,
+                "offered": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "superseded": 0,
+                "canonical_bytes": 0,
+                "retained": 0,
+                "retained_bytes": 0,
+                "saturated": False,
             },
         },
     }
@@ -317,8 +333,18 @@ def _execution(policy: benchmark.Policy) -> RayTaskExecution:
         workflow_plan_selection=_selection(policy),
     )
     if policy == "full":
-        execution.progress_data = _ingress_progress_for(execution)
-        execution.save(update_fields=["progress_data"])
+        from django_ray.workflow.progress.publication import publish_terminal_workflow_progress
+
+        snapshot = json.loads(_ingress_progress_for(execution))
+        execution.state = TaskState.RUNNING
+        execution.save(update_fields=["state"])
+        publication = publish_terminal_workflow_progress(
+            benchmark._run_identity(execution), snapshot, detail_days=7
+        )
+        assert publication.accepted, publication.reason
+        execution.refresh_from_db()
+        execution.state = TaskState.SUCCEEDED
+        execution.save(update_fields=["state"])
     if policy == "terminal_only":
         summary = terminal_only_workflow_progress_summary(
             execution,
@@ -480,7 +506,7 @@ def test_workload_and_measurement_coverage_are_bounded() -> None:
 
     assert first == second
     assert first["fingerprint"] != changed["fingerprint"]
-    assert benchmark._expected_dynamic_topology(fast_items=2, slow_items=1) == (9, 10)
+    assert benchmark._expected_dynamic_topology(fast_items=2, slow_items=1) == (8, 8)
     assert coverage["durable_task_timing"]["status"] == "measured"
     assert coverage["actor_creation_count"]["status"] == "derived"
     assert coverage["actor_observed_logical_ingress"]["status"] == "measured"
@@ -718,16 +744,15 @@ def test_wait_for_terminal_fails_at_deadline() -> None:
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("policy", "pilot_enabled", "availability"),
+    ("policy", "availability"),
     [
-        ("full", False, None),
-        ("terminal_only", True, "OMITTED_BY_POLICY"),
-        ("disabled", True, None),
+        ("full", "AVAILABLE"),
+        ("terminal_only", "OMITTED_BY_POLICY"),
+        ("disabled", None),
     ],
 )
 def test_sample_validates_actor_free_and_package_default_contracts(
     policy: benchmark.Policy,
-    pilot_enabled: bool,
     availability: str | None,
 ) -> None:
     execution = _execution(policy)
@@ -741,7 +766,6 @@ def test_sample_validates_actor_free_and_package_default_contracts(
         poll_count=2,
         fast_items=2,
         slow_items=1,
-        pilot_enabled=pilot_enabled,
     )
 
     assert sample["policy"] == policy
@@ -762,14 +786,14 @@ def test_sample_validates_actor_free_and_package_default_contracts(
         assert actor_cost["delivery_delay"]["negative_clock_samples"] == 0
         assert actor_cost["snapshot"]["calls"] == 2
         producer = cast(dict[str, Any], ingress["producer"])
-        assert producer["reports"] == 3
+        assert producer["reports"] == 2
         assert producer["offered"] == 9
         assert producer["submitted"] == 3
         assert producer["superseded"] == 6
         assert producer["terminal_handoffs"] == {
             "actor_unavailable": 0,
             "failed": 0,
-            "not_needed": 3,
+            "not_needed": 2,
             "submitted": 0,
         }
     selection = cast(dict[str, Any], sample["selection"])
@@ -784,6 +808,67 @@ def test_sample_validates_actor_free_and_package_default_contracts(
     serialized = json.dumps(sample)
     assert "private_application_data" not in serialized
     assert "not emitted" not in serialized
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("policy", benchmark.POLICIES)
+@pytest.mark.parametrize("hide_identity", [False, True])
+def test_selection_accepts_the_materialized_benchmark_plan(
+    policy: benchmark.Policy, hide_identity: bool, settings
+) -> None:
+    from django_ray.observability import get_workflow_plan
+    from django_ray.workflow.plans import materialize_workflow_plan
+    from testproject.apps.cluster_tasks.workflows import complex_branch_workflow
+
+    if hide_identity:
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "REDACT_PATTERNS": ["selection", "fingerprint", "dynamic_tasks"],
+        }
+    execution = _execution(policy)
+    plan = materialize_workflow_plan(
+        complex_branch_workflow, invocation_args=(2, 1, 0.01, 0.02)
+    ).plan
+    execution.workflow_plan_json = plan.canonical_json
+    execution.workflow_plan_fingerprint = plan.fingerprint
+    execution.workflow_plan_selection = json.dumps(
+        plan.eligibility.select(
+            "dynamic_tasks", requested_policy="auto", reporting_policy=policy
+        ).as_dict()
+    )
+
+    # Presentation redaction omits the selection for this real plan. That is
+    # not evidence of an invalid execution policy.
+    assert "selection" not in (get_workflow_plan(execution) or {})
+
+    assert benchmark._selection(execution, policy) == {
+        "reporting_policy": policy,
+        "selected_strategy": "dynamic_tasks",
+        "plan_fingerprint": plan.fingerprint,
+        "plan_node_count": 13,
+        "plan_edge_count": 13,
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("corruption", ["policy", "strategy", "fingerprint", "oversized"])
+def test_selection_still_rejects_invalid_binding_or_oversized_plan(corruption: str) -> None:
+    execution = _execution("disabled")
+    if corruption == "policy":
+        execution.workflow_plan_selection = _selection("full")
+    elif corruption == "strategy":
+        selection = json.loads(execution.workflow_plan_selection)
+        selection.update(selected_strategy="local", eligible_strategies=["local"])
+        execution.workflow_plan_selection = json.dumps(selection)
+    elif corruption == "fingerprint":
+        execution.workflow_plan_fingerprint = "sha256:" + "0" * 64
+    else:
+        execution.workflow_plan_json = (
+            cast(str, execution.workflow_plan_json) + " " * benchmark.MAX_PLAN_BYTES
+        )
+
+    with pytest.raises(benchmark.WorkflowReportingBenchmarkError):
+        benchmark._selection(execution, "disabled")
 
 
 @pytest.mark.django_db
@@ -805,7 +890,6 @@ def test_sample_rejects_invalid_plan_and_selection_evidence() -> None:
             poll_count=1,
             fast_items=2,
             slow_items=1,
-            pilot_enabled=True,
         )
 
     plan_json, fingerprint = _plan()
@@ -840,7 +924,6 @@ def test_sample_rejects_invalid_plan_and_selection_evidence() -> None:
             poll_count=1,
             fast_items=2,
             slow_items=1,
-            pilot_enabled=True,
         )
 
 
@@ -861,13 +944,14 @@ def test_sample_rejects_invalid_plan_and_selection_evidence() -> None:
 )
 def test_full_sample_rejects_incomplete_actor_evidence(corruption: str) -> None:
     execution = _execution("full")
-    snapshot = json.loads(cast(str, execution.progress_data))
+    run = WorkflowProgressRunStorage.objects.get(execution=execution)
+    snapshot = json.loads(cast(str, run.reporting_diagnostics_json))
     if corruption == "identity":
         snapshot["run_identity"]["run_id"] = str(uuid4())
     elif corruption == "truncated":
         snapshot["ingress"]["truncated"] = 1
     elif corruption == "topology":
-        snapshot["graph"]["nodes"].pop()
+        snapshot["ingress"]["retained_nodes"] -= 1
     elif corruption == "erased_decoded_cost":
         cost = snapshot["ingress"]["cost"]
         cost["ingest"]["decoded_calls"] = 0
@@ -906,13 +990,13 @@ def test_full_sample_rejects_incomplete_actor_evidence(corruption: str) -> None:
                 "acknowledged": 4,
             }
         )
-    execution.progress_data = json.dumps(snapshot)
-    execution.save(update_fields=["progress_data"])
+    run.reporting_diagnostics_json = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    run.save(update_fields=["reporting_diagnostics_json"])
 
     expected_error = (
         "saturated"
         if corruption in {"saturated_cost", "saturated_producer"}
-        else "invalid or incomplete|expanded workload|inconsistent"
+        else "invalid or incomplete|bounded workload|inconsistent"
     )
     with pytest.raises(
         benchmark.WorkflowReportingBenchmarkError,
@@ -927,7 +1011,27 @@ def test_full_sample_rejects_incomplete_actor_evidence(corruption: str) -> None:
             poll_count=1,
             fast_items=2,
             slow_items=1,
-            pilot_enabled=False,
+        )
+
+
+@pytest.mark.django_db
+def test_missing_diagnostics_do_not_fall_back_to_legacy_snapshots():
+    execution = _execution("full")
+    execution.progress_data = _ingress_progress_for(execution)
+    execution.save(update_fields=["progress_data"])
+    WorkflowProgressRunStorage.objects.filter(execution=execution).update(
+        reporting_diagnostics_json=None
+    )
+    with pytest.raises(benchmark.WorkflowReportingBenchmarkError, match="reporting diagnostics"):
+        benchmark._sample(
+            execution,
+            cycle=1,
+            position=1,
+            policy="full",
+            client_poll_seconds=0.1,
+            poll_count=1,
+            fast_items=2,
+            slow_items=1,
         )
 
 
@@ -950,7 +1054,6 @@ def test_sample_rejects_terminal_failure() -> None:
             poll_count=1,
             fast_items=2,
             slow_items=1,
-            pilot_enabled=True,
         )
 
 
@@ -1043,6 +1146,7 @@ def test_storage_counts_logical_aggregates_without_double_counting() -> None:
 
     assert storage["run_storage"] == {
         "rows": 1,
+        "diagnostics_bytes": 0,
         "detail_encoded_bytes": len(detail_payload),
         "detail_decoded_bytes": len(detail_payload),
     }
@@ -1157,6 +1261,19 @@ def test_policy_aggregates_never_rank_or_claim_causality() -> None:
                                         "actor_unavailable": 0,
                                     },
                                 },
+                                "capture": {
+                                    "schema_version": 1,
+                                    "scope": "successful_final_invocations",
+                                    "reports": 6,
+                                    "offered": 0,
+                                    "accepted": 0,
+                                    "rejected": 0,
+                                    "superseded": 0,
+                                    "canonical_bytes": 0,
+                                    "retained": 0,
+                                    "retained_bytes": 0,
+                                    "saturated": False,
+                                },
                             }
                             if policy == "full"
                             else None
@@ -1169,6 +1286,10 @@ def test_policy_aggregates_never_rank_or_claim_causality() -> None:
 
     assert set(aggregates) == set(benchmark.POLICIES)
     assert cast(dict[str, Any], aggregates["full"])["sample_count"] == 3
+    full_capture = cast(dict[str, Any], aggregates["full"])["terminal_leaf_capture"]
+    assert full_capture["scope"] == "successful_final_invocations"
+    assert full_capture["reports"]["median"] == 6
+    assert full_capture["offered"]["median"] == 0
     full_cost = cast(
         dict[str, Any],
         cast(dict[str, Any], aggregates["full"])["actor_observed_cost"],

@@ -12,6 +12,15 @@ import time
 from pathlib import Path
 
 from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
+from qualification.application.run_reporting_benchmark import (
+    LAYER as REPORTING_LAYER,
+)
+from qualification.application.run_reporting_benchmark import (
+    MAX_RECEIPT_BYTES,
+)
+from qualification.application.run_reporting_benchmark import (
+    validate_receipt as validate_reporting_receipt,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "qualification/application"
@@ -27,8 +36,10 @@ RECEIPTS = {
     "django-web": ("setup", ("setup",)),
     "assert-before": ("assertions", ("before-nodes", "before-core", "before-workflows")),
     "assert-after": ("assertions", ("after-nodes", "after-core", "after-workflows")),
+    "reporting-benchmark": ("assertions", ("reporting",)),
 }
 LAYERS = {
+    "reporting": REPORTING_LAYER,
     "setup": "application_setup",
     "nodes": "generic_ray_nodes",
     "core": "application_core",
@@ -45,7 +56,8 @@ def checked(argv, *, data=None, timeout=40):
 
 def parse_receipts(raw: bytes, names: tuple[str, ...]) -> dict[str, bytes]:
     """Accept complete source receipts, never a truncated log or partial success."""
-    if len(raw) > 65536:
+    log_limit = MAX_RECEIPT_BYTES + 4096 if names == ("reporting",) else 65536
+    if len(raw) > log_limit:
         raise ValueError("Receipt log exceeds its byte limit")
     parsed = []
     for line in raw.splitlines():
@@ -54,15 +66,21 @@ def parse_receipts(raw: bytes, names: tuple[str, ...]) -> dict[str, bytes]:
         value = json.loads(line)
         if not isinstance(value, dict) or value.get("layer") not in LAYERS.values():
             continue
+        receipt_limit = 16384
+        if value["layer"] == "workflow_api_admin":
+            receipt_limit = WORKFLOW_RECEIPT_MAX_BYTES
+        elif value["layer"] == REPORTING_LAYER:
+            receipt_limit = MAX_RECEIPT_BYTES
         if (
-            len(line)
-            > (WORKFLOW_RECEIPT_MAX_BYTES if value["layer"] == "workflow_api_admin" else 16384)
+            len(line) > receipt_limit
             or type(value.get("schema_version")) is not int
             or value["schema_version"] != 1
             or value.get("status") != "passed"
             or value.get("complete_application_gate") is not False
         ):
             raise ValueError("Missing or failed application receipt")
+        if value["layer"] == REPORTING_LAYER:
+            validate_reporting_receipt(value)
         parsed.append((value, line))
     if len(parsed) != len(names):
         raise ValueError("Receipt count differs from the required assertions")
@@ -88,6 +106,7 @@ def collect(kubectl, namespace: str, output: Path, image: str) -> None:
             for item in pod["spec"].get("containers", []) + pod["spec"].get("initContainers", [])
             if item["name"] == container
         ]
+        log_limit = MAX_RECEIPT_BYTES + 4096 if names == ("reporting",) else 65536
         raw = checked(
             [
                 *kubectl,
@@ -97,10 +116,10 @@ def collect(kubectl, namespace: str, output: Path, image: str) -> None:
                 namespace,
                 "-c",
                 container,
-                "--limit-bytes=65537",
+                f"--limit-bytes={log_limit + 1}",
             ]
         )
-        if len(raw) > 65536:
+        if len(raw) > log_limit:
             raise ValueError("Receipt log exceeds its byte limit")
         (output / f"{app}.log").write_bytes(raw)
         if (

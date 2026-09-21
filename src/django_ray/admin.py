@@ -297,6 +297,10 @@ _WORKFLOW_PROGRESS_MESSAGES = {
     ),
     "AVAILABLE": "Bounded workflow topology and node detail are available.",
     "TRUNCATED": "Bounded workflow detail is available but incomplete.",
+    "LIMIT_EXCEEDED": (
+        "Reporting limits were exceeded, so no graph details were saved. The task outcome "
+        "is unchanged. Use smaller workflows or terminal-only reporting for future runs."
+    ),
     "EXPIRED": "Retained workflow topology and node detail have expired.",
     "MISSING": "The workflow summary references retained detail that is missing.",
     "CORRUPT": "Workflow progress failed validation.",
@@ -2257,6 +2261,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             "OMITTED_BY_POLICY": "OMITTED_BY_POLICY",
             "AVAILABLE": "AVAILABLE",
             "TRUNCATED": "TRUNCATED",
+            "LIMIT_EXCEEDED": "LIMIT_EXCEEDED",
             "EXPIRED": "EXPIRED",
             "MISSING": "MISSING",
             "CORRUPT": "CORRUPT",

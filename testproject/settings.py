@@ -444,10 +444,6 @@ DJANGO_RAY = {
         "DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK",
         default=False,
     ),
-    "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT": _env_bool(
-        "DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT",
-        default=True,
-    ),
     # The local Kubernetes reference uses a dedicated RWX payload claim. Keep
     # these unset for ordinary source-checkout development so sync and Ray Core
     # workflows do not acquire a storage dependency they do not need.

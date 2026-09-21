@@ -565,6 +565,7 @@ def test_graph_endpoint_is_private_get_only_and_authorizes_before_query_data(
         ("legacy", "UNSUPPORTED"),
         ("running", "NOT_REPORTED"),
         ("truncated", "TRUNCATED"),
+        ("publication-limit", "LIMIT_EXCEEDED"),
         ("expired", "UNAVAILABLE"),
     ],
 )
@@ -584,6 +585,9 @@ def test_graph_summary_degrades_without_reading_any_collection(
     elif mode == "truncated":
         summary["availability"] = "TRUNCATED"
         summary["complete"] = False
+    elif mode == "publication-limit":
+        summary["availability"] = "LIMIT_EXCEEDED"
+        summary["complete"] = False
     else:
         summary["availability"] = "EXPIRED"
         summary["complete"] = False
@@ -597,6 +601,9 @@ def test_graph_summary_degrades_without_reading_any_collection(
 
     assert response.status_code == 200
     _assert_empty_graph(_json(response), expected_status)
+    if mode == "publication-limit":
+        assert "no graph details were saved" in _json(response)["message"]
+        assert "paginated" not in _json(response)["message"]
     assert [name for name, _kwargs in calls] == ["summary"]
 
 

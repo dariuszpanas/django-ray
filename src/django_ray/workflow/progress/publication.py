@@ -395,6 +395,7 @@ def _validate_ingress_envelope(
     if not _INGRESS_KEYS <= ingress_keys or not optional_keys <= {
         "cost",
         "producer",
+        "capture",
         "replaceable",
     }:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
@@ -442,12 +443,26 @@ def _validate_ingress_envelope(
         )
     elif accepted_counts["producer_report"] != 0:
         raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
+    if "capture" in ingress:
+        from django_ray.workflow.progress.capture_diagnostics import normalize_capture_totals
+
+        try:
+            capture = normalize_capture_totals(ingress["capture"], limits=limits)
+        except ValueError as error:
+            raise WorkflowProgressPilotError(
+                WorkflowProgressPilotReason.INVALID_SNAPSHOT
+            ) from error
+        if capture["reports"] > accepted_counts["node_settled"]:
+            raise WorkflowProgressPilotError(WorkflowProgressPilotReason.INVALID_SNAPSHOT)
     if "replaceable" in ingress:
         eviction = _exact_mapping(
             ingress["replaceable"], {"evicted_nodes", "evicted_events", "dropped_updates"}
         )
         offered = _saturating_counter_sum(
-            counter_max, accepted_counts["application_progress"], accepted_counts["map_progress"]
+            counter_max,
+            accepted_counts["application_progress"],
+            accepted_counts["map_progress"],
+            accepted_counts["node_settled"],
         )
         counters = {key: _counter(value, maximum=counter_max) for key, value in eviction.items()}
         if any(
@@ -1260,6 +1275,42 @@ def prepare_terminal_only_workflow_progress_summary(
     return summary
 
 
+def publish_unavailable_terminal_workflow_progress(
+    identity: WorkflowRunIdentity,
+    *,
+    outcome: str,
+    started_at: float,
+    finished_at: float,
+    detail_days: int,
+    limit_exceeded: bool,
+) -> bool:
+    """Record unavailable detail without inventing discovery or detail pointers.
+
+    Only the coordinator's completed application outcome is accepted here. A
+    partial collector snapshot cannot establish success or discovered counts.
+    The final write rechecks the complete attempt fence and pinned selection.
+    """
+    from django_ray.workflow.progress.runs import persist_workflow_progress_summary
+
+    pinned = _pinned_workflow_plan(identity, using="default")
+    summary = prepare_terminal_only_workflow_progress_summary(
+        identity,
+        plan_fingerprint=pinned.fingerprint,
+        selected_strategy=pinned.selected_strategy,
+        declared_node_count=0,
+        declared_edge_count=0,
+        outcome=outcome,
+        started_at=started_at,
+        finished_at=finished_at,
+        detail_days=detail_days,
+    )
+    summary["reporting_policy"] = pinned.reporting_policy
+    summary["node_counts"]["declared"] = None
+    summary["edge_counts"]["declared"] = None
+    summary["detail"]["availability"] = "LIMIT_EXCEEDED" if limit_exceeded else "NOT_REPORTED"
+    return persist_workflow_progress_summary(identity, summary)
+
+
 def publish_terminal_workflow_progress(
     identity: WorkflowRunIdentity,
     snapshot: Any,
@@ -1297,6 +1348,8 @@ def publish_terminal_workflow_progress(
                 manifest_id=manifest_id,
                 prepared_topology=prepared.topology,
                 prepared_detail=prepared.detail,
+                reporting_ingress=snapshot["ingress"],
+                reporting_snapshot_revision=snapshot["revision"],
                 using=using,
             )
             result = WorkflowProgressPilotPublicationResult(
@@ -1350,4 +1403,5 @@ __all__ = [
     "prepare_terminal_only_workflow_progress_summary",
     "prepare_terminal_workflow_progress_publication",
     "publish_terminal_workflow_progress",
+    "publish_unavailable_terminal_workflow_progress",
 ]

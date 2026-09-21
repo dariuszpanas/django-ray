@@ -102,6 +102,7 @@ _PAGE_COLLECTIONS = frozenset({"topology_nodes", "topology_edges", "node_details
 _NORMAL_AVAILABILITIES = frozenset(
     {
         WorkflowProgressDetailAvailability.NOT_REPORTED.value,
+        WorkflowProgressDetailAvailability.LIMIT_EXCEEDED.value,
         WorkflowProgressDetailAvailability.AVAILABLE.value,
         WorkflowProgressDetailAvailability.TRUNCATED.value,
         WorkflowProgressDetailAvailability.OMITTED_BY_POLICY.value,

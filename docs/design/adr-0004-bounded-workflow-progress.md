@@ -580,30 +580,101 @@ Implementation remains split into focused deliveries:
 2. **Implemented by #126:** additive database topology manifests/pages, normalized
    latest-state detail rows, deterministic preparation and limits, bounded integrity
    verification, sparse atomic publication, terminal expiry stamping, replacement-run
-   cleanup, and the retention/orphan cleanup command. The runtime actor deliberately
-   remains a schema-v2 writer.
+   cleanup, and the retention/orphan cleanup command. That delivery left the runtime
+   actor as a schema-v2 writer; the terminal-profile follow-up below replaces it.
 3. **Implemented by #127:** package-owned paginated services, indexed single-node
    retrieval, mandatory per-request authorization, summary-only Admin polling, and
    public testproject adapters. These readers are necessary but do not authorize
    producer activation.
 4. **Coordinated with #79:** individual producer envelopes, collector retention, and
-   per-leaf application-progress state are bounded. Aggregate admission across forked
-   actor handles, the sampled policy that depends on it, and the actor-to-preparer
-   drain remain open. Do not claim this storage decision or a per-leaf producer bound
-   governs the aggregate actor mailbox.
+   per-leaf application-progress state are bounded. The terminal-profile follow-up
+   below adds workflow-wide logical pending-call admission. Physical mailbox bounds,
+   larger actor-to-preparer draining and any sampled policy remain separate work.
+   This storage decision alone does not govern the aggregate actor mailbox.
 5. **Follow-up #132:** issue #141 now streams topology identity, duplicate, reference,
    and retained-selection state through ADR-0005's package-owned private SQLite
    workspace. The unchanged prepared value still materializes complete
    `observed_node_ids` for initial detail, so V1 does not yet prove an end-to-end
    O(retained) preparation bound for an arbitrarily larger observed graph. #142 owns
-   composite detail preparation. Schema-v3 activation must compose that boundary with
-   #79's live-ingestion limits.
+   composite detail preparation. Broader activation must compose that boundary with
+   #79's ingress limits; the smaller terminal profile does not require or activate
+   the general streaming path.
 
 Required evidence includes deterministic threshold tests, PostgreSQL write/WAL and
 query measurements, retry and stale-writer races, missing/corrupt/orphan cleanup,
 cursor consistency, Admin query assertions, and representative 1,000-, 10,000-,
 25,000-, 50,000-, and larger-node benchmarks. Performance evidence may lower
 defaults or motivate a new protocol version; it must not silently widen V1.
+
+## Proposed default terminal admission
+
+This follow-up is an unqualified implementation proposal for #261 and #507,
+not a completed activation or a replacement for the evidence requirements above.
+The selected release scope is terminal graphs; live graph updates remain deferred.
+
+Let `N` be the lifetime admitted node count and `W` the maximum canonical event
+wire size. The proposed initial limits are `N = 512` and `W = 32 KiB`.
+Admission is never refunded when a node finishes or its outcome marker is consumed.
+Edges have a separate lifetime limit of 2,048. Exceeding either limit ends graph
+admission and produces an incomplete, summary-only outcome; it must not truncate
+application execution or present a partial graph as complete.
+
+Leaf invocations receive no collector actor handle. Each invocation keeps one
+local latest-value slot, seals it when the invocation ends, and returns bounded
+metadata through its final Ray outcome. Copied invocation contexts share that
+slot. Leaf progress therefore submits zero application-progress actor calls,
+including across Ray retries. This does not bound all memory used by application
+tasks, Ray retries, or Ray's result transport.
+
+Only the coordinator creates map progress producers. There can be at most `N`
+such producers over the workflow lifetime. Each can have one unresolved mutable
+call and one final handoff call; finishing a producer must not make its admission
+available to another map. Thus outstanding map application-progress calls are at
+most `2N`, with at most `2NW` canonical offered bytes: 1,024 calls and 32 MiB at
+the proposed limits. Acknowledged calls can be replaced, so this is not a bound
+on the cumulative calls or bytes of an arbitrarily long workflow. It also excludes
+structural/lifecycle calls and makes no claim about Ray's physical network buffers,
+serialization copies, or mailbox memory. Lifecycle reservation remains a separate
+requirement under #571.
+
+Qualification must retain fixed-cardinality counters that distinguish local
+replacement, submission, acknowledgement, rejection, unavailability and terminal
+handoff without retaining producer identities or application values. Removing the
+legacy live snapshot writer must not silently remove the reporting benchmark's
+cost measurements. The schema-v4 benchmark consumes retained terminal diagnostics
+and separates coordinator map reports from successful final leaf capture. Its
+fixed bounded-map fixture has eight graph nodes and eight edges; it does not
+pretend suppressed map children are reporting producers. Deployed counter
+reconciliation remains unqualified; local admission tests alone do not close #261.
+
+The prototype carries fixed capture counters in successful final leaf metadata
+and aggregates them once per settled leaf. The scope is explicitly
+`successful_final_invocations`: failed retry invocations do not return their
+capture report and must not be included by inference. Capture offers, accepted
+values, local replacements and canonical bytes are separate from actor calls,
+acknowledgements and rejections. Duplicate outcome delivery cannot increment the
+aggregate again. Counters saturate with an explicit flag; saturated observations
+must not be treated as exact benchmark totals.
+
+The prototype adds nullable `reporting_diagnostics_json` to the existing
+workflow-run storage row. Migration 0027 preserves old rows with no diagnostics;
+it does not backfill measurements. A terminal publication saves the validated
+actor, map-producer and leaf-capture counters atomically with its exact detail
+revision. The record is canonical ASCII JSON capped at 16 KiB and contains no
+graph, progress values or producer identities. Its run fence and detail revision
+must match the requested publication. Invalid diagnostics roll back publication.
+Readers filter character length in SQL before loading and reject non-ASCII data;
+a corrupt Unicode row can transfer at most 64 KiB before rejection. Diagnostics
+share the run row's cleanup lifetime, so unavailable history is missing evidence,
+never zero cost. Public summary fields and historical graph codecs are unchanged.
+This additive storage change belongs to the default-path migration in #507;
+it is not a claim that the earlier schema-free scope of #261 is complete.
+
+Before activation, real-Ray tests must cover concurrent leaves, copied contexts,
+slow and unavailable collectors, retries, sequential map churn, overflow and
+cleanup. Required deployed evidence must cover actual defaults, historical reads,
+API/Admin presentation and preserved task results across cold Ray. General
+large-scale composite preparation and sampled/live reporting remain separate work.
 
 ## Related work
 

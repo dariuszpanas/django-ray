@@ -73,10 +73,157 @@ def retry_settlement_target(counter, failures):
     """Importable native fixture with external attempt state, independent of workers."""
     import ray
 
+    from django_ray.runtime.context import report_workflow_progress
+
     attempt = ray.get(counter.increment.remote(), timeout=10)
+    for current in range(100):
+        report_workflow_progress(current, 100, message="retry capture")
     if attempt <= failures:
         raise ValueError("transient workflow failure")
     return 42
+
+
+def _native_bound_executor(collector):
+    from django_ray.runtime.context import DurableTaskContext, WorkflowRunIdentity
+    from django_ray.runtime.runtime_env import normalize_runtime_env
+    from django_ray.workflow.plans import runtime_env_plan_identity
+    from django_ray.workflows import _RayExecutor
+
+    executor = _RayExecutor()
+    executor.task_execution_pk = _WORKFLOW_RUN_IDENTITY["task_execution_pk"]
+    executor.task_context = DurableTaskContext(
+        task_pk=executor.task_execution_pk,
+        task_id="workflow-retry-fixture",
+        attempt_number=_WORKFLOW_RUN_IDENTITY["attempt_number"],
+        execution_generation=_WORKFLOW_RUN_IDENTITY["execution_generation"],
+        execution_protocol_version=1,
+        strict_execution_request=True,
+        runtime_env_plan_identity=runtime_env_plan_identity(
+            normalize_runtime_env({})
+        ).as_transport_dict(),
+    )
+    executor.workflow_run_identity = WorkflowRunIdentity(
+        **{key: value for key, value in _WORKFLOW_RUN_IDENTITY.items() if key != "schema_version"}
+    )
+    executor.progress_actor = collector
+    return executor
+
+
+def _wait_for_actor_death(ray, actor, method):
+    """Ray kill requests are asynchronous; require observed death within a deadline."""
+    import time
+
+    deadline = time.monotonic() + 10
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "collector did not stop within the cleanup deadline"
+        try:
+            ray.get(getattr(actor, method).remote(), timeout=min(2, remaining))
+        except ray.exceptions.RayActorError:
+            return
+        except ray.exceptions.GetTimeoutError:
+            pass
+        time.sleep(0.01)
+
+
+def concurrent_capture_target(barrier, value):
+    import ray
+
+    from django_ray.runtime.context import report_workflow_progress
+
+    for current in range(1000):
+        report_workflow_progress(current, 1000)
+    ray.get(barrier.arrive.remote(), timeout=20)
+    return value
+
+
+@pytest.mark.real_ray
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_native_concurrent_captures_finish_without_collector_ack(ray_cluster, unavailable):
+    """Four actual workers finish while every collector acknowledgement is blocked."""
+    import asyncio
+    import time
+
+    from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+    from django_ray.workflow.progress.protocol import decode_workflow_progress_event
+    from django_ray.workflows import Step
+
+    class Barrier:
+        def __init__(self):
+            self.arrived = 0
+            self.ready = asyncio.Event()
+
+        async def arrive(self):
+            self.arrived += 1
+            if self.arrived == 4:
+                self.ready.set()
+            await self.ready.wait()
+
+    class BlockedCollector:
+        def __init__(self):
+            self.kinds = []
+            self.release = asyncio.Event()
+
+        async def ingest(self, wire):
+            self.kinds.append(decode_workflow_progress_event(wire).kind.value)
+            await self.release.wait()
+            return True
+
+        async def health(self):
+            return self.kinds
+
+    barrier = ray_cluster.remote(num_cpus=0, max_restarts=0)(Barrier).remote()
+    collector = ray_cluster.remote(num_cpus=0, max_restarts=0)(BlockedCollector).remote()
+    refs, markers = [], []
+    try:
+        assert ray_cluster.get(collector.health.remote(), timeout=10) == []
+        if unavailable:
+            ray_cluster.kill(collector, no_restart=True)
+            _wait_for_actor_death(ray_cluster, collector, "health")
+        executor = _native_bound_executor(collector)
+        executor.workflow_progress_limits = WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+        for index in range(4):
+            refs.append(
+                executor.submit_step(
+                    Step(
+                        "tests.unit.test_workflow_retry_settlement.concurrent_capture_target",
+                        bound_args=(barrier, index),
+                        ray_options={"num_cpus": 0.25, "max_retries": 0},
+                    ),
+                    (),
+                    {},
+                    str(index),
+                    (),
+                )
+            )
+        markers = list(executor._pending_leaf_outcomes)
+        assert len(markers) == len(executor._progress_node_ids) == 4
+        assert ray_cluster.get(refs, timeout=30) == list(range(4))
+        wires = ray_cluster.get(markers, timeout=10)
+        for wire in wires:
+            event = decode_workflow_progress_event(wire)
+            assert event.payload["state"] == "SUCCEEDED"
+            report = event.payload["capture_report"]
+            assert report["offered"] == report["accepted"] == 1000
+            assert report["superseded"] == 999
+            assert report["retained"] == 1
+            assert len(wire) <= executor.workflow_progress_limits.event_wire_max_bytes
+        if not unavailable:
+            deadline = time.monotonic() + 10
+            while True:
+                kinds = ray_cluster.get(collector.health.remote(), timeout=10)
+                assert "application_progress" not in kinds
+                assert len(kinds) <= 8
+                if len(kinds) == 8:
+                    break
+                assert time.monotonic() < deadline, "collector did not observe lifecycle calls"
+                time.sleep(0.01)
+            assert kinds.count("node_registered") == kinds.count("submitted") == 4
+    finally:
+        for ref in refs + markers:
+            ray_cluster.cancel(ref, force=True, recursive=True)
+        ray_cluster.kill(collector, no_restart=True)
+        ray_cluster.kill(barrier, no_restart=True)
 
 
 @pytest.mark.real_ray
@@ -107,32 +254,9 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
     )
     ref = marker_ref = downstream = downstream_marker = None
     try:
-        from django_ray.runtime.context import DurableTaskContext, WorkflowRunIdentity
-        from django_ray.runtime.runtime_env import normalize_runtime_env
-        from django_ray.workflow.plans import runtime_env_plan_identity
-        from django_ray.workflows import Step, _RayExecutor
+        from django_ray.workflows import Step
 
-        executor = _RayExecutor()
-        executor.task_execution_pk = _WORKFLOW_RUN_IDENTITY["task_execution_pk"]
-        executor.task_context = DurableTaskContext(
-            task_pk=executor.task_execution_pk,
-            task_id="workflow-retry-fixture",
-            attempt_number=_WORKFLOW_RUN_IDENTITY["attempt_number"],
-            execution_generation=_WORKFLOW_RUN_IDENTITY["execution_generation"],
-            execution_protocol_version=1,
-            strict_execution_request=True,
-            runtime_env_plan_identity=runtime_env_plan_identity(
-                normalize_runtime_env({})
-            ).as_transport_dict(),
-        )
-        executor.workflow_run_identity = WorkflowRunIdentity(
-            **{
-                key: value
-                for key, value in _WORKFLOW_RUN_IDENTITY.items()
-                if key != "schema_version"
-            }
-        )
-        executor.progress_actor = collector
+        executor = _native_bound_executor(collector)
         ref = executor.submit_step(
             Step(
                 "tests.unit.test_workflow_retry_settlement.retry_settlement_target",
@@ -172,20 +296,10 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
         expected_calls = failures + 1 if succeeds else max_retries + 1
         assert ray_cluster.get(counter.count.remote(), timeout=10) == expected_calls
 
-        # A coordinator snapshot is not an ordering barrier for a worker handle.
-        # Wait for the exact number of terminal events, never sleep and assume.
+        # Workers return one final marker and never hold collector handles.
         import time
 
         deadline = time.monotonic() + 10
-        while True:
-            snapshot = ray_cluster.get(collector.snapshot.remote(), timeout=10)
-            decoded = snapshot["ingress"]["cost"]["ingest"]["decoded_by_kind"]
-            if decoded["completed"] + decoded["failed"] == expected_calls + int(
-                following and succeeds
-            ):
-                break
-            assert time.monotonic() < deadline, "leaf lifecycle delivery did not complete"
-            time.sleep(0.05)
         while executor._pending_leaf_outcomes:
             executor._poll_leaf_outcomes()
             assert executor.progress_actor is collector
@@ -200,10 +314,18 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
             assert following_node["state"] == ("SUCCEEDED" if succeeds else "PENDING")
         assert node["state"] == ("SUCCEEDED" if succeeds else "FAILED")
         assert snapshot["state"] == node["state"]
+        assert snapshot["ingress"]["accepted_by_kind"]["application_progress"] == 0
         if succeeds:
             assert node["error"] is None
+            capture = snapshot["ingress"]["capture"]
+            assert capture["scope"] == "successful_final_invocations"
+            assert capture["reports"] == (2 if following else 1)
+            assert capture["offered"] == capture["accepted"] == 100
+            assert capture["superseded"] == 99
+            assert capture["retained"] == 1
         else:
             assert "transient workflow failure" in node["error"]
+            assert "capture" not in snapshot["ingress"]
     finally:
         for owned_ref in (ref, marker_ref, downstream, downstream_marker):
             if owned_ref is not None:

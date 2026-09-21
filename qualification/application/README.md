@@ -79,6 +79,30 @@ preparation evidence from synthetic identities, not a persisted Django task,
 default graph activation or aggregate mailbox admission. The separate workflow
 cases retain their real task, API/Admin, history and diagnostic assertions.
 
+## Reporting-policy cost evidence
+
+After cold-generation API/Admin acceptance, a separate serial Job runs
+`run_reporting_benchmark` against the same installed candidate, PostgreSQL,
+manager and Ray generation. It executes three counterbalanced cycles of full,
+terminal-only and disabled reporting: nine tiny durable tasks in total. Each
+task has a 45-second observation deadline; the Job has a 600-second hard deadline,
+no retries, 200m CPU and 512 MiB memory. It uses existing namespace capacity.
+
+The command validates terminal graph/storage/counter consistency and saves the
+full report before deleting only its nine owned terminal executions. The receipt
+requires completed cleanup and all three policies. `reporting.json` retains every
+sample and aggregate inside a 512 KiB envelope; its producer must be the completed,
+unrestarted candidate-image container. Existing 16 KiB receipt and 64 KiB log
+limits remain unchanged for other layers. Namespace removal remains mandatory.
+The outer source-tree and running-image checks supply deployment attestation;
+an unavailable revision string inside the benchmark is not independent proof.
+
+The comparison measures the documented observable cost layers, not a production
+SLO, causal speedup, physical Ray mailbox bound or complete process lifetime.
+The storage-oriented `Workflow Progress Benchmark` workflow is a different
+measurement and cannot substitute for this report. A missing/failed benchmark
+or cleanup receipt blocks this application qualification run.
+
 ## Generic Ray nodes and cold generations
 
 `generic_nodes.py` supplies a separate assertion Job layer. It connects only to an explicit Ray
@@ -221,8 +245,8 @@ cleanup of the exact recorded namespace; no cluster deletion or shared resource 
 
 ### Resource and evidence boundaries
 
-Source inventory, conservatively counting both serial Jobs and init peaks, is **2.6 CPU, 9728 MiB
-memory, 3200 MiB ephemeral storage, seven Pods and 1408 MiB PVC requests**. Every source container has
+Source inventory, conservatively counting all three serial Jobs and init peaks, is **2.8 CPU, 10240 MiB
+memory, 3456 MiB ephemeral storage, eight Pods and 1408 MiB PVC requests**. Every source container has
 non-root identity, no service-account token, a read-only root filesystem and explicit limits.
 KubeRay, Kubernetes, image builds and the host-side Chainsaw process are additional reservations.
 Storage requests do not prove physical disk enforcement. The caller admits total capacity and
@@ -329,8 +353,9 @@ mode requires current-source Linux CI before repeating the application test.
 Disabled-policy cases check authenticated API and Admin JSON responses for an
 explicit disabled explanation without a run identity, publication or graph.
 Database checks reject current/archived progress and staged run storage. These
-cases do not claim package-default activation;
-the full-policy cases still exercise the explicitly enabled pilot publisher.
+cases verify the disabled policy separately from full reporting. Full-policy
+cases use the package-default terminal publisher without a pilot setting;
+passing receipts must match the candidate source before establishing acceptance.
 
 
 The fixed Admin display-limit case runs 101 serial identity leaves with scalar result `42`.
@@ -341,8 +366,10 @@ records, with a 256 KiB response ceiling; repeated cursors, missing records and 
 identities fail the stage. Admin must return a bounded empty `LIMIT_EXCEEDED` graph and
 point to the paginated API. Anonymous access is denied and diagnostic/history fingerprints
 must remain unchanged. The separate browser observer checks the rendered limit guidance and
-absence of graph nodes; this does not qualify default publication. It uses existing deadlines/capacity, no new submission route, and explicit full
-pilot reporting. The exact callable is added to the sample's authenticated read policy.
+absence of graph nodes. It uses existing deadlines and capacity, no new submission
+route, and full reporting through the package-default terminal publisher. The exact
+callable is added to the sample's authenticated read policy. The fixture definition
+alone does not establish passing rendered or deployed qualification.
 
 ### Rendered Admin observation
 

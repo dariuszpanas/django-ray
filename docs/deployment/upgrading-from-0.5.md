@@ -1,12 +1,13 @@
 # Upgrade from 0.5.0 to the unreleased candidate
 
-This page describes changes currently on main after 0.5.0. It is preparation for
+This page describes the unreleased candidate after 0.5.0. It is preparation for
 an eventual release, not a release announcement or approval to deploy a candidate.
 The planned next release is 0.6.0, tracked in
 [the release scope](https://github.com/dariuszpanas/django-ray/issues/508).
-Default workflow graph activation and final upgrade acceptance remain pending.
+Full reporting uses bounded terminal graphs by default in this candidate.
+Final source-matched qualification and upgrade acceptance remain pending.
 
-## Changes currently on main
+## Candidate changes
 
 ### Changed
 
@@ -46,8 +47,8 @@ Default workflow graph activation and final upgrade acceptance remain pending.
   a configuration message while retaining task identifiers. Generated links
   normalize the base URL and encode job/task identifiers.
 - Admin workflow messages distinguish a running workflow, terminal-only
-  reporting, expired details and missing details. These explanations do not
-  enable full graph publication by default or reconstruct older missing graphs.
+  reporting, expired details and missing details. Full reporting publishes bounded
+  terminal graphs by default; older missing graphs are not reconstructed.
 
 ### Documentation and qualification
 
@@ -104,12 +105,22 @@ reporting, or has expired or missing details. Terminal-only reporting retains a
 summary without graph details. Missing details cannot be reconstructed by
 changing settings after the task completes.
 
-These repairs do not enable the full-detail publisher by default. Existing
-schema-v3 pilot qualification is evidence for that explicitly enabled path only.
-Do not promise default graphs or switch reporting modes solely to hide an Admin
-availability message.
+Full reporting now uses bounded terminal publication by default. Remove
+`DJANGO_RAY["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"]` from application settings and
+`DJANGO_RAY_WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` from sample deployment environments.
+The old application setting is rejected with migration guidance. New runs do not
+write legacy live snapshots; supported old snapshots remain readable without
+backfilling a terminal graph. Live visualization remains unsupported.
 
-Where the full publisher uses SQLite preparation, provide a private worker-owned
+Apply migration 0027 before starting upgraded workers. It adds nullable run diagnostics;
+old rows retain no measurements, rather than fabricated zero-cost records. Drain old
+workers through the coordinated upgrade procedure before admitting new work on the
+new path. Verify default configuration, archived retry graphs, full/terminal-only/
+disabled policies and limit-exceeded presentation against the deployed source. Earlier
+pilot qualification alone does not qualify the new default path.
+
+The default small terminal adapter prepares in memory. For general preparation tools
+that use SQLite, provide a private worker-owned
 mode-0700 `TMPDIR` before Python starts on both Ray head and workers. Preserve
 workflow artifacts, input/result objects, RuntimeEnv archives and their encryption
 keys. Changing the temporary directory does not recover an earlier failed
@@ -136,9 +147,11 @@ not activate another protocol or restore mixed-version execution support.
 
 ## Coordinated stopped-writer upgrade
 
-The current changes after 0.5.0 add no django-ray database migrations or new task
-execution protocol. Recheck the final selected release and your own application's
-migration plan; this statement is not a mixed-version execution guarantee.
+The candidate adds migration 0027 for nullable bounded reporting diagnostics.
+Apply it before starting candidate workers, and review the complete migration
+plan from the installed 0.5.0 baseline, including your application's migrations.
+This does not introduce a new task execution protocol or authorize mixed-version
+execution.
 Use the [coordinated Beta procedure](../stability.md#coordinated-beta-upgrades):
 
 1. Record the exact released and candidate package, image, Python and Ray versions.

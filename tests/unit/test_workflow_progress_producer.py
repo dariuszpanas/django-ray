@@ -171,9 +171,13 @@ def test_map_coordinator_bounds_forced_updates_before_terminal_handoff(
     assert [event.kind for event in events] == [
         WorkflowProgressEventKind.MAP_PROGRESS,
         WorkflowProgressEventKind.MAP_PROGRESS,
+        WorkflowProgressEventKind.PRODUCER_REPORT,
         WorkflowProgressEventKind.FAILED if failed else WorkflowProgressEventKind.COMPLETED,
     ]
     assert [event.payload["completed"] for event in events[:2]] == [0, 1_000]
+    assert events[2].payload["offered"] == 1001
+    assert events[2].payload["submitted"] == 2
+    assert events[2].payload["terminal_handoff"] == "submitted"
     executor.map_progress(
         "map",
         "map:increment",
@@ -182,7 +186,7 @@ def test_map_coordinator_bounds_forced_updates_before_terminal_handoff(
         input_exhausted=True,
         force=True,
     )
-    assert len(actor.ingest.calls) == 3
+    assert len(actor.ingest.calls) == 4
 
 
 @pytest.mark.real_ray

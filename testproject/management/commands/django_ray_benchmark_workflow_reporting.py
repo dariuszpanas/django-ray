@@ -18,10 +18,10 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Literal, cast
 
 import django
-from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import connection, transaction
 from django.db.models import Count, Sum
+from django.db.models.functions import Length
 
 from django_ray.models import (
     RayTaskExecution,
@@ -36,13 +36,10 @@ from django_ray.models import (
 )
 from django_ray.observability import (
     WorkflowObservabilityError,
-    get_workflow_plan,
+    get_workflow_plan_binding,
 )
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.workflow.progress.publication import (
-    WorkflowProgressPilotError,
-    prepare_terminal_workflow_progress_publication,
-)
+from django_ray.workflow.plans import MAX_PLAN_BYTES
 from django_ray.workflow.progress.storage import (
     audit_workflow_progress_detail_storage,
     verify_workflow_progress_topology_manifest,
@@ -54,7 +51,7 @@ from django_ray.workflow.progress.summary import (
 )
 from testproject.apps.cluster_tasks.tasks import complex_workflow_benchmark
 
-BENCHMARK_SCHEMA_VERSION = 3
+BENCHMARK_SCHEMA_VERSION = 4
 BENCHMARK_ID = "django-ray-live-workflow-reporting-policies"
 OPT_IN_ENV = "DJANGO_RAY_RUN_WORKFLOW_REPORTING_BENCHMARK"
 EXPECTED_CALLABLE_PATH = "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark"
@@ -91,6 +88,7 @@ _EXPECTED_INGRESS_KINDS = frozenset(
         "map_progress",
         "output_preview",
         "producer_report",
+        "node_settled",
     }
 )
 _EXPECTED_REJECTION_REASONS = frozenset(
@@ -265,8 +263,9 @@ def _expected_dynamic_topology(
     slow_items: int,
 ) -> tuple[int, int]:
     """Return the fixed fixture's expanded actor node and edge counts."""
-    leaf_tasks = fast_items + slow_items
-    return leaf_tasks + 6, (leaf_tasks * 2) + 4
+    del fast_items, slow_items
+    # Two bounded maps summarize their children; six ordinary steps surround them.
+    return 8, 8
 
 
 def _source_revision() -> str:
@@ -322,7 +321,7 @@ def _measurement_coverage() -> dict[str, dict[str, str]]:
         },
         "processed_actor_ingress": {
             "status": "measured",
-            "scope": "full-mode retained terminal collector snapshot",
+            "scope": "full-mode retained terminal diagnostics",
         },
         "actor_observed_logical_ingress": {
             "status": "measured",
@@ -334,9 +333,16 @@ def _measurement_coverage() -> dict[str, dict[str, str]]:
         "producer_progress_sessions": {
             "status": "measured",
             "scope": (
-                "actor-accepted fixed-shape leaf reports of valid progress offers, "
+                "actor-accepted fixed-shape coordinator map reports of progress offers, "
                 "submissions, local supersession/drop, producer-observed acknowledgements, "
                 "and one terminal handoff outcome"
+            ),
+        },
+        "terminal_leaf_capture": {
+            "status": "measured",
+            "scope": (
+                "successful final leaf invocations only, excluding failed retries; "
+                "bounded map children have reporting suppressed and are not captured"
             ),
         },
         "producer_to_actor_delivery_delay": {
@@ -364,7 +370,7 @@ def _measurement_coverage() -> dict[str, dict[str, str]]:
         "producer_attempted_rpcs": {
             "status": "partial",
             "scope": (
-                "application-progress submissions reported by participating leaves; "
+                "map-progress submissions reported by the coordinator producers; "
                 "a terminal latest-value handoff is included, while structural and "
                 "lifecycle events, producer reports, and coordinator snapshot/disable "
                 "calls are excluded"
@@ -420,19 +426,25 @@ def _run_identity(execution: RayTaskExecution) -> WorkflowRunIdentity:
 
 
 def _selection(execution: RayTaskExecution, expected_policy: Policy) -> dict[str, object]:
+    if (
+        not isinstance(execution.workflow_plan_json, str)
+        or len(execution.workflow_plan_json.encode("utf-8")) > MAX_PLAN_BYTES
+    ):
+        raise WorkflowReportingBenchmarkError(
+            f"{expected_policy} execution retained an invalid workflow plan"
+        )
     try:
-        snapshot = get_workflow_plan(execution)
+        # Presentation redaction can omit a valid plan or its selection when
+        # the work budget is exhausted. Validate identity before inspecting the
+        # bounded stored manifest; export only the fixed projection below.
+        binding = get_workflow_plan_binding(execution)
     except WorkflowObservabilityError as error:
         raise WorkflowReportingBenchmarkError(
             f"{expected_policy} execution retained an invalid workflow plan"
         ) from error
-    if not isinstance(snapshot, dict):
-        raise WorkflowReportingBenchmarkError(
-            f"{expected_policy} execution retained no workflow plan"
-        )
-    selection = snapshot.get("selection")
-    manifest = snapshot.get("manifest")
-    fingerprint = snapshot.get("fingerprint")
+    manifest = json.loads(execution.workflow_plan_json)
+    selection = json.loads(execution.workflow_plan_selection)
+    fingerprint = binding["fingerprint"]
     if (
         not isinstance(selection, dict)
         or not isinstance(manifest, dict)
@@ -440,8 +452,8 @@ def _selection(execution: RayTaskExecution, expected_policy: Policy) -> dict[str
         or fingerprint != execution.workflow_plan_fingerprint
         or selection.get("plan_selection_format") != "django-ray.workflow-plan-selection"
         or selection.get("plan_selection_format_version") != 2
-        or selection.get("reporting_policy") != expected_policy
-        or selection.get("selected_strategy") != "dynamic_tasks"
+        or binding["reporting_policy"] != expected_policy
+        or binding["selected_strategy"] != "dynamic_tasks"
     ):
         raise WorkflowReportingBenchmarkError(
             f"{expected_policy} execution selected an unexpected workflow policy or strategy"
@@ -605,7 +617,11 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
         "retained_edges",
         "cost",
     }
-    if set(ingress) not in (expected_fields, expected_fields | {"producer"}):
+    if not expected_fields <= set(ingress) or not set(ingress) - expected_fields <= {
+        "producer",
+        "capture",
+        "replaceable",
+    }:
         raise WorkflowReportingBenchmarkError("workflow progress ingress has unexpected fields")
     accepted = _non_negative_int(ingress["accepted"], "ingress.accepted")
     rejected = _non_negative_int(ingress["rejected"], "ingress.rejected")
@@ -632,6 +648,35 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
         accepted_by_kind=accepted_by_kind,
     )
     producer = _producer_progress(ingress["producer"]) if "producer" in ingress else None
+    replaceable = None
+    if "replaceable" in ingress:
+        replaceable = _integer_mapping(
+            ingress["replaceable"],
+            name="ingress.replaceable",
+            expected_keys=frozenset({"evicted_nodes", "evicted_events", "dropped_updates"}),
+        )
+        offered = sum(
+            accepted_by_kind[key]
+            for key in ("application_progress", "map_progress", "node_settled")
+        )
+        if any(
+            replaceable[key] + replaceable["dropped_updates"] > offered
+            for key in ("evicted_nodes", "evicted_events")
+        ):
+            raise WorkflowReportingBenchmarkError("invalid replaceable counters")
+    capture = None
+    if "capture" in ingress:
+        from django_ray.workflow.progress.capture_diagnostics import normalize_capture_totals
+        from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+
+        try:
+            capture = normalize_capture_totals(
+                ingress["capture"], limits=WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+            )
+        except ValueError as error:
+            raise WorkflowReportingBenchmarkError("invalid capture counters") from error
+        if capture["saturated"]:
+            raise WorkflowReportingBenchmarkError("benchmark capture counters saturated")
     return {
         "collector_events_accepted": accepted,
         "processed_ingest_events": accepted - 1,
@@ -653,6 +698,8 @@ def _ingress(progress: Mapping[str, object]) -> dict[str, object]:
         ),
         "actor_cost": cost,
         "producer": producer,
+        "capture": capture,
+        "replaceable": replaceable,
     }
 
 
@@ -867,86 +914,53 @@ def _full_snapshot_evidence(
     fast_items: int,
     slow_items: int,
 ) -> dict[str, object]:
-    progress = _json_object(execution.progress_data, "workflow progress snapshot")
-    config = getattr(settings, "DJANGO_RAY", {})
-    detail_days = (
-        int(config.get("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS", 7))
-        if isinstance(config, Mapping)
-        else 7
-    )
+    from django_ray.workflow.progress.reporting_diagnostics import load_reporting_diagnostics
+
+    summary = _summary(execution, identity=identity, expected_policy="full")
+    if summary is None or type(summary.get("detail_revision")) is not int:
+        raise WorkflowReportingBenchmarkError("full execution retained no terminal detail")
     try:
-        prepared = prepare_terminal_workflow_progress_publication(
-            identity,
-            progress,
-            plan_fingerprint=str(selection["plan_fingerprint"]),
-            selected_strategy=str(selection["selected_strategy"]),
-            reporting_policy="full",
-            detail_days=detail_days,
+        record = load_reporting_diagnostics(
+            identity, detail_revision=cast(int, summary["detail_revision"])
         )
-    except (KeyError, WorkflowProgressPilotError) as error:
+    except ValueError as error:
         raise WorkflowReportingBenchmarkError(
-            "full execution retained an invalid or incomplete terminal actor snapshot"
+            "full execution retained invalid or incomplete reporting diagnostics"
         ) from error
-    expected_nodes, expected_edges = _expected_dynamic_topology(
-        fast_items=fast_items,
-        slow_items=slow_items,
-    )
-    topology = prepared.topology
-    ingress = _ingress(progress)
-    accepted_by_kind_value = ingress["accepted_by_kind"]
-    if not isinstance(accepted_by_kind_value, Mapping):
-        raise WorkflowReportingBenchmarkError("full execution actor ingress evidence is invalid")
-    accepted_by_kind = cast(Mapping[str, object], accepted_by_kind_value)
-    application_progress = _non_negative_int(
-        accepted_by_kind.get("application_progress"),
-        "ingress.accepted_by_kind.application_progress",
-    )
-    producer_value = ingress.get("producer")
-    if not isinstance(producer_value, Mapping):
+    ingress = _ingress(record)
+    if not isinstance(ingress["producer"], Mapping) or not isinstance(ingress["capture"], Mapping):
         raise WorkflowReportingBenchmarkError(
-            "full execution retained no producer progress evidence"
+            "full execution retained incomplete producer evidence"
         )
-    producer_reports = _non_negative_int(
-        producer_value.get("reports"),
-        "ingress.producer.reports",
-    )
-    producer_submitted = _non_negative_int(
-        producer_value.get("submitted"),
-        "ingress.producer.submitted",
-    )
-    producer_acknowledged = _non_negative_int(
-        producer_value.get("acknowledged"),
-        "ingress.producer.acknowledged",
-    )
-    producer_actor_rejected = _non_negative_int(
-        producer_value.get("actor_rejected"),
-        "ingress.producer.actor_rejected",
-    )
+    kinds = cast(Mapping[str, int], ingress["accepted_by_kind"])
+    producer = cast(Mapping[str, Any], ingress["producer"])
+    capture = cast(Mapping[str, Any], ingress["capture"])
+    nodes, edges = _expected_dynamic_topology(fast_items=fast_items, slow_items=slow_items)
+    # Bounded map children are intentionally represented by their two map
+    # nodes. The six surrounding leaves return final metadata without actor
+    # handles; the two coordinator map producers supply actor progress.
     if (
-        prepared.summary["state"] != TaskState.SUCCEEDED
-        or topology.observed_node_count != expected_nodes
-        or topology.retained_node_count != expected_nodes
-        or topology.observed_edge_count != expected_edges
-        or topology.retained_edge_count != expected_edges
-        or prepared.detail.observed_count != expected_nodes
-        or len(prepared.detail.records) != expected_nodes
-        or ingress["retained_nodes"] != expected_nodes
-        or ingress["retained_edges"] != expected_edges
-        or accepted_by_kind.get("initialized") != 1
-        or accepted_by_kind.get("node_registered") != expected_nodes
-        or accepted_by_kind.get("edges_registered") != expected_nodes - 1
-        or accepted_by_kind.get("submitted") != expected_nodes
-        or accepted_by_kind.get("started") != expected_nodes
-        or accepted_by_kind.get("completed") != expected_nodes
-        or accepted_by_kind.get("failed") != 0
-        or accepted_by_kind.get("producer_report") != producer_reports
-        or producer_acknowledged > application_progress
-        or application_progress > producer_submitted - producer_actor_rejected
-        or application_progress < fast_items + slow_items
-        or producer_reports != fast_items + slow_items
+        selection["reporting_policy"] != "full"
+        or ingress["retained_nodes"] != nodes
+        or ingress["retained_edges"] != edges
+        or kinds["node_registered"] != 6
+        or kinds["map_registered"] != 2
+        or kinds["edges_registered"] != 7
+        or kinds["submitted"] != 6
+        or kinds["started"] != 0
+        or kinds["completed"] != 2
+        or kinds["node_settled"] != 6
+        or kinds["failed"] != 0
+        or kinds["application_progress"] != 0
+        or kinds["producer_report"] != 2
+        or producer["reports"] != 2
+        or producer["acknowledged"] > kinds["map_progress"]
+        or kinds["map_progress"] > producer["submitted"] - producer["actor_rejected"]
+        or capture["reports"] != 6
+        or capture["offered"] != 0
     ):
         raise WorkflowReportingBenchmarkError(
-            "full execution actor evidence does not match the fixed expanded workload"
+            "full execution actor evidence does not match the fixed bounded workload"
         )
     return ingress
 
@@ -1023,6 +1037,10 @@ def _storage(
     return {
         "run_storage": {
             "rows": exact_runs.count(),
+            "diagnostics_bytes": _sum(
+                exact_runs.annotate(diagnostics_bytes=Length("reporting_diagnostics_json")),
+                "diagnostics_bytes",
+            ),
             "detail_encoded_bytes": _sum(exact_runs, "detail_encoded_bytes"),
             "detail_decoded_bytes": _sum(exact_runs, "detail_decoded_bytes"),
         },
@@ -1066,7 +1084,6 @@ def _validate_storage(
     *,
     identity: WorkflowRunIdentity,
     expected_policy: Policy,
-    pilot_enabled: bool,
     expected_node_count: int,
     expected_edge_count: int,
 ) -> None:
@@ -1076,7 +1093,7 @@ def _validate_storage(
     link_rows = _storage_int(storage, "manifest_links", "rows")
     detail_rows = _storage_int(storage, "node_details", "rows")
     normalized_rows = run_rows + manifest_rows + page_rows + link_rows + detail_rows
-    if expected_policy != "full" or not pilot_enabled:
+    if expected_policy != "full":
         if normalized_rows != 0:
             raise WorkflowReportingBenchmarkError(
                 f"{expected_policy} execution unexpectedly retained normalized detail"
@@ -1163,7 +1180,6 @@ def _validate_policy_contract(
     *,
     execution: RayTaskExecution,
     policy: Policy,
-    pilot_enabled: bool,
     ingress: Mapping[str, object] | None,
     summary: Mapping[str, object] | None,
     storage: Mapping[str, object],
@@ -1173,24 +1189,19 @@ def _validate_policy_contract(
     progress_bytes = _encoded_bytes(execution.progress_data)
     summary_bytes = _encoded_bytes(execution.workflow_progress_summary_json)
     if policy == "full":
-        if progress_bytes == 0 or ingress is None:
+        if progress_bytes != 0 or ingress is None:
             raise WorkflowReportingBenchmarkError(
-                "full reporting retained no observable actor ingress"
+                "full reporting requires terminal diagnostics without legacy snapshots"
             )
-        if pilot_enabled:
-            if (
-                summary is None
-                or summary.get("detail_availability")
-                != WorkflowProgressDetailAvailability.AVAILABLE.value
-                or summary.get("topology_version") is None
-                or summary.get("detail_revision") is None
-            ):
-                raise WorkflowReportingBenchmarkError(
-                    "full pilot reporting retained no complete terminal detail"
-                )
-        elif summary is not None or summary_bytes != 0:
+        if (
+            summary is None
+            or summary.get("detail_availability")
+            != WorkflowProgressDetailAvailability.AVAILABLE.value
+            or summary.get("topology_version") is None
+            or summary.get("detail_revision") is None
+        ):
             raise WorkflowReportingBenchmarkError(
-                "full package-default reporting unexpectedly published schema v3"
+                "full reporting retained no complete terminal detail"
             )
     elif policy == "terminal_only":
         if (
@@ -1213,7 +1224,6 @@ def _validate_policy_contract(
         storage,
         identity=_run_identity(execution),
         expected_policy=policy,
-        pilot_enabled=pilot_enabled,
         expected_node_count=expected_node_count,
         expected_edge_count=expected_edge_count,
     )
@@ -1229,7 +1239,6 @@ def _sample(
     poll_count: int,
     fast_items: int,
     slow_items: int,
-    pilot_enabled: bool,
 ) -> dict[str, object]:
     if (
         execution.callable_path != EXPECTED_CALLABLE_PATH
@@ -1270,7 +1279,6 @@ def _sample(
     _validate_policy_contract(
         execution=execution,
         policy=policy,
-        pilot_enabled=pilot_enabled,
         ingress=ingress,
         summary=summary,
         storage=storage,
@@ -1386,6 +1394,7 @@ def _policy_aggregates(samples: Sequence[Mapping[str, object]]) -> dict[str, obj
         if policy == "full":
             policy_aggregate["actor_observed_cost"] = _actor_cost_aggregate(selected)
             policy_aggregate["producer_progress"] = _producer_progress_aggregate(selected)
+            policy_aggregate["terminal_leaf_capture"] = _capture_aggregate(selected)
         else:
             policy_aggregate["actor_observed_cost"] = {
                 "status": "not_applicable",
@@ -1395,8 +1404,48 @@ def _policy_aggregates(samples: Sequence[Mapping[str, object]]) -> dict[str, obj
                 "status": "not_applicable",
                 "reason": f"{policy} reporting has no progress producer session",
             }
+            policy_aggregate["terminal_leaf_capture"] = {"status": "not_applicable"}
         aggregates[policy] = policy_aggregate
     return aggregates
+
+
+def _capture_aggregate(samples: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    from django_ray.workflow.progress.capture_diagnostics import normalize_capture_totals
+    from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+
+    records = []
+    for sample in samples:
+        reporting = sample.get("reporting")
+        ingress = reporting.get("ingress") if isinstance(reporting, Mapping) else None
+        capture = ingress.get("capture") if isinstance(ingress, Mapping) else None
+        try:
+            record = normalize_capture_totals(
+                capture, limits=WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
+            )
+        except ValueError as error:
+            raise WorkflowReportingBenchmarkError(
+                "capture aggregate evidence is incomplete"
+            ) from error
+        if record["saturated"]:
+            raise WorkflowReportingBenchmarkError("capture aggregate evidence is saturated")
+        records.append(record)
+    fields = (
+        "reports",
+        "offered",
+        "accepted",
+        "rejected",
+        "superseded",
+        "canonical_bytes",
+        "retained",
+        "retained_bytes",
+    )
+    return {
+        "status": "measured",
+        "scope": "successful_final_invocations",
+        "source_schema_version": 1,
+        "units": {field: "bytes" if field.endswith("bytes") else "count" for field in fields},
+        **{field: _distribution([float(record[field]) for record in records]) for field in fields},
+    }
 
 
 def _actor_cost_aggregate(
@@ -1598,11 +1647,6 @@ def _validate_complete_report(
     return plan_fingerprints.pop()
 
 
-def _pilot_enabled() -> bool:
-    config = getattr(settings, "DJANGO_RAY", {})
-    return isinstance(config, Mapping) and config.get("WORKFLOW_PROGRESS_SCHEMA_V3_PILOT") is True
-
-
 def _run_benchmark(
     *,
     repetitions: int,
@@ -1620,7 +1664,6 @@ def _run_benchmark(
             "live workflow reporting benchmark requires PostgreSQL"
         )
     environment_before = _environment()
-    pilot_enabled = _pilot_enabled()
     workload = _workload(
         fast_items=fast_items,
         slow_items=slow_items,
@@ -1656,7 +1699,6 @@ def _run_benchmark(
                 poll_count=polls,
                 fast_items=fast_items,
                 slow_items=slow_items,
-                pilot_enabled=pilot_enabled,
             )
             samples.append(sample)
             progress(
@@ -1684,7 +1726,7 @@ def _run_benchmark(
             "policy_orders": [list(_policy_order(index)) for index in range(repetitions)],
             "timeout_seconds": timeout_seconds,
             "poll_interval_seconds": poll_interval_seconds,
-            "schema_v3_pilot_enabled": pilot_enabled,
+            "terminal_publisher": "package_default",
             "execution_scope": (
                 "sequential durable tasks on the configured local KubeRay testproject"
             ),

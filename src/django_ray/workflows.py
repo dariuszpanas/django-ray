@@ -608,6 +608,10 @@ class _RayExecutor(_Executor):
         self._pending_leaf_outcomes: dict[Any, str] = {}
         self._leaf_outcome_dependencies: dict[str, tuple[str, ...]] = {}
         self._leaf_final_outcomes: dict[str, bool] = {}
+        self._progress_node_ids: set[str] = set()
+        self._progress_edge_count = 0
+        self._progress_admission_exhausted = False
+        self._progress_started_at = time.time()
         self._progress_suppression_depth = 0
         self._map_progress_sent_at: dict[str, float] = {}
         self._map_progress_producers: dict[str, WorkflowProgressProducerSession] = {}
@@ -677,9 +681,7 @@ class _RayExecutor(_Executor):
         self.materialized_plan = prepared_plan
         if reporting_policy in {"disabled", "terminal_only"}:
             return
-        from django_ray.conf.settings import get_settings
         from django_ray.workflow.progress.limits import (
-            WORKFLOW_PROGRESS_LIMITS_V1,
             WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
         )
         from django_ray.workflow.progress.protocol import (
@@ -687,12 +689,7 @@ class _RayExecutor(_Executor):
             prepare_workflow_progress_event,
         )
 
-        pilot_enabled = get_settings().get("WORKFLOW_PROGRESS_SCHEMA_V3_PILOT") is True
-        progress_limits = (
-            WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
-            if pilot_enabled
-            else WORKFLOW_PROGRESS_LIMITS_V1
-        )
+        progress_limits = WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
         self.workflow_progress_limits = progress_limits
 
         initialized_event = prepare_workflow_progress_event(
@@ -701,13 +698,8 @@ class _RayExecutor(_Executor):
             {"plan": materialized_plan.plan.summary()},
             limits=progress_limits,
         )
-        self.progress_actor = (
-            self.progress_actor_cls.remote(
-                initialized_event,
-                limits=progress_limits,
-            )
-            if pilot_enabled
-            else self.progress_actor_cls.remote(initialized_event)
+        self.progress_actor = self.progress_actor_cls.remote(
+            initialized_event, limits=progress_limits
         )
 
     def _send_progress_event(
@@ -717,12 +709,32 @@ class _RayExecutor(_Executor):
         payload: Mapping[str, Any],
     ) -> bool:
         """Best-effort one validated event while preserving the full run fence."""
-        if actor is None:
+        if actor is None or getattr(self, "_progress_admission_exhausted", False):
             return False
         identity = self.workflow_run_identity
         if identity is None:
             raise AssertionError("a workflow progress actor requires a complete run identity")
         from django_ray.workflow.progress.protocol import send_workflow_progress_event
+
+        if str(kind) in {"node_registered", "map_registered"}:
+            admitted = getattr(self, "_progress_node_ids", None)
+            if admitted is None:
+                admitted = self._progress_node_ids = set()
+            node_id = payload["node_id"]
+            if node_id not in admitted:
+                if len(admitted) >= self.workflow_progress_limits.topology_node_max_items:
+                    self._progress_admission_exhausted = True
+                    return False
+                else:
+                    admitted.add(node_id)
+
+        if str(kind) == "edges_registered":
+            edge_count = getattr(self, "_progress_edge_count", 0)
+            offered = len(payload["edges"])
+            if edge_count + offered > self.workflow_progress_limits.topology_edge_max_items:
+                self._progress_admission_exhausted = True
+                return False
+            self._progress_edge_count = edge_count + offered
 
         try:
             send_workflow_progress_event(
@@ -753,6 +765,8 @@ class _RayExecutor(_Executor):
 
         edge_batch: list[dict[str, str]] = []
         for dependency in dependencies:
+            if getattr(self, "_progress_admission_exhausted", False):
+                return
             edge_batch.append({"source": dependency, "target": node_id})
             if len(edge_batch) < self.workflow_progress_limits.edge_batch_max_items:
                 continue
@@ -907,7 +921,10 @@ class _RayExecutor(_Executor):
                 "hash": resolved_runtime_env.digest,
             }
         progress_actor = (
-            self.progress_actor if getattr(self, "_progress_suppression_depth", 0) == 0 else None
+            self.progress_actor
+            if getattr(self, "_progress_suppression_depth", 0) == 0
+            and not getattr(self, "_progress_admission_exhausted", False)
+            else None
         )
         if progress_actor is not None:
             plan_node = (
@@ -933,6 +950,8 @@ class _RayExecutor(_Executor):
                 node_id=node_id,
                 dependencies=dependencies,
             )
+            if getattr(self, "_progress_admission_exhausted", False):
+                progress_actor = None
             if signature.output_preview_path is not None:
                 from django_ray.workflow.previews import (
                     WorkflowOutputPreviewAvailability,
@@ -1015,7 +1034,7 @@ class _RayExecutor(_Executor):
             dict(signature.bound_kwargs),
             input_kwargs,
             self.task_execution_pk,
-            progress_actor,
+            None,
             node_id,
             *input_args,
             **remote_progress_kwargs,
@@ -1046,6 +1065,10 @@ class _RayExecutor(_Executor):
     def _poll_leaf_outcomes(self) -> None:
         """Observe bounded marker references, never fetch application values."""
         pending = getattr(self, "_pending_leaf_outcomes", None)
+        if getattr(self, "_progress_admission_exhausted", False):
+            if pending is not None:
+                pending.clear()
+            return
         if not pending or self.progress_actor is None:
             return
         from ray.exceptions import RayTaskError
@@ -1683,7 +1706,11 @@ class _RayExecutor(_Executor):
         max_concurrency: int | None,
         max_items: int | None,
     ) -> None:
-        if self.progress_actor is None or self._progress_suppression_depth:
+        if (
+            self.progress_actor is None
+            or self._progress_suppression_depth
+            or getattr(self, "_progress_admission_exhausted", False)
+        ):
             return
         from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
@@ -1715,7 +1742,11 @@ class _RayExecutor(_Executor):
         input_exhausted: bool,
         force: bool = False,
     ) -> None:
-        if self.progress_actor is None or self._progress_suppression_depth:
+        if (
+            self.progress_actor is None
+            or self._progress_suppression_depth
+            or getattr(self, "_progress_admission_exhausted", False)
+        ):
             return
 
         from django_ray.conf.settings import get_settings
@@ -1761,10 +1792,19 @@ class _RayExecutor(_Executor):
         failed: bool = False,
         error: str | None = None,
     ) -> None:
-        if self.progress_actor is None or self._progress_suppression_depth:
+        if (
+            self.progress_actor is None
+            or self._progress_suppression_depth
+            or getattr(self, "_progress_admission_exhausted", False)
+        ):
             return
         from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
+        outcomes = getattr(self, "_leaf_final_outcomes", None)
+        if outcomes is None:
+            outcomes = self._leaf_final_outcomes = {}
+        if node_id in outcomes:
+            return
         self.map_progress(
             node_id,
             label,
@@ -1776,12 +1816,15 @@ class _RayExecutor(_Executor):
         producer = self._map_progress_producers.get(node_id)
         if producer is not None:
             try:
-                producer.finish()
+                report = producer.finish()
+                if report["offered"]:
+                    self._send_progress_event(
+                        self.progress_actor,
+                        WorkflowProgressEventKind.PRODUCER_REPORT,
+                        report,
+                    )
             except BaseException:
                 pass
-        outcomes = getattr(self, "_leaf_final_outcomes", None)
-        if outcomes is None:
-            outcomes = self._leaf_final_outcomes = {}
         if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
             self._disable_progress_reporting(reason="leaf_outcome_capacity")
             return
@@ -1869,38 +1912,22 @@ class _RayExecutor(_Executor):
 
         if failed:
             snapshot["state"] = "FAILED"
-        revision = int(snapshot["revision"])
-        already_persisted_failed = getattr(
-            self,
-            "_last_progress_persisted_failed",
-            False,
-        )
-        if revision != self.last_progress_revision or (failed and not already_persisted_failed):
-            from django_ray.workflow.progress.runs import persist_workflow_progress
-
-            try:
-                accepted = persist_workflow_progress(
-                    self.workflow_run_identity,
-                    snapshot,
-                )
-            except Exception:
-                self._disable_progress_reporting(
-                    reason="snapshot_persistence_failed",
-                )
-                return None
-            if not accepted:
-                self._disable_progress_reporting(
-                    reason="snapshot_fence_rejected",
-                )
-                return None
-            self.last_progress_revision = revision
-            self._last_progress_persisted_failed = failed
+        # Only the terminal publication writes durable detail. Historical
+        # schema-v2 readers remain, but new runs do not maintain a parallel writer.
         return snapshot
 
     def finish_progress(self, *, failed: bool = False) -> None:
-        if getattr(self, "reporting_policy", "full") == "terminal_only":
+        if getattr(self, "reporting_policy", "full") in {"terminal_only", "disabled"}:
+            return
+        if getattr(self, "_terminal_progress_finished", False):
+            return
+        self._terminal_progress_finished = True
+        if getattr(self, "_progress_admission_exhausted", False):
+            self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=True)
+            self._disable_progress_reporting()
             return
         if self.progress_actor is None:
+            self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=False)
             return
 
         from django_ray.conf.settings import get_settings
@@ -1912,7 +1939,6 @@ class _RayExecutor(_Executor):
                 15,
             )
         )
-        schema_v3_pilot_enabled = config.get("WORKFLOW_PROGRESS_SCHEMA_V3_PILOT") is True
         deadline = time.monotonic() + timeout_seconds
         saw_snapshot = False
 
@@ -1930,23 +1956,19 @@ class _RayExecutor(_Executor):
                 wait_timeout_seconds=min(0.5, remaining),
             )
             if self.progress_actor is None:
+                self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=False)
                 return
             if snapshot is not None:
                 saw_snapshot = True
                 terminal = snapshot["completed_nodes"] + snapshot["failed_nodes"]
                 ingress = snapshot.get("ingress")
-                ingress_cannot_publish = (
-                    schema_v3_pilot_enabled
-                    and isinstance(ingress, Mapping)
-                    and bool(ingress.get("rejected") or ingress.get("truncated"))
+                ingress_cannot_publish = isinstance(ingress, Mapping) and bool(
+                    ingress.get("rejected") or ingress.get("truncated")
                 )
                 failure_evidence_ready = (
                     failed
                     and not getattr(self, "_pending_leaf_outcomes", None)
-                    and (
-                        not schema_v3_pilot_enabled
-                        or _failed_snapshot_has_causally_complete_ancestors(snapshot)
-                    )
+                    and _failed_snapshot_has_causally_complete_ancestors(snapshot)
                 )
                 if (
                     ingress_cannot_publish
@@ -1957,7 +1979,13 @@ class _RayExecutor(_Executor):
                         and terminal == snapshot["total_nodes"]
                     )
                 ):
-                    self._publish_terminal_progress(snapshot)
+                    if not self._publish_terminal_progress(snapshot):
+                        self._publish_unavailable_terminal_progress(
+                            failed=failed,
+                            limit_exceeded=getattr(
+                                self, "_progress_publication_limit_exceeded", False
+                            ),
+                        )
                     return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1971,10 +1999,36 @@ class _RayExecutor(_Executor):
             timeout_seconds=timeout_seconds,
             failed_workflow=failed,
         )
+        self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=False)
         self._disable_progress_reporting()
 
+    def _publish_unavailable_terminal_progress(self, *, failed: bool, limit_exceeded: bool) -> None:
+        """Persist only the known terminal outcome when bounded detail is unavailable."""
+        if getattr(self, "workflow_run_identity", None) is None:
+            return
+        try:
+            from django_ray.conf.settings import get_settings
+            from django_ray.workflow.progress.publication import (
+                publish_unavailable_terminal_workflow_progress,
+            )
+
+            finished_at = time.time()
+            started_at = min(getattr(self, "_progress_started_at", finished_at), finished_at)
+            publish_unavailable_terminal_workflow_progress(
+                self.workflow_run_identity,
+                outcome="FAILED" if failed else "SUCCEEDED",
+                started_at=started_at,
+                finished_at=finished_at,
+                detail_days=int(get_settings().get("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS", 7)),
+                limit_exceeded=limit_exceeded,
+            )
+        except BaseException:
+            self._progress_warning(
+                "Workflow terminal summary was not completed", reason="publication_failed"
+            )
+
     def _publish_terminal_progress(self, snapshot: dict[str, Any]) -> bool:
-        """Best-effort one default-off schema-v3 terminal publication."""
+        """Best-effort one bounded terminal publication."""
         if self.workflow_run_identity is None or getattr(
             self,
             "_terminal_progress_publication_attempted",
@@ -1985,8 +2039,6 @@ class _RayExecutor(_Executor):
         from django_ray.conf.settings import get_settings
 
         config = get_settings()
-        if config.get("WORKFLOW_PROGRESS_SCHEMA_V3_PILOT") is not True:
-            return False
         self._terminal_progress_publication_attempted = True
         try:
             from django_ray.workflow.progress.publication import (
@@ -2000,13 +2052,17 @@ class _RayExecutor(_Executor):
             )
         except BaseException:
             self._progress_warning(
-                "Workflow schema-v3 pilot publication was not completed",
+                "Workflow terminal publication was not completed",
                 reason="publication_failed",
             )
             return False
         if not publication.accepted:
+            self._progress_publication_limit_exceeded = publication.reason.value in {
+                "admission_limit",
+                "preparation_truncated",
+            }
             self._progress_warning(
-                "Workflow schema-v3 pilot publication was not completed",
+                "Workflow terminal publication was not completed",
                 reason=publication.reason.value,
             )
             return False

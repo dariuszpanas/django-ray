@@ -42,6 +42,9 @@ EXPECTED_WORKFLOW_MODULE_FILES = {
     "django_ray/workflow/progress/storage.py",
     "django_ray/workflow/progress/summary.py",
     "django_ray/workflow/progress/terminal_input.py",
+    "django_ray/workflow/progress/capture_diagnostics.py",
+    "django_ray/workflow/progress/reporting_diagnostics.py",
+    "django_ray/workflow/progress/terminal_capture.py",
 }
 EXPECTED_FILES = {
     "django_ray/__init__.py",
@@ -80,6 +83,7 @@ EXPECTED_FILES = {
     "django_ray/migrations/0024_ray_target_routes.py",
     "django_ray/migrations/0025_ray_worker_target_capabilities.py",
     "django_ray/migrations/0026_ray_task_target_execution_evidence.py",
+    "django_ray/migrations/0027_workflow_reporting_diagnostics.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/management/commands/django_ray_worker_ready.py",
@@ -91,7 +95,7 @@ EXPECTED_FILES = {
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0026_ray_task_target_execution_evidence",
+    "0027_workflow_reporting_diagnostics",
 )
 
 

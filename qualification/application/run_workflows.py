@@ -390,8 +390,10 @@ def main(argv: list[str] | None = None) -> int:
         django.setup()
         from django_ray.conf.settings import get_settings
 
-        if get_settings()["WORKFLOW_PROGRESS_SCHEMA_V3_PILOT"] is not True:
-            raise ValueError("This baseline workload requires explicit pilot publication")
+        if "WORKFLOW_PROGRESS_SCHEMA_V3_PILOT" in get_settings():
+            raise ValueError("Default qualification forbids the retired pilot override")
+        if get_settings()["WORKFLOW_PROGRESS_REPORTING_POLICY"] != "full":
+            raise ValueError("Default qualification requires package-default full reporting")
         request = ApplicationHttp(args.base_url)
         observations = {}
         for case in workflow_cases():
@@ -404,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt.update(
             status="passed",
             failed_stage=None,
-            publisher="pilot",
+            publisher="default_terminal",
             observations=observations,
             collector_pressure=pressure,
         )

@@ -73,7 +73,9 @@ def test_profile_waits_for_assertions_around_identical_cold_replacement():
         == "assert-after"
     )
     assert before < deleted < after
-    assert sequence[-1]["assert"]["resource"]["metadata"]["name"] == "assert-after"
+    assert sequence[-3]["assert"]["resource"]["metadata"]["name"] == "assert-after"
+    assert sequence[-3]["assert"]["resource"]["status"] == {"succeeded": 1}
+    assert sequence[-1]["assert"]["resource"]["metadata"]["name"] == "reporting-benchmark"
     assert sequence[-1]["assert"]["resource"]["status"] == {"succeeded": 1}
 
 
@@ -81,7 +83,7 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
     test = definition()
     assert test["apiVersion"] == "chainsaw.kyverno.io/v1alpha1"
     assert test["kind"] == "Test"
-    assert len(test["spec"]["steps"]) == 13
+    assert len(test["spec"]["steps"]) == 14
     for generation in ("before", "after"):
         job = resources()["Job", f"assert-{generation}"]
         assert job["spec"]["parallelism"] == job["spec"]["completions"] == 1
@@ -147,7 +149,7 @@ def test_profile_bounds_source_inventory_including_init():
                 else:
                     scratch += replicas * peak
             pods += replicas
-    assert (cpu, memory, scratch, pods, storage) == (2600, 9728, 3200, 7, 1408)
+    assert (cpu, memory, scratch, pods, storage) == (2800, 10240, 3456, 8, 1408)
     assert cpu <= 4000 and memory <= 10240 and scratch <= 8192 and pods <= 8 and storage <= 16384
 
 

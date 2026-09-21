@@ -95,18 +95,22 @@ never advertises topology, node detail, or an execution graph. Historical attemp
 need an archived schema-v3 summary to retain these distinctions; otherwise they remain
 `NOT_REPORTED`.
 
-General/default full-mode schema-v3 publication stays disabled until #79 bounds the
-remaining live ingestion path, #142 completes ADR-0005's composite topology/detail
-preparation after #141's spill-backed topology delivery, and old writers have drained.
-The default-off `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` is the only current producer
-exception: one admitted terminal snapshot may make bounded graph and node helpers
-available for that run. Runs without an accepted pilot publication report detail
-unavailable rather than fabricating an empty workflow.
+Full reporting publishes one bounded terminal schema-v3 graph by default. Leaves
+capture their latest progress locally; only the final successful invocation supplies
+that value. The coordinator settles nodes from final Ray outcomes, so a transient
+retry failure cannot overwrite eventual success. This path does not publish live
+schema-v2 snapshots or promise live graph updates.
 
-Once activated, `AVAILABLE` and `TRUNCATED` summaries may reference the manifest and
-detail revisions committed by the atomic storage writer. `DISABLED` and
-`OMITTED_BY_POLICY` are summary-only states: they carry no manifest or detail pointer,
-and callers must not interpret them as an empty completed graph.
+Admission is limited to 512 nodes and 2,048 edges for the lifetime of a run. Exceeding
+admission preserves the application result and attempts a summary with
+`LIMIT_EXCEEDED` detail availability, without presenting a partial graph as complete.
+Other publication failures also leave the application outcome authoritative.
+
+`AVAILABLE` and `TRUNCATED` summaries may reference revisions committed by the atomic
+storage writer. Summary-only states carry no manifest or detail pointer; callers must
+not interpret unavailable or omitted detail as an empty completed graph. Historical
+schema-v2 snapshots remain readable. See the [upgrade guide](deployment/upgrading-from-0.5.md)
+for migration 0027, removal of the old pilot setting, and draining old workers.
 
 ### Authorized bounded detail reads
 
