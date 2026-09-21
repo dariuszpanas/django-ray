@@ -89,8 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaceable display progress before rejecting structural or terminal updates.
   Retain observed map fanout counts and report display drops separately from
   invalid ingress. Structural data that cannot fit still fails explicitly. This
-  bounds retained actor state; aggregate admission across producers and retries
-  remains pending.
+  bounds retained actor state; the default terminal publisher additionally enforces
+  the lifetime node and edge admission limits described above.
 - Settle workflow graph leaves from final Ray retry outcomes instead of retaining
   the first transient failure. A separate bounded metadata result preserves the
   successful invocation's preview and progress even when worker events arrive
@@ -112,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Coalesce coordinator map progress behind one outstanding acknowledgement and
   one latest-value slot, including forced updates. Hand off at most one final
   value before the terminal lifecycle event. This bounds each map producer;
-  workflow-wide admission across producers and retries remains pending.
+  the default terminal publisher additionally enforces lifetime graph admission
+  across producers and retries.
 - Serialize concurrent updates and terminal handoff within a shared leaf-local
   workflow progress session. Preserve its one-outstanding-call bound and coherent
   terminal counters when threads report progress or finish at the same time.
@@ -162,7 +163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restore, rollback boundaries and deployment-specific acceptance.
 - Qualify pilot workflow publication over authenticated API/Admin HTTP on cold
   Ray, covering full and terminal-only success/failure, archived retry recovery
-  and cleanup. Default workflow graph activation remains pending.
+  and cleanup. Final qualification also exercises default terminal publication.
 - Add immutable 0.4.0/0.5.0 upgrade baselines and bounded hosted Linux rehearsals
   for Core, Jobs, Jobs-manager crashes and Core/Ray loss, including independent
   restore and preserved history. These fixtures do not replace final-candidate

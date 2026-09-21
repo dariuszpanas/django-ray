@@ -1,18 +1,19 @@
-# Upgrade from 0.5.0 to the unreleased candidate
+# Upgrade from 0.5.0 to 0.6.0
 
-This page describes the unreleased candidate after 0.5.0. It is preparation for
-an eventual release, not a release announcement or approval to deploy a candidate.
-The planned next release is 0.6.0, tracked in
+This page describes the coordinated upgrade from 0.5.0 to 0.6.0, tracked in
 [the release scope](https://github.com/dariuszpanas/django-ray/issues/508).
-Full reporting uses bounded terminal graphs by default in this candidate.
+Confirm published artifacts on the
+[releases page](https://github.com/dariuszpanas/django-ray/releases) before deploying;
+version metadata in a development checkout does not establish publication.
+Full reporting uses bounded terminal graphs by default in 0.6.0.
 The candidate retained by [PR #587](https://github.com/dariuszpanas/django-ray/pull/587)
 passed source-matched public qualification and coordinated upgrade acceptance.
 The [acceptance record](https://github.com/dariuszpanas/django-ray/issues/526#issuecomment-5762967245)
 links the verified Linux, database, native recovery and cold-Ray application evidence.
-This qualifies that candidate source; 0.6.0 remains unpublished, and a later source
-or deployment change needs its applicable checks.
+This qualifies that candidate source; a later source or deployment change needs
+its applicable checks.
 
-## Candidate changes
+## Changes in 0.6.0
 
 ### Changed
 
@@ -62,10 +63,11 @@ or deployment change needs its applicable checks.
   starts on both Ray head and workers.
 - Add public workflow/Admin qualification for full and terminal-only success,
   failure and recovery, including cold-Ray observations. This qualifies the
-  explicitly enabled publisher; it does not establish default graph availability.
+  default terminal publisher, including rendered current and archived history.
 - Qualify upgrades from an immutable 0.5.0 baseline on SQLite and PostgreSQL,
   including independent restores, Core/Jobs execution and manager-loss recovery.
-  The receipts retain their incomplete release-acceptance status.
+  Individual receipts retain their limited stage scope; complete acceptance requires
+  a combined review of the source-matched evidence described below.
 - Add pinned YAGA workflow checks and repository-wide Typos checks for docs,
   source, tests and configuration.
 - Replace commitlint with released YAGA 0.2.0 in the required commit workflow,
