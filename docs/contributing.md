@@ -612,8 +612,8 @@ testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and 
 report `success`. Its `always()` condition makes a failed, cancelled, timed-out, or skipped dependency
 visible as a failed gate instead of a successful skip. This repository uses rebase auto-merge rather
 than a merge queue: auto-merge
-waits for `Commit Messages` and `CI Gate`, then applies the rebase method. Approval and
-review-conversation state do not block merges in this single-maintainer repository.
+waits for `Commit Messages`, `CI Gate` and `Qualification Gate`, then applies the rebase method.
+Approval and review-conversation state do not block merges in this single-maintainer repository.
 
 Native Compiled Graph evidence is produced only by the guarded local KubeRay pilot, not a public
 hosted workflow. Coverage-debt review and benchmark workflows are evidence producers, not merge
@@ -645,22 +645,12 @@ title separately before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
 conflicts, rerun the affected checks, re-evaluate the full-gate triggers above, and push. Auto-merge
-recalculates the required checks. The merge policy requires `Commit Messages` and `CI Gate`, does not
-require approvals or resolved review conversations, and allows rebase merges only. The current owner
-`pull_request` bypass remains
-explicit break-glass recovery, not absolute enforcement against an intentional owner bypass. Routine
-merges remain gated, and emergency use requires the explicit
-`gh pr merge --admin --rebase <PR-number>` command.
-
-The bypass is a break-glass path for a GitHub infrastructure failure, not a way to retain an invalid
-commit or omit local validation. Document the outage and urgency in the PR, validate the exact range
-with `make commit-check`, validate the title with
-`PR_TITLE='feat: describe the pull request' make commit-title-check`, run `uv run make ci`, and record
-the results. After the emergency merge, verify the rebased `main` history and ruleset bypass event,
-then open or link a follow-up incident. If GitHub's PR merge service is unavailable, export the
-ruleset, change only the named owner bypass to `always`, perform the smallest recovery, immediately
-restore `pull_request`, and verify the complete ruleset through the API. Never leave an `always` or
-`exempt` bypass configured.
+recalculates the required checks. The merge policy requires `Commit Messages`, `CI Gate` and
+`Qualification Gate`, does not require approvals or resolved review conversations, and allows rebase
+merges only. The active ruleset has no bypass actors.
+Administrator privileges are not a configured exception to the required checks.
+Any separately authorized infrastructure recovery must preserve and restore the exact
+original ruleset, record its validation evidence and verify the resulting history.
 
 ### Commit and PR Titles
 
@@ -1026,8 +1016,8 @@ Selection and aggregation have five-minute deadlines; workload deadlines and
 resource limits remain in their reusable workflows. No polling runner waits for
 unrelated workflow status names.
 
-After hosted validation, replace the individual conditional qualification contexts
-in branch rules with `Qualification Gate`. Do not remove old contexts before
-validating the replacement or bypass merge protection. The source change alone is
-not a completed ruleset migration. Windows remains advisory; transaction/data
-upgrade checks retain their separate affected-gate requirements.
+The active ruleset requires `Qualification Gate`, `CI Gate` and `Commit Messages`.
+The individual conditional qualification contexts were replaced after the aggregate
+passed all selected workloads. Keep strict up-to-date checks, CodeQL and the other
+repository protections. Windows remains advisory; transaction/data upgrade checks
+retain their separate affected-gate requirements.
