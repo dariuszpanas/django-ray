@@ -240,7 +240,7 @@ and [RayCluster configuration](https://docs.ray.io/en/latest/cluster/kubernetes/
 The topology names identify the process that compiles the graph and must perform every
 invocation. They do not describe the actor tasks inside the graph. The ownership and
 reuse design is defined separately in
-[ADR-0002](design/adr-0002-compiled-session-ownership.md); this page decides whether an
+[ADR-0002](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0002-compiled-session-ownership.md); this page decides whether an
 exact runtime tuple may attempt that design.
 
 | Topology | Policy version 3 | Contract |

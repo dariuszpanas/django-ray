@@ -1,7 +1,7 @@
 # Bounded Workflow Progress Preparation: WSL2 Linux Evidence
 
 This report records the required preparation-only evidence matrix for
-[ADR-0005](../design/adr-0005-bounded-workflow-preparation.md) and issue #140. The
+[ADR-0005](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md) and issue #140. The
 authoritative measurements are in the adjacent
 [JSON artifact](workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json).
 

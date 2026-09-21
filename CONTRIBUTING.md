@@ -26,6 +26,11 @@ Follow an explicit maintainer-requested branch name when one is provided.
 
 ## Commits and pull requests
 
+For significant architectural choices, use the repository-only
+[ADR template and lifecycle guidance](adrs/README.md). Track decision approval,
+implementation evidence, and supersession separately. ADRs are reviewed in GitHub
+and are not part of the published documentation site.
+
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages and PR titles:
 
 ```text

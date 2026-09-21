@@ -907,11 +907,14 @@ or admit workloads near the larger storage-protocol ceilings.
 ADR-0005's production topology phase now externalizes exact node/edge identity,
 duplicate, reference, and selection state into a private bounded SQLite workspace and
 removes it before returning prepared evidence. The unchanged result still includes
-complete `observed_node_ids` for the existing materialized detail API, so #142 must
-complete the shared topology/detail lifetime before broader activation. See
-[ADR-0004: Bounded Workflow Progress Storage](design/adr-0004-bounded-workflow-progress.md)
+complete `observed_node_ids` for the existing materialized detail API. Open issues
+[#156](https://github.com/dariuszpanas/django-ray/issues/156) and
+[#157](https://github.com/dariuszpanas/django-ray/issues/157) own the shared
+topology/detail lifetime for the general path; #142 was closed as superseded.
+This does not block the admitted terminal path described above. See
+[ADR-0004: Bounded Workflow Progress Storage](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0004-bounded-workflow-progress.md)
 and
-[ADR-0005: Bounded Workflow Progress Preparation](design/adr-0005-bounded-workflow-preparation.md).
+[ADR-0005: Bounded Workflow Progress Preparation](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md).
 
 Ray Core tasks already run inside an initialized Ray worker. Ray Job drivers
 initialize their cluster connection lazily when a workflow first requests Ray, and

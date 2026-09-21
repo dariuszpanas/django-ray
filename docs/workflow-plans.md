@@ -8,11 +8,11 @@ reducer are implemented. Static actors, a native Compiled Graph execution adapte
 a resident owner remain future strategy work.
 
 The governing plan decision is
-[ADR-0001](design/adr-0001-workflow-plan-contract.md). The first Compiled Graph
+[ADR-0001](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0001-workflow-plan-contract.md). The first Compiled Graph
 ownership and reuse boundary is fixed separately by
-[ADR-0002](design/adr-0002-compiled-session-ownership.md). Invocation state, deadlines,
+[ADR-0002](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0002-compiled-session-ownership.md). Invocation state, deadlines,
 fallback, one-shot output ownership, and cleanup are fixed by
-[ADR-0003](design/adr-0003-compiled-invocation-lifecycle.md).
+[ADR-0003](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0003-compiled-invocation-lifecycle.md).
 
 ## Stable invariants
 
@@ -684,8 +684,8 @@ invocation is non-adoptable and the graph cannot be reused.
 The versioned snapshot is secret-free, JSON-safe, limited to 64 output slots, eight
 cleanup diagnostic codes, and 16,384 JSON bytes, and contains no payload, result value,
 credential, exception object, Ray handle, channel, DAG node, or compiled reference. See
-[ADR-0003: Compiled Invocation Lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
-for the normative state and evidence boundaries.
+[ADR-0003: Compiled Invocation Lifecycle](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0003-compiled-invocation-lifecycle.md)
+for the historical decision behind these state and evidence boundaries.
 
 The 64-slot reducer bound is accounting capacity for a versioned protocol, not native
 multi-output eligibility. The first adapter boundary remains one buffered invocation
@@ -886,6 +886,6 @@ adapter. Those decisions remain in their focused issues.
 - [Performance](performance.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry and Error Handling](retry.md)
-- [ADR-0001: Workflow plans and execution strategies](design/adr-0001-workflow-plan-contract.md)
-- [ADR-0002: Compiled session ownership and reuse](design/adr-0002-compiled-session-ownership.md)
-- [ADR-0003: Compiled invocation lifecycle](design/adr-0003-compiled-invocation-lifecycle.md)
+- [ADR-0001: Workflow plans and execution strategies](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0001-workflow-plan-contract.md)
+- [ADR-0002: Compiled session ownership and reuse](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0002-compiled-session-ownership.md)
+- [ADR-0003: Compiled invocation lifecycle](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0003-compiled-invocation-lifecycle.md)

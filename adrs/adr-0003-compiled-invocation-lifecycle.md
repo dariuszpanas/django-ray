@@ -1,9 +1,41 @@
 # ADR-0003: Compiled Invocation Lifecycle
 
-- **Status:** Accepted as a Ray-free protocol contract
+> Historical decision record. The status below describes the decision when
+> recorded, not current implementation or support. Later changes may have
+> superseded it without another ADR. See the [archive context](README.md).
+
+## Tracking
+
+| Field | Value |
+| --- | --- |
+| Decision status | Accepted historically; current applicability unverified |
+| Implementation status | Implemented as a Ray-free protocol; native adapter remains separate |
+| Decision review | [Original merged PR #123](https://github.com/dariuszpanas/django-ray/pull/123); not a current implementation approval |
+| Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
+| Supersedes | Not reconstructed |
+| Superseded by | No replacement ADR identified; later divergences are recorded below |
+| Last verified | 2026-09-21; source and issue audit at `273e987` |
+
+## Current implementation and evidence
+
+Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+not a new native execution qualification.
+
+| Requirement | Current finding | Evidence and remaining work |
+| --- | --- | --- |
+| Ray-free session/invocation reducer | Implemented within its protocol scope | [Reducer](../src/django_ray/runtime/compiled_graph_lifecycle.py), [lifecycle tests](../tests/unit/test_compiled_graph_lifecycle.py), and [completed issue #85](https://github.com/dariuszpanas/django-ray/issues/85) |
+| Output ownership, deadlines and reuse decisions | Represented and tested in the reducer | Tests cover one-shot consumption, fallback cutoff, timeout and quarantine transitions |
+| Native adapter execution of returned actions | Pending | The module describes a future adapter; [issue #72](https://github.com/dariuszpanas/django-ray/issues/72) owns integration |
+
+Implemented here means the Ray-free protocol, not a working or supported native
+Compiled Graph strategy. No replacement ADR was identified in the archive.
+
+## Historical decision
+
+- **Historical status (not revalidated):** Accepted as a Ray-free protocol contract
 - **Date:** 2026-07-20
 - **Decision owners:** django-ray maintainers
-- **Related contracts:** [Workflow Plans and Execution Strategies](../workflow-plans.md),
+- **Related contracts:** [Workflow Plans and Execution Strategies](../docs/workflow-plans.md),
   [ADR-0001](adr-0001-workflow-plan-contract.md),
   [ADR-0002](adr-0002-compiled-session-ownership.md)
 
