@@ -19,6 +19,8 @@ Create branches from an up-to-date `main`. Use lowercase kebab-case after one of
 | Documentation only | `docs/` | `docs/worker-mode-selection` |
 | Maintenance, tooling, or dependencies | `chore/` | `chore/ruff-upgrade` |
 | Test-only change | `test/` | `test/worker-reconnect-coverage` |
+| Performance work | `perf/` | `perf/terminal-graph-preparation` |
+| CI-only change | `ci/` | `ci/qualification-gate` |
 
 `feat/` is the default for feature work. Repository conventions take precedence over generic tool
 defaults, so automated agents must not substitute an unrelated `agent/`, `codex/`, or similar prefix.
@@ -168,6 +170,11 @@ Administrator privileges are not a configured exception to the required checks.
 Any separately authorized infrastructure recovery must preserve and restore the exact
 original ruleset, record its validation evidence and verify the resulting history.
 
+After committing and fetching `origin`, run `uv run make pre-push-check` to combine
+quality, workflow, committed-tree, branch, changed-path and commit-policy checks.
+See [the YAGA policies](docs/contributing.md#repository-checks-with-yaga) for budgets,
+explicit inputs and the distinction between working files and committed evidence.
+
 ## Worktree and staging safety
 
 Inspect the worktree before editing:
@@ -209,7 +216,7 @@ that reason and use passing exact-head hosted Linux `CI Gate` as the full-suite 
 does not waive a required deployed-behavior KubeRay gate. Do not automatically start or repurpose
 shared Docker/Kubernetes infrastructure to satisfy a checkpoint.
 
-Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
+Before ordinary pushes, run `uv run make pre-push-check` plus the narrowest affected tests and applicable
 schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
 hosted CI matrix. Record the commands and results in the retained commit and PR instead of treating
 one broad command as the only valid evidence.

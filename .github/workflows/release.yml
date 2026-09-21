@@ -67,7 +67,11 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
         run: |
           checked_out_sha="$(git rev-parse HEAD)"
-          if [[ "$checked_out_sha" != "$CANDIDATE_SHA" || "$checked_out_sha" != "$EVENT_SHA" ]]; then
+          if [[ "$checked_out_sha" != "$CANDIDATE_SHA" ]]; then
+            echo "::error::the default branch changed after dispatch; start a new rehearsal"
+            exit 1
+          fi
+          if [[ "$checked_out_sha" != "$EVENT_SHA" ]]; then
             echo "::error::the default branch changed after dispatch; start a new rehearsal"
             exit 1
           fi
@@ -189,7 +193,11 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
         run: |
           checked_out_sha="$(git rev-parse HEAD)"
-          if [[ "$checked_out_sha" != "$CANDIDATE_SHA" || "$checked_out_sha" != "$EVENT_SHA" ]]; then
+          if [[ "$checked_out_sha" != "$CANDIDATE_SHA" ]]; then
+            echo "::error::the default branch changed after dispatch; start a new rehearsal"
+            exit 1
+          fi
+          if [[ "$checked_out_sha" != "$EVENT_SHA" ]]; then
             echo "::error::the default branch changed after dispatch; start a new rehearsal"
             exit 1
           fi

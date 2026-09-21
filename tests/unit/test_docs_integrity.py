@@ -22,7 +22,7 @@ PRIVATE_VULNERABILITY_REPORT_URL = (
 )
 SECURITY_POLICY_URL = "https://github.com/dariuszpanas/django-ray/security/policy"
 FOCUSED_PUSH_POLICY = (
-    "Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and "
+    "Before ordinary pushes, run `uv run make pre-push-check` plus the narrowest affected tests and "
     "applicable schema, documentation, or packaging checks. Every push to an open PR receives the "
     "broad exact-head hosted CI matrix."
 )

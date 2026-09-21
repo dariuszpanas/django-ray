@@ -42,7 +42,7 @@ jobs:
           mkdir -m 700 "$TRANSACTION_EVIDENCE_DIR"
           sudo chown 10001:10001 "$TRANSACTION_EVIDENCE_DIR"
           echo "TRANSACTION_EVIDENCE_DIR=$TRANSACTION_EVIDENCE_DIR" >> "$GITHUB_ENV"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/transaction-source.txt"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/transaction-source.txt"
           docker compose config --quiet
 
       - name: Build the same-source installed-wheel fixture

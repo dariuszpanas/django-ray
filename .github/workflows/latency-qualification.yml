@@ -46,7 +46,7 @@ jobs:
           mkdir -m 700 "$LATENCY_EVIDENCE_DIR"
           sudo chown 10001:10001 "$LATENCY_EVIDENCE_DIR"
           echo "LATENCY_EVIDENCE_DIR=$LATENCY_EVIDENCE_DIR" >> "$GITHUB_ENV"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/latency-source.txt"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/latency-source.txt"
 
       - name: Build installed-wheel fixture
         timeout-minutes: 12

@@ -1,0 +1,8 @@
+size-policy-version = 1
+default-max-blob-bytes = 1048576
+max-total-blob-bytes = 25165824
+
+# Retained historical measurements; new benchmark files keep the default budget.
+[[path-limits]]
+pattern = "docs/benchmarks/workflow-progress-storage-postgresql17-windows-2026-07-20.json"
+max-blob-bytes = 3145728

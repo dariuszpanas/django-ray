@@ -53,22 +53,58 @@ make install
 make test
 ```
 
-### Workflow checks with YAGA
+### Repository checks with YAGA
 
 Run `make workflow-check` to check immutable Actions/container references and the
 YAGA `recommended-v3` workflow security profile. This uses the pinned released
 `yaga-cli==0.2.0` through uvx; it does not add a package runtime dependency.
-The same explicit `.yaga/checks/workflows.toml` plan runs in the required CI lint job.
+`make check` and the Linux `make ci` run these workflow checks too. The required
+CI lint job includes them in `.yaga/checks/repository.toml` alongside the committed
+tree policies described below.
 Both findings (exit 1) and operational errors (exit 2) fail the check.
 
 To try the global installation instead, run `make workflow-check YAGA=yaga` or
 `yaga repo check --plan .yaga/checks/workflows.toml`. Compare its `yaga --version`
-with the repository pin before relying on equivalent results. Review release notes,
-update the Makefile pin, and rerun the baseline and CI when upgrading YAGA.
+with the repository pin before relying on equivalent results. When upgrading YAGA,
+review its release notes and update the pinned CLI entries in `Makefile`,
+`scripts/check_commits.py` and `scripts/check_repository_policy.py` together.
+Review the trusted commit Action pin separately, then rerun the baseline and CI.
 
-These deterministic checks require no Docker, model credentials, or GitHub write
-access. They inspect the selected workflow files; they do not replace actionlint,
-behavior tests or trusted GitHub rules. Commit Messages uses the exact trusted
+After committing, fetch `origin` and run `uv run make pre-push-check`. It combines
+the ordinary quality checks, retained commit checks, and `make repository-check`:
+
+- Workflow reference and `recommended-v3` security rules.
+- Portable paths, required repository files, and forbidden committed environment,
+  cache, bytecode, coverage and build-output paths. This is not a secret-content scan.
+- Regular Git file modes, with executable permission required only for the tracked
+  commit hook; accidental executables, symlinks and submodules fail.
+- A 1 MiB per-blob and 24 MiB total committed-size budget. The existing historical
+  PostgreSQL benchmark JSON has one explicit 3 MiB exception.
+- Branch names matching the documented prefixes, including `perf/` and `ci/`, or
+  the existing `main` and Dependabot namespaces.
+- Changes to YAGA policy files accompanied by contributor-guidance changes. YAGA's
+  path-only coupling does not prove test coverage or dependency-lock consistency;
+  tests and locked dependency validation remain separate checks.
+
+`repository-check` requires a clean tracked checkout. Tree and change providers
+inspect committed Git objects, not untracked files or ignored output. It requires
+complete history, fetches nothing, defaults to `HEAD` and `origin/main...HEAD`, and
+checks the current branch name. Override `YAGA_REVISION`, `YAGA_BASE`, `YAGA_BRANCH`
+and `YAGA_FORMAT` through environment variables; the revision must equal checkout
+HEAD so workflow files and committed checks describe the same candidate. Detached
+checkouts require an explicit branch. CI supplies exact event SHAs and the source
+branch through environment variables, without shell interpolation.
+
+The released YAGA 0.2.0 CLI provides these checks; no development checkout is needed.
+CI also runs `make workflow-lint` through YAGA's digest-pinned actionlint container,
+with bounded resources and verified cleanup. It is not part of the resource-free
+local gate: run it locally only with an explicitly admitted Docker daemon. These
+policies supplement the commit hook and required CI Gate; they do not replace
+runtime tests, deployment qualification or trusted merge enforcement.
+
+The pure reference/security and committed-tree checks require no Docker, model
+credentials or GitHub write access. Syntax lint uses Docker as described above.
+Commit Messages uses the exact trusted
 event checkout for its policy and verifies the fetched PR head before checking it. PostgreSQL service images retain their major-version tag for readability
 and pin the registry manifest digest; refresh all three pins together after review.
 See the [YAGA adoption guide](https://dariuszpanas.github.io/yaga/ci-adoption/).
@@ -86,6 +122,8 @@ Create branches from an up-to-date `main` and use lowercase kebab-case names:
 | Documentation only | `docs/` | `docs/worker-mode-selection` |
 | Maintenance, tooling, or dependencies | `chore/` | `chore/ruff-upgrade` |
 | Test-only change | `test/` | `test/worker-reconnect-coverage` |
+| Performance work | `perf/` | `perf/terminal-graph-preparation` |
+| CI-only change | `ci/` | `ci/qualification-gate` |
 
 `feat/` is the default for feature work. Repository guidance overrides generic tool defaults, so
 automated agents must not replace it with an unrelated `agent/`, `codex/`, or similar prefix. An
@@ -578,7 +616,7 @@ Keep commits focused and do not squash the PR. Once the required checks pass, en
 gh pr merge --auto --rebase <PR-number>
 ```
 
-Before ordinary pushes, run `uv run make check` plus the narrowest affected tests and applicable
+Before ordinary pushes, run `uv run make pre-push-check` plus the narrowest affected tests and applicable
 schema, documentation, or packaging checks. Every push to an open PR receives the broad exact-head
 hosted CI matrix. Record the commands and results in the retained commit and PR.
 

@@ -73,10 +73,12 @@ jobs:
           export UPGRADE_EVIDENCE_DIR="$RUNNER_TEMP/upgrade-receipts"
           mkdir -m 700 "$UPGRADE_EVIDENCE_DIR"
           sudo chown 10001:10001 "$UPGRADE_EVIDENCE_DIR"
-          echo "UPGRADE_BASELINE_SOURCE=$UPGRADE_BASELINE_SOURCE" >> "$GITHUB_ENV"
-          echo "UPGRADE_EVIDENCE_DIR=$UPGRADE_EVIDENCE_DIR" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE=$source_dir/qualification/upgrade/$UPGRADE_RECIPE.yaml" >> "$GITHUB_ENV"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/upgrade-source.txt"
+          {
+            echo "UPGRADE_BASELINE_SOURCE=$UPGRADE_BASELINE_SOURCE"
+            echo "UPGRADE_EVIDENCE_DIR=$UPGRADE_EVIDENCE_DIR"
+            echo "COMPOSE_FILE=$source_dir/qualification/upgrade/$UPGRADE_RECIPE.yaml"
+          } >> "$GITHUB_ENV"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/upgrade-source.txt"
 
       - name: Build the two locked installed-wheel environments
         timeout-minutes: 12

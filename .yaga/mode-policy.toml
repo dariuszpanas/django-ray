@@ -1,0 +1,6 @@
+mode-policy-version = 1
+default-allowed-modes = ["regular"]
+
+[[path-overrides]]
+pattern = ".githooks/commit-msg"
+allowed-modes = ["executable"]

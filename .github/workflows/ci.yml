@@ -24,6 +24,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
@@ -61,8 +63,16 @@ jobs:
           export UV_OFFLINE=1
           uv run --no-sync make commit-policy-test spelling-check
 
-      - name: Check workflows with YAGA
-        run: make workflow-check YAGA_FORMAT=github
+      - name: Check repository policies with YAGA
+        env:
+          YAGA_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          YAGA_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+          YAGA_BRANCH: ${{ github.head_ref || github.ref_name }}
+          YAGA_FORMAT: github
+        run: uv run make repository-check
+
+      - name: Check workflow syntax with pinned actionlint
+        run: make workflow-lint YAGA_FORMAT=github
 
       - name: Check repository spelling
         run: uv run make spelling-check
