@@ -50,3 +50,4 @@ preserves the original wording.
 - [ADR-0003: Compiled Invocation Lifecycle](adr-0003-compiled-invocation-lifecycle.md)
 - [ADR-0004: Bounded Workflow Progress Storage](adr-0004-bounded-workflow-progress.md)
 - [ADR-0005: Bounded Workflow Progress Preparation](adr-0005-bounded-workflow-preparation.md)
+- [ADR-0006: Bounded Read-only Operator Diagnosis (proposed)](adr-0006-bounded-operator-diagnosis.md)
