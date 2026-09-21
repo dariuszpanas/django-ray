@@ -22,27 +22,18 @@ CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
 CONTRIBUTING_DOCS = PROJECT_ROOT / "docs" / "contributing.md"
 REQUIRED_CHECK_JOBS = {
     ("ci.yml", "ci-gate"): "CI Gate",
+    ("qualification-gate.yml", "qualification-gate"): "Qualification Gate",
     ("commit-messages.yml", "conventional-commits"): "Commit Messages",
 }
-REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate"}
+REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate", "Qualification Gate"}
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
-    ("latency-qualification.yml", "latency"): (
-        "Path-selected deployed evidence is reviewed under the affected-gate policy"
-    ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
-        "Path-selected deployed evidence is reviewed under the affected-gate policy"
-    ),
-    ("upgrade-native-qualification.yml", "native"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
     ("upgrade-qualification.yml", "data"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
-    (
-        "application-qualification.yml",
-        "application-core",
-    ): "Path-selected deployed evidence is reviewed under the affected-gate policy",
 }
 
 
@@ -984,7 +975,10 @@ def test_pull_request_jobs_are_gated_required_or_explicitly_nonblocking() -> Non
             if key in REQUIRED_CHECK_JOBS:
                 assert job.get("name") == REQUIRED_CHECK_JOBS[key]
                 continue
-            gated = path == CI_WORKFLOW and job_id in gate_needs
+            gated = (path == CI_WORKFLOW and job_id in gate_needs) or (
+                path.name == "qualification-gate.yml"
+                and job_id in _needs(_jobs(path)["qualification-gate"])
+            )
             nonblocking = key in EXPLICIT_NONBLOCKING_PR_JOBS
             assert sum((gated, nonblocking)) == 1, key
             if nonblocking:
@@ -1100,7 +1094,7 @@ def test_yaga_required_requires_pinned_spelling_without_author_allowlist() -> No
 def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> None:
     document = _workflow(WORKFLOWS / "upgrade-native-qualification.yml")
     assert document["permissions"] == {"contents": "read", "checks": "read", "actions": "read"}
-    assert set(document["on"]) == {"pull_request", "workflow_dispatch"}
+    assert set(document["on"]) == {"workflow_call", "workflow_dispatch"}
     job = document["jobs"]["native"]
     assert job["strategy"]["max-parallel"] == "1"
     assert job["strategy"]["fail-fast"] == "false"

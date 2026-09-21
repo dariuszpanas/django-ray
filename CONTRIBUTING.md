@@ -316,3 +316,33 @@ returns a failure for spelling findings or tool errors. Binary PNG/ICO assets ar
 excluded. File-specific exceptions preserve deliberately malformed test data and
 published command syntax; do not add broad dictionary exceptions to hide mistakes.
 Commit spelling through YAGA is qualified separately under issue #521.
+
+## Conditional qualification merge gate
+
+`Qualification Gate` is the single required aggregate for path-selected application,
+native upgrade (all four recipes), and latency qualification. Keep `CI Gate` and
+`Commit Messages` required independently; qualification waits for Linux CI and
+must not become a prerequisite of `CI Gate`.
+
+One PR workflow owns selection, the reusable qualification jobs and their final
+aggregate. It selects from the complete changed-file inventory, including both
+paths of renames, and refuses stale heads or more than 3,000 changed files. The
+versioned `scripts/qualification_policy.json` retains the prior path scopes.
+Changing the gate or policy selects every qualification. There is no expensive
+qualification job on an unaffected documentation-only change.
+
+Every selected reusable workflow must succeed. Missing, cancelled, skipped or
+failed selected jobs fail the aggregate. A skipped job passes only when selection
+explicitly marks it not applicable; the job summary records that distinction.
+The aggregate runs with `always()` and depends on selection and all three calls,
+so rerunning a prerequisite remains within the same dependency graph. Manual
+qualification dispatch remains diagnostic and cannot substitute for these results.
+Selection and aggregation have five-minute deadlines; workload deadlines and
+resource limits remain in their reusable workflows. No polling runner waits for
+unrelated workflow status names.
+
+After hosted validation, replace the individual conditional qualification contexts
+in branch rules with `Qualification Gate`. Do not remove old contexts before
+validating the replacement or bypass merge protection. The source change alone is
+not a completed ruleset migration. Windows remains advisory; transaction/data
+upgrade checks retain their separate affected-gate requirements.

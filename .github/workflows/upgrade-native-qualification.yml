@@ -1,21 +1,7 @@
 name: Upgrade Native Qualification
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - scripts/wait_for_ci_checkpoint.py
-      - .github/workflows/upgrade-native-qualification.yml
-      - qualification/upgrade/**
-      - qualification/transactions/Dockerfile
-      - qualification/transactions/probe.py
-      - qualification/docker/scenario.py
-      - src/django_ray/migrations/**
-      - src/django_ray/backends.py
-      - src/django_ray/input_storage.py
-      - src/django_ray/result_storage.py
-      - pyproject.toml
-      - uv.lock
+  workflow_call:
   workflow_dispatch:
 
 permissions:

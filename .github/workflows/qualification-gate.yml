@@ -1,0 +1,67 @@
+name: Qualification Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+  pull-requests: read
+
+concurrency:
+  group: qualification-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  selection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      application: ${{ steps.select.outputs.application }}
+      native: ${{ steps.select.outputs.native }}
+      latency: ${{ steps.select.outputs.latency }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/qualification_gate.py
+
+  application:
+    needs: selection
+    if: needs.selection.outputs.application == 'true'
+    uses: ./.github/workflows/application-qualification.yml
+
+  native:
+    needs: selection
+    if: needs.selection.outputs.native == 'true'
+    uses: ./.github/workflows/upgrade-native-qualification.yml
+
+  latency:
+    needs: selection
+    if: needs.selection.outputs.latency == 'true'
+    uses: ./.github/workflows/latency-qualification.yml
+
+  qualification-gate:
+    name: Qualification Gate
+    if: always()
+    needs: [selection, application, native, latency]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Require every selected qualification to pass
+        env:
+          GATE_MODE: verify
+          QUALIFICATION_RESULTS: ${{ toJSON(needs) }}
+        run: python scripts/qualification_gate.py
