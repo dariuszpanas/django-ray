@@ -578,11 +578,12 @@ while running:
   non-retryable outcome. An unverifiable binding instead follows the exact-stop,
   `LOST`, no-auto-retry quarantine. Reconciliation never fetches logs for authority or
   automatically replays either class of work.
-- Released unversioned protocol-v1 payloads and the earlier strict rq1 inline transport
-  remain explicit drain adapters. New submissions are rq2 only. Because all three carry
-  execution protocol `1`, operators must retire older task-manager claimers and close
-  legacy admission before treating a deployment as reference-only; already submitted
-  legacy/rq1 jobs can still drain under upgraded reconciliation.
+- Unversioned payloads and the earlier strict rq1 inline transport are rejected
+  before application setup in 0.6.0. New submissions are rq2 only. The active
+  execution protocol remains `1`; its number does not make retired carriers
+  executable. Drain work using the old version and stop its producers, managers
+  and purgers before the coordinated upgrade. Retained historical readers and
+  reconciliation do not authorize replay or mixed-version execution.
 
 ## Entrypoint Contract
 
@@ -644,11 +645,13 @@ rolling back, disable spillover and drain every task that already has a referenc
 Migration `0021` adds the separately typed Ray Job request reference used by rq2. It is
 additive and dormant under 0.4.0 writers, but an rq2 task manager requires a retrievable
 `INPUT_STORAGE_BACKEND` even when argument spillover remains disabled. Configure the
-same backend namespace and ambient credentials for task managers and Ray Job drivers,
-deploy the final rq2 reader, stop every 0.4.0 and intermediate rq1 task-manager claimer,
-upgrade or disable every older scheduled/manual input-purge command, and close the
-existing legacy-admission latch before resuming new Ray Job claims. Keep the old
-namespace available until every retained request reference and purge tombstone expires.
+same backend namespace and ambient credentials for task managers and Ray Job drivers.
+For the supported coordinated upgrade, drain work on the old version and stop
+old writers before applying migrations or replacing components. Upgrade or disable
+every older scheduled/manual input-purge command before resuming new Ray Job
+claims; do not mutate private admission policy or tokens as an upgrade step. Keep
+the old namespace available until every retained request reference and purge
+tombstone expires.
 Do not activate protocol `2`; rq2 is an outer carrier for protocol `1`.
 
 Migrations `0010` and `0011` add nullable workflow-run and effective-plan identity,
@@ -892,8 +895,10 @@ reference, stores a result, changes lifecycle state, or records executor provena
 Package Semantic Version remains diagnostic and never decides compatibility.
 
 Unversioned 0.4 completions remain explicit protocol-v1 legacy envelopes. Their existing
-success/failure behavior and bounded malformed-envelope recovery remain available during
-a manager rolling handoff, but they cannot report executor provenance. A valid
+success/failure behavior and bounded malformed-envelope recovery remain available to
+retained readers and fenced reconciliation, but they cannot report executor provenance.
+This does not authorize mixed-version 0.6.0 execution or replace its
+[stopped-writer upgrade](deployment/upgrading-from-0.5.md). A valid
 versioned-v1 completion can also be consumed by an older permissive v1 manager because
 the legacy outcome keys remain at the top level. In contrast, a versioned schema,
 protocol, identity, or shape mismatch is uncertain: its result and reference are never
@@ -981,9 +986,10 @@ unverifiable binding instead follows the exact-stop, `LOST`, no-auto-retry quara
 Ray Job logs are not authority for either case. Persisted strict job IDs plus bounded
 identity and protocol metadata let a compatible replacement manager reconcile the same
 job without rewriting its task identity or generation. Rq2 never falls back to the
-earlier inline transports. Unversioned released payloads and rq1 remain protocol-v1 drain
-inputs only; upgraded managers continue to reconcile them while their already submitted
-jobs finish.
+earlier inline transports. The 0.6.0 entrypoint rejects unversioned payloads and rq1
+before application setup. Retained historical reconciliation preserves their
+identity and uncertain-outcome handling; it is not permission to resume old
+submissions. Complete the drain on the old version before the coordinated upgrade.
 
 Strict outer Ray Core and Ray Job contexts now extend the same immutable task identity
 and execution protocol through nested workflow steps, result-fold actors, and
@@ -1010,23 +1016,27 @@ arguments before any Python leaf body executes.
 A typed nested-request rejection remains fixed and pickle-safe through bounded
 `RayTaskError.cause` unwrapping. The outer completion records only its fixed classifier,
 no remote traceback, and `retryable=false`; it is never automatically replayed because
-sibling leaves may already have produced effects. Marker-free released direct calls
-remain the protocol-v1 compatibility path, while an explicitly strict context cannot
-downgrade. These boundaries still do not prove cross-version cloudpickle compatibility
+sibling leaves may already have produced effects. Marker-free standalone workflow
+and distributed calls remain supported when they are unbound to a durable task;
+old positional durable-task carriers are retired, and an explicitly strict context
+cannot downgrade. These boundaries still do not prove cross-version cloudpickle compatibility
 or replace the separate exact Ray/Python and cluster-instance attestation required
 before serialization and submission.
 
-This completes the still-unreleased 0.5 explicit protocol-`1` worker contract. The
-supported rolling boundary is released 0.4 legacy/schema-`0` workers versus one exact
-final 0.5 candidate; intermediate development snapshots that advertised schema `1`
-before this boundary landed are not a supported cohort and must be stopped and drained.
-Protocol fields deliberately do not encode Git commits or package Semantic Versions.
+The explicit protocol-`1` worker contract was completed in 0.5.0. Its historical
+0.4-to-0.5 qualification boundary paired released legacy/schema-`0` workers with the
+final 0.5 schema-`1` contract; intermediate development snapshots were not supported
+cohorts. Protocol fields deliberately do not encode Git commits or package Semantic
+Versions. These historical notes do not authorize a rolling upgrade to 0.6.0:
+use the [coordinated stopped-writer procedure](deployment/upgrading-from-0.5.md).
 
-The guarded local KubeRay gate validates that boundary with the real released and current
-manager implementations rather than synthesizing their lease metadata. A manager built
-from the pinned released `v0.4.0` tree acquires a capability-schema-`0` lease and submits a
-slow protocol-`1` Ray Job through its released transport. After that manager stops, the exact
-current candidate's explicit schema-`1`, `1..1` lease must adopt the same persisted job,
+The guarded local KubeRay script retains a regression fixture for that older handoff.
+It checks real manager implementations rather than synthesized lease metadata;
+its presence does not establish a passing result for the current source. The fixture
+builds the pinned released `v0.4.0` tree on the current Ray/Python tuple, requires its
+manager to acquire a capability-schema-`0` lease, and submits a slow protocol-`1` Ray Job
+through the released transport. After that manager stops, the source under test's
+explicit schema-`1`, `1..1` lease must adopt the same persisted job,
 attempt, and generation without a second submission. A separately deferred protocol-`1`
 row must also remain byte-for-byte queued across the replacement, then complete from that
 same durable row through one current request-reference submission. A separate test-only
@@ -1049,7 +1059,7 @@ emitted. The terminal staging row and reserved release-manager hostname also let
 run identify and recover only its exact interrupted residue; missing ownership, foreign
 residue, an orphan live lease, or ambiguity fails closed. That recovery runs after the current
 application image identity is pinned but before any live task submission, and repeats
-immediately before the handoff certification.
+immediately before the historical handoff check.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager
@@ -1240,15 +1250,14 @@ package-version, or payload identity. Building or rendering the report never loc
 mutation and never changes rollout state; every changing transition rechecks its own
 durable preconditions.
 
-A code-only rollback and a schema reversal are different operations. To return to exact
-0.4.0 code, first keep the policy at protocol `1` with legacy admission open, verify
-that nonterminal work is protocol `1`, stop upgraded task managers, and reconcile their
-in-flight work; retain migration `0019` so old writers receive its legacy database
-defaults and token, and retain `0020` so reopening cannot race incompatible work.
-Reverse `0020` and then `0019` only in a separate stopped-writer maintenance window
-after confirming no retained diagnostics require their fields. Reversal removes the
-protocol and provenance columns, worker capability metadata, singleton policy and token,
-and database fences; it is not required for a code rollback.
+A code-only rollback and a schema reversal are different operations. The historical
+0.5-to-0.4 rollback contract kept policy protocol `1` and legacy admission open,
+required protocol-`1` nonterminal work, and stopped upgraded managers before reconciling
+their in-flight work. It retained migrations `0019` and `0020` for legacy database
+defaults, tokens and fencing. Reversing `0020` and then `0019` was a separate stopped-writer
+maintenance operation that removed protocol, provenance, worker capability, policy,
+token and fence data. These historical preconditions are not a 0.6.0 downgrade recipe;
+follow the [current independent backup/restore procedure](deployment/upgrading-from-0.5.md#rollback-decisions).
 
 RuntimeEnv encryption has no schema migration. Its rollout is nevertheless
 reader-first: deploy the dual plaintext/encrypted reader everywhere while writes remain
@@ -1258,15 +1267,18 @@ to plaintext writes remains readable only while the dual-reader code and all his
 keys stay deployed. A binary downgrade to a release that does not understand encrypted
 envelopes is unsafe after the first encrypted row. Key rotation adds a reader key before
 making it active and retains every old key until no durable row needs it; this release
-does not rewrite or rewrap historical rows.
+does not rewrite or rewrap historical rows. This configuration ordering does not
+authorize a mixed-version package upgrade; package changes use the coordinated Beta
+procedure linked above.
 
 The completion envelope and `execution_generation` fields are part of the Ray Job
-protocol. This release's explicit legacy-v1 adapter permits compatible 0.4 completions
-to finish while upgraded task managers reconcile them, and the flat enriched-v1 shape
-retains the old top-level outcome keys. A future incompatible request or completion
-schema still requires a reader-first rollout and a compatible manager cohort until every
-older in-flight Ray Job drains. Never retry an uncertain remote execution merely to
-complete an upgrade; first prove its exact remote identity and quiescence.
+protocol. The explicit legacy-v1 adapter retains compatible 0.4 completion reads and
+fenced reconciliation, and the flat enriched-v1 shape retains the old top-level outcome
+keys. This reader compatibility does not authorize mixed-version execution or live-job
+adoption during the 0.5-to-0.6 package upgrade. Any future incompatible request or
+completion schema needs its own documented upgrade contract. Never retry an uncertain
+remote execution merely to complete an upgrade; first prove its exact remote identity
+and quiescence.
 
 ## Reliability Controls
 

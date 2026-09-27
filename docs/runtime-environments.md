@@ -285,11 +285,13 @@ rotation and RuntimeEnv retention usually have different schedules.
 
 ### Roll out encrypted writes
 
-Use this order for a rolling deployment:
+Use this order to enable encryption on a compatible deployed release. Any package
+upgrade first follows the [coordinated Beta procedure](deployment/upgrading-from-0.5.md);
+the configuration and key ordering below does not authorize mixed-version execution:
 
-1. Back up the complete RuntimeEnv key ring separately from the database. Deploy the
-   dual-read release to every web process, task producer, retry API, admin process, and
-   task manager while writes remain `plaintext`.
+1. Back up the complete RuntimeEnv key ring separately from the database. Confirm the
+   dual-read release is installed in every web process, task producer, retry API, admin
+   process, and task manager while writes remain `plaintext`.
 2. Distribute every retained key to all of those processes and restart them, still in
    plaintext mode. Validate configuration everywhere before any encrypted row exists.
 3. Confirm no pre-encryption reader remains, then select the active key and switch new

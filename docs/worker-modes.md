@@ -122,12 +122,13 @@ bind its reference to the durable row, and pass only a bounded locator plus opaq
 identity/protocol/content metadata to Ray. The driver validates the locator before
 storage I/O and the retrieved canonical request before Django setup, input hydration, or
 application callable import/invocation; a compatible replacement task manager can
-reconcile the same persisted job ID and reference. Released protocol-`1` payloads and
-the earlier strict rq1 inline carrier remain supported only during the drain window.
-That transitional reader window is not a rolling-upgrade commitment. Remaining Beta
-releases use the [coordinated upgrade procedure](stability.md#coordinated-beta-upgrades):
-drain on the old version and update components together. Old execution acceptance is
-retired at the announced release boundary while historical data stays readable.
+reconcile the same persisted job ID and reference. Unversioned payloads and the
+earlier strict rq1 inline carrier are rejected before application setup in 0.6.0;
+they are not accepted execution adapters. Historical data stays readable, and
+retained reconciliation does not authorize replay or a mixed-version rollout.
+Remaining Beta releases use the
+[coordinated upgrade procedure](stability.md#coordinated-beta-upgrades):
+drain on the old version, stop old writers and update components together.
 Strict rejection or a strict terminal driver without an exact completion is never
 automatically retried. The rejection exit code is diagnostic rather than proof of
 execution phase, and Ray Job logs are not compatibility authority. Nested workflow,

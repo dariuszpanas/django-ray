@@ -74,10 +74,11 @@ key and internal manifest identifier. It contains no graph records, events, arbi
 metrics or errors, credentials, paths, URIs, Ray identifiers, or handles.
 
 The package-owned topology/detail storage, bounded integrity verifier, atomic writer,
-retention cleanup, and authorized public read facade are present. The current workflow
-actor still publishes schema v2 in full mode. Terminal-only and disabled workflows
-create no actor and publish no legacy snapshot. Their bounded version-2 plan selection
-records the effective policy independently.
+retention cleanup, and authorized public read facade are present. Full reporting
+publishes bounded terminal schema-v3 graphs by default and does not write live
+schema-v2 snapshots. Terminal-only and disabled workflows create no actor and
+publish no legacy snapshot. Their bounded version-2 plan selection records the
+effective policy independently.
 
 On accepted durable success or failure, terminal-only mode attempts one revision-1
 schema-v3 summary containing pinned plan identity, declared counts, terminal outcome,

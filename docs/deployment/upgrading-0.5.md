@@ -1,7 +1,7 @@
 # Upgrade from 0.4.0 to 0.5.0
 
-This guide records the released 0.5.0 upgrade boundary. For the later 0.6.0
-candidate, follow [Upgrade from 0.5](upgrading-from-0.5.md), including its retired
+This guide records the released 0.5.0 upgrade boundary. To upgrade to 0.6.0,
+follow [Upgrade from 0.5](upgrading-from-0.5.md), including its retired
 execution carriers and preserved-history requirements. The migration history
 below does not authorize old workers to execute against a newer deployment.
 
