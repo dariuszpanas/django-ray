@@ -135,6 +135,11 @@ post-merge/manual documentation builds, and tag/manual release workflows remain 
 gate. PR-facing equivalents that protect correctness live in the blocking CI workflow; Codecov
 upload is advisory within the otherwise blocking Python 3.12 job.
 
+Native shutdown sampling is diagnostic and does not replace CI Gate. The bounded
+`Native Shutdown Investigation` workflow runs for its affected PR paths or manual dispatch;
+its failure remains visible, and a successful sample does not establish a crash repair.
+Review its evidence when investigating issue #557 before release acceptance.
+
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
 changes. Its passing current-source result is required when the enqueue-only gate row applies,

@@ -659,6 +659,11 @@ checks. Documentation builds outside pull requests and release workflows run aft
 or from tags. Codecov upload is advisory inside the otherwise blocking Python 3.12 job. Add future PR
 CI jobs to `CI Gate` unless contributor policy explicitly documents why they are non-blocking.
 
+Native shutdown sampling is diagnostic and does not replace CI Gate. The bounded
+`Native Shutdown Investigation` workflow runs for its affected PR paths or manual dispatch;
+its failure remains visible, and a successful sample does not establish a crash repair.
+Review its evidence when investigating issue #557 before release acceptance.
+
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:
 
