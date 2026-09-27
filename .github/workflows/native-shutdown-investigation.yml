@@ -1,0 +1,104 @@
+name: Native Shutdown Investigation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-shutdown-investigation.yml
+      - scripts/investigate_pytest_shutdown.py
+      - scripts/observe_pytest_exit.py
+      - scripts/pytest_exit_gdb.py
+      - tests/unit/test_native_shutdown_investigation.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-shutdown-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  investigate:
+    name: Shutdown diagnostic (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Setup 4m + smoke 2m + sampler 21m + actor control 10m + artifact margin.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    env:
+      PYTHONFAULTHANDLER: "1"
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: latest
+          enable-cache: "false"
+
+      - name: Install locked interpreter and debugger
+        timeout-minutes: 4
+        run: |
+          uv python install ${{ matrix.python-version }}
+          uv sync --frozen --python ${{ matrix.python-version }}
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y gdb
+
+      - name: Verify diagnostic machinery
+        timeout-minutes: 2
+        env:
+          DJANGO_RAY_REQUIRE_NATIVE_DEBUGGER: "1"
+        run: >-
+          uv run --no-sync --python ${{ matrix.python-version }} python -m pytest
+          tests/unit/test_observe_pytest_exit.py
+          tests/unit/test_native_shutdown_investigation.py -q
+
+      - name: Observe bounded fresh-interpreter shutdowns
+        timeout-minutes: 21
+        run: |
+          # Dedicated disposable hosted VM: 4 CPUs/16 GiB; no shared cluster.
+          # Each serial local Ray runtime requests 2 CPUs and a 128-MiB store.
+          test "$(nproc)" -ge 4
+          awk '/MemTotal/ { exit ($2 < 14000000) }' /proc/meminfo
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 5000000
+          echo 'Diagnostic sampling only; no reproduction does not certify a crash repair or replace CI Gate.' >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p artifacts/native-shutdown-investigation
+          git rev-parse HEAD 'HEAD^{tree}' > artifacts/native-shutdown-investigation/source.txt
+          uv run --no-sync --python ${{ matrix.python-version }} python scripts/investigate_pytest_shutdown.py
+
+      - name: Observe existing actor and cancellation shutdowns
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Separate pytest processes own their fixture lock after sampling ends.
+          # Coverage traces the real plugin lifecycle; this subset cannot meet
+          # the full-suite percentage gate, which remains enforced by CI Gate.
+          cases=(
+            "tests/unit/test_workflow_progress_producer.py::test_real_ray_map_progress_has_one_pending_call_and_final_handoff"
+            "tests/unit/test_result_buffer.py::test_real_ray_non_detached_buffer_dies_with_owner"
+            "tests/unit/test_distributed.py::TestDistributedWithRay::test_failed_fanout_stops_sibling_and_preserves_primary_error"
+          )
+          for attempt in 1 2 3; do
+            echo "Actor/cancellation shutdown observation ${attempt}/3"
+            timeout --signal=TERM --kill-after=10s 180s \
+              uv run --no-sync --python ${{ matrix.python-version }} python \
+              scripts/observe_pytest_exit.py --native-debug -- "${cases[@]}" \
+              --cov=src --cov-report=term --cov-fail-under=0 -q \
+              2>&1 | tail -c 262144 | tee "artifacts/native-shutdown-investigation/actor-control-${attempt}.log"
+          done
+
+      - name: Retain bounded diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-shutdown-python-${{ matrix.python-version }}
+          path: artifacts/native-shutdown-investigation/
+          retention-days: 14
+          if-no-files-found: warn

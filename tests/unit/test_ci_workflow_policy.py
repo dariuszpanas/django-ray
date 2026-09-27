@@ -27,6 +27,9 @@ REQUIRED_CHECK_JOBS = {
 }
 REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate", "Qualification Gate"}
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
+    ("native-shutdown-investigation.yml", "investigate"): (
+        "Native shutdown sampling is diagnostic and does not replace CI Gate"
+    ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
@@ -224,6 +227,41 @@ def test_workflows_declare_least_privilege_token_permissions() -> None:
     assert release_jobs["publish-testpypi"]["permissions"] == {"id-token": "write"}
     assert release_jobs["publish-pypi"]["permissions"] == {"id-token": "write"}
     assert release_jobs["github-release"]["permissions"] == {"contents": "write"}
+
+
+def test_native_shutdown_actor_control_keeps_fixed_selection_and_deadlines() -> None:
+    workflow = _workflow(WORKFLOWS / "native-shutdown-investigation.yml")
+    job = workflow["jobs"]["investigate"]
+    steps = {step["name"]: step for step in job["steps"] if "name" in step}
+    sampler_name = "Observe bounded fresh-interpreter shutdowns"
+    control_name = "Observe existing actor and cancellation shutdowns"
+    control = steps[control_name]
+    run = control["run"]
+
+    assert workflow["permissions"] == {"contents": "read"}
+    assert job["timeout-minutes"] == "40"
+    assert steps[sampler_name]["timeout-minutes"] == "21"
+    assert control["timeout-minutes"] == "10"
+    assert list(steps).index(sampler_name) < list(steps).index(control_name)
+    assert list(steps).index(control_name) < list(steps).index("Retain bounded diagnostic evidence")
+    assert control["shell"] == "bash"
+    assert "if" not in control
+    assert "continue-on-error" not in control
+    assert "set -euo pipefail" in run
+    assert "for attempt in 1 2 3; do" in run
+    assert "timeout --signal=TERM --kill-after=10s 180s" in run
+    assert 'scripts/observe_pytest_exit.py --native-debug -- "${cases[@]}"' in run
+    assert "--cov=src --cov-report=term --cov-fail-under=0" in run
+    assert re.findall(r'"(tests/[^"\s]+::[^"\s]+)"', run) == [
+        "tests/unit/test_workflow_progress_producer.py::"
+        "test_real_ray_map_progress_has_one_pending_call_and_final_handoff",
+        "tests/unit/test_result_buffer.py::test_real_ray_non_detached_buffer_dies_with_owner",
+        "tests/unit/test_distributed.py::TestDistributedWithRay::"
+        "test_failed_fanout_stops_sibling_and_preserves_primary_error",
+    ]
+    assert 'tail -c 262144 | tee "artifacts/native-shutdown-investigation/actor-control-' in run
+    assert "|| true" not in run
+    assert "investigate_pytest_shutdown.py" not in run
 
 
 def test_release_never_checks_out_dispatch_input_or_persists_credentials() -> None:
