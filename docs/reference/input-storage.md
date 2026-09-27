@@ -217,28 +217,36 @@ Purging makes historical manual retry impossible until the same object is restor
 reactivated. Choose a retention window that covers the application's audit and manual
 recovery requirements. The command never runs automatically.
 
-## Rolling Upgrade
+## Coordinated Beta upgrade {#rolling-upgrade}
 
 Migration `0021_ray_job_request_reference` is additive preparation for rq2. It gives
 `payload_kind` the Python and database default `task_input`, so released writers that
-omit the column remain compatible. Applying it alone does not change submissions.
+omit the column remain schema-compatible. That historical schema property does
+not authorize mixed-version execution or a rolling upgrade. Follow the
+[coordinated Beta procedure](../stability.md#coordinated-beta-upgrades) and the
+[0.5.0 upgrade guide](../deployment/upgrading-from-0.5.md).
 
-1. Apply all additive migrations while old writers still run.
+1. Stop submissions and drain work using the old version. Resolve uncertain
+   effects explicitly, then stop old managers, producers and purgers. Preserve
+   database, referenced artifacts and keys, and verify an independent restore
+   before applying the reviewed migration plan to the stopped database.
 2. Configure one retrievable backend/namespace and ambient credentials reachable by the
    new task managers and Ray Job drivers. Keep argument spillover disabled if its own
    reader rollout is not complete.
-3. Deploy the exact final rq2 reader everywhere that may reconcile or start a Ray Job.
+3. Replace managers and compatible Ray/Python components together. Start only
+   current-version managers; the 0.6.0 entrypoint rejects unversioned and rq1
+   inline carriers before application setup.
 4. Upgrade or disable every released/intermediate scheduled or manual
    `django_ray_purge_inputs` invocation. Older binaries understand neither
    `payload_kind` nor `ray_job_request_reference`; their dry run misreports an aged active
    request as unreferenced and `--delete` can remove it. Resume purge only from the exact
    final rq2 code, and revoke storage delete permission from retired runtime identities
    where practical.
-5. Pause claims/producers as needed, retire every released 0.4.0 and intermediate rq1
-   task-manager claimer, then close the existing legacy-admission latch with its reviewed
-   revision and producer-retirement fence. Do not edit policy/token rows directly.
-6. Resume Ray Job claims. Already submitted legacy and rq1 jobs can drain under upgraded
-   reconciliation; all new submissions use rq2 while active protocol remains `1`.
+5. Verify preserved history, current-version execution and the deployment's
+   recovery checks before reopening submissions. Do not edit private admission
+   policy/token rows directly or use historical reconciliation as permission to
+   replay old submissions.
+6. Resume Ray Job claims using rq2 while active protocol remains `1`.
 7. Retain every old storage namespace and credential set until no queued/running task,
    retained request reference, or registry tombstone needs it.
 

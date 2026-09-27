@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-27
+
 ### Changed
 
 - **Breaking:** Full workflow reporting publishes bounded terminal graphs by
@@ -127,7 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publication state, including unfinished runs, terminal-only or disabled
   reporting, expired detail and missing historical publications. Direct oversized
   views to retained paginated API detail where available. These messages do not
-  enable graphs by default or reconstruct missing historical graphs.
+  guarantee publication or reconstruct missing historical graphs.
 - Preserve precise sample search-result types and installed-wheel dependency
   checks under updated type-checker and cryptography releases.
 
@@ -141,11 +143,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add a fixed 101-node application qualification case for Admin display limits,
   requiring retained paginated API detail and an honest empty Admin response.
-  This does not enable default graphs or establish rendered browser behavior.
+  This does not extend the default publisher's limits or establish rendered
+  browser behavior.
 
 - Extend the disposable application workload with bounded Chromium checks of
   rendered current and archived Admin graphs and reporting-policy explanations.
-  Keep default-publication and full release acceptance as separate requirements.
+  Browser checks alone do not establish full release acceptance.
 
 - Add a supported read-only worker-lease readiness API and management command
   with exact queue/hostname selection, optional worker ID, fixed JSON and exit
@@ -1804,7 +1807,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/dariuszpanas/django-ray/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dariuszpanas/django-ray/compare/v0.3.0...v0.3.1

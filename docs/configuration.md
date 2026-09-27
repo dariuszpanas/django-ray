@@ -91,11 +91,14 @@ not break a django-ray worker. An opted-in alias must resolve to `RayTaskBackend
 subclass before it can reserve queues; an unavailable opted-in backend fails closed.
 The same-named option on a confirmed non-django-ray backend has no django-ray effect.
 
-For a rolling deployment, first pause producers for the queue (or prove it empty), then
-drain and stop every old Ray Core or synchronous worker that could select it. Upgrade
-worker code, start the dedicated Ray Job worker, enable the backend option, and only
+When enabling queue affinity, first pause producers for the queue (or prove it empty),
+then drain and stop every old Ray Core or synchronous worker that could select it.
+Start the dedicated Ray Job worker on compatible code, enable the backend option, and only
 then resume producers. An older worker does not understand the affinity option and can
-still claim the queue; do not overlap it with newly protected work.
+still claim the queue; do not overlap it with newly protected work. This configuration
+ordering does not authorize mixed-version package deployment. If worker code must be
+upgraded, complete the [coordinated Beta upgrade](deployment/upgrading-from-0.5.md)
+before enabling protected work.
 
 ## All Settings
 
@@ -253,7 +256,7 @@ have no detail expiry because no detail rows are created.
 RuntimeEnv profiles are resolved and stored when a task is enqueued. See
 [Runtime Environments](runtime-environments.md) for inheritance, backend aliases,
 workflow leaf overrides, cache behavior, encrypted snapshot configuration, and the
-required rolling-deployment order.
+required configuration and key-rollout order.
 
 ### Inputs
 

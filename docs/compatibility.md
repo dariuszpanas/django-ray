@@ -71,7 +71,8 @@ Current [Ray releases support a wider Python range](https://pypi.org/project/ray
 Django 6.0.8 is the django-ray security floor. Django 6.0.0 through 6.0.7 are not
 supported; newer compatible releases are exercised by the latest-dependency lane.
 
-Ray 2.58.0 is the django-ray 0.5 security and runtime baseline. Ray 2.57 added
+Ray 2.58.0 remains the security and runtime baseline for django-ray 0.6.0,
+unchanged from 0.5.0. Ray 2.57 added
 [Dashboard log-path validation](https://github.com/ray-project/ray/pull/64701),
 which is absent from 2.56.0 and 2.56.1. Ray 2.58 additionally fixes
 [nested Parquet/Lance pickle handling](https://github.com/ray-project/ray/pull/64881)
@@ -81,7 +82,7 @@ bundled Data recipe reads JSON, not Lance or nested pickle data. These extend th
 earlier fixes behind django-ray 0.4's Ray 2.56.0 floor.
 
 Upgrade the task managers, Ray head, and Ray workers together before installing
-django-ray 0.5; do not use a mixed Ray minor-version cluster as a rolling-upgrade
+django-ray 0.6.0; do not use a mixed Ray minor-version cluster as a rolling-upgrade
 shortcut. The Ray upgrade does not activate Compiled Graph, task-event migration,
 Sandbox, or a new execution protocol. Existing cancellation, ownership and durable
 completion fences remain necessary.

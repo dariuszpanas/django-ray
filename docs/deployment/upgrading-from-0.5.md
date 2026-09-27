@@ -1,10 +1,11 @@
-# Upgrade from 0.5.0 to the unreleased 0.6.0 candidate
+# Upgrade from 0.5.0 to 0.6.0
 
-0.6.0 is unreleased. This page describes the planned coordinated upgrade from 0.5.0, tracked in
+This page describes the coordinated stopped-writer upgrade from 0.5.0 to 0.6.0, tracked in
 [the release scope](https://github.com/dariuszpanas/django-ray/issues/508).
 Confirm published artifacts on the
 [releases page](https://github.com/dariuszpanas/django-ray/releases) before deploying;
-version metadata in a development checkout does not establish publication.
+version metadata or untagged release preparation in a development checkout does not
+establish publication.
 Full reporting uses bounded terminal graphs by default in 0.6.0.
 The candidate retained by [PR #587](https://github.com/dariuszpanas/django-ray/pull/587)
 passed source-matched public qualification and coordinated upgrade acceptance.
@@ -154,14 +155,14 @@ not activate another protocol or restore mixed-version execution support.
 
 ## Coordinated stopped-writer upgrade
 
-The candidate adds migration 0027 for nullable bounded reporting diagnostics.
-Apply it before starting candidate workers, and review the complete migration
+0.6.0 adds migration 0027 for nullable bounded reporting diagnostics.
+Apply it before starting upgraded workers, and review the complete migration
 plan from the installed 0.5.0 baseline, including your application's migrations.
 This does not introduce a new task execution protocol or authorize mixed-version
 execution.
 Use the [coordinated Beta procedure](../stability.md#coordinated-beta-upgrades):
 
-1. Record the exact released and candidate package, image, Python and Ray versions.
+1. Record the exact baseline and selected 0.6.0 package, image, Python and Ray versions.
    Verify the selected runtime's matching requirements. Stop submissions,
    schedules and other producers, and let old managers drain. Resolve uncertain
    outcomes explicitly; do not delete or relabel work to make the inventory empty.
@@ -169,9 +170,9 @@ Use the [coordinated Beta procedure](../stability.md#coordinated-beta-upgrades):
    the final database-and-artifact backup. Back up encryption keys separately
    through the existing secret backup process. Independently restore and verify
    the backup before modifying the stopped database.
-3. Run `python manage.py migrate --plan` with the final candidate installed and
+3. Run `python manage.py migrate --plan` with the selected 0.6.0 package installed and
    review the complete plan. Apply required migrations, replace the runtime
-   components together, and start only candidate managers. Do not carry active
+   components together, and start only upgraded managers. Do not carry active
    ObjectRefs into another Ray session.
 4. Read historical success, failure and retry records and their retained artifacts.
    Check missing/corrupt artifact behavior and the expected Admin availability
@@ -240,7 +241,7 @@ automatic replay, then exercises an explicit retry after old processes retire.
 
 These results cover the qualified source and fixture, not an inaccessible private
 deployment. Receipts deliberately retain `complete_upgrade_gate: false`.
-The accepted candidate also passed rendered current/archived workflow history,
+The historical PR #587 candidate also passed rendered current/archived workflow history,
 execution retirement, defined uncertain-outcome recovery and required cold-Ray
 observations, including the fixture's configured Dashboard proxy. Operators must
 still reconcile their own uncertain effects, verify their backups and keys, and
@@ -261,4 +262,4 @@ Keep historical rows and their results. After checking the original outcome and
 any possible side effects, explicitly enqueue new work under the intended current
 configuration. Do not clear hashes, rewrite the marker, or retry old work to
 silently adopt today's default profile. Complete the stopped-writer upgrade and
-old-work drain before starting the candidate.
+old-work drain before starting upgraded managers.

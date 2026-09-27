@@ -186,7 +186,8 @@ bounded canonical request assembled from durable JSON or an opaque input referen
 plus independent expected task and protocol primitives. The by-value bootstrap rejects
 a malformed, unsupported, or mismatched request with a fixed non-retryable completion
 before Django setup, input hydration, or application callable import/invocation.
-Released positional submissions remain the protocol-v1 rolling-compatibility path.
+Old positional durable-task submissions are rejected before application setup;
+retained completion readers do not authorize their execution or replay.
 If Ray returns no completion for a strict handle, the manager uses a fixed
 non-retryable transport failure with no remote exception text or executor provenance;
 inspect the remote execution before considering manual replay.
@@ -210,8 +211,10 @@ the retrieved request bytes, canonical schema, exact identity, protocol, and inn
 transport before Django setup, input hydration, or callable import/invocation. A
 compatible replacement manager validates the exact persisted rq2 job ID and reference
 binding; it does not reconstruct or retrieve the request through JobInfo and does not
-use a digest to infer execution effects. Released unversioned payloads and the earlier
-strict rq1 inline carrier remain protocol-`1` drain adapters only.
+use a digest to infer execution effects. The 0.6.0 entrypoint rejects unversioned
+payloads and the earlier strict rq1 inline carrier before application setup.
+Historical readers and reconciliation do not authorize executing those carriers
+or replaying uncertain work.
 
 Treat every strict terminal Ray Job with a verified binding but no exact completion as
 non-retryable after the normal publication grace period. The dedicated rejection exit
@@ -228,17 +231,18 @@ arguments.
 Rq2 does not activate protocol `2` and cannot stop a released 0.4.0 manager from claiming
 protocol-`1` work. Before declaring new submissions reference-only, configure one shared
 retrievable input namespace and ambient credentials for every task manager and Ray Job
-driver, deploy the exact final rq2 reader, pause claims/producers as needed, retire all
-0.4.0 and intermediate rq1 task-manager claimers, and upgrade or disable every older
-scheduled/manual `django_ray_purge_inputs` invocation before the first rq2 write. Older
-purge binaries understand neither `payload_kind` nor `ray_job_request_reference`: their
+driver. Drain work on the old version and stop all old producers, managers and
+purgers before applying migrations and replacing components together. Upgrade or
+disable every older scheduled/manual `django_ray_purge_inputs` invocation before
+the first rq2 write. Older purge binaries understand neither `payload_kind` nor
+`ray_job_request_reference`: their
 dry run misreports an aged active request as unreferenced and `--delete` can remove its
 object. Resume purge only from the exact final rq2 code; where practical, revoke storage
-delete permission from retired runtime identities. Then close the existing
-legacy-admission latch with its revision and producer-retirement fence. Already submitted
-legacy and rq1 jobs may drain under upgraded reconciliation. Until the supported closure
-adapter lands, this is an explicit release blocker rather than a reason to mutate policy
-rows, tokens, or leases directly.
+delete permission from retired runtime identities. Follow the
+[coordinated Beta procedure](stability.md#coordinated-beta-upgrades); do not mutate
+private admission policy rows, tokens or leases as an upgrade step. The retained
+coordination primitive is not a required operator adapter for this stopped-writer
+upgrade and does not authorize mixed-version execution.
 Do not restore an older purge binary during rollback until every rq2 job has drained and
 every retained rq2 request reference and registry tombstone has expired.
 
@@ -259,22 +263,26 @@ each remote bootstrap and ordinary item arguments before the leaf body can valid
 exact Ray/Python and cluster-instance attestation remains a separate pre-serialization
 and pre-submission requirement.
 
-Use only the exact final 0.5 candidate as the schema-`1`, protocol-`1` upgraded cohort.
-Intermediate unreleased 0.5 snapshots that advertised the same protocol before nested
-fencing was complete are not rollout-compatible; stop and drain them before the final
-candidate. The supported handoff is from released 0.4 legacy/schema-`0` workers, not
-between arbitrary development commits that happen to share a protocol number.
+The following retained fixture describes historical 0.4-to-0.5 protocol qualification,
+not the supported 0.6.0 package-upgrade procedure. The original boundary paired released
+0.4 legacy/schema-`0` workers with the final 0.5 schema-`1`, protocol-`1` contract;
+intermediate development snapshots were not compatible merely because they advertised
+the same protocol. For 0.5.0-to-0.6.0 deployments, follow
+[Upgrade from 0.5](deployment/upgrading-from-0.5.md): drain old work and stop writers.
+Historical live-job adoption checks do not authorize mixed-version execution.
 
-The guarded local KubeRay final gate certifies that boundary with real manager code from
-both cohorts. It builds an ephemeral task-manager image from the pinned released `v0.4.0` tree,
+The guarded local KubeRay script retains a regression fixture for that older boundary.
+Its presence does not establish a passing result for the current source. The fixture
+builds an ephemeral task-manager image from the pinned released `v0.4.0` tree on the
+current Ray/Python tuple,
 lets that binary acquire its legacy capability-schema-`0` lease and submit a slow
-protocol-`1` Ray Job, then stops it and requires the exact current candidate's explicit
+protocol-`1` Ray Job, then stops it and requires the source under test's explicit
 schema-`1`, `1..1` lease to reconcile the same persisted job ID, attempt, and generation
 without resubmission. While the released manager is occupied, a separately deferred
 protocol-`1` row must remain byte-for-byte queued through that replacement; the current
 manager then completes the same durable row through one request-reference submission. Do
 not substitute a current binary with hand-edited legacy fields: that would test stored
-metadata, not the released rolling boundary.
+metadata, not the historical released handoff boundary.
 
 The gate's protocol-`2` path is deliberately negative and test-only. It first stages one
 synthetic row in a terminal state outside production producers while legacy admission is
@@ -344,7 +352,7 @@ the fixed 128-byte public-read guard.
 
 The following describes the retained `0019`/`0020` migration foundation and its
 private coordination primitive. It is not the current operational upgrade or
-rollback procedure. For a deployed 0.5.0 system moving to the 0.6.0 candidate,
+rollback procedure. For a deployed 0.5.0 system moving to 0.6.0,
 use [Upgrade from 0.5](deployment/upgrading-from-0.5.md) and the
 [coordinated Beta procedure](stability.md#coordinated-beta-upgrades). Historical
 policy/token compatibility does not authorize old execution carriers or a
@@ -398,7 +406,7 @@ to use protocol `1` and upgraded task managers to stop and reconcile before exac
 0.4.0 code started. Reversing `0020` and then `0019` was a separate stopped-writer
 maintenance operation that lost protocol, provenance, capability, policy, token,
 and fencing data. These historical preconditions are not a rollback recipe for
-the current candidate; use its documented independent backup/restore procedure.
+0.6.0; use the [current independent backup/restore procedure](deployment/upgrading-from-0.5.md#rollback-decisions).
 
 ## Useful Queries
 

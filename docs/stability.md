@@ -12,8 +12,10 @@ stopped-writer upgrade. Mixed-version task managers, rolling execution handoff a
 continued execution of old payload formats are outside that product commitment.
 Ray Jobs remains a supported current execution mode.
 
-The [0.4.0 to 0.5 procedure](deployment/upgrading-0.5.md) records the current
-candidate's migration inventory, read-only rollback checks and remaining rehearsal.
+The [0.5.0 to 0.6.0 guide](deployment/upgrading-from-0.5.md) records the current
+upgrade boundary, migration inventory, rollback decisions and required evidence.
+The [0.4.0 to 0.5.0 procedure](deployment/upgrading-0.5.md) remains the historical
+guide for that released boundary.
 
 For each Beta release, document and rehearse this order:
 

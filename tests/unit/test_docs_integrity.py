@@ -43,6 +43,10 @@ FULL_GATE_CARRY_FORWARD_POLICY = (
 def _markdown_heading_anchors(content: str) -> set[str]:
     anchors: set[str] = set()
     for heading in re.findall(r"^#{1,6}\s+(.+?)\s*$", content, re.MULTILINE):
+        explicit = re.search(r"\s+\{#([\w-]+)\}\s*$", heading)
+        if explicit:
+            anchors.add(explicit.group(1))
+            continue
         plain = heading.replace("`", "").lower()
         anchor = re.sub(r"[^\w\s-]", "", plain)
         anchors.add(re.sub(r"[\s-]+", "-", anchor).strip("-"))

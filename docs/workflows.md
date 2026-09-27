@@ -9,7 +9,8 @@ topology-node limit; each marker obeys the progress event byte limits. One
 producer retains at most one additional bounded latest event for that marker.
 Missing, invalid or uncertain metadata disables graph publication without
 cancelling or retrying successful application work. These bounds do not establish
-aggregate admission across live progress producers or activate graphs by default.
+aggregate admission across live progress producers. Full reporting uses bounded
+terminal graphs by default; live graph updates remain unsupported.
 
 django-ray workflows combine one durable Django task with low-overhead Ray-native
 steps. The outer task is queued, retried, cancelled, and recorded in the database.
