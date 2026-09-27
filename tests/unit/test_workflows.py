@@ -3081,7 +3081,7 @@ def test_workflow_executes_on_real_ray() -> None:
         outer_task = ray.remote(run_nested_workflow)
         assert ray.get(outer_task.remote(5)) == 40
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.django_db
@@ -3138,7 +3138,7 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
                     step(report_and_increment).with_progress_reporting(policy).run(5, use_ray=True)
                 )
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
     assert actor_creation_attempts == []
     assert results == {
@@ -3174,7 +3174,7 @@ def test_real_ray_bounded_map_preserves_order_and_limits_concurrency() -> None:
         assert workflow.run(items, use_ray=True) == [0, 1, 2, 3]
         assert ray.get(tracker.snapshot.remote()) == (0, 2)
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -3234,7 +3234,7 @@ def test_real_ray_mapped_group_cleans_sibling_ref_before_failure_returns() -> No
         assert {"sibling_cancelled", "sibling_completed"} & set(events)
         assert elapsed < cancel_timeout_seconds + 1.0
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -3273,7 +3273,7 @@ def test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure() -> No
         events = ray.get(tracker.snapshot.remote())
         assert events == ["upstream_completed", "terminal_started"]
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -3321,7 +3321,7 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
         ):
             assert workflow.run(2, use_ray=True) == 6
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
     from django_ray.workflow.progress.reads import (
         get_workflow_node_detail,
@@ -3413,7 +3413,7 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         ):
             assert workflow.run(6, use_ray=True) == [1, 2, 3, 4, 5, 6]
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
     execution.refresh_from_db()
     assert execution.progress_data is None
@@ -3737,7 +3737,7 @@ def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None
             with pytest.raises(RayTaskError, match="intentional workflow failure"):
                 workflow.run(1, use_ray=True)
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
     execution.refresh_from_db()
 

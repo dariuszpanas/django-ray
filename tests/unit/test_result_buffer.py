@@ -920,7 +920,7 @@ def test_real_ray_production_payload_stays_out_of_coordinator_until_reducer() ->
             "manifest_bytes": 4 * payload_bytes,
         }
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -946,7 +946,7 @@ def test_real_ray_overflow_stops_admission_and_preserves_actor_error() -> None:
 
         assert ray.get(tracker.snapshot.remote()) == [0]
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -1013,7 +1013,7 @@ def test_real_ray_actor_resources_direct_returns_and_success_cleanup() -> None:
                 pytest.fail("result buffer survived successful cleanup")
             time.sleep(0.05)
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -1038,4 +1038,4 @@ def test_real_ray_non_detached_buffer_dies_with_owner() -> None:
                 pytest.fail("non-detached result buffer survived owner death")
             time.sleep(0.05)
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)

@@ -1692,7 +1692,7 @@ def test_real_ray_production_summary_stays_out_of_coordinator_until_final_result
 
         assert workflow.run([0, 1, 2, 3], use_ray=True) == 4
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -1719,7 +1719,7 @@ def test_real_ray_item_overflow_stops_admission_and_preserves_actor_error() -> N
             workflow.run(range(10), use_ray=True)
         assert ray.get(tracker.snapshot.remote()) == [0]
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -1795,7 +1795,7 @@ def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> Non
                 pytest.fail("result-fold actor survived successful cleanup")
             time.sleep(0.05)
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
@@ -1820,4 +1820,4 @@ def test_real_ray_non_detached_fold_dies_with_owner() -> None:
                 pytest.fail("non-detached result fold survived owner death")
             time.sleep(0.05)
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)

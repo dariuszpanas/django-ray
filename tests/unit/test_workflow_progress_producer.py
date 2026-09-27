@@ -115,7 +115,7 @@ def ray_runtime() -> Iterator[Any]:
     try:
         yield ray
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 def _decoded(actor: _Actor) -> list[Any]:
