@@ -16,6 +16,7 @@ from qualification.application.workflow_fixtures import (
     verify_complex_graph,
     verify_plan_overflow_graph,
     verify_recovery_graph,
+    verify_showcase_graph,
 )
 
 COLLECTIONS = {
@@ -93,6 +94,7 @@ def read_full_workflow_graph(
         None,
         "complex",
         "recovery",
+        "showcase",
         "plan-overflow",
         "retry-success",
         "retry-exhausted",
@@ -224,6 +226,8 @@ def read_full_workflow_graph(
         verify_plan_overflow_graph(graph)
     elif full and fixture == "recovery":
         verify_recovery_graph(graph, attempt=attempt)
+    elif full and fixture == "showcase":
+        verify_showcase_graph(graph)
     elif full and fixture is not None and fixture.startswith("retry-"):
         from qualification.application.workflow_fixtures import verify_retry_graph
 

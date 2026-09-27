@@ -3,6 +3,8 @@
 from collections.abc import Mapping
 from typing import Any
 
+FIRST_WORKFLOW_TRIAL_NAMES = ("showcase-first", "showcase-warm")
+
 WORKFLOW_SHOWCASE_NODE_LAYERS = (
     frozenset({"0.0"}),
     frozenset(
@@ -106,6 +108,23 @@ def verify_recovery_graph(graph: Mapping[str, Any], *, attempt: int) -> None:
         or {(edge.get("source"), edge.get("target")) for edge in edges} != expected_edges
     ):
         raise ValueError("Recovery fixture graph has unexpected dependency edges")
+
+
+def verify_showcase_graph(graph: Mapping[str, Any]) -> None:
+    """Require the fixed successful shape and both three-item aggregate maps."""
+    verify_recovery_graph(graph, attempt=3)
+    maps = {node["id"]: node for node in graph["nodes"] if node.get("kind") == "map"}
+    if set(maps) != {"0.1.g0.1", "0.5"} or any(
+        node.get("fanout")
+        != {
+            "submitted_items": 3,
+            "completed_items": 3,
+            "in_flight_items": 0,
+            "input_exhausted": True,
+        }
+        for node in maps.values()
+    ):
+        raise ValueError("Showcase fixture changed its matched map inputs or completion")
 
 
 COMPLEX_EDGES = frozenset(

@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
@@ -24,6 +25,7 @@ from qualification.application.workflow_browser import (
     observe_rendered_workflow,
 )
 from qualification.application.workflow_display_limit import read_admin_display_limit
+from qualification.application.workflow_fixtures import FIRST_WORKFLOW_TRIAL_NAMES
 from qualification.application.workflow_http import (
     WorkflowHttpError,
     decode_workflow_object,
@@ -115,17 +117,38 @@ def workflow_cases() -> tuple[WorkflowCase, ...]:
     return tuple(cases)
 
 
-def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) -> list[dict]:
+def first_workflow_cases() -> tuple[WorkflowCase, ...]:
+    """Keep the first and warm showcase inputs identical within each generation."""
+    return tuple(
+        WorkflowCase(
+            name,
+            "/api/cluster/workflow-showcase",
+            (("item_count", 3), ("work_seconds", 0.05)),
+            ("SUCCEEDED",),
+            "full",
+            "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task",
+        )
+        for name in FIRST_WORKFLOW_TRIAL_NAMES
+    )
+
+
+def execute_case(
+    request: ApplicationHttp,
+    *,
+    token: str,
+    case: WorkflowCase,
+    on_terminal: Callable[[], None] | None = None,
+) -> list[dict]:
     """Submit once, fail fast and inspect each retained attempt without replay."""
     from django.db.models import Q
     from django.db.models.functions import Length
 
     from django_ray.models import RayTaskExecution
 
-    if case not in workflow_cases():
+    if case not in (*workflow_cases(), *first_workflow_cases()):
         raise ValueError("Workflow qualification accepts only its fixed cases")
     headers = {"Authorization": f"Bearer {token}"}
-    if case.name != "recovery":
+    if case.name not in {"recovery", "showcase-first", "showcase-warm"}:
         # Production deliberately disables the complex-workflow demo route.
         # Submit these fixed cases through the same bounded Django task API.
         from testproject.admission import enqueue_sample
@@ -202,6 +225,8 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
         raise ValueError("Durable workflow attempt count differs")
     if row.callable_path != case.callable_path:
         raise ValueError("Durable workflow callable differs")
+    if on_terminal is not None:
+        on_terminal()
     attempts = list(
         row.attempts.annotate(summary_size=Length("workflow_progress_summary_json"))
         .filter(Q(summary_size__lte=65536) | Q(workflow_progress_summary_json__isnull=True))
@@ -286,7 +311,9 @@ def execute_case(request: ApplicationHttp, *, token: str, case: WorkflowCase) ->
                     admin_cookie=cookie,
                     reporting_policy=case.policy,
                     fixture=(
-                        case.name
+                        "showcase"
+                        if case.name.startswith("showcase-")
+                        else case.name
                         if case.name in {"recovery", "plan-overflow"}
                         or case.name.startswith("retry-")
                         else "complex"

@@ -192,6 +192,9 @@ helper does not qualify workflow visualization or change publisher defaults.
 Use an explicitly admitted Linux Kubernetes environment with public KubeRay 1.6.2 already installed,
 a compatible `kubectl`, [Chainsaw 0.2.15](https://github.com/kyverno/chainsaw/releases/tag/v0.2.15),
 and Python 3.12+. No private test service, schema, image registry API or executor is required.
+The host runner and receipt validators use only Python's standard library. Django and
+Ray execution helpers load inside the application fixture, not during host startup or
+receipt collection.
 Never create or resize a shared cluster merely to run this test. The path-selected
 [Application Qualification workflow](../../.github/workflows/application-qualification.yml) waits
 for the current source Linux `CI Gate`, then hosts this stage on a disposable GitHub Actions Linux
@@ -259,22 +262,52 @@ inventory above is unchanged. An fsGroup-backed emptyDir can expose a root-owned
 mode-2777 `/tmp`; the workflow publisher correctly refuses that shared parent for SQLite preparation.
 Creating a private child and explicitly clearing inherited setgid preserves the ownership checks.
 
-The test has a 1800-second outer deadline, each assertion Job a 600-second deadline, and owned
-namespace deletion a 180-second allowance. These are ceilings, not expected durations.
+Each generation runs the first/warm pair within 180 seconds, then gives the existing
+node, Core and workflow/pressure commands one shared 600-second budget. Unused first-pair
+time does not extend that budget. The generation Job has an 810-second deadline for these
+780 seconds plus startup and termination margin; only its Chainsaw assertion uses 825
+seconds. Reporting Jobs and other assertions retain 600 seconds. The host runner's
+1800-second outer deadline remains authoritative: all phase maxima cannot be consumed
+in one run. Owned namespace deletion has a separate 180-second allowance. These are
+ceilings, not expected durations.
+
+The standard-library generation runner launches fixed argument lists in the original
+order and emits bounded phase timing markers outside the receipt schema. A failure or
+timeout stops later commands. On interruption or timeout it terminates the owned POSIX
+process group, allows two seconds, escalates to a kill and waits at most two more seconds.
+It never signals a group whose leader it has already reaped. The runner is the container's
+initial process, and Pod teardown bounds remaining descendants after an ordinary child
+failure. This adds no retries or product runtime deadline changes.
 
 The runner retrieves at most 64 KiB from each exact setup/assertion container's log. It requires
 zero successful-container restarts, exit zero, the requested immutable image with its manifest
 digest in the observed container image ID, and every expected
 passing JSON receipt at no more than 16 KiB, except the workflow receipt's 32 KiB
 budget for the fixed success, failure, recovery and nested-retry matrix. The shared
-64 KiB container-log ceiling remains unchanged. It retains `setup.json`, `before-nodes.json`,
-`before-core.json`, `before-workflows.json`, `after-nodes.json`, `after-core.json`,
+64 KiB container-log ceiling remains unchanged. It retains `setup.json`, `before-first.json`,
+`after-first.json`, `before-nodes.json`, `before-core.json`, `before-workflows.json`, `after-nodes.json`, `after-core.json`,
 `after-workflows.json`, producer Pod/image identities, Chainsaw's
 XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
 in the public Actions job log. Receipts are transported from the modules' existing stdout; they are
 not inferred from Job status. The cold receipt's predecessor digest must match the retained first
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
+
+Each Ray generation begins with two serial, identical order-fulfillment showcases
+(`item_count=3`, `work_seconds=0.05`) before generic-node probe tasks or core task smoke.
+Both must publish the full 21-node, 28-edge graph, complete both three-item maps,
+match API/Admin history and render in Chromium. The original 15-second terminal-flush
+budget remains unchanged. The first/warm receipt records exact fixture inputs,
+observation durations and both outcomes. If the first task settles but graph observation
+fails, one matched warm diagnostic still runs; its success cannot erase the first failure.
+An unsettled first task stops further submissions. Assertion Job logs retain that failure
+before namespace cleanup.
+
+This controls workflow ordering within each fresh Ray generation, not host cache state.
+The existing public profile still grants each Ray Pod 750m CPU; it does not reproduce
+the more constrained local profile or establish a startup latency guarantee. The
+separate 180-second first-pair budget and authoritative 1800-second outer deadline
+bound these cases.
 
 The workflow observation stage runs twelve fixed tasks serially in each Ray generation: complex
 workflow success and failure under `full`, `terminal_only` and `disabled`, followed by the recovery showcase's
@@ -322,8 +355,8 @@ and line, rather than raw
 exception messages, response bodies or traceback contents. This identifies assertion failures
 against the recorded source without exposing application diagnostics or credentials.
 
-This is explicitly a pilot-publication baseline, not proof that the package's default publisher
-supports Admin graphs. The reader checks publication identity, API/Admin agreement and independent
+This stage verifies package-default terminal publication without a pilot override.
+The reader checks publication identity, API/Admin agreement and independent
 fixture topology and state expectations. The reused HTML checker verifies escaped and redacted
 diagnostic presentation. A separate Chromium child executes the shipped Admin JavaScript, opens
 current and archived graph disclosures, and checks visible terminal node/edge counts, edge geometry,
@@ -332,11 +365,13 @@ Failed archived attempts retain the exact verified count of unstarted nodes; ter
 must not contain running nodes. A failed workflow does not imply that every planned node ran.
 The integrated size cases check the visible 65-node graph and the 101-node display-limit guidance
 without rendering a partial over-limit graph.
-This does not establish exhaustive redaction or default-publication coverage. Receipts also report
-`complete_workflow_gate: false`; issue #512 tracks the remaining assertions.
+This provides scoped rendering and redaction evidence for the fixed fixture, not exhaustive
+coverage of arbitrary workflows. Receipts retain `complete_workflow_gate: false`;
+release acceptance requires a combined source-matched review with the applicable upgrade
+and other qualification stages.
 Before failure cleanup, the runner also retains at most 100 RayCluster, Pod and Event records
 per resource, capped at 64 KiB per file. These include status and event messages, never resource
-specs or Secrets. It captures current and previous logs from at most six Ray, web or manager Pods,
+specs or Secrets. It captures current and previous logs from at most eight Ray, web, manager or assertion Pods,
 at most 32 KiB per log, before teardown. Failed core receipts retain request count, last HTTP status
 and validated API progress without response bodies or exception text. Hosted failures retain the
 last 200 operator log lines, capped at 64 KiB.

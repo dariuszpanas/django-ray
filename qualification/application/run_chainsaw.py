@@ -12,6 +12,12 @@ import time
 from pathlib import Path
 
 from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
+from qualification.application.run_first_workflows import (
+    LAYER as FIRST_WORKFLOW_LAYER,
+)
+from qualification.application.run_first_workflows import (
+    validate_receipt as validate_first_workflow_receipt,
+)
 from qualification.application.run_reporting_benchmark import (
     LAYER as REPORTING_LAYER,
 )
@@ -34,8 +40,14 @@ CREDENTIAL_KEYS = (
 )
 RECEIPTS = {
     "django-web": ("setup", ("setup",)),
-    "assert-before": ("assertions", ("before-nodes", "before-core", "before-workflows")),
-    "assert-after": ("assertions", ("after-nodes", "after-core", "after-workflows")),
+    "assert-before": (
+        "assertions",
+        ("before-first", "before-nodes", "before-core", "before-workflows"),
+    ),
+    "assert-after": (
+        "assertions",
+        ("after-first", "after-nodes", "after-core", "after-workflows"),
+    ),
     "reporting-benchmark": ("assertions", ("reporting",)),
 }
 LAYERS = {
@@ -44,6 +56,7 @@ LAYERS = {
     "nodes": "generic_ray_nodes",
     "core": "application_core",
     "workflows": "workflow_api_admin",
+    "first": FIRST_WORKFLOW_LAYER,
 }
 
 
@@ -81,6 +94,8 @@ def parse_receipts(raw: bytes, names: tuple[str, ...]) -> dict[str, bytes]:
             raise ValueError("Missing or failed application receipt")
         if value["layer"] == REPORTING_LAYER:
             validate_reporting_receipt(value)
+        elif value["layer"] == FIRST_WORKFLOW_LAYER:
+            validate_first_workflow_receipt(value)
         parsed.append((value, line))
     if len(parsed) != len(names):
         raise ValueError("Receipt count differs from the required assertions")
@@ -174,8 +189,16 @@ def diagnose(kubectl, namespace: str, output: Path) -> None:
                 for pod in [
                     p
                     for p in items
-                    if p["metadata"]["name"].startswith(("ray-", "django-web-", "django-manager-"))
-                ][:6]:
+                    if p["metadata"]["name"].startswith(
+                        (
+                            "ray-",
+                            "django-web-",
+                            "django-manager-",
+                            "assert-before-",
+                            "assert-after-",
+                        )
+                    )
+                ][:8]:
                     for container in pod.get("status", {}).get("containerStatuses", [])[:1]:
                         for previous in (
                             (False, True) if container.get("restartCount") else (False,)
