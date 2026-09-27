@@ -304,10 +304,25 @@ An unsettled first task stops further submissions. Assertion Job logs retain tha
 before namespace cleanup.
 
 This controls workflow ordering within each fresh Ray generation, not host cache state.
-The existing public profile still grants each Ray Pod 750m CPU; it does not reproduce
-the more constrained local profile or establish a startup latency guarantee. The
-separate 180-second first-pair budget and authoritative 1800-second outer deadline
-bound these cases.
+The standard acceptance profile still grants each Ray Pod 750m physical CPU and one
+logical Ray CPU; it does not reproduce the more constrained local profile or establish
+a startup latency guarantee. The separate 180-second first-pair budget and authoritative
+1800-second outer deadline bound these cases.
+
+For the head-placement hypothesis, the fixed `constrained-ray` diagnostic profile
+requests zero logical CPUs and a 350m physical CPU limit on the head, plus one logical
+CPU and a 500m physical CPU limit on the worker. Requests equal limits. Both Ray
+generations use the same profile. Ray's zero-resource progress actor may still run
+on the zero-logical-CPU head; positive-CPU workflow leaves cannot. This experiment
+changes no collector scheduling or terminal deadline.
+
+The constrained inventory is 2.15 CPU; memory, scratch, Pods, storage, outer hosted
+capacity and cleanup are unchanged. This reproduces the Ray CPU placement boundary,
+not the entire local environment: head memory remains 5 GiB, manager CPU remains 250m,
+and the local combined 1.6-CPU/9-GiB quota and host-cache state are not reproduced.
+`summary.json` and each first/warm receipt identify the intent, profile, and
+`requested_ray_resources`. These are requested configuration, not proof of observed
+Pod limits or actor placement. Receipt collection refuses a different profile.
 
 The workflow observation stage runs twelve fixed tasks serially in each Ray generation: complex
 workflow success and failure under `full`, `terminal_only` and `disabled`, followed by the recovery showcase's
@@ -393,10 +408,31 @@ For fixture debugging, push a branch without an open PR and manually dispatch th
 gh workflow run application-qualification.yml --ref "$BRANCH" -f mode=diagnostic
 ```
 
+To select the constrained Ray placement diagnostic:
+
+```sh
+gh workflow run application-qualification.yml --ref "$BRANCH" \
+  -f mode=diagnostic -f resource_profile=constrained-ray
+```
+
+The runner equivalents are `--validation-intent diagnostic --resource-profile constrained-ray`.
+Both the workflow and runner reject constrained acceptance before allocating resources.
+Automatic qualification and omitted profile inputs keep the standard acceptance profile.
+
 This runs only the bounded application job, without waiting for or launching the full CI matrix.
 The job summary and artifact explicitly identify diagnostic intent. Diagnostic execution does not
 satisfy final acceptance: publish the completed candidate to its PR, where the default acceptance
 mode requires current-source Linux CI before repeating the application test.
+
+After a failed run only, the existing diagnostic collector also attempts three read-only
+loopback Ray State queries from the owned head: progress actors, their snapshot tasks,
+and node identity/address mapping. It retains at most 32 allowlisted scalar records per
+kind and 16 KiB total, with 128 KiB response caps, three-second socket timeouts, a
+12-second remote process deadline and a 15-second host command deadline. It submits
+no actor or task RPC, performs no warm-up, and cannot prevent namespace cleanup.
+The diagnostic receipt reports missing/truncated observations explicitly; State data
+can lag, and these records do not measure actor-constructor or worker-startup duration.
+Runtime environments, arguments, error bodies and unapproved State fields are omitted.
 
 
 Disabled-policy cases check authenticated API and Admin JSON responses for an

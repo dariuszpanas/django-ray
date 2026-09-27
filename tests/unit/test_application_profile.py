@@ -6,26 +6,43 @@ credential ordering, shared paths and conservative inventory bounds.
 
 from pathlib import Path
 
+import pytest
 import yaml
 
+from qualification.application.resource_profiles import chainsaw_values, select_profile
 from qualification.application.run_chainsaw import CREDENTIAL_KEYS
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def definition():
-    return yaml.safe_load(
+def definition(profile="standard"):
+    document = yaml.safe_load(
         (ROOT / "qualification/application/core.yaml").read_text(encoding="utf-8")
     )
+    values = chainsaw_values(
+        select_profile(profile, "diagnostic" if profile == "constrained-ray" else "acceptance")
+    )
+
+    def resolve(value):
+        if isinstance(value, dict):
+            return {key: resolve(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [resolve(item) for item in value]
+        for key, selected in values.items():
+            if value == f"($values.{key})":
+                return selected
+        return value
+
+    return resolve(document)
 
 
-def operations():
-    return [entry for step in definition()["spec"]["steps"] for entry in step["try"]]
+def operations(profile="standard"):
+    return [entry for step in definition(profile)["spec"]["steps"] for entry in step["try"]]
 
 
-def resources():
+def resources(profile="standard"):
     result = {}
-    for operation in operations():
+    for operation in operations(profile):
         if "create" not in operation:
             continue
         resource = operation["create"]["resource"]
@@ -127,7 +144,8 @@ def test_profile_uses_public_foreground_cleanup_configuration():
             assert resource["spec"]["storageClassName"] == "($values.storageClass)"
 
 
-def test_profile_bounds_source_inventory_including_init():
+@pytest.mark.parametrize("profile, expected_cpu", [("standard", 2800), ("constrained-ray", 2150)])
+def test_profile_bounds_source_inventory_including_init(profile, expected_cpu):
     # Compare a conservative sum of unique resources, not just concurrent Jobs.
     cpu, memory, scratch, pods, storage = 0, 0, 0, 0, 0
 
@@ -135,7 +153,7 @@ def test_profile_bounds_source_inventory_including_init():
         assert value.endswith(("Mi", "Gi"))
         return int(value[:-2]) * (1024 if value.endswith("Gi") else 1)
 
-    for resource in resources().values():
+    for resource in resources(profile).values():
         if resource["kind"] == "PersistentVolumeClaim":
             storage += mib(resource["spec"]["resources"]["requests"]["storage"])
         for template, replicas in templates(resource):
@@ -159,8 +177,60 @@ def test_profile_bounds_source_inventory_including_init():
                 else:
                     scratch += replicas * peak
             pods += replicas
-    assert (cpu, memory, scratch, pods, storage) == (2800, 10240, 3456, 8, 1408)
+    assert (cpu, memory, scratch, pods, storage) == (expected_cpu, 10240, 3456, 8, 1408)
     assert cpu <= 4000 and memory <= 10240 and scratch <= 8192 and pods <= 8 and storage <= 16384
+
+
+@pytest.mark.parametrize("profile", ["standard", "constrained-ray"])
+def test_ray_profile_controls_both_identical_generations_and_receipt_environment(profile):
+    inventory = resources(profile)
+    expected = select_profile(profile, "diagnostic")
+    cluster = inventory["RayCluster", "ray"]["spec"]
+    for role, group in (
+        ("head", cluster["headGroupSpec"]),
+        ("worker", cluster["workerGroupSpecs"][0]),
+    ):
+        wanted = expected["requested_ray_resources"][role]
+        assert group["rayStartParams"]["num-cpus"] == str(wanted["logical_cpus"])
+        container = group["template"]["spec"]["containers"][0]
+        assert container["resources"]["requests"]["cpu"] == wanted["cpu_request"]
+        assert container["resources"]["limits"]["cpu"] == wanted["cpu_limit"]
+    config = inventory["ConfigMap", "application-config"]["data"]
+    assert config["DJANGO_RAY_QUALIFICATION_RESOURCE_PROFILE"] == profile
+    assert config["DJANGO_RAY_QUALIFICATION_VALIDATION_INTENT"] == (
+        "diagnostic" if profile == "constrained-ray" else "acceptance"
+    )
+    for generation in ("before", "after"):
+        container = inventory["Job", f"assert-{generation}"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]
+        assert {"configMapRef": {"name": "application-config"}} in container["envFrom"]
+
+
+def test_hosted_profile_rejection_precedes_build_and_reaches_the_runner():
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/application-qualification.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["resource_profile"]["default"] == "standard"
+    assert inputs["resource_profile"]["options"] == ["standard", "constrained-ray"]
+    job = workflow["jobs"]["application-core"]
+    assert "github.event_name == 'workflow_dispatch'" in job["env"]["RESOURCE_PROFILE"]
+    assert job["env"]["RESOURCE_PROFILE"].endswith("|| 'standard' }}")
+    scripts = [step.get("run", "") for step in job["steps"]]
+    validation = next(i for i, script in enumerate(scripts) if "select_profile(" in script)
+    build = next(i for i, script in enumerate(scripts) if "docker run" in script)
+    assert validation < build
+    assert (
+        "select_profile(os.environ['RESOURCE_PROFILE'], os.environ['VALIDATION_INTENT'])"
+        in scripts[validation]
+    )
+    command = next(
+        script for script in scripts if "qualification.application.run_chainsaw" in script
+    )
+    assert '--validation-intent "$VALIDATION_INTENT"' in command
+    assert '--resource-profile "$RESOURCE_PROFILE"' in command
 
 
 def test_profile_credentials_precede_the_composed_secret():

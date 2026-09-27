@@ -9,6 +9,11 @@ on:
         type: choice
         options: [acceptance, diagnostic]
         default: acceptance
+      resource_profile:
+        description: Constrained Ray resources require diagnostic mode
+        type: choice
+        options: [standard, constrained-ray]
+        default: standard
 
 permissions:
   contents: read
@@ -28,11 +33,20 @@ jobs:
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       VALIDATION_INTENT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'diagnostic' && 'diagnostic' || 'acceptance' }}
+      RESOURCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.resource_profile || 'standard' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+
+      - name: Validate the fixed resource profile before allocating capacity
+        run: |
+          python - <<'PY'
+          import os
+          from qualification.application.resource_profiles import select_profile
+          select_profile(os.environ['RESOURCE_PROFILE'], os.environ['VALIDATION_INTENT'])
+          PY
 
       - name: Require the current source Linux CI checkpoint
         if: env.VALIDATION_INTENT == 'acceptance'
@@ -66,7 +80,9 @@ jobs:
             registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
           mkdir "$RUNNER_TEMP/application-source" "$RUNNER_TEMP/application-build"
           echo "$VALIDATION_INTENT" | tee "$RUNNER_TEMP/application-build/validation-intent.txt"
+          echo "$RESOURCE_PROFILE" | tee "$RUNNER_TEMP/application-build/resource-profile.txt"
           echo "Application core run: **$VALIDATION_INTENT**" >> "$GITHUB_STEP_SUMMARY"
+          echo "Requested resource profile: **$RESOURCE_PROFILE**" >> "$GITHUB_STEP_SUMMARY"
           if [ "$VALIDATION_INTENT" = diagnostic ]; then
             echo 'Diagnostic execution does not satisfy final acceptance.' >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -118,7 +134,8 @@ jobs:
         timeout-minutes: 35
         run: |
           python -m qualification.application.run_chainsaw --context kind-application-core \
-            --image "$APPLICATION_IMAGE" --storage-class standard --output "$RUNNER_TEMP/application-evidence"
+            --image "$APPLICATION_IMAGE" --storage-class standard --output "$RUNNER_TEMP/application-evidence" \
+            --validation-intent "$VALIDATION_INTENT" --resource-profile "$RESOURCE_PROFILE"
 
       - name: Retain bounded operator diagnostics on failure
         if: failure()
@@ -148,5 +165,6 @@ jobs:
             ${{ runner.temp }}/application-build/source.sha256
             ${{ runner.temp }}/application-build/images.json
             ${{ runner.temp }}/application-build/validation-intent.txt
+            ${{ runner.temp }}/application-build/resource-profile.txt
           if-no-files-found: warn
           retention-days: 14
