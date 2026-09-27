@@ -16,6 +16,8 @@ spec:
           immutable: true
           data:
             DJANGO_SETTINGS_MODULE: testproject.settings_qualification
+            DJANGO_RAY_QUALIFICATION_RESOURCE_PROFILE: ($values.resourceProfile)
+            DJANGO_RAY_QUALIFICATION_VALIDATION_INTENT: ($values.validationIntent)
             DJANGO_DEPLOYMENT_MODE: production
             DJANGO_DEBUG: 'false'
             DJANGO_ALLOWED_HOSTS: django-web,localhost,127.0.0.1
@@ -437,7 +439,7 @@ spec:
             headGroupSpec:
               serviceType: ClusterIP
               rayStartParams:
-                num-cpus: '1'
+                num-cpus: ($values.rayHeadLogicalCPU)
                 num-gpus: '0'
                 object-store-memory: '134217728'
                 dashboard-host: 0.0.0.0
@@ -495,11 +497,11 @@ spec:
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
-                        cpu: 750m
+                        cpu: ($values.rayHeadCPU)
                         memory: 5120Mi
                         ephemeral-storage: 1Gi
                       limits:
-                        cpu: 750m
+                        cpu: ($values.rayHeadCPU)
                         memory: 5120Mi
                         ephemeral-storage: 1Gi
                     securityContext:
@@ -560,7 +562,7 @@ spec:
               minReplicas: 1
               maxReplicas: 1
               rayStartParams:
-                num-cpus: '1'
+                num-cpus: ($values.rayWorkerLogicalCPU)
                 num-gpus: '0'
                 object-store-memory: '134217728'
               template:
@@ -615,11 +617,11 @@ spec:
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
-                        cpu: 750m
+                        cpu: ($values.rayWorkerCPU)
                         memory: 1536Mi
                         ephemeral-storage: 1Gi
                       limits:
-                        cpu: 750m
+                        cpu: ($values.rayWorkerCPU)
                         memory: 1536Mi
                         ephemeral-storage: 1Gi
                     securityContext:
@@ -926,7 +928,7 @@ spec:
             headGroupSpec:
               serviceType: ClusterIP
               rayStartParams:
-                num-cpus: '1'
+                num-cpus: ($values.rayHeadLogicalCPU)
                 num-gpus: '0'
                 object-store-memory: '134217728'
                 dashboard-host: 0.0.0.0
@@ -984,11 +986,11 @@ spec:
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
-                        cpu: 750m
+                        cpu: ($values.rayHeadCPU)
                         memory: 5120Mi
                         ephemeral-storage: 1Gi
                       limits:
-                        cpu: 750m
+                        cpu: ($values.rayHeadCPU)
                         memory: 5120Mi
                         ephemeral-storage: 1Gi
                     securityContext:
@@ -1049,7 +1051,7 @@ spec:
               minReplicas: 1
               maxReplicas: 1
               rayStartParams:
-                num-cpus: '1'
+                num-cpus: ($values.rayWorkerLogicalCPU)
                 num-gpus: '0'
                 object-store-memory: '134217728'
               template:
@@ -1104,11 +1106,11 @@ spec:
                     image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
                     resources:
                       requests:
-                        cpu: 750m
+                        cpu: ($values.rayWorkerCPU)
                         memory: 1536Mi
                         ephemeral-storage: 1Gi
                       limits:
-                        cpu: 750m
+                        cpu: ($values.rayWorkerCPU)
                         memory: 1536Mi
                         ephemeral-storage: 1Gi
                     securityContext:

@@ -12,6 +12,11 @@ import time
 from pathlib import Path
 
 from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
+from qualification.application.resource_profiles import (
+    RESOURCE_PROFILES,
+    chainsaw_values,
+    select_profile,
+)
 from qualification.application.run_first_workflows import (
     LAYER as FIRST_WORKFLOW_LAYER,
 )
@@ -67,7 +72,9 @@ def checked(argv, *, data=None, timeout=40):
     return result.stdout
 
 
-def parse_receipts(raw: bytes, names: tuple[str, ...]) -> dict[str, bytes]:
+def parse_receipts(
+    raw: bytes, names: tuple[str, ...], *, expected_profile: dict | None = None
+) -> dict[str, bytes]:
     """Accept complete source receipts, never a truncated log or partial success."""
     log_limit = MAX_RECEIPT_BYTES + 4096 if names == ("reporting",) else 65536
     if len(raw) > log_limit:
@@ -96,6 +103,8 @@ def parse_receipts(raw: bytes, names: tuple[str, ...]) -> dict[str, bytes]:
             validate_reporting_receipt(value)
         elif value["layer"] == FIRST_WORKFLOW_LAYER:
             validate_first_workflow_receipt(value)
+            if expected_profile is not None and value["qualification_profile"] != expected_profile:
+                raise ValueError("First-workflow receipt belongs to another resource profile")
         parsed.append((value, line))
     if len(parsed) != len(names):
         raise ValueError("Receipt count differs from the required assertions")
@@ -107,7 +116,9 @@ def parse_receipts(raw: bytes, names: tuple[str, ...]) -> dict[str, bytes]:
     return result
 
 
-def collect(kubectl, namespace: str, output: Path, image: str) -> None:
+def collect(
+    kubectl, namespace: str, output: Path, image: str, *, expected_profile: dict | None = None
+) -> None:
     pods = json.loads(checked([*kubectl, "get", "pods", "-n", namespace, "-o", "json"]))["items"]
     identities = []
     for app, (container, names) in RECEIPTS.items():
@@ -145,7 +156,7 @@ def collect(kubectl, namespace: str, output: Path, image: str) -> None:
             or status.get("state", {}).get("terminated", {}).get("exitCode") != 0
         ):
             raise ValueError("Receipt producer is not the completed candidate container")
-        for name, data in parse_receipts(raw, names).items():
+        for name, data in parse_receipts(raw, names, expected_profile=expected_profile).items():
             (output / f"{name}.json").write_bytes(data)
         identities.append(
             {
@@ -186,6 +197,7 @@ def diagnose(kubectl, namespace: str, output: Path) -> None:
             if len(raw) <= 65536:
                 (output / f"diagnostic-{resource}.json").write_bytes(raw)
             if resource == "pods":
+                diagnose_progress_actors(kubectl, namespace, output, items)
                 for pod in [
                     p
                     for p in items
@@ -226,6 +238,49 @@ def diagnose(kubectl, namespace: str, output: Path) -> None:
                                 pass
         except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
             print(f"Could not retain bounded {resource} diagnostics", flush=True)
+
+
+def diagnose_progress_actors(kubectl, namespace: str, output: Path, pods: list) -> None:
+    """Read bounded State data only after failure, before owned cleanup."""
+    heads = [
+        pod
+        for pod in pods
+        if pod["metadata"].get("labels", {}).get("app") == "ray-head"
+        and not pod["metadata"].get("deletionTimestamp")
+    ]
+    if len(heads) != 1:
+        return
+    try:
+        source = (PROFILE / "actor_diagnostics.py").read_text(encoding="utf-8")
+        raw = checked(
+            [
+                *kubectl,
+                "exec",
+                "--request-timeout=5s",
+                "-n",
+                namespace,
+                heads[0]["metadata"]["name"],
+                "-c",
+                "ray-head",
+                "--",
+                "timeout",
+                "--signal=TERM",
+                "--kill-after=1s",
+                "12s",
+                "python",
+                "-c",
+                source,
+            ],
+            timeout=15,
+        )
+        if len(raw) > 16384:
+            raise ValueError("Oversized actor diagnostics")
+        receipt = json.loads(raw)
+        if not isinstance(receipt, dict) or receipt.get("diagnostic_only") is not True:
+            raise ValueError("Invalid bounded actor diagnostics")
+        (output / "diagnostic-progress-actors.json").write_bytes(raw)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        print("Could not retain bounded actor diagnostics", flush=True)
 
 
 def run_test(command, kubectl, namespace: str) -> None:
@@ -294,7 +349,15 @@ def main(argv=None) -> int:
     parser.add_argument("--image", required=True)
     parser.add_argument("--storage-class", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--resource-profile", choices=RESOURCE_PROFILES, default="standard")
+    parser.add_argument(
+        "--validation-intent", choices=("acceptance", "diagnostic"), default="acceptance"
+    )
     args = parser.parse_args(argv)
+    try:
+        profile = select_profile(args.resource_profile, args.validation_intent)
+    except ValueError as error:
+        parser.error(str(error))
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}", args.image):
         parser.error("--image must be a digest-pinned repository reference")
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]", args.storage_class):
@@ -311,7 +374,13 @@ def main(argv=None) -> int:
     args.output.mkdir(parents=True, exist_ok=False)
     values = args.output / "values.json"
     values.write_text(
-        json.dumps({"applicationImage": args.image, "storageClass": args.storage_class})
+        json.dumps(
+            {
+                "applicationImage": args.image,
+                "storageClass": args.storage_class,
+                **chainsaw_values(profile),
+            }
+        )
     )
     namespace = "django-ray-core-" + secrets.token_hex(8)
     kubectl = ["kubectl", "--context", args.context, "--request-timeout=30s"]
@@ -341,7 +410,7 @@ def main(argv=None) -> int:
         if uid is not None:
             print("Collecting application receipts and removing the owned namespace", flush=True)
             try:
-                collect(kubectl, namespace, args.output, args.image)
+                collect(kubectl, namespace, args.output, args.image, expected_profile=profile)
                 current_tree = checked([*git, "rev-parse", "HEAD^{tree}"]).decode().strip()
                 passed = passed and current_tree == source_tree
                 passed = passed and not checked([*git, "status", "--porcelain"]).strip()
@@ -372,6 +441,7 @@ def main(argv=None) -> int:
             "image": args.image,
             "source_tree": source_tree,
             "cold_ray": "required",
+            "qualification_profile": profile,
             "complete_application_gate": False,
         }
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

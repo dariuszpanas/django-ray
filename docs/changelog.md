@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Add a diagnostic-only application qualification profile with a zero-logical-CPU
+  350m Ray head and a one-logical-CPU 500m worker. Retain bounded progress actor and
+  snapshot task state after failure. Standard acceptance resources and package
+  scheduling remain unchanged; profile inputs do not establish observed placement.
+
 - **Breaking:** Full workflow reporting publishes bounded terminal graphs by
   default and no longer writes live schema-v2 snapshots. Remove
   `WORKFLOW_PROGRESS_SCHEMA_V3_PILOT`, including explicit `False`, apply migration

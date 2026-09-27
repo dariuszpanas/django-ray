@@ -131,6 +131,29 @@ assert not any(name in sys.modules for name in ("django", "django_ray", "ray"))
     assert result.returncode == 0, result.stderr
 
 
+def test_diagnostic_receipt_identifies_requested_limits_and_cannot_replace_acceptance(monkeypatch):
+    from qualification.application.resource_profiles import select_profile
+
+    passing_pair(monkeypatch)
+    receipt = runner.observe_pair(
+        Mock(),
+        token="private-token",
+        resource_profile="constrained-ray",
+        validation_intent="diagnostic",
+    )
+    expected = select_profile("constrained-ray", "diagnostic")
+    assert receipt["qualification_profile"] == expected
+    raw = json.dumps(receipt).encode()
+    assert parse_receipts(raw, ("before-first",), expected_profile=expected)
+    with pytest.raises(ValueError, match="another resource profile"):
+        parse_receipts(
+            raw, ("before-first",), expected_profile=select_profile("standard", "acceptance")
+        )
+    receipt["qualification_profile"]["validation_intent"] = "acceptance"
+    with pytest.raises(ValueError, match="diagnostic intent"):
+        runner.validate_receipt(receipt)
+
+
 @pytest.mark.parametrize("settled", [False, True])
 def test_first_failure_cannot_be_hidden_by_warm_success(monkeypatch, settled):
     def execute(_request, *, token, case, on_terminal):

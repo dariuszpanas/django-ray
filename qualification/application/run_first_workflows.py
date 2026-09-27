@@ -15,6 +15,7 @@ from functools import partial
 from pathlib import Path
 from uuid import UUID
 
+from qualification.application.resource_profiles import select_profile
 from qualification.application.run_api import ApplicationHttp, read_token
 from qualification.application.workflow_fixtures import FIRST_WORKFLOW_TRIAL_NAMES
 
@@ -22,10 +23,17 @@ LAYER = "first_workflow_pair"
 RECEIPT_MAX_BYTES = 16 * 1024
 
 
-def observe_pair(request: ApplicationHttp, *, token: str) -> dict:
+def observe_pair(
+    request: ApplicationHttp,
+    *,
+    token: str,
+    resource_profile: str = "standard",
+    validation_intent: str = "acceptance",
+) -> dict:
     """Keep the first failure and submit a warm diagnostic only after settlement."""
     from qualification.application.run_workflows import execute_case, first_workflow_cases
 
+    profile = select_profile(resource_profile, validation_intent)
     trials = []
     for case in first_workflow_cases():
         trial: dict = {"name": case.name, "status": "failed", "terminal_observed": False}
@@ -66,12 +74,18 @@ def observe_pair(request: ApplicationHttp, *, token: str) -> dict:
         "ordering": "before_node_probe_tasks_and_core_smoke",
         "inputs": {"item_count": 3, "work_seconds": 0.05},
         "terminal_flush_timeout_seconds": 15,
+        "qualification_profile": profile,
         "trials": trials,
     }
 
 
 def validate_receipt(value: dict) -> None:
     """Refuse an unmatched pair or a warm success that hides the first failure."""
+    profile = value.get("qualification_profile")
+    if not isinstance(profile, dict) or profile != select_profile(
+        profile.get("resource_profile"), profile.get("validation_intent")
+    ):
+        raise ValueError("First-workflow receipt has no verified profile selection")
     trials = value.get("trials")
     if (
         value.get("status") != "passed"
@@ -169,6 +183,11 @@ def main(argv: list[str] | None = None) -> int:
         "failed_stage": "configuration",
     }
     try:
+        profile = select_profile(
+            os.environ.get("DJANGO_RAY_QUALIFICATION_RESOURCE_PROFILE", "standard"),
+            os.environ.get("DJANGO_RAY_QUALIFICATION_VALIDATION_INTENT", "acceptance"),
+        )
+        receipt["qualification_profile"] = profile
         if os.environ.get("DJANGO_SETTINGS_MODULE") != "testproject.settings_qualification":
             raise ValueError("First workflows require disposable qualification settings")
         import django
@@ -183,7 +202,12 @@ def main(argv: list[str] | None = None) -> int:
             or config["WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS"] != 15
         ):
             raise ValueError("First workflows require the unchanged reporting defaults")
-        receipt = observe_pair(ApplicationHttp(args.base_url), token=read_token(args.token_file))
+        receipt = observe_pair(
+            ApplicationHttp(args.base_url),
+            token=read_token(args.token_file),
+            resource_profile=profile["resource_profile"],
+            validation_intent=profile["validation_intent"],
+        )
         if receipt["status"] == "passed":
             validate_receipt(receipt)
         encoded = json.dumps(receipt, sort_keys=True).encode()
@@ -199,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             "complete_application_gate": False,
             "complete_workflow_gate": False,
             "failed_stage": receipt.get("failed_stage", "receipt"),
+            "qualification_profile": receipt.get("qualification_profile"),
         }
     print(json.dumps(receipt, sort_keys=True), flush=True)
     return 0 if receipt["status"] == "passed" else 1

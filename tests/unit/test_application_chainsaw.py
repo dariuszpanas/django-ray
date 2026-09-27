@@ -79,8 +79,11 @@ def test_receipts_refuse_partial_duplicate_wrong_or_unbounded_evidence(raw):
 @pytest.mark.parametrize(
     "failure", [None, "test", "timeout", "receipt", "cleanup", "ownership", "source"]
 )
+@pytest.mark.parametrize(
+    "profile, intent", [("standard", "acceptance"), ("constrained-ray", "diagnostic")]
+)
 def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
-    tmp_path, monkeypatch, failure
+    tmp_path, monkeypatch, failure, profile, intent
 ):
     output = tmp_path / "evidence"
     calls = []
@@ -120,7 +123,8 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
         if failure == "test":
             raise RuntimeError("Test failed")
 
-    def collect(*args):
+    def collect(*args, expected_profile):
+        assert expected_profile == runner.select_profile(profile, intent)
         if failure == "receipt":
             raise ValueError("Incomplete receipt")
 
@@ -138,14 +142,44 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
             "standard",
             "--output",
             str(output),
+            "--resource-profile",
+            profile,
+            "--validation-intent",
+            intent,
         ]
     )
     summary = json.loads((output / "summary.json").read_text())
     assert result == (0 if failure is None else 1)
     assert summary["status"] == ("passed" if failure is None else "failed")
     assert summary["namespace_removed"] is (failure not in {"cleanup", "ownership"})
+    assert summary["qualification_profile"] == runner.select_profile(profile, intent)
+    values = json.loads((output / "values.json").read_text())
+    assert values["resourceProfile"] == profile
+    assert values["validationIntent"] == intent
+    assert values["rayHeadLogicalCPU"] == ("0" if profile == "constrained-ray" else "1")
     assert any("delete" in call for call in calls) is (failure != "ownership")
     assert not (output / "secret.json").exists()
+
+
+def test_constrained_acceptance_rejected_before_commands_or_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "checked", lambda *_a, **_k: pytest.fail("must reject first"))
+    output = tmp_path / "evidence"
+    with pytest.raises(SystemExit):
+        runner.main(
+            [
+                "--context",
+                "unused",
+                "--image",
+                "example/core@sha256:" + "a" * 64,
+                "--storage-class",
+                "standard",
+                "--output",
+                str(output),
+                "--resource-profile",
+                "constrained-ray",
+            ]
+        )
+    assert not output.exists()
 
 
 def test_runner_rejects_mutable_image_before_commands(tmp_path, monkeypatch):
@@ -243,6 +277,39 @@ def test_failure_diagnostics_include_bounded_application_logs(tmp_path, monkeypa
     assert (tmp_path / "assert-before-one-previous-False.log").exists()
     assert (tmp_path / "assert-after-one-previous-False.log").exists()
     assert not (tmp_path / "ray-4-previous-False.log").exists()
+
+
+@pytest.mark.parametrize("failure", [None, "timeout", "oversized", "invalid"])
+def test_actor_diagnostics_are_bounded_and_cannot_prevent_owned_cleanup(
+    tmp_path, monkeypatch, failure
+):
+    pods = [{"metadata": {"name": "ray-owned-head", "labels": {"app": "ray-head"}}}]
+    calls = []
+
+    def checked(argv, *, timeout):
+        calls.append(argv)
+        assert timeout == 15
+        assert argv[:3] == ["kubectl", "exec", "--request-timeout=5s"]
+        assert argv[argv.index("--") + 1 : -1] == [
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=1s",
+            "12s",
+            "python",
+            "-c",
+        ]
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if failure == "invalid":
+            return b"[]"
+        return b"x" * 16385 if failure == "oversized" else b'{"diagnostic_only":true}'
+
+    monkeypatch.setattr(runner, "checked", checked)
+    runner.diagnose_progress_actors(["kubectl"], "owned", tmp_path, pods)
+    assert len(calls) == 1
+    assert (tmp_path / "diagnostic-progress-actors.json").exists() is (failure is None)
+    runner.diagnose_progress_actors(["kubectl"], "owned", tmp_path, pods * 2)
+    assert len(calls) == 1
 
 
 def test_failure_diagnostics_do_not_prevent_cleanup_on_api_failure(tmp_path, monkeypatch):
