@@ -560,6 +560,21 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert "--lane supported-python" in steps["Run tests with suite timing"]["run"]
     assert steps["Run tests with suite timing"]["run"].endswith("-v")
     assert steps["Run tests"]["run"].endswith("-v")
+    assert "observe_pytest_exit.py --native-debug --" in steps["Run tests"]["run"]
+    debugger = steps["Install native shutdown debugger"]
+    smoke = steps["Verify native shutdown diagnostics"]
+    assert debugger["if"] == smoke["if"] == "matrix.python-version != '3.12'"
+    assert debugger["timeout-minutes"] == "3"
+    assert "--no-install-recommends gdb" in debugger["run"]
+    assert smoke["timeout-minutes"] == "2"
+    assert smoke["env"]["DJANGO_RAY_REQUIRE_NATIVE_DEBUGGER"] == "1"
+    assert "tests/unit/test_observe_pytest_exit.py" in smoke["run"]
+    names = list(steps)
+    assert (
+        names.index("Install native shutdown debugger")
+        < names.index("Verify native shutdown diagnostics")
+        < names.index("Run tests")
+    )
     test_commands = "\n".join(
         str(step.get("run", "")) for step in test_job["steps"] if isinstance(step, dict)
     )
