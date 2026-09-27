@@ -211,6 +211,23 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
+      - name: Install native shutdown debugger
+        if: matrix.python-version != '3.12'
+        timeout-minutes: 3
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends gdb
+          gdb --version
+
+      - name: Verify native shutdown diagnostics
+        if: matrix.python-version != '3.12'
+        timeout-minutes: 2
+        env:
+          DJANGO_RAY_REQUIRE_NATIVE_DEBUGGER: "1"
+        run: >-
+          uv run --python ${{ matrix.python-version }} python -m pytest
+          tests/unit/test_observe_pytest_exit.py -q
+
       - name: Run tests with suite timing
         if: matrix.python-version == '3.12'
         run: >-
@@ -248,7 +265,7 @@ jobs:
 
       - name: Run tests
         if: matrix.python-version != '3.12'
-        run: uv run --python ${{ matrix.python-version }} python scripts/observe_pytest_exit.py -- -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
+        run: uv run --python ${{ matrix.python-version }} python scripts/observe_pytest_exit.py --native-debug -- -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
 
       - name: Enforce worker module coverage
         if: matrix.python-version == '3.12'
