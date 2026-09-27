@@ -158,7 +158,9 @@ def test_retired_pilot_override_cannot_qualify_package_defaults(fixture_runner, 
     assert not receipt.exists()
 
 
-@pytest.mark.parametrize("case", runner.workflow_cases(), ids=lambda case: case.name)
+@pytest.mark.parametrize(
+    "case", (*runner.workflow_cases(), *runner.first_workflow_cases()), ids=lambda case: case.name
+)
 @pytest.mark.parametrize("browser_mutates", [False, True])
 @pytest.mark.parametrize("mismatch", [None, "state", "attempt_number", "callable_path"])
 def test_execute_observes_each_durable_attempt_after_one_submission(
@@ -234,9 +236,10 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
         "kwargs": dict(case.options),
     }
     responses = [(200, json.dumps(polling).encode()), (302, b""), (401, b"")]
-    if case.name == "recovery":
+    if case.name in {"recovery", "showcase-first", "showcase-warm"}:
         responses.insert(0, (200, json.dumps(submitted).encode()))
     request = Mock(side_effect=responses)
+    terminal = Mock()
     expected = {"observed": True}
     if case.policy != "disabled" and case.name != "admin-display-limit":
         expected["admin_contract"] = {"admin_workflow": "verified"}
@@ -256,22 +259,28 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
             "callable_path": "callable",
         }[mismatch]
         with pytest.raises(ValueError, match=f"Durable workflow {expected_failure} differs"):
-            runner.execute_case(request, token="fixture-token", case=case)
+            runner.execute_case(request, token="fixture-token", case=case, on_terminal=terminal)
+        terminal.assert_not_called()
         graph.assert_not_called()
         browser.assert_not_called()
         return
     if browser_mutates:
         with pytest.raises(ValueError, match="Browser observation changed protected"):
-            runner.execute_case(request, token="fixture-token", case=case)
+            runner.execute_case(request, token="fixture-token", case=case, on_terminal=terminal)
+        terminal.assert_called_once_with()
         browser.assert_called_once()
         assert fingerprints.call_count == (4 if case.name == "admin-display-limit" else 2)
         return
-    assert runner.execute_case(request, token="fixture-token", case=case) == expected_attempts
+    assert (
+        runner.execute_case(request, token="fixture-token", case=case, on_terminal=terminal)
+        == expected_attempts
+    )
+    terminal.assert_called_once_with()
     browser.assert_called_once()
     assert browser.call_args.kwargs["execution_pk"] == 12
     assert browser.call_args.kwargs["policy"] == case.policy
     assert browser.call_args.kwargs["admin_cookie"] == "fixture-cookie"
-    if case.name != "recovery":
+    if case.name not in {"recovery", "showcase-first", "showcase-warm"}:
         from testproject.apps.cluster_tasks import tasks as fixture_tasks
 
         assert enqueue.call_args.args[0] is getattr(
@@ -290,14 +299,17 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
         enqueue.assert_called_once()
         return
     disabled_storage.assert_not_called()
-    assert enqueue.call_count == (0 if case.name == "recovery" else 1)
+    via_http = case.name in {"recovery", "showcase-first", "showcase-warm"}
+    assert enqueue.call_count == (0 if via_http else 1)
     assert sum(call.kwargs["method"] == "POST" for call in request.call_args_list) == (
-        1 if case.name == "recovery" else 0
+        1 if via_http else 0
     )
     assert [call.kwargs["run_identity"] for call in graph.call_args_list] == identities
     assert [call.kwargs["expected_state"] for call in graph.call_args_list] == list(case.states)
     assert [call.kwargs["fixture"] for call in graph.call_args_list] == [
-        case.name
+        "showcase"
+        if case.name.startswith("showcase-")
+        else case.name
         if case.name in {"recovery", "plan-overflow"} or case.name.startswith("retry-")
         else "complex"
     ] * len(case.states)

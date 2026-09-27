@@ -88,19 +88,29 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
         job = resources()["Job", f"assert-{generation}"]
         assert job["spec"]["parallelism"] == job["spec"]["completions"] == 1
         assert job["spec"]["backoffLimit"] == 0
-        assert job["spec"]["activeDeadlineSeconds"] == 600
+        assert job["spec"]["activeDeadlineSeconds"] == 810
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
-        assert command[:2] == ["/bin/sh", "-ec"]
-        node_command, core_command, workflow_command = command[2].split(" && ")
-        assert node_command.startswith("python -m qualification.application.generic_nodes ")
-        assert core_command.startswith("python -m qualification.application.run_core ")
-        assert f"--receipt /receipts/{generation}-nodes.json" in node_command
-        assert f"--receipt /receipts/{generation}-core.json" in core_command
-        assert workflow_command.startswith("python -m qualification.application.run_workflows ")
-        assert f"--receipt /receipts/{generation}-workflows.json" in workflow_command
-        assert ("--previous-receipt /receipts/before-nodes.json" in node_command) == (
-            generation == "after"
+        assert command == [
+            "python",
+            "-m",
+            "qualification.application.run_generation",
+            "--generation",
+            generation,
+            "--base-url",
+            "http://django-web:8000",
+            "--token-file",
+            "/credentials/DJANGO_API_TOKEN",
+        ]
+        assertion = next(
+            op["assert"]
+            for op in operations()
+            if op.get("assert", {}).get("resource", {}).get("metadata", {}).get("name")
+            == f"assert-{generation}"
         )
+        assert assertion["timeout"] == "825s"
+    assert resources()["Job", "reporting-benchmark"]["spec"]["activeDeadlineSeconds"] == 600
+    config = yaml.safe_load((ROOT / "qualification/application/chainsaw.yaml").read_text())
+    assert config["spec"]["timeouts"]["assert"] == "600s"
 
 
 def test_profile_uses_public_foreground_cleanup_configuration():

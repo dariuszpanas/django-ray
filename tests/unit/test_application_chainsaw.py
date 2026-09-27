@@ -213,7 +213,13 @@ def test_failure_diagnostics_exclude_resource_specs_and_bound_records(tmp_path, 
 
 
 def test_failure_diagnostics_include_bounded_application_logs(tmp_path, monkeypatch):
-    names = ["django-web-one", "django-manager-one", *(f"ray-{i}" for i in range(5))]
+    names = [
+        "assert-before-one",
+        "assert-after-one",
+        "django-web-one",
+        "django-manager-one",
+        *(f"ray-{i}" for i in range(5)),
+    ]
     pods = [
         {
             "metadata": {"name": name},
@@ -230,10 +236,12 @@ def test_failure_diagnostics_include_bounded_application_logs(tmp_path, monkeypa
     monkeypatch.setattr(runner, "checked", checked)
     runner.diagnose(["kubectl"], "owned", tmp_path)
     logs = list(tmp_path.glob("*.log"))
-    assert len(logs) == 12
+    assert len(logs) == 16
     assert all(path.stat().st_size == 32768 for path in logs)
     assert (tmp_path / "django-web-one-previous-False.log").exists()
     assert (tmp_path / "django-manager-one-previous-True.log").exists()
+    assert (tmp_path / "assert-before-one-previous-False.log").exists()
+    assert (tmp_path / "assert-after-one-previous-False.log").exists()
     assert not (tmp_path / "ray-4-previous-False.log").exists()
 
 

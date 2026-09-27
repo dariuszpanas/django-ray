@@ -77,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Qualify matched first and warm workflow showcases before other Ray-generation
+  probe tasks. Preserve first-run graph failures, inspect rendered/API history,
+  give the pair its own bounded phase before the existing shared assertion budget,
+  and keep the terminal publication deadline and hosted resources unchanged.
+
 - Add an always-present Qualification Gate that requires complete current-PR
   success for applicable application, native upgrade and latency workflows while
   retaining their path filters and reporting explicit non-applicability.
