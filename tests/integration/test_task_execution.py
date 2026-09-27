@@ -83,7 +83,7 @@ def ray_cluster():
     try:
         yield
     finally:
-        ray.shutdown()
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.fixture

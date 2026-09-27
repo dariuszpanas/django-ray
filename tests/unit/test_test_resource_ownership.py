@@ -100,8 +100,10 @@ def test_required_local_ray_startup_error_fails_the_fixture(monkeypatch) -> None
     assert shutdown_calls == [True]
 
 
+@pytest.mark.parametrize("test_failed", [False, True])
 def test_required_local_ray_uses_explicit_local_runtime_and_tears_down(
     monkeypatch,
+    test_failed,
 ) -> None:
     init_calls: list[dict[str, object]] = []
     shutdown_calls: list[bool] = []
@@ -114,13 +116,19 @@ def test_required_local_ray_uses_explicit_local_runtime_and_tears_down(
     monkeypatch.setattr(
         test_task_execution.ray,
         "shutdown",
-        lambda: shutdown_calls.append(True),
+        lambda *, wait_for_processes: shutdown_calls.append(wait_for_processes),
     )
     fixture = test_task_execution.ray_cluster.__wrapped__()
 
     assert next(fixture) is None
-    with pytest.raises(StopIteration):
-        next(fixture)
+    if test_failed:
+        failure = RuntimeError("test failed")
+        with pytest.raises(RuntimeError) as raised:
+            fixture.throw(failure)
+        assert raised.value is failure
+    else:
+        with pytest.raises(StopIteration):
+            next(fixture)
 
     assert init_calls == [
         {
@@ -132,6 +140,41 @@ def test_required_local_ray_uses_explicit_local_runtime_and_tears_down(
             "resources": None,
         }
     ]
+    assert shutdown_calls == [True]
+
+
+@pytest.mark.parametrize("fixture_owner", ["progress", "distributed"])
+@pytest.mark.parametrize("test_failed", [False, True])
+def test_specialized_local_ray_fixtures_wait_after_success_or_failure(
+    monkeypatch, fixture_owner, test_failed
+) -> None:
+    from tests.unit import test_distributed, test_workflow_progress_producer
+
+    shutdown_calls: list[bool] = []
+    monkeypatch.setattr(test_task_execution.ray, "is_initialized", lambda: False)
+    monkeypatch.setattr(test_task_execution.ray, "init", lambda **kwargs: None)
+    monkeypatch.setattr(
+        test_task_execution.ray,
+        "shutdown",
+        lambda *, wait_for_processes: shutdown_calls.append(wait_for_processes),
+    )
+    if fixture_owner == "progress":
+        fixture = test_workflow_progress_producer.ray_runtime.__wrapped__()
+    else:
+        fixture = test_distributed.TestDistributedWithRay.ray_cluster.__wrapped__(
+            test_distributed.TestDistributedWithRay()
+        )
+
+    next(fixture)
+    assert shutdown_calls == []
+    if test_failed:
+        failure = RuntimeError("test failed")
+        with pytest.raises(RuntimeError) as raised:
+            fixture.throw(failure)
+        assert raised.value is failure
+    else:
+        with pytest.raises(StopIteration):
+            next(fixture)
     assert shutdown_calls == [True]
 
 

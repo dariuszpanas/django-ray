@@ -288,7 +288,7 @@ class TestDistributedWithRay:
         try:
             yield
         finally:
-            ray.shutdown()
+            ray.shutdown(wait_for_processes=True)
 
     def test_parallel_map_with_ray(self) -> None:
         """Test parallel_map uses Ray when available."""
