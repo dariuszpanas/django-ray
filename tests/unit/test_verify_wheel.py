@@ -96,13 +96,22 @@ def test_wheel_layout_rejects_removed_private_modules(removed_module: str) -> No
         _verify_canonical_module_layout(EXPECTED_FILES | {removed_module})
 
 
-def _metadata(*, ray_requirement: str = "ray[default]>=2.58.0") -> bytes:
+def _metadata(
+    *,
+    ray_requirement: str = "ray[default]>=2.58.0",
+    transitive_requirements: tuple[str, ...] = (
+        "multidict>=6.9.1",
+        "urllib3>=2.8.0",
+        "virtualenv>=21.7.13",
+    ),
+) -> bytes:
     return (
         "Metadata-Version: 2.4\n"
         "Name: django-ray\n"
         "Version: 0.4.0\n"
         f"Requires-Dist: {ray_requirement}\n"
-        "\n"
+        + "".join(f"Requires-Dist: {requirement}\n" for requirement in transitive_requirements)
+        + "\n"
     ).encode()
 
 
@@ -111,16 +120,28 @@ def _write_distributions(
     *,
     wheel_requirement: str = "ray[default]>=2.58.0",
     sdist_requirement: str = "ray[default]>=2.58.0",
+    wheel_transitives: tuple[str, ...] = (
+        "multidict>=6.9.1",
+        "urllib3>=2.8.0",
+        "virtualenv>=21.7.13",
+    ),
+    sdist_transitives: tuple[str, ...] = (
+        "multidict>=6.9.1",
+        "urllib3>=2.8.0",
+        "virtualenv>=21.7.13",
+    ),
 ) -> None:
     wheel = dist_dir / "django_ray-0.4.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr(
             "django_ray-0.4.0.dist-info/METADATA",
-            _metadata(ray_requirement=wheel_requirement),
+            _metadata(ray_requirement=wheel_requirement, transitive_requirements=wheel_transitives),
         )
 
     sdist = dist_dir / "django_ray-0.4.0.tar.gz"
-    payload = _metadata(ray_requirement=sdist_requirement)
+    payload = _metadata(
+        ray_requirement=sdist_requirement, transitive_requirements=sdist_transitives
+    )
     member = tarfile.TarInfo("django_ray-0.4.0/PKG-INFO")
     member.size = len(payload)
     with tarfile.open(sdist, mode="w:gz") as archive:
@@ -148,4 +169,34 @@ def test_distribution_archives_reject_a_pre_floor_ray_requirement(
     _write_distributions(tmp_path, **requirements)
 
     with pytest.raises(RuntimeError, match=r"ray\[default\]>=2\.58\.0"):
+        verify_distribution_archives(tmp_path, "0.4.0")
+
+
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+@pytest.mark.parametrize(
+    ("name", "floor", "old_floor"),
+    [
+        ("multidict", "6.9.1", "6.9.0"),
+        ("urllib3", "2.8.0", "2.7.0"),
+        ("virtualenv", "21.7.13", "21.7.12"),
+    ],
+)
+@pytest.mark.parametrize("defect", ["missing", "old", "optional", "duplicate"])
+def test_distribution_archives_reject_vulnerable_transitive_requirements(
+    tmp_path: Path, artifact: str, name: str, floor: str, old_floor: str, defect: str
+) -> None:
+    requirements = ["multidict>=6.9.1", "urllib3>=2.8.0", "virtualenv>=21.7.13"]
+    requirements.remove(f"{name}>={floor}")
+    if defect == "old":
+        requirements.append(f"{name}>={old_floor}")
+    elif defect == "optional":
+        requirements.append(f'{name}>={floor}; extra == "sample"')
+    elif defect == "duplicate":
+        requirements.extend([f"{name}>={floor}"] * 2)
+    if artifact == "wheel":
+        _write_distributions(tmp_path, wheel_transitives=tuple(requirements))
+    else:
+        _write_distributions(tmp_path, sdist_transitives=tuple(requirements))
+
+    with pytest.raises(RuntimeError, match=f"unconditional {name}"):
         verify_distribution_archives(tmp_path, "0.4.0")

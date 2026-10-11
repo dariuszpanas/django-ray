@@ -423,6 +423,30 @@ def test_ray_security_floor_is_an_unconditional_runtime_dependency() -> None:
     assert locked_versions[0] >= Version("2.58.0")
 
 
+def test_ray_transitive_security_floors_protect_fresh_and_locked_installs() -> None:
+    """Ray's unconstrained transitive dependencies must exclude vulnerable releases."""
+    project_root = Path(__file__).parents[2]
+    config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((project_root / "uv.lock").read_text(encoding="utf-8"))
+
+    for name, floor, vulnerable in (
+        ("multidict", "6.9.1", "6.9.0"),
+        ("urllib3", "2.8.0", "2.7.0"),
+        ("virtualenv", "21.7.13", "21.7.12"),
+    ):
+        requirements = _requirements_for_distribution(config["project"]["dependencies"], name)
+        assert len(requirements) == 1
+        requirement = requirements[0]
+        assert requirement.marker is None
+        assert Version(floor) in requirement.specifier
+        assert Version(vulnerable) not in requirement.specifier
+        locked_versions = [
+            Version(package["version"]) for package in lock["package"] if package["name"] == name
+        ]
+        assert len(locked_versions) == 1
+        assert locked_versions[0] >= Version(floor)
+
+
 def test_ray_security_floor_is_consistent_across_public_install_paths() -> None:
     """Docs and the default Ray image must not bypass the package security floor."""
     project_root = Path(__file__).parents[2]
