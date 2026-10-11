@@ -119,6 +119,10 @@ remain ambient workload identity or environment. The driver constructs the stora
 reader directly from the locator and does not load Django settings, query the payload
 registry, or import application code to discover the request.
 
+Strict request refusals exit with code `78` and a fixed diagnostic before
+application settings are imported. That diagnostic uses only built-in redaction;
+configured patterns still apply to errors from accepted application execution.
+
 ## Backend and Namespace Rotation
 
 The active `INPUT_STORAGE_BACKEND` selects new writes. Reads and cleanup instead dispatch from
