@@ -33,6 +33,34 @@ upstream fix is available. Verify startup and abrupt-parent-death cleanup before
 removing this warning: the proposed patch changes child fate sharing. This is
 not a promise that a particular upstream release will contain the fix.
 
+### Ray 2.59.0 review
+
+The [Ray 2.59.0 release](https://github.com/ray-project/ray/releases/tag/ray-2.59.0)
+was reviewed on October 10, 2026. The declared compatible range permits it and the
+latest-dependency CI lane can exercise it, but the reproducible lock, minimum
+version, and deployment baseline remain 2.58.0 in this change.
+
+- New local clusters enable token authentication. Token-file persistence and
+  inherited process environment affect repeated `ray.init()` and child startup;
+  the default for remote/multi-node clusters is unchanged in 2.59. Qualification
+  must cover isolated token files, existing clusters, and authenticated Jobs
+  submission, polling, cancellation, and address precedence. See the
+  [authentication change](https://github.com/ray-project/ray/pull/64755).
+- The [dashboard forkserver change](https://github.com/ray-project/ray/pull/65159)
+  concerns a different startup path from Ray Client. Client fix
+  [#65982](https://github.com/ray-project/ray/pull/65982) remained open and unmerged
+  on the review date, so the Client race warning above still applies.
+- [Dashboard redaction](https://github.com/ray-project/ray/pull/65226) protects
+  browser-facing RuntimeEnv values. It does not replace django-ray's stored
+  diagnostic redaction. [Worker-lease cancellation changes](https://github.com/ray-project/ray/pull/65613)
+  also warrant cancellation and durable-completion regression evidence.
+
+This review does not certify a Ray upgrade. Before changing the pinned deployment
+tuple, run the Linux checkpoint and affected cold-Ray application/upgrade scenarios
+with matching managers, head, and workers. Native Compiled Graph remains outside
+the admitted exact-version capability policy, and no shutdown-crash repair is
+established by these release notes.
+
 ## Module Path Compatibility
 
 `django_ray.workflows` remains the public defining module for workflow builders. Private
@@ -67,6 +95,37 @@ Beta users that imported those private modules must move to the canonical packag
 
 Python 3.12 is the floor because Django 6.0 requires Python 3.12+, not because Ray does.
 Current [Ray releases support a wider Python range](https://pypi.org/project/ray/).
+
+### Python 3.15 preparation
+
+[Python 3.15.0 was released on October 9, 2026](https://www.python.org/downloads/release/python-3150/).
+As reviewed on October 10, [Ray 2.59.0's files](https://pypi.org/project/ray/2.59.0/#files)
+still include no CPython 3.15 Core wheel.
+Python 3.15 is therefore a compatibility preparation target, not a supported
+django-ray runtime. The ordinary test, dependency, release, and container matrices
+remain on Python 3.12–3.14, and the package does not advertise a 3.15 classifier.
+
+The blocking **Python 3.15 Compatibility (without Ray Core)** Linux CI job builds
+the wheel and sdist on released CPython 3.15, compiles repository Python source,
+checks archive metadata, and runs selected resource-free tests against the installed
+wheel. It installs the project's non-Ray direct dependencies and the selected test
+tools separately. Ray remains a mandatory package dependency; this test-only
+`--no-deps` installation is not an application installation procedure.
+
+The check rejects editable/source imports, mismatched installed Python files, Ray
+imports or stubs, external-resource tests, skips, and expected failures. It exercises
+Django startup, serialization, callable imports, retry policy, redaction, encryption,
+and selected workflow/target codecs. It does not establish Ray Core, Client, Jobs,
+cloudpickle, distributed execution, or free-threaded Python compatibility.
+See [contributor instructions](contributing.md#python-315-compatibility-check).
+
+Before promoting 3.15 to supported status, require upstream Core wheels and compatible
+mandatory extras, run the complete Linux test/dependency and installed-release matrices,
+and qualify a matching Python/Ray tuple across the manager, head, and workers. Update
+the classifiers and supported-version documentation only with that evidence. Native
+Compiled Graph retains its separate exact-tuple capability policy.
+
+### Runtime dependency boundaries
 
 Django 6.0.8 is the django-ray security floor. Django 6.0.0 through 6.0.7 are not
 supported; newer compatible releases are exercised by the latest-dependency lane.

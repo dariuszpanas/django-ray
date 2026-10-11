@@ -181,6 +181,7 @@
           "tests/unit/test_local_ray.py",
           "tests/unit/test_require_linux.py",
           "tests/unit/test_package_metadata.py",
+          "tests/unit/test_python315_compatibility.py",
           "tests/unit/test_release.py",
           "tests/unit/test_runtime_qualification.py",
           "tests/unit/test_target_package.py",

@@ -67,6 +67,10 @@ task stats, project links, and smoke-task trigger:
 - Django 6.0.8+
 - Ray 2.58.0+
 
+Python 3.15 has a preparatory compatibility check without Ray Core. Full runtime
+support remains blocked by upstream Ray wheels; use Python 3.12–3.14 for installation
+and execution. See the [Python 3.15 policy](https://django-ray.readthedocs.io/en/latest/compatibility/#python-315-preparation).
+
 ## Installation
 
 ```bash

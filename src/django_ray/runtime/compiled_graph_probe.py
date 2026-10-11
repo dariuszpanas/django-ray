@@ -851,7 +851,9 @@ def _bounded_json_object(value: Any) -> dict[str, Any] | None:
 
 def _decode_child_payload(value: str) -> CompiledGraphProbeRequest:
     try:
-        payload = json.loads(base64.urlsafe_b64decode(value.encode("ascii")))
+        # Python 3.15 accepts missing padding in urlsafe_b64decode by default.
+        # Keep the child transport's existing padded encoding on every Python.
+        payload = json.loads(base64.b64decode(value.encode("ascii"), altchars=b"-_"))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("Invalid Compiled Graph probe child payload") from error
     if not isinstance(payload, dict):

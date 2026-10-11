@@ -439,7 +439,10 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     assert '"pyasn1==0.6.4"' in minimum_install["run"]
     assert '"ray[default]==2.58.0"' in minimum_install["run"]
     assert '"django==6.0.8"' in minimum_install["run"]
+    assert '"multidict==6.9.1"' in minimum_install["run"]
     assert '"sqlparse==0.6.0"' in minimum_install["run"]
+    assert '"urllib3==2.8.0"' in minimum_install["run"]
+    assert '"virtualenv==21.7.13"' in minimum_install["run"]
     assert '"pip-audit==2.10.1"' in minimum_install["run"]
     assert audit_job["name"] == (
         "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
@@ -620,6 +623,48 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert "test-xdist" not in test_commands
     assert "pytest -n" not in test_commands
     assert "--execution xdist" not in test_commands
+
+
+def test_python315_compatibility_is_blocking_and_uses_an_isolated_installed_wheel() -> None:
+    """Partial interpreter evidence must not silently become full Ray support."""
+    job = _jobs()["python315-compatibility"]
+    assert job["name"] == "Python 3.15 Compatibility (without Ray Core)"
+    assert job["if"] == "github.event_name != 'pull_request_target'"
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == "10"
+    assert "strategy" not in job
+    assert "python315-compatibility" in _needs(_jobs()["build"])
+    assert "python315-compatibility" in _needs(_gate_job())
+
+    steps = job["steps"]
+    checkout = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert checkout["with"] == {
+        "persist-credentials": "false",
+        "ref": "${{ github.event.pull_request.head.sha || github.sha }}",
+    }
+    by_name = {step["name"]: step for step in steps if "name" in step}
+    assert by_name["Set up stable Python 3.15"]["run"] == "uv python install 3.15"
+    assert by_name["Build distributions on Python 3.15"]["run"] == (
+        'uv build --python 3.15 --out-dir "$RUNNER_TEMP/python315-dist"'
+    )
+    prepare = by_name["Prepare isolated compatibility environment without Ray"]["run"]
+    assert 'uv venv --python 3.15 "$RUNNER_TEMP/python315-venv"' in prepare
+    assert "scripts/check_python315_compatibility.py \\\n" in prepare
+    assert '--write-requirements "$RUNNER_TEMP/python315-requirements.txt"' in prepare
+    assert '--requirement "$RUNNER_TEMP/python315-requirements.txt"' in prepare
+    assert '--no-deps "$RUNNER_TEMP"/python315-dist/*.whl' in prepare
+    verify = by_name["Check Python 3.15 compatibility without Ray"]["run"]
+    assert verify == (
+        '"$RUNNER_TEMP/python315-venv/bin/python" scripts/check_python315_compatibility.py '
+        '--dist-dir "$RUNNER_TEMP/python315-dist"'
+    )
+    commands = "\n".join(str(step.get("run", "")) for step in steps)
+    assert "uv sync" not in commands
+    assert "--smoke" not in commands
+    assert "--with-editable" not in commands
+    assert "--prerelease" not in commands
 
 
 def test_ray_data_golden_path_runs_real_optional_dependency_endpoints() -> None:
@@ -1053,14 +1098,16 @@ def test_ci_gate_accepts_only_complete_success(
 
 
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "timed_out"])
+@pytest.mark.parametrize("job_id", ["lint", "python315-compatibility"])
 def test_ci_gate_rejects_every_non_success_result(
     monkeypatch: pytest.MonkeyPatch,
     result: str,
+    job_id: str,
 ) -> None:
     results = _all_successful_results()
-    results["lint"] = result
+    results[job_id] = result
 
-    with pytest.raises(SystemExit, match=rf"CI Gate blocked: lint={result}"):
+    with pytest.raises(SystemExit, match=rf"CI Gate blocked: {job_id}={result}"):
         _execute_gate(monkeypatch, results)
 
 
