@@ -27,6 +27,65 @@ python -m pip install "django-ray[postgres]"
 
 The equivalent uv command is `uv add django-ray`.
 
+### Projects that prohibit prerelease dependencies
+
+If your project sets uv's `prerelease = "disallow"`, resolution can fail at
+`opentelemetry-exporter-prometheus`. django-ray depends on `ray[default]`, which
+includes OpenTelemetry dependencies with prerelease version numbers. The
+project's stable-only policy rejects those dependencies even when the django-ray
+and Ray version identifiers have no prerelease suffix. django-ray remains Beta.
+Ordinary installs using the default resolver policy do not need this exception.
+
+Keep the project's stable-only policy and explicitly permit only the required
+packages. Pin a compatible OpenTelemetry exporter and semantic-conventions pair
+as direct dependencies, then use uv's
+[per-package prerelease setting](https://docs.astral.sh/uv/reference/settings/#prerelease-package).
+This standalone example was verified on 2026-10-11 with uv 0.12.17 and CPython
+3.14.2 against the published django-ray 0.6.0 package:
+
+```toml
+[project]
+name = "django-ray-install-reproduction"
+version = "0.0.0"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "django-ray==0.6.0",
+    "opentelemetry-exporter-prometheus==0.64b0",
+    "opentelemetry-semantic-conventions==0.64b0",
+]
+
+[tool.uv]
+prerelease = "disallow"
+prerelease-package = { opentelemetry-exporter-prometheus = "explicit", opentelemetry-semantic-conventions = "explicit" }
+```
+
+Merge the relevant entries into your existing `pyproject.toml`; retain its
+Python support range, existing dependencies, constraints and security floors.
+The exact versions above are a dated installation example, not permanent
+OpenTelemetry compatibility pins or a recommendation to select an older
+django-ray release. For another release or Ray version, review the resolver's
+dependency chain and the matching OpenTelemetry package requirements before
+updating those pins. Do not replace the project's policy with a global
+`--prerelease allow` just to resolve these two packages. This configuration was
+tested with uv 0.12.17; older uv versions may not support `prerelease-package`.
+
+In a fresh directory containing the example, verify resolution and installation:
+
+```bash
+uv lock --python 3.14 --default-index https://pypi.org/simple
+uv sync --frozen --python 3.14 --default-index https://pypi.org/simple
+uv pip check
+```
+
+The verified example resolved 64 packages and installed 63, including Ray
+2.59.0, OpenTelemetry API/SDK 1.43.0 and the two 0.64b0 packages. The installed
+metadata check passed in a fresh environment without starting Ray. Removing
+the package exceptions while retaining `prerelease = "disallow"` reproduced
+the resolution failure; the ordinary default policy resolved successfully.
+These checks establish installation and dependency consistency, not Linux
+runtime or cluster qualification. Follow [Compatibility](compatibility.md)
+when choosing and validating the execution environment.
+
 ## Configure Django
 
 Add the application and task backend in `settings.py`:
