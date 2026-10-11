@@ -758,6 +758,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         assert args.payload_b64 is not None
         result_json = execute_task_from_payload(args.payload_b64)
+    strict_rejection = isinstance(result_json, _StrictRequestRejectionResult)
     try:
         result = json.loads(result_json)
     except (TypeError, json.JSONDecodeError):
@@ -768,11 +769,15 @@ def main(argv: list[str] | None = None) -> int:
         elif result.get("success"):
             print("django-ray task completed successfully")
         else:
+            # A strict refusal contains only fixed rejection vocabulary. Its
+            # diagnostic must not import application settings to load custom
+            # redaction patterns before the request is accepted.
+            error = redact_text(result.get("error"), patterns=() if strict_rejection else None)
             print(
-                f"django-ray task failed: {redact_text(result.get('error'))}",
+                f"django-ray task failed: {error}",
                 file=sys.stderr,
             )
-    if isinstance(result_json, _StrictRequestRejectionResult):
+    if strict_rejection:
         return RAY_JOB_REQUEST_REJECTED_EXIT_CODE
     return 0
 

@@ -6,9 +6,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import runpy
+import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -137,6 +140,65 @@ def _booby_trap_application_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(entrypoint, "_persist_task_completion", forbidden)
     monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", forbidden)
     monkeypatch.setattr("django_ray.runtime.context.durable_task_execution", forbidden)
+
+
+@pytest.mark.parametrize("case", ["missing-reference", "malformed-reference", "retired-inline"])
+@pytest.mark.parametrize("settings_fail", [False, True])
+def test_fresh_cli_rejection_does_not_import_application_settings(tmp_path, case, settings_fail):
+    """CLI diagnostic formatting must preserve the pre-bootstrap refusal boundary."""
+    marker = tmp_path / "settings-imported"
+    module = tmp_path / "rejected_job_settings.py"
+    module.write_text(
+        "import os\nfrom pathlib import Path\n"
+        "Path(os.environ['IMPORT_MARKER']).write_text('imported')\n"
+        + (
+            "raise RuntimeError('settings must remain unloaded')\n"
+            if settings_fail
+            else "DJANGO_RAY = {'REDACT_PATTERNS': ['execution request']}\n"
+        ),
+        encoding="utf-8",
+    )
+    request, serialized = _strict_request()
+    native = _rq2_locator(serialized)
+    locator = replace(
+        native,
+        reference="rq2ref:v1:" + native.reference,
+        filesystem_path=str(tmp_path.resolve()),
+    )
+    environment = os.environ.copy()
+    environment.update(
+        DJANGO_SETTINGS_MODULE="rejected_job_settings",
+        IMPORT_MARKER=str(marker),
+        PYTHONPATH=os.pathsep.join((str(tmp_path), str(Path(entrypoint.__file__).parents[2]))),
+    )
+    expected = "invalid_versioned"
+    if case == "retired-inline":
+        environment[RAY_JOB_CONFIG_JSON_ENV_VAR] = _strict_config(request, serialized)
+        args = ["--payload-b64", _payload_b64(serialized)]
+        expected = "unsupported_transport"
+    else:
+        environment[RAY_JOB_CONFIG_JSON_ENV_VAR] = _rq2_config(request, serialized, locator)
+        args = [
+            "--request-ref-b64",
+            "%%%" if case == "malformed-reference" else encode_ray_job_request_locator(locator),
+        ]
+    result = subprocess.run(
+        [sys.executable, "-m", "django_ray.runtime.entrypoint", *args],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert not marker.exists(), "Rejected request imported application settings"
+    assert result.returncode == RAY_JOB_REQUEST_REJECTED_EXIT_CODE
+    assert result.stdout == ""
+    # The existing runtime package import may emit a runpy warning. The CLI's
+    # own diagnostic remains exactly one fixed line with no application data.
+    assert [line for line in result.stderr.splitlines() if line.startswith("django-ray task ")] == [
+        f"django-ray task failed: execution request rejected: {expected}"
+    ]
 
 
 class TestEntrypointPayload:
@@ -1153,6 +1215,18 @@ class TestEntrypointPayload:
         )
 
         assert entrypoint.main(["--payload-b64", "abc"]) == 0
+        assert capsys.readouterr().err.strip() == "django-ray task failed: [REDACTED]"
+
+    def test_main_retains_configured_patterns_for_accepted_application_errors(
+        self, settings, monkeypatch, capsys
+    ) -> None:
+        settings.DJANGO_RAY = {"REDACT_PATTERNS": ["domain_canary"]}
+        monkeypatch.setattr(
+            entrypoint,
+            "execute_task_from_reference",
+            lambda _: '{"success":false,"error":"domain_canary"}',
+        )
+        assert entrypoint.main(["--request-ref-b64", "bounded-locator"]) == 0
         assert capsys.readouterr().err.strip() == "django-ray task failed: [REDACTED]"
 
     def test_bootstrap_requires_settings_module(self, monkeypatch) -> None:
