@@ -270,6 +270,28 @@ Linux CI checkpoint and exact-source application/release evidence remain require
 Mixed-version running cohorts, live ObjectRef migration and two-cluster handoff
 are outside the coordinated Beta commitment.
 
+## Additional installed worker modes
+
+The candidate non-crash Core phase also checks the installed worker CLI on each
+database. After the default manager exits, the existing Ray instance serves two
+sequential concurrency-one observations: `--sync` on its own queue, then
+`--cluster auto` on a different queue. Each requires the exact installed package,
+a fixed result, process/mode witnesses, one attempt/generation, an unchanged older
+task on an unselected queue, graceful manager exit and an inactive owned lease.
+The fixture removes only its new rows and leases and compares the preserved
+history. Both modes share one sixty-second observation, including bounded
+cleanup; there is no additional per-mode allowance. Connection/query limits and
+the existing 240-second phase process deadline remain the outer bounds.
+
+This adds no container or concurrent manager to the existing 2-CPU, 8-GiB,
+1024-PID admission. The sample ML manager uses the same Core command/dispatch
+with a dedicated queue; this observation establishes that execution-mode and
+queue-path equivalence only. It does not claim all four sample Deployments were
+rolled out, custom ML dependencies ran, or Kubernetes replica topology was
+qualified. Those unchanged manifest/resource contracts retain their separate
+rendered tests and applicable platform evidence. The receipt names this limit
+explicitly; a local simulated observer test is not installed native proof.
+
 ## Remaining execution-retirement inventory
 
 The native candidate-read phase checks retired durable-task carriers before

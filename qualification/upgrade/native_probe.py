@@ -150,6 +150,7 @@ def run_work(root, *, check_completion_encoding=False):
     manager = None
     crash = {}
     encoding_failure = None
+    worker_modes = None
     log = (root / "manager.log").open("wb")
 
     def start_manager():
@@ -360,6 +361,19 @@ def run_work(root, *, check_completion_encoding=False):
                 "attempt_number": row.attempt_number,
                 "identity_bearing_job_completion": settings.RUNNER == "ray_job",
             }
+        if (
+            check_completion_encoding
+            and settings.RUNNER == "ray_core"
+            and not settings.CRASH_MANAGER
+        ):
+            from qualification.upgrade.worker_modes import run as observe_worker_modes
+
+            assert settings.WORKER_MODE_PROBE is True
+            # Reuse this owned Ray process only after the original CLI manager
+            # is gone. The additional managers never overlap each other.
+            manager.send_signal(signal.SIGINT)
+            assert manager.wait(timeout=10) == 128 + signal.SIGINT
+            worker_modes = observe_worker_modes(snapshot)
     finally:
         try:
             if manager is not None:
@@ -393,6 +407,7 @@ def run_work(root, *, check_completion_encoding=False):
         "runner": settings.RUNNER,
         "manager_crash": crash,
         "completion_encoding_failure": encoding_failure,
+        "worker_modes": worker_modes,
     }
 
 

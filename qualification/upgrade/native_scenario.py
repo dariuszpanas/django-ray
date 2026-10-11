@@ -61,6 +61,9 @@ def phase(root, backend, name, target, *, database, artifacts, runner, crash_man
                 "runner": runner,
                 "crash_manager": crash_manager and name == "candidate-run",
                 "legacy_failure_probe": name == "candidate-legacy-failure",
+                "worker_mode_probe": name == "candidate-run"
+                and runner == "ray_core"
+                and not crash_manager,
             }
         ),
         RAY_USAGE_STATS_ENABLED="0",
