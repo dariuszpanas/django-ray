@@ -365,8 +365,8 @@ qualified baseline. This preserves the earlier aggregate allowance for setup, co
 and reporting rather than making the two added rq2 phases consume it. All child deadlines,
 workloads and resource limits stay unchanged. The outer deadline remains authoritative: all
 phase maxima cannot be consumed in one run. Owned namespace deletion has a separate
-180-second allowance. The hosted native step allows 41 minutes: 2160 seconds plus the inherited
-300-second external aggregate allowance. That allowance is not guaranteed worst-case startup,
+180-second allowance. The hosted native step allows 44 minutes: 2160 seconds for Chainsaw,
+180 seconds for worker images and the inherited 300-second external aggregate allowance. That allowance is not guaranteed worst-case startup,
 receipt collection or cleanup coverage. The job retains its 75-minute cap. These are ceilings,
 not expected durations or a performance guarantee.
 
@@ -607,6 +607,78 @@ absence of graph nodes. It uses existing deadlines and capacity, no new submissi
 route, and full reporting through the package-default terminal publisher. The exact
 callable is added to the sample's authenticated read policy. The fixture definition
 alone does not establish passing rendered or deployed qualification.
+
+### Source-derived worker image observation
+
+After both Ray generations and reporting assertions, the runner checks the current
+application image with the shipped sync and ML queue manager commands. It renders
+the KubeRay Kind overlay, validates the exact CLI, queue and concurrency of 20,
+stops the original manager and verifies its observed scale-down, zero ReplicaSet
+replicas and Pod absence, then runs one temporary Deployment at a time. Each
+manager must become lease-ready, execute the
+fixed `add_numbers(2, 3)` task exactly once, leave an older `low-priority` queue
+sentinel unchanged, and release its lease on graceful shutdown. The actual PID1
+command, pinned image identity, zero restarts, result `5`, generation, attempt and
+claiming lease are checked. The claim must belong to PID1 of the exact captured
+Pod name; its UID, image and restart count are rechecked before success-path
+deletion, which also verifies the created Deployment UID. This is simple task
+consumption on the ML queue; it does not qualify a machine-learning framework,
+model lifecycle or custom topology.
+
+The fixed receipt lists every deployment substitution: disposable namespace and
+database secrets, qualification settings and offline recovery archive, existing
+Ray Client DNS/auth profile, the existing manager's 250m CPU/768 MiB footprint,
+volume/security/lease-readiness profile, and fixture-only SIGINT shutdown of the
+owned Pod's PID1. No additional Ray process or concurrent manager is admitted.
+Source CLI/queue/concurrency are preserved; the complete production manifests are
+not deployed unchanged. Negative Ray authentication is a separate observation.
+
+The worker phase starts only after the separate cold Chainsaw workload succeeds.
+It owns a fresh 180-second total from one monotonic start for original-manager
+quiescence and both sequential worker lifecycles. Observation ends at
+135 seconds, reserving the final 45 seconds for cleanup. Temporary controller/Pod
+removal allows at most five seconds per mode; database cleanup uses a command
+capped at ten seconds and preserves the final 25 seconds for original manager
+restoration. Cleanup can start earlier after a failure, and restoration may use
+unused time from earlier cleanup steps. Every step remains inside the original
+180-second deadline. It does not consume or extend Chainsaw's unchanged 2160-second
+window. The hosted step is 44 minutes: 2160 seconds for Chainsaw, 180 for
+worker images and the previous 300-second aggregate allowance for command
+startup, receipt collection and namespace cleanup. Those operations retain
+their existing individual timeouts; the allowance is not a promise that every
+timeout can be exhausted sequentially. The whole job remains capped at 75
+minutes. Existing outer collection and namespace deletion run after either
+phase fails. Individual remote database observers have an eight-second alarm,
+two-second statement and one-second lock timeouts; host commands are at most ten
+seconds. Receipts are at most 4 KiB, local ownership state 128 KiB, and history
+hash queries return at most 512 rows per fixed task/attempt/lease table, without
+returning persisted payload columns.
+
+Ownership is saved before the enqueue transaction commits, so an interrupted
+response cannot leave unidentified tasks. Full persisted history hashes are
+compared after owned task/attempt/lease removal. Assertion or row-cleanup failure
+still attempts restoration, provided foreground deletion and subsequent checks
+prove the temporary Deployment, ReplicaSets and Pods absent. Unconfirmed removal
+fails closed instead of starting an overlapping manager; outer owned namespace
+cleanup remains the fallback. Passing simulated unit observers are not deployed
+evidence: acceptance requires the `worker_images` summary from the exact current
+image, along with the existing cold-generation receipts and namespace cleanup.
+
+An unready container in `ContainerCreating` may not have an image ID yet. The
+observer waits within the existing deadline only while its declared image
+matches and its integer restart count is zero; a running ready container still
+requires the matching observed digest. A failure leaves `worker_images` null
+and records a separate `worker_images_failure` object with a fixed initiating
+phase/category, separate cleanup failure, and independently confirmed temporary
+removal, row removal, history preservation and original-manager restoration.
+False cleanup flags mean unconfirmed, not proof that cleanup was attempted or
+failed. Timeout failures also identify the local bound that fired: the deadline
+before launching a command, the polling reserve, a command limited by remaining
+time, the command's own cap, or the total phase deadline. Unknown timeout sources
+remain explicit; this attribution does not identify a remote root cause. The
+first failure and its timeout source survive later cleanup errors. These diagnostics
+contain no raw exception, command, response, payload or Pod identity, and never
+substitute for the complete success receipt.
 
 ### Rendered Admin observation
 

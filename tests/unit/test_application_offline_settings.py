@@ -190,6 +190,17 @@ def test_negative_setup_sentinel_precedes_even_a_failed_base_import(tmp_path, mo
     assert (tmp_path / "before" / "missing-setup").is_file()
 
 
+def test_offline_settings_validate_shipped_image_worker_and_negative_queues(environment):
+    from django.test import override_settings
+
+    from testproject.tasks import add_numbers
+
+    config = load_settings()
+    with override_settings(TASKS=config["TASKS"]):
+        for queue in ("sync", "ml", "low-priority"):
+            assert add_numbers.using(queue_name=queue).queue_name == queue
+
+
 @pytest.mark.parametrize(
     "name,value",
     [

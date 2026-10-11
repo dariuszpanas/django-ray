@@ -36,6 +36,11 @@ from qualification.application.run_reporting_benchmark import (
 from qualification.application.run_reporting_benchmark import (
     validate_receipt as validate_reporting_receipt,
 )
+from qualification.application.worker_images import WorkerImageObservationError
+from qualification.application.worker_images import run as observe_worker_images
+from qualification.application.worker_images import (
+    validate_failure_receipt as validate_worker_image_failure,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "qualification/application"
@@ -404,6 +409,8 @@ def main(argv=None) -> int:
     kubectl = ["kubectl", "--context", args.context, "--request-timeout=30s"]
     uid = None
     passed = cleaned = False
+    worker_images = None
+    worker_images_failure = None
     try:
         created = json.loads(checked([*kubectl, "create", "namespace", namespace, "-o", "json"]))
         uid = created["metadata"]["uid"]
@@ -421,7 +428,22 @@ def main(argv=None) -> int:
         command += ["--values", str(values), "--report-path", str(args.output), str(PROFILE)]
         print(f"Running application core in owned namespace {namespace}", flush=True)
         run_test(command, kubectl, namespace)
+        worker_images = observe_worker_images(
+            checked=checked,
+            kubectl=kubectl,
+            namespace=namespace,
+            image=args.image,
+            root=ROOT,
+        )
         passed = True
+    except WorkerImageObservationError as error:
+        try:
+            diagnostic = error.diagnostic()
+            validate_worker_image_failure(diagnostic)
+            worker_images_failure = diagnostic
+        except (KeyError, TypeError, ValueError):
+            pass
+        print("Application image worker observation failed; retained evidence is incomplete.")
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
         print("Application core failed; retained evidence is incomplete.")
     finally:
@@ -461,7 +483,10 @@ def main(argv=None) -> int:
             "cold_ray": "required",
             "qualification_profile": profile,
             "complete_application_gate": False,
+            "worker_images": worker_images,
         }
+        if worker_images_failure is not None:
+            summary["worker_images_failure"] = worker_images_failure
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return 0 if passed and cleaned else 1
 

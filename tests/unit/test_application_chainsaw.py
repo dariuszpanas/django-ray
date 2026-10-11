@@ -115,17 +115,45 @@ def test_receipts_refuse_partial_duplicate_wrong_or_unbounded_evidence(raw):
 
 
 @pytest.mark.parametrize(
-    "failure", [None, "test", "timeout", "receipt", "cleanup", "ownership", "source"]
+    "failure",
+    [
+        None,
+        "test",
+        "timeout",
+        "receipt",
+        "cleanup",
+        "ownership",
+        "source",
+        "worker-images",
+        "worker-diagnostic",
+        "worker-diagnostic-invalid",
+        "worker-diagnostic-unavailable",
+        "worker-diagnostic-collection",
+    ],
 )
 @pytest.mark.parametrize(
     "profile, intent", [("standard", "acceptance"), ("constrained-ray", "diagnostic")]
 )
 def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
-    tmp_path, monkeypatch, failure, profile, intent
+    tmp_path, monkeypatch, capsys, failure, profile, intent
 ):
     output = tmp_path / "evidence"
     calls = []
     trees = 0
+    diagnostic = {
+        "schema_version": 2,
+        "phase": "ready_sync",
+        "category": "validation",
+        "timeout_source": None,
+        "cleanup_phase": "cleanup_restore",
+        "cleanup_category": "timeout",
+        "cleanup_timeout_source": "remaining_budget_limit",
+        "temporary_removed": True,
+        "rows_removed": True,
+        "history_preserved": True,
+        "original_restored": False,
+    }
+    private_error = "PRIVATE_WORKER_ERROR_MUST_NOT_BE_RETAINED"
 
     def checked(argv, *, data=None, timeout=40):
         nonlocal trees
@@ -160,14 +188,36 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
             raise subprocess.TimeoutExpired(argv, runner.TEST_SECONDS)
         if failure == "test":
             raise RuntimeError("Test failed")
+        return 0.001  # A prior phase's remaining budget must not constrain the next one.
+
+    def worker_images(**kwargs):
+        assert "deadline" not in kwargs
+        if failure == "worker-images":
+            raise ValueError(private_error)
+        if failure and failure.startswith("worker-diagnostic"):
+            error = runner.WorkerImageObservationError(diagnostic)
+            error.args = (private_error,)
+            if failure == "worker-diagnostic-invalid":
+                monkeypatch.setattr(
+                    error, "diagnostic", lambda: {**diagnostic, "raw": private_error}
+                )
+            elif failure == "worker-diagnostic-unavailable":
+
+                def unavailable():
+                    raise ValueError(private_error)
+
+                monkeypatch.setattr(error, "diagnostic", unavailable)
+            raise error
+        return {"test_fixture": True}
 
     def collect(*args, expected_profile):
         assert expected_profile == runner.select_profile(profile, intent)
-        if failure == "receipt":
+        if failure in {"receipt", "worker-diagnostic-collection"}:
             raise ValueError("Incomplete receipt")
 
     monkeypatch.setattr(runner, "checked", checked)
     monkeypatch.setattr(runner, "run_test", run)
+    monkeypatch.setattr(runner, "observe_worker_images", worker_images)
     monkeypatch.setattr(runner, "collect", collect)
     monkeypatch.setattr(runner, "diagnose", lambda *_args: None)
     result = runner.main(
@@ -191,12 +241,25 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
     assert summary["status"] == ("passed" if failure is None else "failed")
     assert summary["namespace_removed"] is (failure not in {"cleanup", "ownership"})
     assert summary["qualification_profile"] == runner.select_profile(profile, intent)
+    assert summary["worker_images"] == (
+        None
+        if failure in {"test", "timeout", "worker-images"}
+        or (failure and failure.startswith("worker-diagnostic"))
+        else {"test_fixture": True}
+    )
+    if failure in {"worker-diagnostic", "worker-diagnostic-collection"}:
+        assert summary["worker_images_failure"] == diagnostic
+    else:
+        assert "worker_images_failure" not in summary
     values = json.loads((output / "values.json").read_text())
     assert values["resourceProfile"] == profile
     assert values["validationIntent"] == intent
     assert values["rayHeadLogicalCPU"] == ("0" if profile == "constrained-ray" else "1")
     assert any("delete" in call for call in calls) is (failure != "ownership")
     assert not (output / "secret.json").exists()
+    captured = capsys.readouterr()
+    assert private_error not in captured.out + captured.err
+    assert all(private_error.encode() not in path.read_bytes() for path in output.iterdir())
 
 
 def test_constrained_acceptance_rejected_before_commands_or_output(tmp_path, monkeypatch):
