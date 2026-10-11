@@ -660,6 +660,25 @@ alone does not prove that legacy Ray panels render correctly in the browser.
 This does not prove migration of an operator's persistent monitoring database or
 plugins.
 
+After replacing Grafana, rerun imports in the existing head's sidecar. This does
+not restart Ray or task managers. Use the intended namespace and verify that
+the selector identifies exactly one current head:
+
+```bash
+kubectl get pods -n django-ray -l app=ray,component=head
+kubectl exec -n django-ray <verified-head-pod> -c dashboard-importer -- \
+  python /scripts/import_dashboards.py --once
+```
+
+The one-shot command exits successfully only when every generated dashboard is
+accepted with its expected identity. It uses the sidecar's existing Grafana
+credentials; do not pass credentials on the command line. Imports overwrite
+the generated Ray dashboards, so export operator edits to those dashboards first.
+The default sidecar command still waits after its initial successful pass. Each
+pass permits at most 32 dashboards of 2 MiB each, 64 KiB import responses, and
+ten-second HTTP socket timeouts. Readiness and dashboard discovery each retry at
+most 30 times; these are finite retries, not an overall wall-clock deadline.
+
 ### Prometheus Metrics
 
 Metrics are available at `/api/metrics`:

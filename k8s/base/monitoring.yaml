@@ -726,6 +726,7 @@ data:
   import_dashboards.py: |
     #!/usr/bin/env python3
     """Import Ray Grafana dashboards into Grafana."""
+    import argparse
     import base64
     import json
     import urllib.request
@@ -739,6 +740,9 @@ data:
     DASHBOARDS_PATH = "/tmp/ray/session_latest/metrics/grafana/dashboards"
     MAX_RETRIES = 30
     RETRY_DELAY = 10
+    MAX_DASHBOARDS = 32
+    MAX_DASHBOARD_BYTES = 2 * 1024 * 1024
+    MAX_RESPONSE_BYTES = 64 * 1024
 
     def wait_for_grafana():
         """Wait for Grafana to be ready."""
@@ -746,10 +750,10 @@ data:
         for i in range(MAX_RETRIES):
             try:
                 req = urllib.request.Request(f"{GRAFANA_URL}/api/health")
-                resp = urllib.request.urlopen(req, timeout=5)
-                if resp.status == 200:
-                    print("Grafana is ready!")
-                    return True
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        print("Grafana is ready!")
+                        return True
             except Exception as e:
                 print(f"  Attempt {i+1}/{MAX_RETRIES}: {e}")
             time.sleep(RETRY_DELAY)
@@ -772,8 +776,17 @@ data:
         """Import a single dashboard JSON file into Grafana."""
         print(f"Importing {os.path.basename(filepath)}...")
 
-        with open(filepath) as f:
-            dashboard = json.load(f)
+        try:
+            with open(filepath, "rb") as f:
+                encoded = f.read(MAX_DASHBOARD_BYTES + 1)
+            if len(encoded) > MAX_DASHBOARD_BYTES:
+                raise ValueError("dashboard exceeds import bound")
+            dashboard = json.loads(encoded)
+            if not isinstance(dashboard, dict) or not dashboard.get("uid"):
+                raise ValueError("dashboard has no identity")
+        except (OSError, ValueError):
+            print("  ERROR: dashboard file is invalid or exceeds its bound")
+            return False
 
         payload = json.dumps({
             "dashboard": dashboard,
@@ -788,19 +801,29 @@ data:
         )
 
         try:
-            resp = urllib.request.urlopen(req)
-            result = json.loads(resp.read().decode())
-            print(f"  OK: {result.get('status', 'success')} - {result.get('slug', 'unknown')}")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                encoded = resp.read(MAX_RESPONSE_BYTES + 1)
+                if resp.status != 200 or len(encoded) > MAX_RESPONSE_BYTES:
+                    raise ValueError("import response status or size is invalid")
+            result = json.loads(encoded)
+            if not isinstance(result, dict) or result.get("status") != "success":
+                raise ValueError("import was not accepted")
+            if result.get("uid") != dashboard["uid"]:
+                raise ValueError("import response identity does not match")
+            print("  OK: dashboard imported")
             return True
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode()
-            print(f"  HTTPError {e.code}: {error_body}")
+            e.close()
+            print(f"  HTTPError {e.code}: dashboard import refused")
             return False
         except Exception as e:
-            print(f"  Error: {type(e).__name__}: {e}")
+            print(f"  Error: {type(e).__name__}: dashboard import failed")
             return False
 
-    def main():
+    def main(argv=None):
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--once", action="store_true", help="Exit after one import pass")
+        args = parser.parse_args(argv)
         if not wait_for_grafana():
             print("ERROR: Grafana not available")
             return 1
@@ -810,7 +833,10 @@ data:
             return 1
 
         pattern = os.path.join(DASHBOARDS_PATH, "*_dashboard.json")
-        files = glob.glob(pattern)
+        files = sorted(glob.glob(pattern))
+        if not 1 <= len(files) <= MAX_DASHBOARDS:
+            print("ERROR: dashboard inventory is empty or exceeds its bound")
+            return 1
 
         print(f"\nImporting {len(files)} dashboards...")
         success = 0
@@ -821,6 +847,9 @@ data:
         print(f"\nImported {success}/{len(files)} dashboards")
 
         if success == len(files):
+            if args.once:
+                print("Dashboard import complete!")
+                return 0
             print("Dashboard import complete! Sleeping to keep sidecar alive...")
             # Sleep forever to prevent container from exiting
             while True:
