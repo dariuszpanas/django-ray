@@ -14,9 +14,18 @@ INSTALLED_APPS = ["django_ray"]
 DATABASES = {"default": CONFIG["database"]}
 RUNNER = CONFIG.get("runner", "ray_core")
 CRASH_MANAGER = CONFIG.get("crash_manager", False)
+WORKER_MODE_PROBE = CONFIG.get("worker_mode_probe", False)
 TASKS = {
     "default": {
         "BACKEND": "django_ray.backends.RayTaskBackend",
+        "QUEUES": [
+            "default",
+            *(
+                ["qualification-sync", "qualification-core", "qualification-unselected"]
+                if WORKER_MODE_PROBE
+                else []
+            ),
+        ],
         "OPTIONS": {"RAY_JOB_ONLY": RUNNER == "ray_job"},
     }
 }

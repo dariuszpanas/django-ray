@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rendered legacy Ray panel bound to its CPU query. Require exact source/image
   correspondence and owned cleanup; cold Ray and the broader release matrix
   remain separate ([#627](https://github.com/dariuszpanas/django-ray/pull/627)).
+- Extend native upgrade qualification with installed `--sync` and dedicated
+  Core worker observations on SQLite and PostgreSQL. Require actual consumption,
+  exact ownership, unchanged unselected work, graceful stopping, inactive leases
+  and owned-row cleanup while preserving history. These mode checks do not
+  establish equivalence to every deployed manager configuration.
 
 ### Changed
 
