@@ -33,7 +33,7 @@ def select(policy, files):
             raise GateError("Invalid qualification policy fields")
         if not re.fullmatch(r"[a-z][a-z0-9-]*\.yml", entry["workflow"]):
             raise GateError("Invalid qualification workflow")
-        if entry["id"] not in {"application", "native", "latency", "cancellation"}:
+        if entry["id"] not in {"application", "native", "latency", "cancellation", "monitoring"}:
             raise GateError("Invalid qualification identity")
         if not isinstance(entry["paths"], list) or not entry["paths"]:
             raise GateError("Missing qualification paths")
@@ -68,7 +68,7 @@ def changed_files(api, repo, number, sha):
 
 
 def verify(results):
-    expected = {"selection", "application", "native", "latency", "cancellation"}
+    expected = {"selection", "application", "native", "latency", "cancellation", "monitoring"}
     if set(results) != expected or results["selection"].get("result") != "success":
         raise GateError("Qualification selection did not pass")
     outputs = results["selection"].get("outputs", {})
@@ -113,7 +113,7 @@ def main():
             if changed_files(api, repo, number, sha) != files:
                 raise GateError("Changed file selection changed")
             result = {entry["id"]: "true" if entry in required else "false" for entry in policy}
-            if set(result) != {"application", "native", "latency", "cancellation"}:
+            if set(result) != {"application", "native", "latency", "cancellation", "monitoring"}:
                 raise GateError("Qualification policy is incomplete")
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                 for key, value in result.items():

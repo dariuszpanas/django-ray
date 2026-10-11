@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from qualification.application.resource_profiles import chainsaw_values, select_profile
-from qualification.application.run_chainsaw import CREDENTIAL_KEYS
+from qualification.application.run_chainsaw import CREDENTIAL_KEYS, TEST_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -234,6 +234,12 @@ def test_hosted_profile_rejection_precedes_build_and_reaches_the_runner():
     assert inputs["resource_profile"]["default"] == "standard"
     assert inputs["resource_profile"]["options"] == ["standard", "constrained-ray"]
     job = workflow["jobs"]["application-core"]
+    assert job["timeout-minutes"] == "75"
+    native_step = next(
+        step for step in job["steps"] if step.get("name") == "Run the native application core test"
+    )
+    assert TEST_SECONDS == 2160
+    assert int(native_step["timeout-minutes"]) * 60 == TEST_SECONDS + 300
     assert "github.event_name == 'workflow_dispatch'" in job["env"]["RESOURCE_PROFILE"]
     assert job["env"]["RESOURCE_PROFILE"].endswith("|| 'standard' }}")
     scripts = [step.get("run", "") for step in job["steps"]]

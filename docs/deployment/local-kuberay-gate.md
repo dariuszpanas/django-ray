@@ -40,6 +40,16 @@ revision still needs its own affected product assertions. The complete DRT/cloud
 roadmap is not a merge prerequisite; the capabilities the workload actually uses
 must be proved.
 
+The [bounded monitoring fixture](https://github.com/dariuszpanas/django-ray/tree/main/qualification/monitoring)
+provides a separate current-source scenario for shipped discovery, metrics-token
+isolation, private Services/probe hosts, Grafana authentication, datasource queries,
+dashboard import/replay after Grafana replacement, and one real imported panel render.
+It uses an admitted disposable hosted VM and explicit resource/deadline limits.
+`Qualification Gate` selects this workflow for affected inputs. Its cold-Ray
+decision is `skip`; application cold-generation and preserved-data upgrade evidence
+remain separate release requirements. Authentication and rendering success do not
+constitute a general security or production-topology certification.
+
 ## Retained full-script runbook
 
 The full local KubeRay script complements, but never replaces, the Linux full-suite checkpoint and the required

@@ -8,8 +8,9 @@ The `Job Latency Qualification` workflow similarly runs after exact-source Linux
 for polling-fixture changes. Its passing receipts and cleanup must be reviewed before
 accepting measurement changes; it does not run inside the prerequisite `CI Gate`.
 
-Application, native upgrade, latency and cancellation qualification inspect the
-latest `CI` workflow run for the exact source commit and its current attempt. They wait for
+Application, native upgrade, latency, cancellation and monitoring qualification
+inspect the latest `CI` workflow run for the exact source commit and its current
+attempt. They wait for
 an active replacement instead of treating a cancelled predecessor's aggregate
 check as authoritative. Completed failures remain blocking. The checkpoint logs
 the source commit, CI run and attempt; its wait deadline is finite. Moving a PR
@@ -1073,7 +1074,7 @@ Commit spelling through YAGA is qualified separately under issue #521.
 ## Conditional qualification merge gate
 
 `Qualification Gate` is the single required aggregate for path-selected application,
-native upgrade (all four recipes), latency and cancellation qualification. Keep `CI Gate` and
+native upgrade (all four recipes), latency, cancellation and monitoring qualification. Keep `CI Gate` and
 `Commit Messages` required independently; qualification waits for Linux CI and
 must not become a prerequisite of `CI Gate`.
 

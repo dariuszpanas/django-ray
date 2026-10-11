@@ -26,6 +26,7 @@ from qualification.application.run_first_workflows import (
 from qualification.application.run_first_workflows import (
     validate_receipt as validate_first_workflow_receipt,
 )
+from qualification.application.run_generation import RQ2_SECONDS
 from qualification.application.run_reporting_benchmark import (
     LAYER as REPORTING_LAYER,
 )
@@ -38,6 +39,8 @@ from qualification.application.run_reporting_benchmark import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "qualification/application"
+# Preserve the qualified pre-rq2 envelope and account for both added phases.
+TEST_SECONDS = 1800 + 2 * RQ2_SECONDS
 CREDENTIAL_KEYS = (
     "DJANGO_API_TOKEN",
     "DJANGO_SECRET_KEY_PART_ONE",
@@ -301,12 +304,12 @@ def diagnose_progress_actors(kubectl, namespace: str, output: Path, pods: list) 
 def run_test(command, kubectl, namespace: str) -> None:
     """Keep progress visible and stop on crashed containers instead of readiness timeout."""
     process = subprocess.Popen(command, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 1800
+    deadline = time.monotonic() + TEST_SECONDS
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("Application core exceeded 1800 seconds")
+                raise TimeoutError(f"Application core exceeded {TEST_SECONDS} seconds")
             try:
                 code = process.wait(timeout=min(15, remaining))
             except subprocess.TimeoutExpired:

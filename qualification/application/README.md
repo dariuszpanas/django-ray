@@ -188,7 +188,7 @@ The observer compares those snapshots again after both cases finish.
 These cases run before and after cold Ray replacement within the existing core Jobs.
 They have a shared 60-second observation budget, bounded 64-KiB HTTP responses, the
 existing per-request transport deadlines and the enclosing 600-second generation phase
-and 1800-second test deadline. No extra cluster, process, queue or resource allocation is
+and 2160-second test deadline. No extra cluster, process, queue or resource allocation is
 introduced. Namespace teardown owns the four fixture rows across the two generations.
 The core receipt retains only four booleans per fixed case; a second-case timeout keeps
 the first case's observations but fails the stage. Missing, partial or unexpected negative
@@ -358,10 +358,17 @@ then only final shutdown receives a five-second alarm: two seconds for TERM, two
 and receipt margin. Startup cannot borrow cleanup time. The parent generation retains its
 process-group bound. The generation Job has a
 990-second deadline for these 960 seconds plus startup and termination margin; only its
-Chainsaw assertion uses 1005 seconds. Reporting Jobs and other assertions retain 600 seconds. The host runner's
-1800-second outer deadline remains authoritative: all phase maxima cannot be consumed
-in one run. Owned namespace deletion has a separate 180-second allowance. These are
-ceilings, not expected durations.
+Chainsaw assertion uses 1005 seconds. Reporting Jobs and other assertions retain 600 seconds.
+The host runner's 2160-second outer deadline is the qualified pre-rq2 1800-second envelope
+plus one 180-second rq2 allowance for each generation. First/warm was already part of that
+qualified baseline. This preserves the earlier aggregate allowance for setup, cold replacement
+and reporting rather than making the two added rq2 phases consume it. All child deadlines,
+workloads and resource limits stay unchanged. The outer deadline remains authoritative: all
+phase maxima cannot be consumed in one run. Owned namespace deletion has a separate
+180-second allowance. The hosted native step allows 41 minutes: 2160 seconds plus the inherited
+300-second external aggregate allowance. That allowance is not guaranteed worst-case startup,
+receipt collection or cleanup coverage. The job retains its 75-minute cap. These are ceilings,
+not expected durations or a performance guarantee.
 
 The standard-library generation runner launches fixed argument lists in the original
 order and emits bounded phase timing markers outside the receipt schema. A failure or
@@ -436,7 +443,7 @@ This controls workflow ordering within each fresh Ray generation, not host cache
 The standard acceptance profile still grants each Ray Pod 750m physical CPU and one
 logical Ray CPU; it does not reproduce the more constrained local profile or establish
 a startup latency guarantee. The separate 180-second first-pair budget and authoritative
-1800-second outer deadline bound these cases.
+2160-second outer deadline bound these cases.
 
 For the head-placement hypothesis, the fixed `constrained-ray` diagnostic profile
 requests zero logical CPUs and a 350m physical CPU limit on the head, plus one logical
