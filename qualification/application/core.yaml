@@ -35,6 +35,8 @@ spec:
             DJANGO_RAY_QUEUES: default
             GUNICORN_WORKERS: '1'
             GUNICORN_THREADS: '2'
+            GUNICORN_MAX_REQUESTS: '0'
+            GUNICORN_MAX_REQUESTS_JITTER: '0'
             GUNICORN_WORKER_TMP_DIR: /tmp
             GUNICORN_ACCESS_LOGFILE: 'off'
             HOME: /tmp

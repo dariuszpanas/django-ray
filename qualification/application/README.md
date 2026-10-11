@@ -439,6 +439,22 @@ The runner checks Pod status every 15 seconds and aborts on nonzero container te
 retaining diagnostics before cleanup. This avoids spending the readiness timeout retrying
 an OOM-killed or failed container.
 
+The owned web fixture uses one Gunicorn worker and two threads. In both resource
+profiles it explicitly sets `GUNICORN_MAX_REQUESTS=0` and
+`GUNICORN_MAX_REQUESTS_JITTER=0`: request-count recycling is outside this finite
+acceptance workload's declared lifecycle faults. This keeps a spontaneous worker
+drain from interrupting unrelated API/Admin assertions. The separate bounded
+[recycle experiment](https://github.com/dariuszpanas/django-ray/pull/622) retains
+actual locked-Gunicorn recycle and no-recycle coverage, including a fresh-connection
+header timeout during the controlled single-worker drain.
+
+This is a qualification-fixture decision. The sample entrypoint still defaults to
+1,000 requests with jitter 100; production settings, worker/thread counts, resource
+limits, request timeouts, retry rules and cleanup deadlines are unchanged. The
+mechanism experiment and passing application baseline do not identify the cause of
+the historical [#613 failures](https://github.com/dariuszpanas/django-ray/issues/613).
+Qualification still fails on timeouts and other unexpected lifecycle failures.
+
 For fixture debugging, push a branch without an open PR and manually dispatch the same workflow:
 
 ```sh
