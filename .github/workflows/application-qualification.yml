@@ -59,6 +59,7 @@ jobs:
         timeout-minutes: 5
         working-directory: ${{ runner.temp }}
         run: |
+          python -m pip install PyYAML==6.0.3
           curl -fsSL -o kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
           echo 'aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind' | sha256sum -c -
           curl -fsSL -o chainsaw.tar.gz https://github.com/kyverno/chainsaw/releases/download/v0.2.15/chainsaw_linux_amd64.tar.gz
@@ -131,7 +132,9 @@ jobs:
             --wait --timeout 180s
 
       - name: Run the native application core test
-        timeout-minutes: 41
+        # 2160s cold workload + 180s worker images; retain the existing 300s
+        # allowance for startup, receipt collection and namespace cleanup.
+        timeout-minutes: 44
         run: |
           python -m qualification.application.run_chainsaw --context kind-application-core \
             --image "$APPLICATION_IMAGE" --storage-class standard --output "$RUNNER_TEMP/application-evidence" \

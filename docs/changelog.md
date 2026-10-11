@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact ownership, unchanged unselected work, graceful stopping, inactive leases
   and owned-row cleanup while preserving history. These mode checks do not
   establish equivalence to every deployed manager configuration.
+- Exercise the shipped sync and ML queue manager commands in the owned
+  application image, using source-derived temporary Deployments within the
+  existing resource footprint. Require consumption, preserved unselected work,
+  and graceful stopping. Confirm temporary-controller removal before restoring
+  the original manager, and require row cleanup and history preservation for
+  acceptance.
+  The separate phase allows 135 seconds for sequential observation and reserves
+  45 seconds for cleanup, retaining fixed failure diagnostics. An ML queue
+  observation does not qualify an ML framework.
 
 ### Changed
 

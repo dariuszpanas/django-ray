@@ -239,7 +239,7 @@ def test_hosted_profile_rejection_precedes_build_and_reaches_the_runner():
         step for step in job["steps"] if step.get("name") == "Run the native application core test"
     )
     assert TEST_SECONDS == 2160
-    assert int(native_step["timeout-minutes"]) * 60 == TEST_SECONDS + 300
+    assert int(native_step["timeout-minutes"]) * 60 == TEST_SECONDS + 180 + 300
     assert "github.event_name == 'workflow_dispatch'" in job["env"]["RESOURCE_PROFILE"]
     assert job["env"]["RESOURCE_PROFILE"].endswith("|| 'standard' }}")
     scripts = [step.get("run", "") for step in job["steps"]]
