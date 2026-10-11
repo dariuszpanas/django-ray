@@ -1,5 +1,18 @@
 # CLI Reference
 
+## django_ray_doctor
+
+Collect bounded read-only configuration and database observations on Linux:
+
+```bash
+python manage.py django_ray_doctor --database default --format json
+```
+
+This first slice returns exit 2 when available observations are clear because
+remote readiness and inventory sections remain unavailable. See the
+[doctor contract](doctor.md) for finite budgets, supported settings, process
+cleanup, exit codes and the standalone entry point that also bounds startup.
+
 ## django_ray_worker
 
 The main worker command that processes tasks from the queue.
