@@ -262,3 +262,46 @@ def test_core_failure_retains_safe_api_progress_without_private_response(
     assert failed["api_diagnostics"]["observations"]["task_id"] == TASK_ID
     assert failed["api_diagnostics"]["observations"]["task_state"] == "FAILED"
     assert not receipt.exists()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_core_requires_negative_cases_and_retains_partial_safe_progress(
+    tmp_path, monkeypatch, capsys, failure
+):
+    import django
+
+    from qualification.application import dashboard_browser, runtime_env_refusal
+    from qualification.application.api import ApiEvidence
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setattr(django, "setup", lambda: None)
+    monkeypatch.setattr(run_core, "read_token", lambda path: "unprinted-token")
+    monkeypatch.setattr(run_core, "verify_application_api", lambda *args, **kwargs: ApiEvidence())
+    monkeypatch.setattr(run_core, "verify_durable_task", lambda *args, **kwargs: {})
+    monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *args, **kwargs: TASK_ID)
+    monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *args: {})
+
+    def verify(request, *, evidence, **kwargs):
+        for case in runtime_env_refusal.CASES:
+            if failure and case == runtime_env_refusal.CASES[1]:
+                raise ValueError("unprinted-envelope-and-exception")
+            evidence[case] = dict.fromkeys(runtime_env_refusal.FACTS, True)
+
+    monkeypatch.setattr(runtime_env_refusal, "verify_refusals", verify)
+    path = tmp_path / "receipt.json"
+    assert run_core.main(["--token-file", "unused", "--receipt", str(path)]) == int(failure)
+    output = capsys.readouterr().out
+    assert "unprinted" not in output
+    receipt = json.loads(output)
+    assert all(receipt["runtime_env_refusals"][runtime_env_refusal.CASES[0]].values())
+    if failure:
+        assert receipt["status"] == "failed"
+        assert receipt["failed_stage"] == "runtime_env_refusal"
+        assert not any(receipt["runtime_env_refusals"][runtime_env_refusal.CASES[1]].values())
+        assert not path.exists()
+    else:
+        assert receipt["status"] == "passed"
+        runtime_env_refusal.validate_evidence(receipt["runtime_env_refusals"])
+        assert (
+            json.loads(path.read_bytes())["runtime_env_refusals"] == receipt["runtime_env_refusals"]
+        )

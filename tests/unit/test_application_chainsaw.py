@@ -6,18 +6,36 @@ import subprocess
 import pytest
 
 from qualification.application import run_chainsaw as runner
+from qualification.application.runtime_env_refusal import CASES, FACTS
 
 
 def receipt(layer="application_setup", **changes):
+    defaults = {}
+    if layer == "application_core":
+        defaults["runtime_env_refusals"] = {case: dict.fromkeys(FACTS, True) for case in CASES}
     return json.dumps(
         {
             "schema_version": 1,
             "layer": layer,
             "status": "passed",
             "complete_application_gate": False,
+            **defaults,
             **changes,
         }
     ).encode()
+
+
+@pytest.mark.parametrize("failure", ["missing", "partial", "extra", "non-boolean"])
+def test_core_receipt_requires_both_exact_negative_runtime_env_cases(failure):
+    value = json.loads(receipt("application_core"))
+    if failure == "missing":
+        del value["runtime_env_refusals"]
+    elif failure == "extra":
+        value["runtime_env_refusals"]["extra"] = {}
+    else:
+        value["runtime_env_refusals"][CASES[1]][FACTS[0]] = 1 if failure == "non-boolean" else False
+    with pytest.raises(ValueError):
+        runner.parse_receipts(json.dumps(value).encode(), ("after-core",))
 
 
 @pytest.mark.parametrize("extra", [0, 1])
