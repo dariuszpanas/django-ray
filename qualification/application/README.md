@@ -150,19 +150,23 @@ Its existence or resource-free unit tests do not establish a passing live generi
 
 ## Offline application core stage
 
-`core.yaml` is a native public Chainsaw Test. Its thirteen steps start disposable PostgreSQL 17,
+`core.yaml` is a native public Chainsaw Test. Its fourteen steps start disposable PostgreSQL 17,
 prepare the sample web application and locked recovery archives, and start one current core task
 manager with stock Ray 2.58.0 head/worker nodes. Two serial Jobs require authenticated API execution,
 exact durable task/attempt/current-manager ownership, authenticated encrypted RuntimeEnv snapshots
 and the remote decrypted canary. Between them Chainsaw foreground-deletes and recreates RayCluster.
 Both generic-node receipts require identical archives/runtime and disjoint node identities.
-The web and manager Deployments remain; this does not assert survival of one manager process.
+The web and Core manager Deployments remain. The separate rq2 layer below replaces its own
+Jobs-only manager while requiring the same running Job to survive.
 
 `settings_qualification` retains production validation and replaces the project RuntimeEnv with the
 locked recovery ZIP; `thin` and `recovery-showcase` inherit it and retain their own profile labels.
 No pip download or `PYTHONPATH=src` is used in those profiles.
-The task environment pins the validated Ray Client target so generic workers retain the same
-application configuration when their Pod supplies a node-local Ray address. Database and encryption
+The task environment preserves the validated Ray Client target in the separate
+`DJANGO_RAY_QUALIFICATION_CLIENT_ADDRESS` variable. Ray's Jobs supervisor replaces `RAY_ADDRESS`
+with its native GCS target after applying RuntimeEnv; the settings overlay validates the separate
+Client target for application configuration while leaving the supervisor's process environment
+unchanged. Core workers retain the same explicit Client configuration. Database and encryption
 settings remain inherited from the disposable Pod's configuration and Secret.
 The fixture declares a retry environment revision derived only from its validated Ray address,
 fixed profile labels and non-secret storage probe. Credentials are excluded. The recovery endpoint
@@ -198,6 +202,62 @@ not establish bounded protected-value log scanning, ordinary-result escaping, ca
 versus observed stopping, arbitrary ingress or monitoring coverage. Those catalogue cases
 remain in #455. A fixture definition or mocked test is not a passing hosted observation;
 acceptance still requires the exact-source receipts and owned cleanup described below.
+
+### Request-reference Jobs assertions
+
+`run_rq2.py` runs after the existing first/warm, node, Core and workflow assertions in each
+generation. It owns one `rq2-qualification` queue and one child manager at concurrency one,
+using the fixed `http://ray-head:8265` Jobs target. `settings_qualification_jobs` overlays only
+these subprocesses; the existing Ray Client settings and Core manager remain unchanged. The
+overlay and two-case callable travel in the same locked recovery archive whose bytes the
+generic-node layer compares on both fresh Ray generations.
+
+The Jobs overlay inherits the Core manager's common 60-second lease duration and uses a
+two-second heartbeat. Lease cleanup spans the shared table, so a shorter Jobs-only lease
+would also expire healthy Core workers on other queues between their 15-second heartbeats.
+Manager replacement waits for natural expiry and reconciliation; it never forces a lease
+inactive. The callable's 90-second wait and the helper's 170-second work, 175-second process
+and 180-second phase limits remain fixed. Both generations must pass within those limits.
+
+The positive callable records one bounded effect and waits for an explicit release. The helper
+requires a new `rq2ref:v1:` reference, matching active registry record, exact request-reference
+entrypoint and metadata/content/DB identity binding. Bounded raw JobInfo and logs must omit the
+callable, arguments, public task identifier and credential values, including the RuntimeEnv key.
+It kills its current manager with SIGKILL, waits for a different live manager lease to adopt the
+same Job, attempt, generation and reference, then releases the callable. Completion must preserve
+that identity and exactly one effect. The bounded Jobs inventory must contain one submission with
+the identity and one matching coordination, request-content and reference binding, preventing a
+second submission ID from passing the same-request check.
+
+With that manager stopped, the negative case uses the production runner to prepare an actual
+submission, deletes only its owned object through the typed request deleter, then submits the
+unchanged spec once. Exit 78 and the fixed request-refusal diagnostic must accompany absence of
+both the settings-import sentinel and callable effect. A fresh current manager must reconcile
+one failed archived attempt with no result, completion or scheduled retry. Retries remain enabled;
+the helper observes the terminal fence for at least four seconds, covering two configured
+Jobs heartbeat periods without asserting that two heartbeat writes occurred. No arbitrary external
+effect, general process-surface secrecy, multi-node storage backend or complete upgrade claim is
+made by these two cases.
+
+The setup container creates `/receipts/rq2`; both generic Ray Pod templates and both assertion
+Jobs mount only that subdirectory at `/rq2`, writable by their existing UID 1000. Request objects
+and effect markers never enter `/runtime` or the source archive. Archives retain read-only mounts.
+This reuses the owned receipts claim and current container CPU/memory limits, adding no Pod,
+Deployment, PVC or cluster. Child-manager output is suppressed. Nine fixed boolean assertions are
+retained separately for each generation; partial or missing evidence cannot pass collection.
+Failure output retains only fixed phase, error and manager-exit categories. Before the first
+effect, at most one task row, two matching leases and one bounded JobInfo call are sampled every
+two seconds. Fixed categories distinguish an unclaimed row, a missing/inactive manager lease,
+request/submission bindings, task error presence/origin, Job status, Ray's declared error type and driver
+exit category. Terminal task states fail immediately instead of waiting for an absent effect until
+timeout. No identifiers, free-form errors, Job messages or logs enter these diagnostics. An unreadable
+Job is unavailable, not evidence of absence. Error origins use exact fixed preparation errors or
+the production reservation/submission prefixes, evaluated in SQL; prefix categories do not prove
+the remote acceptance outcome or identify a root cause. The last completed observations are retained; they are
+not necessarily simultaneous with the failure. The first failure remains separate from cleanup.
+Namespace cleanup owns the four fixture rows and their files. These definitions and local tests
+are not a passing deployed receipt: exact-source Linux CI, both live generations, source/archive
+correspondence and owned cleanup must still pass for acceptance.
 
 ### Shared workflow assertions
 
@@ -291,9 +351,14 @@ Creating a private child and explicitly clearing inherited setgid preserves the 
 
 Each generation runs the first/warm pair within 180 seconds, then gives the existing
 node, Core and workflow/pressure commands one shared 600-second budget. Unused first-pair
-time does not extend that budget. The generation Job has an 810-second deadline for these
-780 seconds plus startup and termination margin; only its Chainsaw assertion uses 825
-seconds. Reporting Jobs and other assertions retain 600 seconds. The host runner's
+time does not extend that budget. A final rq2 phase has its own 180-second budget, including
+its child-manager cleanup; unused earlier time does not extend it. The helper reserves
+170 seconds including Django bootstrap and observations. A work alarm interrupts blocking calls,
+then only final shutdown receives a five-second alarm: two seconds for TERM, two for KILL/wait,
+and receipt margin. Startup cannot borrow cleanup time. The parent generation retains its
+process-group bound. The generation Job has a
+990-second deadline for these 960 seconds plus startup and termination margin; only its
+Chainsaw assertion uses 1005 seconds. Reporting Jobs and other assertions retain 600 seconds. The host runner's
 1800-second outer deadline remains authoritative: all phase maxima cannot be consumed
 in one run. Owned namespace deletion has a separate 180-second allowance. These are
 ceilings, not expected durations.
@@ -350,7 +415,7 @@ passing JSON receipt at no more than 16 KiB, except the workflow receipt's 32 Ki
 budget for the fixed success, failure, recovery and nested-retry matrix. The shared
 64 KiB container-log ceiling remains unchanged. It retains `setup.json`, `before-first.json`,
 `after-first.json`, `before-nodes.json`, `before-core.json`, `before-workflows.json`, `after-nodes.json`, `after-core.json`,
-`after-workflows.json`, producer Pod/image identities, Chainsaw's
+`after-workflows.json`, `before-rq2.json`, `after-rq2.json`, producer Pod/image identities, Chainsaw's
 XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
 in the public Actions job log. Receipts are transported from the modules' existing stdout; they are
 not inferred from Job status. The cold receipt's predecessor digest must match the retained first

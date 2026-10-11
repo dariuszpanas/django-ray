@@ -29,6 +29,8 @@ def archives(tmp_path):
             archive.writestr(f"{prefix}django_ray/runtime/remote.py", remote.read_bytes())
             archive.writestr("testproject/apps/cluster_tasks/workflows.py", "# workflow")
             if name == "recovery":
+                archive.writestr("testproject/settings_qualification_jobs.py", "# overlay")
+                archive.writestr("testproject/qualification_rq2_tasks.py", "# fixture")
                 for package in ("cryptography", "django", "psycopg", "unfold"):
                     archive.writestr(f"{package}/__init__.py", "# locked dependency")
     return {
@@ -70,6 +72,28 @@ def test_probe_survives_by_value_serialization(archives, generic_imports):
         "remote_sha256": digest,
         "archives": expected,
     }
+
+
+@pytest.mark.parametrize(
+    "member",
+    ["testproject/settings_qualification_jobs.py", "testproject/qualification_rq2_tasks.py"],
+)
+def test_generic_probe_requires_jobs_overlay_and_callable(archives, generic_imports, member):
+    path = archives["recovery_archive"]
+    with ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist() if name != member}
+    with ZipFile(path, "w") as archive:
+        for name, body in entries.items():
+            archive.writestr(name, body)
+    expected = {
+        name: generic_nodes.archive_identity(archives[f"{name}_archive"])
+        for name in ("source", "recovery")
+    }
+    digest = hashlib.sha256(archives["remote_source"].read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="required task modules"):
+        generic_nodes.make_node_probe()(
+            str(archives["source_archive"]), str(path), expected, digest
+        )
 
 
 @pytest.mark.parametrize("failure", ["installed", "hash", "source", "missing", "oversize"])

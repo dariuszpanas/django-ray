@@ -29,7 +29,8 @@ from django_ray.models import (
 
 
 def _reference(suffix: str) -> str:
-    return f"inputfs://sha256/{suffix * 64}?bytes=128"
+    digest = (suffix * 64)[:64]
+    return f"resultfs://sha256/{digest}?rel={digest[:2]}/{digest[2:4]}/{digest}.json&bytes=128"
 
 
 def _fingerprint(reference: str) -> str:

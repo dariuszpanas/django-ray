@@ -4025,6 +4025,102 @@ def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
     assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
 
 
+def test_rq2_wrapped_attach_waits_for_native_purge_then_refuses_alias(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A historical native tombstone cannot acquire a second registry identity."""
+    import django_ray.input_storage as input_storage_module
+    from django_ray.ray_job_request_storage import (
+        RAY_JOB_REQUEST_REFERENCE_PREFIX,
+        RayJobRequestStorageError,
+        RayJobRequestStorageRejection,
+        register_and_attach_ray_job_request,
+    )
+
+    storage_config = {
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **storage_config}
+    execution, handle = _rq2_reserved_execution("postgres-rq2-native-alias-001")
+    prepared = _prepared_rq2_request(execution, tmp_path)
+    native = prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    payload = TaskInputPayload.objects.create(
+        reference=native,
+        payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
+        backend=prepared.backend,
+        digest=prepared.digest,
+        size_bytes=prepared.size_bytes,
+        envelope_version=prepared.envelope_version,
+        state=InputPayloadState.ACTIVE,
+    )
+    TaskInputPayload.objects.filter(pk=payload.pk).update(
+        last_used_at=timezone.now() - timedelta(days=60)
+    )
+    cutoff = timezone.now() - timedelta(days=30)
+    deletion_started = Event()
+    release_deletion = Event()
+    attach_connected = Event()
+    attach_backend_pid: list[int] = []
+    original_delete = input_storage_module.delete_input_reference
+
+    def blocking_delete(reference: str) -> None:
+        assert reference == native
+        original_delete(reference, config=storage_config)
+        deletion_started.set()
+        if not release_deletion.wait(timeout=10):
+            raise TimeoutError("test did not release native request deletion")
+
+    monkeypatch.setattr(input_storage_module, "delete_input_reference", blocking_delete)
+
+    def purge_request() -> str:
+        close_old_connections()
+        try:
+            return PurgeInputsCommand()._process_reference(
+                native, cutoff=cutoff, delete=True, max_attachments=1
+            )
+        finally:
+            close_old_connections()
+
+    def attach_request() -> RayJobRequestStorageRejection:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                attach_backend_pid.append(int(cursor.fetchone()[0]))
+            attach_connected.set()
+            with pytest.raises(RayJobRequestStorageError) as error:
+                register_and_attach_ray_job_request(
+                    prepared, task_execution=execution, submission_handle=handle
+                )
+            return error.value.classification
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        purge_future = executor.submit(purge_request)
+        try:
+            assert deletion_started.wait(timeout=10)
+            assert not _rq2_request_path(prepared).exists()
+            attach_future = executor.submit(attach_request)
+            assert attach_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(attach_backend_pid[0])
+        finally:
+            release_deletion.set()
+        assert purge_future.result(timeout=20) == "purged"
+        assert attach_future.result(timeout=20) == RayJobRequestStorageRejection.REGISTRY_MISMATCH
+
+    payload.refresh_from_db()
+    execution.refresh_from_db()
+    assert payload.state == InputPayloadState.PURGED
+    assert payload.purged_at is not None
+    assert not TaskInputPayload.objects.filter(reference=prepared.reference).exists()
+    assert not execution.ray_job_request_reference
+    assert not _rq2_request_path(prepared).exists()
+
+
 @pytest.mark.parametrize("transition", ["cancel", "owner-loss", "replacement"])
 def test_rq2_attach_rejects_a_concurrent_execution_transition_exactly(
     tmp_path: Path,

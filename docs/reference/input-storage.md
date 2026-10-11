@@ -210,6 +210,30 @@ Every attachment/reactivation path must lock or register the payload before it l
 updates the execution row. Cleanup safety depends on that common lock order; rq2
 registration/attachment and its definite pre-submission release path follow it.
 
+### Request-reference discriminator
+
+New Ray Job request references use `rq2ref:v1:` followed by the canonical
+filesystem, S3 or GCS reference. The wrapper identifies an execution request;
+task-input and result parsers do not unwrap it. Released 0.4.0, 0.5.0 and 0.6.0
+input deleters reject this spelling before selecting a backend. This extra
+protection does not authorize mixed-version managers or purgers: historical
+native references still require current cleanup code.
+
+The complete ASCII reference must fit the existing 500-byte database limit,
+including the wrapper. The native portion of a new reference therefore has
+490 bytes available. Configuration preflight also checks the existing 4,096-byte
+locator limit before writing an object. Unknown versions, nested wrappers and
+noncanonical references fail before storage access. Existing native locators
+remain readable and eligible for typed request cleanup without a data rewrite.
+
+Attachment refuses a native registry alias for the same object, including a
+`PURGED` tombstone or a row of another kind. It does not create a second registry
+identity that an older purger could treat as unreferenced. If both spellings
+already exist, current cleanup retains both as incomplete, regardless of kind
+or tombstone state. Investigate these inconsistent records; do not delete a
+tombstone or rewrite references to bypass the refusal. Retrying the identical
+historical request as a new attachment is intentionally refused.
+
 Command output identifies a reference only by a 16-character SHA-256 fingerprint. It
 does not print the bucket, prefix, digest locator, provider exception text, or full
 reference. `cleanup_error` retains only the bounded exception class so command logs and
@@ -250,10 +274,10 @@ not authorize mixed-version execution or a rolling upgrade. Follow the
    current-version managers; the 0.6.0 entrypoint rejects unversioned and rq1
    inline carriers before application setup.
 4. Upgrade or disable every released/intermediate scheduled or manual
-   `django_ray_purge_inputs` invocation. Older binaries understand neither
+   `django_ray_purge_inputs` invocation. Pre-rq2 binaries such as 0.4.0 understand neither
    `payload_kind` nor `ray_job_request_reference`; their dry run misreports an aged active
    request as unreferenced and `--delete` can remove it. Resume purge only from the exact
-   final rq2 code, and revoke storage delete permission from retired runtime identities
+   current rq2 code, and revoke storage delete permission from retired runtime identities
    where practical.
 5. Verify preserved history, current-version execution and the deployment's
    recovery checks before reopening submissions. Do not edit private admission
@@ -270,6 +294,11 @@ run retention from the exact final rq2 code until every retained rq2 request ref
 and registry tombstone has expired; restoring an older binary sooner can destroy retry
 and audit bytes it cannot see through the new reference column. Before rolling back input
 spillover, disable new spillover and drain every task with `input_reference`.
+
+After new wrapped request references have been written, 0.6.0 and earlier cannot
+load those new request references. Restore the independently verified
+pre-upgrade database and matching artifact/key snapshot using the coordinated
+Beta procedure. Do not strip the wrapper or roll back only the executable.
 
 ## See Also
 

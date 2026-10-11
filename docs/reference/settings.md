@@ -421,6 +421,8 @@ through retry handling.
 
 Duration of worker lease for distributed coordination. Workers must renew their lease within this period.
 `WORKER_HEARTBEAT_SECONDS` must be lower than this value.
+All processes sharing the lease table must use the same duration, including workers on different
+queues or backend aliases. See the [shared lease policy](../configuration.md#reliability).
 
 ```python
 "WORKER_LEASE_SECONDS": 120

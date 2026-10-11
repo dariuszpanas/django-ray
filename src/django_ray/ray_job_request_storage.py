@@ -55,6 +55,7 @@ RAY_JOB_REQUEST_LOCATOR_MAX_BYTES = 4096
 RAY_JOB_REQUEST_LOCATOR_MAX_CHARS = (RAY_JOB_REQUEST_LOCATOR_MAX_BYTES * 4 + 2) // 3
 RAY_JOB_REQUEST_REFERENCE_MAX_BYTES = 500
 RAY_JOB_REQUEST_REFERENCE_MAX_CHARS = RAY_JOB_REQUEST_REFERENCE_MAX_BYTES
+RAY_JOB_REQUEST_REFERENCE_PREFIX = "rq2ref:v1:"
 
 _DEFAULT_INPUT_S3_PREFIX = "django-ray/inputs"
 _DEFAULT_INPUT_GCS_PREFIX = "django-ray/inputs"
@@ -340,6 +341,74 @@ def _configured_storage(
         _reject(RayJobRequestStorageRejection.CONFIGURATION)
 
 
+def _native_request_reference(reference: object, *, load: bool = False) -> str:
+    """Validate one wrapped or historical native rq2 reference without I/O.
+
+    The discriminator belongs only to request storage. Generic input/result
+    parsers must continue rejecting it before selecting a storage backend.
+    """
+    if (
+        type(reference) is not str
+        or not reference
+        or len(reference) > RAY_JOB_REQUEST_REFERENCE_MAX_CHARS
+        or not reference.isascii()
+    ):
+        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=load)
+    native = reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    try:
+        metadata = _parse_result_reference(native)
+    except ResultStorageError:
+        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=load)
+    if (
+        metadata.scheme not in {"resultfs", "s3", "gs"}
+        or not 0 < metadata.size_bytes <= EXECUTION_REQUEST_MAX_BYTES
+    ):
+        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=load)
+    return native
+
+
+def _wrap_request_reference(reference: object) -> str:
+    """Create the sole current discriminator without allocating oversized text."""
+    if (
+        type(reference) is not str
+        or len(reference)
+        > RAY_JOB_REQUEST_REFERENCE_MAX_CHARS - len(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+        or reference.startswith(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    ):
+        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR)
+    return RAY_JOB_REQUEST_REFERENCE_PREFIX + _native_request_reference(reference)
+
+
+def _request_reference_alias(reference: object) -> str | None:
+    """Return the other possible registry spelling, solely for refusal checks."""
+    native = _native_request_reference(reference)
+    if native != reference:
+        return native
+    if len(native) + len(RAY_JOB_REQUEST_REFERENCE_PREFIX) <= RAY_JOB_REQUEST_REFERENCE_MAX_CHARS:
+        return RAY_JOB_REQUEST_REFERENCE_PREFIX + native
+    return None
+
+
+def delete_ray_job_request_reference(
+    reference: str, config: Mapping[str, Any] | None = None
+) -> None:
+    """Delete one typed rq2 object after the caller's registry/attachment checks.
+
+    Native historical references retain their authorized cleanup path. Only this
+    rq2-aware entry point unwraps current references; task-input and result
+    deletion must reject the discriminator.
+    """
+    from django_ray.input_storage import delete_input_reference
+
+    native = _native_request_reference(reference)
+    # The input-storage deleter validates the exact configured backend and
+    # authorized location before constructing a client or issuing deletion.
+    if config is None:
+        delete_input_reference(native)
+    else:
+        delete_input_reference(native, dict(config))
+
+
 def _validated_reference(
     reference: object,
     *,
@@ -347,10 +416,9 @@ def _validated_reference(
     location: Mapping[str, str | None],
     load: bool = False,
 ) -> tuple[str, int]:
-    if type(reference) is not str or len(reference) > RAY_JOB_REQUEST_REFERENCE_MAX_CHARS:
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=load)
+    native = _native_request_reference(reference, load=load)
     try:
-        metadata = _parse_result_reference(reference)
+        metadata = _parse_result_reference(native)
         if backend == "filesystem":
             if metadata.scheme != "resultfs" or not location.get("filesystem_path"):
                 raise ResultStorageError
@@ -674,22 +742,7 @@ def _build_locator(
 
 def ray_job_request_reference_content_identity(reference: object) -> tuple[str, int]:
     """Return canonical retrievable reference content identity without I/O."""
-    if (
-        type(reference) is not str
-        or not reference
-        or len(reference) > RAY_JOB_REQUEST_REFERENCE_MAX_CHARS
-        or not reference.isascii()
-    ):
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR)
-    try:
-        metadata = _parse_result_reference(reference)
-    except ResultStorageError:
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR)
-    if (
-        metadata.scheme not in {"resultfs", "s3", "gs"}
-        or not 0 < metadata.size_bytes <= EXECUTION_REQUEST_MAX_BYTES
-    ):
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR)
+    metadata = _parse_result_reference(_native_request_reference(reference))
     return metadata.digest, metadata.size_bytes
 
 
@@ -717,7 +770,7 @@ def validate_ray_job_request_storage_config(config: Mapping[str, Any]) -> None:
                 size_bytes=size_bytes,
             )
         locator = _build_locator(
-            reference=reference,
+            reference=_wrap_request_reference(reference),
             backend=backend,
             location=location,
         )
@@ -748,6 +801,8 @@ def prepare_ray_job_request(
         _reject(RayJobRequestStorageRejection.INVALID_REQUEST)
     digest = hashlib.sha256(payload).hexdigest()
     size_bytes = len(payload)
+    # Account for discriminator and locator ceilings before any object write.
+    validate_ray_job_request_storage_config(config)
     backend, storage, location = _configured_storage(config)
     try:
         reference = storage.store_payload(serialized_payload=serialized_request)
@@ -756,6 +811,7 @@ def prepare_ray_job_request(
     except (ResultStorageError, OSError, UnicodeError):
         _reject(RayJobRequestStorageRejection.STORAGE_UNAVAILABLE)
     try:
+        reference = _wrap_request_reference(reference)
         locator = _build_locator(
             reference=reference,
             backend=backend,
@@ -836,7 +892,9 @@ def load_ray_job_request(
         decoded = decode_ray_job_request_locator(locator)
     storage = _storage_for_locator(decoded)
     try:
-        serialized_request = storage.load(reference=decoded.reference)
+        serialized_request = storage.load(
+            reference=_native_request_reference(decoded.reference, load=True)
+        )
     except ResultStorageIntegrityError:
         _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH, load=True)
     except (ResultStorageError, OSError, UnicodeError):
@@ -880,7 +938,7 @@ def _restore_purged_request(prepared: PreparedRayJobRequest) -> None:
         _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
     except (ResultStorageError, OSError, UnicodeError):
         _reject(RayJobRequestStorageRejection.STORAGE_UNAVAILABLE)
-    if restored_reference != prepared.reference:
+    if restored_reference != _native_request_reference(prepared.reference):
         _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
 
 
@@ -940,6 +998,9 @@ def register_and_attach_ray_job_request(
 ) -> str:
     """Register then attach one request under the purge-safe global lock order."""
     prepared = _validate_prepared_request(prepared)
+    if not prepared.reference.startswith(RAY_JOB_REQUEST_REFERENCE_PREFIX):
+        # Native locators remain readable; new writes must use the discriminator.
+        _reject(RayJobRequestStorageRejection.INVALID_REQUEST)
 
     from django.db import transaction
     from django.utils import timezone
@@ -988,6 +1049,21 @@ def register_and_attach_ray_job_request(
 
     now = timezone.now()
     with transaction.atomic(using=database):
+        # Do not create a second registry identity for a historical native
+        # object. An obsolete native-reference purger cannot see a wrapped
+        # attachment. Retain the old registry row (including tombstones) and
+        # refuse this adoption before attaching any execution. Current writers
+        # never create native request rows; old writers must be stopped during
+        # the coordinated upgrade. Only this one row is locked before refusal.
+        if (
+            TaskInputPayload.objects.using(database)
+            .select_for_update()
+            .filter(reference=_native_request_reference(prepared.reference))
+            .values_list("reference", flat=True)
+            .first()
+            is not None
+        ):
+            _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
         payload, created = (
             TaskInputPayload.objects.using(database)
             .select_for_update()
@@ -1138,10 +1214,8 @@ def release_ray_job_request_reservation(
         return False
     if expected_reference is not None:
         try:
-            metadata = _parse_result_reference(expected_reference)
-        except ResultStorageError:
-            return False
-        if metadata.scheme not in {"resultfs", "s3", "gs"}:
+            _native_request_reference(expected_reference)
+        except RayJobRequestStorageError:
             return False
 
     with transaction.atomic(using=database):
@@ -1212,11 +1286,13 @@ __all__ = [
     "RAY_JOB_REQUEST_LOCATOR_SCHEMA",
     "RAY_JOB_REQUEST_LOCATOR_VERSION",
     "RAY_JOB_REQUEST_REFERENCE_MAX_BYTES",
+    "RAY_JOB_REQUEST_REFERENCE_PREFIX",
     "RayJobRequestLoadError",
     "RayJobRequestLocator",
     "RayJobRequestStorageError",
     "RayJobRequestStorageRejection",
     "decode_ray_job_request_locator",
+    "delete_ray_job_request_reference",
     "encode_ray_job_request_locator",
     "load_ray_job_request",
     "prepare_ray_job_request",

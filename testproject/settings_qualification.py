@@ -25,7 +25,9 @@ if _base.DEPLOYMENT_MODE != "production":
 if _base.DATABASE_ENGINE != "django.db.backends.postgresql":
     raise ImproperlyConfigured("Application qualification requires disposable PostgreSQL.")
 
-_address = os.environ.get("RAY_ADDRESS", "")
+_address = os.environ.get(
+    "DJANGO_RAY_QUALIFICATION_CLIENT_ADDRESS", os.environ.get("RAY_ADDRESS", "")
+)
 _target = urlsplit(_address)
 if (
     _target.scheme != "ray"
@@ -53,13 +55,20 @@ if (
     raise ImproperlyConfigured("Application qualification requires an absolute Linux archive path.")
 
 DJANGO_RAY = copy.deepcopy(_base.DJANGO_RAY)
+DJANGO_RAY["RAY_ADDRESS"] = _address
+TASKS = copy.deepcopy(_base.TASKS)
+for _backend in TASKS.values():
+    _backend["OPTIONS"]["RAY_ADDRESS"] = _address
 _storage_probe = "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
 DJANGO_RAY["RUNTIME_ENV_PROFILES"]["project"] = {
     "working_dir": _archive,
     "env_vars": {
-        # Preserve the application's validated client target when the generic
-        # Ray Pod supplies a different node-local RAY_ADDRESS to its workers.
+        # Core workers inherit this target, but the Jobs supervisor overwrites
+        # RAY_ADDRESS with its native GCS target after applying RuntimeEnv.
+        # Keep a separate validated application target without changing that
+        # supervisor-owned process environment during settings bootstrap.
         "RAY_ADDRESS": _address,
+        "DJANGO_RAY_QUALIFICATION_CLIENT_ADDRESS": _address,
         "DJANGO_RAY_RUNTIME_ENV": "project",
         "DJANGO_RAY_RUNTIME_ENV_STORAGE_PROBE": _storage_probe,
     },

@@ -10,7 +10,9 @@ import time
 from pathlib import Path
 
 
-def prepare(*, base: Path, runtime_root: Path, database_timeout: float = 120) -> dict:
+def prepare(
+    *, base: Path, runtime_root: Path, database_timeout: float = 120, rq2_root: Path | None = None
+) -> dict:
     """Run inside the web init container; the executor owns its outer deadline."""
     if os.environ.get("DJANGO_SETTINGS_MODULE") != "testproject.settings_qualification":
         raise ValueError("Application setup requires the explicit qualification settings")
@@ -19,6 +21,11 @@ def prepare(*, base: Path, runtime_root: Path, database_timeout: float = 120) ->
     recovery = runtime_root / "recovery.zip"
     if os.environ.get("DJANGO_RAY_RECOVERY_WORKING_DIR") != str(recovery):
         raise ValueError("The configured recovery archive must match setup output")
+    if rq2_root is not None:
+        if rq2_root != Path("/receipts/rq2"):
+            raise ValueError("Request fixtures require the owned receipts subdirectory")
+        rq2_root.mkdir(mode=0o700, exist_ok=True)
+        (rq2_root / "requests").mkdir(mode=0o700, exist_ok=True)
     password = os.environ.get("DJANGO_SUPERUSER_PASSWORD", "")
     if len(password) < 32 or len(set(password)) < 5:
         raise ValueError("The disposable administrator credential is missing or invalid")
@@ -84,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-root", type=Path, default=Path("/runtime"))
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--database-timeout", type=float, default=120)
+    parser.add_argument("--rq2-root", type=Path)
     args = parser.parse_args(argv)
     passed = False
     receipt = {
@@ -94,7 +102,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         receipt = prepare(
-            base=args.base, runtime_root=args.runtime_root, database_timeout=args.database_timeout
+            base=args.base,
+            runtime_root=args.runtime_root,
+            database_timeout=args.database_timeout,
+            rq2_root=args.rq2_root,
         )
         if receipt["static_collected"] is not True:
             raise ValueError("Application static manifest is missing")

@@ -8354,8 +8354,8 @@ from django.utils import timezone
 
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.ray_job_request_storage import (
-    _storage_for_locator,
     decode_ray_job_request_locator,
+    delete_ray_job_request_reference,
 )
 from django_ray.runner.ray_job import RayJobRunner
 from testproject.tasks import echo_task
@@ -8412,7 +8412,7 @@ if (
 locator = decode_ray_job_request_locator(parts[4])
 if locator.reference != row.ray_job_request_reference:
     raise AssertionError("captured rq2 locator changed the durable request reference")
-_storage_for_locator(locator).delete(reference=locator.reference)
+delete_ray_job_request_reference(locator.reference)
 returned = real_client.submit_job(**captured)
 if returned != handle.ray_job_id:
     raise AssertionError("missing-reference submission returned an unexpected ID")
