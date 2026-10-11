@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import importlib.util
 import io
 import json
 import tarfile
@@ -65,6 +66,13 @@ EXPECTED_FILES = {
     "django_ray/ray_job_request_storage.py",
     "django_ray/protocol_coordination.py",
     "django_ray/protocol_status.py",
+    "django_ray/doctor/__init__.py",
+    "django_ray/doctor/__main__.py",
+    "django_ray/doctor/contracts.py",
+    "django_ray/doctor/probe.py",
+    "django_ray/doctor/runner.py",
+    "django_ray/doctor/supervisor.py",
+    "django_ray/management/commands/django_ray_doctor.py",
     *EXPECTED_TARGET_MODULE_FILES,
     *EXPECTED_WORKFLOW_MODULE_FILES,
     "django_ray/models.py",
@@ -227,6 +235,18 @@ def verify_distribution_archives(dist_dir: Path, expected_version: str) -> None:
         expected_version=expected_version,
         source="sdist archive metadata",
     )
+
+
+def _verify_doctor() -> None:
+    """Load the owned helper by path, including under an isolated interpreter."""
+    spec = importlib.util.spec_from_file_location(
+        "verify_doctor_wheel", Path(__file__).with_name("verify_doctor_wheel.py")
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Installed doctor verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.verify()
 
 
 def _verify_registered_payload_purge() -> None:
@@ -571,6 +591,7 @@ def verify_installed_wheel(expected_version: str) -> None:
             raise RuntimeError(f"{model.__name__} did not retain standard admin compatibility")
 
     expected_commands = {
+        "django_ray_doctor",
         "django_ray_purge_inputs",
         "django_ray_protocol_status",
         "django_ray_worker",
@@ -611,6 +632,7 @@ def verify_installed_wheel(expected_version: str) -> None:
     ):
         raise RuntimeError("django_ray_protocol_status did not emit its versioned JSON schema")
 
+    _verify_doctor()
     _verify_registered_payload_purge()
     _verify_rq2_reference_discriminator()
 

@@ -5,15 +5,15 @@
 | Field | Value |
 | --- | --- |
 | Decision status | Proposed |
-| Implementation status | Not started |
+| Implementation status | Partial: bounded read-only first slice implemented and initially qualified; remaining observations and final integrated artifact qualification pending |
 | Owners | django-ray maintainers |
 | Proposed | 2026-09-21 |
 | Accepted | Not accepted |
 | Decision review | Pending; merging this proposal does not record acceptance |
-| Delivery tracking | [#368](https://github.com/dariuszpanas/django-ray/issues/368) |
+| Delivery tracking | [#368](https://github.com/dariuszpanas/django-ray/issues/368); bounded first slice [#620](https://github.com/dariuszpanas/django-ray/issues/620) |
 | Supersedes | None |
 | Superseded by | None |
-| Last verified | Foundations inspected at `add2fd8` on 2026-09-21; proposed behavior is unimplemented |
+| Last verified | Initial first-slice source review, Linux supervision, independent PostgreSQL and installed-wheel checks passed; rebased qualification and separate fresh installed-sdist verification remain pending as of 2026-10-12 |
 
 ## Context and scope
 
@@ -113,16 +113,34 @@ entry point; it must not require reversing durable state or restoring leases.
 
 ## Implementation and evidence
 
+The first slice tracked by #620 is intentionally incomplete: configuration and
+database observations do not implement remote reachability, target attestation,
+queue capacity, artifact availability or orphan inventory. Those sections remain
+explicitly unavailable and an otherwise clear report returns exit 2. Its proposed
+[numeric and ownership contract](../docs/reference/doctor.md) includes the trust
+boundary around settings-module import and unconfirmed cleanup when process
+ownership cannot be established. This implementation-status update records
+initial source-specific qualification. It does not accept the ADR, authorize
+maintenance, establish unavailable observations, or qualify a later combined
+release tree.
+
 | Requirement | State | Source or delivery issue | Validation evidence |
 | --- | --- | --- | --- |
 | Existing protocol observation foundation | Existing, limited | [protocol_status.py](../src/django_ray/protocol_status.py) | [Protocol integration tests](../tests/integration/test_protocol_status.py); not doctor qualification |
 | Existing exact-lease readiness foundation | Existing, limited | [worker_readiness.py](../src/django_ray/worker_readiness.py) | Does not attest Ray or queue capacity |
-| Versioned doctor report and CLI | Not started | #368 | Missing |
-| Total/probe/query/output bounds and owned cleanup | Not started | #368 | Require blocked connection/query, oversized output, timeout and interruption cases |
-| Read-only behavior and connection isolation | Not started | #368 | Require SQLite and independent PostgreSQL connection tests |
-| Secret-safe partial failure and unsupported results | Not started | #368 | Require injected exceptions, unavailable dependencies and output inspection |
-| Installed-wheel Linux integration and user guidance | Not started | #368 | Require applicable hosted CI and deployed qualification |
+| Versioned doctor report and CLI | Implemented first slice | #620; [doctor package](../src/django_ray/doctor/) | Initial #621 Linux CI passed; exact rebased and release-candidate checks remain required |
+| Total/probe/query/output bounds and owned cleanup | Implemented first slice | #620; [supervision tests](../tests/unit/test_doctor_supervision.py) | Nine actual Linux supervision cases passed on each supported interpreter, including blocked/escaped descendants, output, timeout and interruption; process-group and unconfirmed-cleanup limits remain explicit |
+| Read-only behavior and connection isolation | Implemented first slice | #620; [PostgreSQL tests](../tests/integration/test_doctor_postgresql.py) | Owned SQLite checks and five actual PostgreSQL cases passed: dedicated read-only session/write refusal, statement/lock/connect bounds, caller preservation and unsupported-row preservation without payload hydration |
+| Secret-safe partial failure and unsupported results | Implemented first slice | #620; [doctor tests](../tests/unit/test_doctor.py) | Injected-error, retained partial observation, unsupported-setting and bounded scalar-output checks passed in initial Linux CI |
+| Installed Linux integration and user guidance | Partial qualification | #620; [owned installed fixture](../scripts/verify_doctor_wheel.py) | Initial installed-wheel doctor invocation passed with owned SQLite observations, incomplete exit 2, preservation and cleanup. Separate fresh sdist installation remains pending the release-candidate artifact matrix |
 | Drain, retirement and quarantine | Outside this proposal; still pending | #368 | Separate fenced mutation and race acceptance required |
+
+The selected cold-Ray application qualification also passed for the initial
+#621 source, including source/image correspondence, both cold generations,
+workload/API/task checks, preservation and owned cleanup. That application smoke
+does not invoke doctor and does not replace the separate supervision, PostgreSQL
+or installed-package evidence. It is not the complete release application
+matrix. Final integration requires current-source checks again.
 
 ## Revisit and supersession
 
@@ -137,3 +155,4 @@ must not silently change the read-only command's meaning.
 | Date | Change | Evidence |
 | --- | --- | --- |
 | 2026-09-21 | Proposed bounded diagnosis, independent from mutation controls | #368 and source inspection at `add2fd8`; implementation evidence missing |
+| 2026-10-12 | Record partial first-slice implementation and initial source-specific qualification; retain Proposed decision and unfinished observations | #620 / #621; actual Linux supervision, PostgreSQL and installed-wheel checks; final combined tree and fresh installed-sdist acceptance pending |

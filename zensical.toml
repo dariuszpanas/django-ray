@@ -44,6 +44,7 @@ nav = [
   ] },
   { "Reference" = [
     { "CLI" = "reference/cli.md" },
+    { "Bounded Doctor" = "reference/doctor.md" },
     { "Settings" = "reference/settings.md" },
     { "Durable Input Storage" = "reference/input-storage.md" },
     { "Result Storage" = "reference/result-storage.md" },
