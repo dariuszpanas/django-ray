@@ -14,6 +14,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from qualification.application.api import ApiEvidence, verify_application_api
+from qualification.application.http_context import (
+    HttpObserver,
+    local_outer_deadline,
+    remaining_seconds,
+    request_substage,
+)
 
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_EXPLICIT_RESPONSE_BYTES = 1024 * 1024
@@ -64,9 +70,14 @@ class ApplicationHttpError(ValueError):
         self.code = code
         self.status = status if type(status) is int and 100 <= status <= 599 else None
         self.transport_failure = transport_failure
+        self.attribution: dict[str, str | int | float | None] = {}
 
-    def diagnostic(self) -> dict[str, str | int | None]:
-        result: dict[str, str | int | None] = {"code": self.code.value, "status": self.status}
+    def diagnostic(self) -> dict[str, str | int | float | None]:
+        result: dict[str, str | int | float | None] = {
+            "code": self.code.value,
+            "status": self.status,
+            **self.attribution,
+        }
         if self.transport_failure is not None:
             result["transport_failure"] = self.transport_failure.value
         return result
@@ -85,6 +96,8 @@ class ApplicationHttp:
         *,
         request_timeout: float = 10,
         retry_read_disconnects: bool = False,
+        observer: HttpObserver = HttpObserver.UNSPECIFIED,
+        observer_deadline: float | None = None,
     ) -> None:
         parsed = urlsplit(base_url)
         if (
@@ -106,11 +119,21 @@ class ApplicationHttp:
             raise ValueError("The request timeout must be positive and at most 10 seconds")
         if type(retry_read_disconnects) is not bool:
             raise ValueError("The read retry policy must be boolean")
+        if not isinstance(observer, HttpObserver):
+            raise ValueError("Invalid HTTP observer category")
         self.hostname = parsed.hostname
         self.port = parsed.port
         self.secure = parsed.scheme == "https"
         self.request_timeout = request_timeout
         self.retry_read_disconnects = retry_read_disconnects
+        self.observer = observer
+        self.outer_deadline = local_outer_deadline()
+        self.observer_deadline = (
+            observer_deadline
+            if type(observer_deadline) in {int, float}
+            and remaining_seconds(observer_deadline, time.monotonic()) is not None
+            else None
+        )
         self.requests = 0
         self.last_http_status: int | None = None
         self.transport_recoveries = {
@@ -151,12 +174,14 @@ class ApplicationHttp:
         for attempt in range(2):
             timeout = deadline - time.monotonic() if retry_enabled else self.request_timeout
             if timeout <= 0:
-                raise ApplicationHttpError(
+                error = ApplicationHttpError(
                     "Application HTTP read retry window expired",
                     code=HttpFailureCode.REQUEST,
                     status=None,
                     transport_failure=HttpTransportFailure.TIMEOUT,
                 )
+                self._attribute(error, path, method, attempt, timeout, deadline)
+                raise error
             try:
                 result = self._request_once(
                     path,
@@ -180,18 +205,50 @@ class ApplicationHttp:
                 ):
                     recovered = error.transport_failure
                     continue
+                self._attribute(error, path, method, attempt, timeout, deadline)
                 raise
             if retry_enabled and time.monotonic() >= deadline:
-                raise ApplicationHttpError(
+                error = ApplicationHttpError(
                     "Application HTTP read retry window expired",
                     code=HttpFailureCode.BODY_READ,
                     status=self.last_http_status,
                     transport_failure=HttpTransportFailure.TIMEOUT,
                 )
+                self._attribute(error, path, method, attempt, timeout, deadline)
+                raise error
             if recovered is not None:
                 self.transport_recoveries[recovered.value] += 1
             return result
         raise AssertionError("HTTP read retry exhausted without a result")
+
+    def _attribute(
+        self,
+        error: ApplicationHttpError,
+        path: str,
+        method: str,
+        attempt: int,
+        timeout: float,
+        deadline: float,
+    ) -> None:
+        # Observe at the failure, not construction or retry start. These values
+        # do not alter socket waits, retry eligibility or the enclosing deadline.
+        now = time.monotonic()
+        error.attribution = {
+            "observer": self.observer.value,
+            "request_substage": request_substage(path).value,
+            "method": method,
+            "attempt": attempt + 1,
+            "configured_timeout_seconds": self.request_timeout,
+            "attempt_timeout_seconds": round(max(0.0, timeout), 3),
+            "retry_policy": "one_get_pre_status_disconnect_or_reset"
+            if self.retry_read_disconnects and method == "GET"
+            else "none",
+            "retry_remaining_seconds": remaining_seconds(deadline, now)
+            if self.retry_read_disconnects and method == "GET"
+            else None,
+            "outer_remaining_seconds": remaining_seconds(self.outer_deadline, now),
+            "observer_remaining_seconds": remaining_seconds(self.observer_deadline, now),
+        }
 
     def _request_once(
         self,
@@ -296,10 +353,11 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     transport = None
     passed = False
+    http_failure = None
     try:
         if not math.isfinite(args.task_timeout) or not 0 < args.task_timeout <= 600:
             raise ValueError("Task timeout must be positive and at most 600 seconds")
-        transport = ApplicationHttp(args.base_url)
+        transport = ApplicationHttp(args.base_url, observer=HttpObserver.API)
         verify_application_api(
             transport,
             get_token=lambda: read_token(args.token_file),
@@ -307,10 +365,11 @@ def main(argv: list[str] | None = None) -> int:
             evidence=observations,
         )
         passed = True
-    except Exception:
+    except Exception as error:
         # Assertion exceptions can contain server-controlled result values.
         # Keep only the typed observations and fixed failure classification.
-        pass
+        if isinstance(error, ApplicationHttpError):
+            http_failure = error.diagnostic()
     print(
         json.dumps(
             {
@@ -319,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
                 "status": "passed" if passed else "failed",
                 "complete_application_gate": False,
                 "failure": None if passed else "application_api_assertion_failed",
+                "http_failure": http_failure,
                 "requests": transport.requests if transport is not None else 0,
                 "last_http_status": transport.last_http_status if transport is not None else None,
                 "elapsed_seconds": round(time.monotonic() - started, 3),

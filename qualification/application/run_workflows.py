@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from qualification.application.api import TASK_FAILURE_STATES, validate_task_status_payload
+from qualification.application.http_context import HttpObserver
 from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
 from qualification.application.run_api import ApplicationHttp, ApplicationHttpError, read_token
 from qualification.application.workflow_admin import _protected_diagnostics, observe_admin_contract
@@ -421,7 +422,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("Default qualification forbids the retired pilot override")
         if get_settings()["WORKFLOW_PROGRESS_REPORTING_POLICY"] != "full":
             raise ValueError("Default qualification requires package-default full reporting")
-        request = ApplicationHttp(args.base_url, retry_read_disconnects=True)
+        request = ApplicationHttp(
+            args.base_url, retry_read_disconnects=True, observer=HttpObserver.WORKFLOW
+        )
         receipt["http_transport_recoveries"] = request.transport_recoveries
         observations = {}
         for case in workflow_cases():

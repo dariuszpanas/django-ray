@@ -15,8 +15,9 @@ from functools import partial
 from pathlib import Path
 from uuid import UUID
 
+from qualification.application.http_context import HttpObserver
 from qualification.application.resource_profiles import select_profile
-from qualification.application.run_api import ApplicationHttp, read_token
+from qualification.application.run_api import ApplicationHttp, ApplicationHttpError, read_token
 from qualification.application.workflow_fixtures import FIRST_WORKFLOW_TRIAL_NAMES
 
 LAYER = "first_workflow_pair"
@@ -48,6 +49,8 @@ def observe_pair(
             )
             trial["status"] = "passed"
         except Exception as error:
+            if isinstance(error, ApplicationHttpError):
+                trial["http_failure"] = error.diagnostic()
             # Export fixed source locations, never raw task errors or credentials.
             traceback = error.__traceback__
             while traceback is not None:
@@ -203,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise ValueError("First workflows require the unchanged reporting defaults")
         receipt = observe_pair(
-            ApplicationHttp(args.base_url),
+            ApplicationHttp(args.base_url, observer=HttpObserver.FIRST_WORKFLOW),
             token=read_token(args.token_file),
             resource_profile=profile["resource_profile"],
             validation_intent=profile["validation_intent"],

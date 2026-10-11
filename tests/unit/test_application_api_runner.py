@@ -14,6 +14,19 @@ from types import SimpleNamespace
 import pytest
 
 from qualification.application import run_api
+from qualification.application.http_context import (
+    OUTER_DEADLINE_ENV,
+    HttpObserver,
+    local_outer_deadline,
+)
+
+
+def failure_taxonomy(error):
+    return {
+        key: value
+        for key, value in error.diagnostic().items()
+        if key in {"code", "status", "transport_failure"}
+    }
 
 
 @pytest.mark.parametrize(
@@ -204,7 +217,7 @@ def test_http_failure_closes_connection_and_discards_private_exception(monkeypat
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None
     assert closed == [True]
-    assert caught.value.diagnostic() == {
+    assert failure_taxonomy(caught.value) == {
         "code": "request_failed",
         "status": None,
         "transport_failure": "os_error",
@@ -240,7 +253,7 @@ def test_http_read_failures_keep_only_fixed_stage_and_status(monkeypatch, stage)
     monkeypatch.setattr(http.client, "HTTPConnection", Connection)
     with pytest.raises(run_api.ApplicationHttpError) as caught:
         run_api.ApplicationHttp("http://app")("/private", method="GET")
-    assert caught.value.diagnostic() == {
+    assert failure_taxonomy(caught.value) == {
         "code": "response_headers_failed" if stage == "headers" else "body_read_failed",
         "status": None if stage == "headers" else 200,
         "transport_failure": "remote_disconnected" if stage == "headers" else "os_error",
@@ -265,7 +278,7 @@ def test_http_contract_failure_categories_exclude_private_response(server, optio
         run_api.ApplicationHttp(origin, retry_read_disconnects=True)(
             "/private", method="GET", **options
         )
-    assert caught.value.diagnostic() == {"code": code, "status": 200}
+    assert failure_taxonomy(caught.value) == {"code": code, "status": 200}
     assert "private" not in str(caught.value)
     assert len(requests) == 1
 
@@ -343,7 +356,7 @@ def test_read_observer_stops_after_two_disconnects(scripted_http):
     transport = run_api.ApplicationHttp("http://app", retry_read_disconnects=True)
     with pytest.raises(run_api.ApplicationHttpError) as caught:
         transport("/private", method="GET")
-    assert caught.value.diagnostic() == {
+    assert failure_taxonomy(caught.value) == {
         "code": "response_headers_failed",
         "status": None,
         "transport_failure": "remote_disconnected",
@@ -406,7 +419,7 @@ def test_read_observer_rejects_late_success(scripted_http, retry):
     transport = run_api.ApplicationHttp("http://app", retry_read_disconnects=True)
     with pytest.raises(run_api.ApplicationHttpError) as caught:
         transport("/private", method="GET")
-    assert caught.value.diagnostic() == {
+    assert failure_taxonomy(caught.value) == {
         "code": "body_read_failed",
         "status": 200,
         "transport_failure": "timeout",
@@ -427,6 +440,232 @@ def test_http_failure_discards_invalid_status(status):
         "failure", code=run_api.HttpFailureCode.REQUEST, status=status
     )
     assert error.diagnostic() == {"code": "request_failed", "status": None}
+
+
+@pytest.mark.parametrize("raw", [None, "private", "nan", "inf", "601", "1" * 33])
+def test_unknown_outer_context_does_not_change_http_policy(monkeypatch, scripted_http, raw):
+    if raw is None:
+        monkeypatch.delenv(OUTER_DEADLINE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(OUTER_DEADLINE_ENV, raw)
+    assert local_outer_deadline() is None
+    scripted_http.replies = [{"stage": "headers", "error": TimeoutError("private")}]
+    transport = run_api.ApplicationHttp("http://app", observer=HttpObserver.WORKFLOW)
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        transport("/api/tasks/private", method="GET")
+    assert caught.value.diagnostic()["outer_remaining_seconds"] is None
+    assert scripted_http.timeouts == [10]
+
+
+@pytest.mark.parametrize("observer", ["workflow", "private-token", None, True])
+def test_observer_requires_finite_vocabulary(observer):
+    with pytest.raises(ValueError, match="observer category"):
+        run_api.ApplicationHttp("http://app", observer=observer)
+
+
+@pytest.mark.parametrize("error_type", [http.client.RemoteDisconnected, ConnectionResetError])
+def test_final_attempt_keeps_actual_budget_policy_and_redaction(
+    monkeypatch, scripted_http, error_type
+):
+    monkeypatch.setenv(OUTER_DEADLINE_ENV, "100")
+    scripted_http.replies = [
+        {"stage": "headers", "error": error_type("private-token"), "elapsed": 2.5},
+        {"stage": "headers", "error": TimeoutError("private-body"), "elapsed": 7.5},
+    ]
+    transport = run_api.ApplicationHttp(
+        "http://app", retry_read_disconnects=True, observer=HttpObserver.WORKFLOW
+    )
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        transport(
+            "/api/tasks/private-id?secret=private-query",
+            method="GET",
+            headers={"Authorization": "private-token", "Cookie": "private-cookie"},
+        )
+    assert caught.value.diagnostic() == {
+        "code": "response_headers_failed",
+        "status": None,
+        "transport_failure": "timeout",
+        "observer": "workflow",
+        "request_substage": "task_status",
+        "method": "GET",
+        "attempt": 2,
+        "configured_timeout_seconds": 10,
+        "attempt_timeout_seconds": 7.5,
+        "retry_policy": "one_get_pre_status_disconnect_or_reset",
+        "retry_remaining_seconds": 0,
+        "outer_remaining_seconds": 90,
+        "observer_remaining_seconds": None,
+    }
+    assert scripted_http.timeouts == [10, 7.5]
+    assert transport.requests == 2
+    assert sum(transport.transport_recoveries.values()) == 0
+    assert caught.value.__context__ is None
+    assert "private" not in json.dumps(caught.value.diagnostic()) + str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "path,substage",
+    [
+        ("/api/tasks/private", "task_status"),
+        ("/api/cluster/workflows/private?attempt_number=1", "workflow_summary"),
+        ("/api/cluster/workflows/private/topology/nodes?cursor=private", "workflow_collection"),
+        ("/api/cluster/workflows/private/topology/edges", "workflow_collection"),
+        ("/api/cluster/workflows/private/nodes", "workflow_collection"),
+        ("/api/cluster/workflows/private/node-detail?node_id=private", "workflow_collection"),
+        ("/admin/django_ray/raytaskexecution/private/workflow/graph/", "admin_graph"),
+        ("/admin/django_ray/raytaskexecution/private/change/", "admin_page"),
+        ("/api/private?secret=private", "other"),
+    ],
+)
+def test_route_labels_never_retain_dynamic_components(scripted_http, path, substage):
+    scripted_http.replies = [{"stage": "headers", "error": TimeoutError("private")}]
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        run_api.ApplicationHttp("http://app")(path, method="GET")
+    diagnostic = caught.value.diagnostic()
+    assert diagnostic["request_substage"] == substage
+    assert "private" not in json.dumps(diagnostic)
+
+
+@pytest.mark.parametrize(
+    "error_type", [TimeoutError, http.client.RemoteDisconnected, ConnectionResetError]
+)
+@pytest.mark.parametrize("remaining", [2.0, 180.0])
+def test_nested_admin_uses_own_deadline_without_adopting_main_retry_policy(
+    monkeypatch, scripted_http, error_type, remaining
+):
+    from qualification.application import workflow_admin
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setenv(OUTER_DEADLINE_ENV, "100")
+    scripted_http.replies = [{"stage": "headers", "error": error_type("private"), "elapsed": 1}]
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        workflow_admin.read_admin_text(
+            workflow_admin.FIXTURE_ORIGIN,
+            "/admin/django_ray/raytaskexecution/private/workflow/graph/?secret=private",
+            headers={"Cookie": "private"},
+            deadline=remaining,
+        )
+    diagnostic = caught.value.diagnostic()
+    assert diagnostic["observer"] == "nested_admin"
+    assert diagnostic["request_substage"] == "admin_graph"
+    assert diagnostic["retry_policy"] == "none"
+    assert diagnostic["retry_remaining_seconds"] is None
+    assert diagnostic["outer_remaining_seconds"] == 99
+    assert diagnostic["observer_remaining_seconds"] == remaining - 1
+    assert diagnostic["configured_timeout_seconds"] == min(5, remaining)
+    assert diagnostic["attempt_timeout_seconds"] == min(5, remaining)
+    assert diagnostic["attempt"] == 1
+    assert len(scripted_http.requests) == 1
+    assert scripted_http.timeouts == [min(5, remaining)]
+    assert "private" not in json.dumps(diagnostic)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "error_type,category",
+    [
+        (TimeoutError, "timeout"),
+        (http.client.RemoteDisconnected, "remote_disconnected"),
+        (ConnectionResetError, "connection_reset"),
+    ],
+)
+def test_workflow_main_propagates_real_transport_failure_with_caller(
+    monkeypatch, scripted_http, tmp_path, capsys, nested, error_type, category
+):
+    from qualification.application import run_workflows, workflow_admin
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setenv(OUTER_DEADLINE_ENV, "120")
+    monkeypatch.setattr("django.setup", lambda: None)
+    monkeypatch.setattr(run_workflows, "read_token", lambda _path: "private-token")
+    case = run_workflows.workflow_cases()[0]
+    monkeypatch.setattr(
+        "testproject.admission.enqueue_sample",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            id="f717c512-17d7-4b5e-b778-d614fb14427c", args=[], kwargs=dict(case.options)
+        ),
+    )
+    if nested:
+
+        def observe(*_args, **_kwargs):
+            return workflow_admin.read_admin_text(
+                workflow_admin.FIXTURE_ORIGIN, "/admin/private/?secret=private", deadline=180
+            )
+
+        monkeypatch.setattr(run_workflows, "execute_case", observe)
+    attempts = 1 if nested or error_type is TimeoutError else 2
+    scripted_http.replies = [
+        {"stage": "headers", "error": error_type("private"), "elapsed": 3} for _ in range(attempts)
+    ]
+    receipt = tmp_path / "receipt.json"
+    assert run_workflows.main(["--token-file", "unused", "--receipt", str(receipt)]) == 1
+    output = capsys.readouterr().out
+    value = json.loads(output)
+    diagnostic = value["http_failure"]
+    assert value["failed_stage"] == case.name
+    assert diagnostic["observer"] == ("nested_admin" if nested else "workflow")
+    assert diagnostic["request_substage"] == ("admin_page" if nested else "task_status")
+    assert diagnostic["configured_timeout_seconds"] == (5 if nested else 10)
+    assert diagnostic["outer_remaining_seconds"] == 120 - 3 * attempts
+    assert diagnostic["transport_failure"] == category
+    assert diagnostic["attempt"] == attempts
+    assert len(scripted_http.requests) == attempts
+    assert value["http_transport_recoveries"] == {"remote_disconnected": 0, "connection_reset": 0}
+    assert len(output.encode()) < 32768
+    assert "private" not in output
+    assert not receipt.exists()
+
+
+def test_first_workflow_pair_preserves_typed_post_failure_without_replay(scripted_http):
+    from qualification.application import run_first_workflows
+
+    scripted_http.replies = [{"stage": "headers", "error": ConnectionResetError("private")}]
+    request = run_api.ApplicationHttp("http://app", observer=HttpObserver.FIRST_WORKFLOW)
+    receipt = run_first_workflows.observe_pair(request, token="private")
+    assert receipt["status"] == "failed"
+    assert len(receipt["trials"]) == 1
+    failure = receipt["trials"][0]["http_failure"]
+    assert failure["observer"] == "first_workflow"
+    assert failure["method"] == "POST"
+    assert failure["retry_policy"] == "none"
+    assert failure["transport_failure"] == "connection_reset"
+    assert len(scripted_http.requests) == 1
+    assert len(json.dumps(receipt).encode()) < run_first_workflows.RECEIPT_MAX_BYTES
+    assert "private" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("entrypoint", ["api", "core"])
+def test_api_and_core_cli_preserve_real_typed_failure(
+    monkeypatch, scripted_http, capsys, tmp_path, entrypoint
+):
+    from qualification.application import run_core
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setattr("django.setup", lambda: None)
+    scripted_http.replies = [{"stage": "headers", "error": TimeoutError("private")}]
+    args = ["--base-url", "http://app", "--token-file", "unused"]
+    receipt = tmp_path / "receipt.json"
+    if entrypoint == "core":
+        args += ["--receipt", str(receipt)]
+    assert (run_core if entrypoint == "core" else run_api).main(args) == 1
+    output = capsys.readouterr().out
+    failure = json.loads(output)["http_failure"]
+    assert failure["observer"] == f"application_{entrypoint}"
+    assert failure["method"] == "POST"
+    assert failure["transport_failure"] == "timeout"
+    assert len(scripted_http.requests) == 1
+    assert "private" not in output
+    assert not receipt.exists()
+
+
+@pytest.mark.parametrize("deadline", [True, "private", float("nan"), float("inf"), 601])
+def test_invalid_observer_deadline_is_unknown_without_changing_transport(scripted_http, deadline):
+    scripted_http.replies = [{"stage": "headers", "error": TimeoutError("private")}]
+    request = run_api.ApplicationHttp("http://app", observer_deadline=deadline)
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        request("/admin/private/", method="GET")
+    assert caught.value.diagnostic()["observer_remaining_seconds"] is None
+    assert scripted_http.timeouts == [10]
 
 
 @pytest.mark.parametrize("raw", [b"short", b"x" * 513, b"x" * 31 + b"\n", b"x" * 31 + b"\xff"])

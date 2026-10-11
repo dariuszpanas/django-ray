@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+from qualification.application.http_context import OUTER_DEADLINE_ENV
+
 FIRST_SECONDS = 180
 EXISTING_SECONDS = 600
 TERMINATE_SECONDS = 2
@@ -80,7 +82,10 @@ def _stop_owned_process(process: subprocess.Popen) -> None:
 
 def run_command(argv: list[str], timeout: float) -> int:
     deadline = time.monotonic() + timeout
-    process = subprocess.Popen(argv, start_new_session=os.name == "posix")
+    # Only this local child shares the monotonic clock. Never pass the value to
+    # a remote Pod or Ray node, and never use it to change HTTP enforcement.
+    environment = {**os.environ, OUTER_DEADLINE_ENV: str(deadline)}
+    process = subprocess.Popen(argv, start_new_session=os.name == "posix", env=environment)
     try:
         return process.wait(timeout=max(0, deadline - time.monotonic()))
     except BaseException:

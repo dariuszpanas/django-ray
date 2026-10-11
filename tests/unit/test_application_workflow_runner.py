@@ -49,7 +49,9 @@ def test_success_records_all_serial_cases_without_claiming_complete_gate(fixture
         "connection_reset": 0,
     }
     runner.ApplicationHttp.assert_called_once_with(
-        "http://django-web:8000", retry_read_disconnects=True
+        "http://django-web:8000",
+        retry_read_disconnects=True,
+        observer=runner.HttpObserver.WORKFLOW,
     )
     assert [call.kwargs["case"] for call in execute.call_args_list] == list(runner.workflow_cases())
 

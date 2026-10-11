@@ -4,6 +4,7 @@ import math
 import os
 import time
 
+from qualification.application.http_context import HttpObserver
 from qualification.application.run_api import MAX_EXPLICIT_RESPONSE_BYTES, ApplicationHttp
 
 FIXTURE_ORIGIN = "http://django-web:8000"
@@ -34,7 +35,12 @@ def read_admin_text(
         if isinstance(expected_content_type, str)
         else frozenset(expected_content_type or ())
     )
-    request = ApplicationHttp(base_url, request_timeout=min(5, remaining))
+    request = ApplicationHttp(
+        base_url,
+        request_timeout=min(5, remaining),
+        observer=HttpObserver.NESTED_ADMIN,
+        observer_deadline=deadline,
+    )
     status, body = request(
         path,
         method="GET",
