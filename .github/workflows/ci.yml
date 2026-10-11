@@ -678,6 +678,14 @@ jobs:
       - name: Validate sample project
         run: uv run make test-testproject
 
+      - name: Verify bounded single-worker recycle mechanism
+        timeout-minutes: 2
+        env:
+          REQUIRE_HTTP_RECYCLE_PROOF: "1"
+        run: >-
+          uv run --frozen --extra sample pytest
+          tests/unit/test_http_recycle_probe.py -q -s
+
   docker-compose-smoke:
     if: github.event_name != 'pull_request_target'
     name: Docker Compose Smoke

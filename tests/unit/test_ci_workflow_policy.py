@@ -719,9 +719,16 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     postgresql = jobs["postgresql-coordination"]
 
     assert testproject["name"] == "Testproject Smoke"
-    assert testproject["steps"][-1] == {
+    steps = {step.get("name"): step for step in testproject["steps"]}
+    assert steps["Validate sample project"] == {
         "name": "Validate sample project",
         "run": "uv run make test-testproject",
+    }
+    assert steps["Verify bounded single-worker recycle mechanism"] == {
+        "name": "Verify bounded single-worker recycle mechanism",
+        "timeout-minutes": "2",
+        "env": {"REQUIRE_HTTP_RECYCLE_PROOF": "1"},
+        "run": "uv run --frozen --extra sample pytest tests/unit/test_http_recycle_probe.py -q -s",
     }
     assert live_cluster["name"] == "Live Cluster Fault Tests"
     assert "concurrency" not in live_cluster
