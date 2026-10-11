@@ -235,6 +235,12 @@ python manage.py django_ray_purge_inputs --format=json --max-candidates=100
 python manage.py django_ray_purge_inputs --format=json --cursor="$PURGE_CURSOR"
 ```
 
+Keep the equals sign in `--cursor=TOKEN`: a valid opaque token can start with
+`-`, which the argument parser would otherwise mistake for another option.
+Quoting a separate token does not remove this ambiguity. Programmatic callers
+passing argument strings to `call_command` should likewise use one
+`f"--cursor={token}"` argument; keyword callers can pass `cursor=token`.
+
 **Scheduling migration:** the formerly unbounded invocation now stops after 100
 candidates by default. Update scheduled jobs to read JSON, retain each page's
 outcomes, and continue with `next_cursor` while `has_more` is true, with the same
