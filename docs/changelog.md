@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking CLI change:** Bound `django_ray_purge_inputs` to finite registry,
+  attachment, and output budgets. The default now stops after 100 candidates
+  and returns status 2 when continuation or incomplete attachment evidence
+  remains. Update scheduled cleanup to retain every page's JSON outcome and
+  follow the opaque cursor with the same explicit deletion mode; repeating the
+  original command can revisit retained leading rows. A fresh pass revisits
+  unresolved candidates and concurrent earlier-key inserts. Oversized histories
+  remain retained, dry-run remains the default, and no hard I/O deadline is
+  implied. Cursor tokens keep storage locations private and become invalid on
+  Django `SECRET_KEY` rotation.
 - Preserve required Base64 padding for Compiled Graph diagnostic child payloads
   across Python 3.15's changed URL-safe decoder default.
 - Import Admin URL quoting helpers directly from the standard library so Django

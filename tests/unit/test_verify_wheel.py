@@ -9,12 +9,14 @@ from pathlib import Path
 
 import pytest
 
+from scripts import verify_wheel
 from scripts.verify_wheel import (
     EXPECTED_FILES,
     EXPECTED_MIGRATION_LEAF,
     EXPECTED_TARGET_MODULE_FILES,
     EXPECTED_WORKFLOW_MODULE_FILES,
     _verify_canonical_module_layout,
+    _verify_registered_payload_purge,
     verify_distribution_archives,
 )
 
@@ -27,6 +29,8 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/protocol_coordination.py" in EXPECTED_FILES
     assert "django_ray/protocol_status.py" in EXPECTED_FILES
     assert "django_ray/management/commands/django_ray_protocol_status.py" in EXPECTED_FILES
+    assert "django_ray/management/commands/django_ray_purge_inputs.py" in EXPECTED_FILES
+    assert "django_ray/management/purge_cursor.py" in EXPECTED_FILES
     assert "django_ray/runner/ray_job.py" in EXPECTED_FILES
     assert "django_ray/runtime/entrypoint.py" in EXPECTED_FILES
 
@@ -200,3 +204,60 @@ def test_distribution_archives_reject_vulnerable_transitive_requirements(
 
     with pytest.raises(RuntimeError, match=f"unconditional {name}"):
         verify_distribution_archives(tmp_path, "0.4.0")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("fail_deletion", [False, True])
+def test_purge_wheel_smoke_cleans_owned_fixture_after_success_or_partial_deletion_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, fail_deletion: bool
+) -> None:
+    from django.db import connection
+
+    from django_ray.models import RayTaskExecution, TaskInputPayload
+    from django_ray.result_storage import FilesystemResultStorage
+
+    if connection.vendor != "sqlite":
+        pytest.skip("The installed-wheel fixture explicitly owns an in-memory SQLite database")
+    created_directories = []
+    original_directory = verify_wheel.TemporaryDirectory
+
+    def owned_directory(**kwargs):
+        directory = original_directory(dir=tmp_path, **kwargs)
+        created_directories.append(Path(directory.name))
+        return directory
+
+    monkeypatch.setattr(verify_wheel, "TemporaryDirectory", owned_directory)
+    if fail_deletion:
+        original_delete = FilesystemResultStorage.delete
+        calls = 0
+
+        def fail_second_delete(self, *, reference):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("fixed wheel smoke failure")
+            return original_delete(self, reference=reference)
+
+        monkeypatch.setattr(FilesystemResultStorage, "delete", fail_second_delete)
+        with pytest.raises(RuntimeError, match="report or continuation contract"):
+            _verify_registered_payload_purge()
+        assert calls == 2
+        assert "Verified installed bounded purge" not in capsys.readouterr().out
+    else:
+        _verify_registered_payload_purge()
+        assert "Verified installed bounded purge" in capsys.readouterr().out
+    assert not TaskInputPayload.objects.exists()
+    assert not RayTaskExecution.objects.exists()
+    assert len(created_directories) == 1
+    assert not created_directories[0].exists()
+
+
+def test_purge_wheel_smoke_refuses_non_memory_database_before_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from django.db import connection
+
+    monkeypatch.setitem(connection.settings_dict, "NAME", str(tmp_path / "not-owned.sqlite3"))
+    with pytest.raises(RuntimeError, match="isolated in-memory SQLite"):
+        _verify_registered_payload_purge()
+    assert not (tmp_path / "not-owned.sqlite3").exists()

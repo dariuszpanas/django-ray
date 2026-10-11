@@ -8,8 +8,10 @@ import io
 import json
 import tarfile
 import zipfile
+from datetime import timedelta
 from email.parser import Parser
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -93,6 +95,8 @@ EXPECTED_FILES = {
     "django_ray/migrations/0026_ray_task_target_execution_evidence.py",
     "django_ray/migrations/0027_workflow_reporting_diagnostics.py",
     "django_ray/management/commands/django_ray_worker.py",
+    "django_ray/management/commands/django_ray_purge_inputs.py",
+    "django_ray/management/purge_cursor.py",
     "django_ray/management/commands/django_ray_protocol_status.py",
     "django_ray/management/commands/django_ray_worker_ready.py",
     "django_ray/worker_readiness.py",
@@ -225,6 +229,132 @@ def verify_distribution_archives(dist_dir: Path, expected_version: str) -> None:
     )
 
 
+def _verify_registered_payload_purge() -> None:
+    """Exercise installed deletion only in an empty memory DB and owned storage."""
+    from django.core.management import call_command
+    from django.core.management.base import CommandError
+    from django.db import connection, transaction
+    from django.test import override_settings
+    from django.utils import timezone
+
+    from django_ray.input_storage import prepare_task_input, register_task_input
+    from django_ray.models import InputPayloadState, RayTaskExecution, TaskInputPayload, TaskState
+    from django_ray.result_storage import FilesystemResultStorage
+
+    if connection.vendor != "sqlite" or not connection.is_in_memory_db():
+        raise RuntimeError("Purge wheel smoke requires an isolated in-memory SQLite database")
+    if TaskInputPayload.objects.exists() or RayTaskExecution.objects.exists():
+        raise RuntimeError("Purge wheel smoke requires an empty payload and execution registry")
+
+    with TemporaryDirectory(prefix="django-ray-wheel-purge-") as directory:
+        config = {
+            "RAY_ADDRESS": "local",
+            "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": directory,
+        }
+        with override_settings(DJANGO_RAY=config), transaction.atomic():
+            prepared = sorted(
+                (prepare_task_input([index], {}, config) for index in range(3)),
+                key=lambda item: item.input_reference or "",
+            )
+            references: list[str] = []
+            old = timezone.now() - timedelta(days=60)
+            for index, item in enumerate(prepared):
+                payload = register_task_input(item, config)
+                if payload is None:
+                    raise RuntimeError("Purge wheel smoke did not externalize its fixture")
+                references.append(payload.reference)
+                payload.last_used_at = old
+                payload.save(update_fields=["last_used_at"])
+                RayTaskExecution.objects.create(
+                    task_id=f"wheel-purge-{index}",
+                    callable_path="wheel_smoke.unreachable",
+                    args_json=item.args_json,
+                    kwargs_json=item.kwargs_json,
+                    input_reference=item.input_reference,
+                    state=TaskState.RUNNING if index == 2 else TaskState.SUCCEEDED,
+                    finished_at=None if index == 2 else old,
+                )
+
+            def page(*, delete: bool, cursor: str | None = None) -> dict:
+                output = io.StringIO()
+                error_code = 0
+                arguments = ["--format=json", "--max-candidates=2", "--max-details=1"]
+                if delete:
+                    arguments.append("--delete")
+                if cursor is not None:
+                    arguments.extend(["--cursor", cursor])
+                try:
+                    call_command("django_ray_purge_inputs", *arguments, stdout=output)
+                except CommandError as error:
+                    error_code = error.returncode
+                raw = output.getvalue()
+                report = json.loads(raw)
+                if (
+                    len(raw.encode("utf-8")) > 16_384
+                    or any(reference in raw for reference in references)
+                    or report["schema_version"] != 1
+                    or report["mode"] != ("delete" if delete else "dry-run")
+                    or report["retention_days"] != 30
+                    or report["counts"]["failed"] != 0
+                    or report["counts"]["incomplete"] != 0
+                    or len(report["details"]) > 1
+                    or report["counts"]["processed"] != (2 if cursor is None else 1)
+                    or error_code != (2 if cursor is None else 0)
+                    or report["has_more"] != (cursor is None)
+                    or bool(report["next_cursor"]) != (cursor is None)
+                ):
+                    raise RuntimeError("Installed purge report or continuation contract failed")
+                return report
+
+            storage = FilesystemResultStorage(directory)
+            payload_files = {path.name: path for path in Path(directory).rglob("*.json")}
+            if len(payload_files) != 3:
+                raise RuntimeError("Purge wheel smoke did not store three distinct payload files")
+            for delete in (False, True):
+                first = page(delete=delete)
+                second = page(delete=delete, cursor=first["next_cursor"])
+                if (
+                    first["cutoff"] != second["cutoff"]
+                    or first["counts"]["eligible"] != 2
+                    or first["counts"]["purged"] != (2 if delete else 0)
+                    or second["counts"]["eligible"] != 0
+                    or second["counts"]["purged"] != 0
+                    or second["counts"]["retained"] != 1
+                ):
+                    raise RuntimeError("Installed purge did not preserve its cutoff and ownership")
+                for index, item in enumerate(prepared):
+                    purged = delete and index < 2
+                    payload = TaskInputPayload.objects.get(pk=item.input_reference)
+                    expected_state = (
+                        InputPayloadState.PURGED if purged else InputPayloadState.ACTIVE
+                    )
+                    if (
+                        payload.state != expected_state
+                        or (payload.purged_at is not None) != purged
+                        or payload.cleanup_error
+                        or (
+                            not purged
+                            and storage.load(reference=item.input_reference)
+                            != item.serialized_payload
+                        )
+                        or (purged and payload_files[f"{item.digest}.json"].exists())
+                        or RayTaskExecution.objects.get(
+                            task_id=f"wheel-purge-{index}"
+                        ).input_reference
+                        != item.input_reference
+                    ):
+                        raise RuntimeError(
+                            "Installed purge payload or tombstone preservation failed"
+                        )
+            # The fixture never survives this probe, even when an assertion raises.
+            transaction.set_rollback(True)
+    print(
+        "Verified installed bounded purge: dry-run, deletion continuation, tombstones, preservation"
+    )
+
+
 def verify_installed_wheel(expected_version: str) -> None:
     """Check metadata, import version, migrations, command discovery, and contents."""
     distribution = importlib.metadata.distribution("django-ray")
@@ -326,20 +456,23 @@ def verify_installed_wheel(expected_version: str) -> None:
     import django
     from django.conf import settings
 
-    if not settings.configured:
-        settings.configure(
-            SECRET_KEY="release-smoke-test",
-            INSTALLED_APPS=[
-                "django.contrib.admin",
-                "django.contrib.auth",
-                "django.contrib.contenttypes",
-                "django.contrib.sessions",
-                "django.contrib.messages",
-                "django_ray",
-            ],
-            DJANGO_RAY={"RAY_ADDRESS": "local"},
-            DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    if settings.configured:
+        raise RuntimeError(
+            "Wheel verification requires a fresh process with isolated Django settings"
         )
+    settings.configure(
+        SECRET_KEY="release-smoke-test",
+        INSTALLED_APPS=[
+            "django.contrib.admin",
+            "django.contrib.auth",
+            "django.contrib.contenttypes",
+            "django.contrib.sessions",
+            "django.contrib.messages",
+            "django_ray",
+        ],
+        DJANGO_RAY={"RAY_ADDRESS": "local"},
+        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    )
     django.setup()
 
     from django.contrib import admin
@@ -364,6 +497,7 @@ def verify_installed_wheel(expected_version: str) -> None:
             raise RuntimeError(f"{model.__name__} did not retain standard admin compatibility")
 
     expected_commands = {
+        "django_ray_purge_inputs",
         "django_ray_protocol_status",
         "django_ray_worker",
         "django_ray_worker_ready",
@@ -402,6 +536,8 @@ def verify_installed_wheel(expected_version: str) -> None:
         or protocol_status.get("schema_version") != 1
     ):
         raise RuntimeError("django_ray_protocol_status did not emit its versioned JSON schema")
+
+    _verify_registered_payload_purge()
 
 
 def main() -> int:
