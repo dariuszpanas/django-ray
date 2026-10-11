@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import urllib.error
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -112,7 +112,7 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _loopback_upstream(**overrides: Any) -> Iterator[tuple[str, _UpstreamState]]:
+def _loopback_upstream(**overrides: Any) -> Generator[tuple[str, _UpstreamState], None, None]:
     state = _UpstreamState(**overrides)
     server = _LoopbackServer(("127.0.0.1", 0), _LoopbackHandler)
     server.state = state

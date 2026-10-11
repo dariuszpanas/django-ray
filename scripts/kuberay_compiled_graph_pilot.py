@@ -26,7 +26,7 @@ import threading
 import time
 import tomllib
 import traceback
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -902,7 +902,7 @@ def _tracked_build_context(
     revision: str,
     *,
     repository: Path = ROOT,
-) -> Iterator[tuple[Path, str]]:
+) -> Generator[tuple[Path, str], None, None]:
     """Materialize a bounded, regular-file-only archive of one Git commit."""
 
     inventory = _tracked_build_inventory(revision, repository=repository)
@@ -1841,7 +1841,7 @@ def _current_pilot_lease_boundary(
     context: str,
     namespace_lease: NamespaceLease,
     raycluster_lease: RayClusterLease | None = None,
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Bracket one cluster API boundary with current immutable lease checks."""
 
     _assert_current_namespace_lease(context, namespace_lease)

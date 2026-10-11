@@ -11,7 +11,7 @@ import json
 import math
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Sized
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence, Sized
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -173,7 +173,7 @@ class _Executor(ABC):
         return self.resolve(value)
 
     @contextmanager
-    def capture_cleanup(self, values: list[Any]) -> Iterator[None]:
+    def capture_cleanup(self, values: list[Any]) -> Generator[None, None, None]:
         """Capture physical refs submitted for one bounded logical item."""
         stack = getattr(self, "_cleanup_capture_stack", None)
         if stack is None:
@@ -1690,7 +1690,7 @@ class _RayExecutor(_Executor):
                 pass
 
     @contextmanager
-    def suppress_progress(self) -> Iterator[None]:
+    def suppress_progress(self) -> Generator[None, None, None]:
         self._progress_suppression_depth += 1
         try:
             yield

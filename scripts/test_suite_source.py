@@ -9,7 +9,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
@@ -55,7 +55,7 @@ _BOUND_SOURCE: ContextVar[tuple[Path, Path] | None] = ContextVar("test_suite_sou
 
 
 @contextmanager
-def bound_source(root: Path, source_manifest: Path | None) -> Iterator[None]:
+def bound_source(root: Path, source_manifest: Path | None) -> Generator[None, None, None]:
     """Bind explicit archive provenance for nested helpers on this exact root only."""
     if source_manifest is None:
         yield
