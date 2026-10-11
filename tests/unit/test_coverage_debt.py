@@ -150,7 +150,9 @@ def test_coverage_phases_replace_then_append_manifest_owned_local_ray(tmp_path: 
         local_ray_timeout_seconds=900,
     )
 
-    assert default_resources.selection == "not real_ray and not live_cluster and not postgresql"
+    assert default_resources.selection == (
+        "not real_ray and not live_cluster and (not postgresql or sqlite_compatible)"
+    )
     assert default_resources.coverage_mode == "replace"
     assert "--cov=src" in default_resources.command
     assert "--cov-fail-under=0" in default_resources.command
@@ -175,6 +177,52 @@ def test_coverage_phases_replace_then_append_manifest_owned_local_ray(tmp_path: 
     )
     assert lane["skip_policy"]["mode"] == "forbid"
     assert "compiled_graph_opt_in" in lane["selection"]["exclude_markers"]
+
+
+def test_default_phase_includes_shared_sqlite_contracts_without_external_resources(
+    tmp_path: Path,
+) -> None:
+    """The explicit shared marker cannot admit PostgreSQL-only or Ray tests."""
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\nmarkers =\n"
+        "    postgresql: PostgreSQL lane\n"
+        "    sqlite_compatible: Also runs on SQLite\n"
+        "    real_ray: Local Ray\n"
+        "    live_cluster: External Ray\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_selection.py").write_text(
+        "import pytest\n\n"
+        "def test_default():\n    pass\n\n"
+        "@pytest.mark.postgresql\n"
+        "@pytest.mark.sqlite_compatible\n"
+        "def test_shared_sqlite():\n    pass\n\n"
+        "@pytest.mark.postgresql\n"
+        "def test_postgresql_only():\n    raise AssertionError('external database')\n\n"
+        "@pytest.mark.sqlite_compatible\n"
+        "@pytest.mark.real_ray\n"
+        "def test_local_ray():\n    raise AssertionError('local Ray')\n\n"
+        "@pytest.mark.sqlite_compatible\n"
+        "@pytest.mark.live_cluster\n"
+        "def test_live_cluster():\n    raise AssertionError('external Ray')\n",
+        encoding="utf-8",
+    )
+    phase, _ = coverage_phases(
+        tmp_path, default_timeout_seconds=1_200, local_ray_timeout_seconds=900
+    )
+    marker_argument = phase.command[phase.command.index("-m", 3) + 1]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-m", marker_argument, "-q", "--strict-markers"],
+        cwd=tmp_path,
+        env={**coverage_debt_module.os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed, 3 deselected" in result.stdout
 
 
 def test_coverage_phase_stops_after_first_failure_with_exact_diagnostics(

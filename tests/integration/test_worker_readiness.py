@@ -18,7 +18,11 @@ from django.test.utils import CaptureQueriesContext
 from django_ray import worker_readiness
 from django_ray.models import TaskWorkerLease
 
-pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.postgresql]
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.postgresql,
+    pytest.mark.sqlite_compatible,
+]
 NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 
 

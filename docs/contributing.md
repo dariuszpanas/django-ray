@@ -296,8 +296,11 @@ tracker from a local checkout with:
 uv run make coverage-debt
 ```
 
-The target first runs the default-resource selection (`not real_ray and not live_cluster and not
-postgresql`) and then runs the manifest-owned `local-ray` lane serially with skips forbidden. The
+The target first runs the default-resource selection (`not real_ray and not live_cluster and
+(not postgresql or sqlite_compatible)`) and then runs the manifest-owned `local-ray` lane serially
+with skips forbidden. The `sqlite_compatible` marker includes the shared worker-readiness contracts
+in their default SQLite environment while retaining their separate PostgreSQL lane. It never
+admits local-Ray, live-cluster, or PostgreSQL-only tests into the default phase. The
 default-off `compiled_graph_opt_in` probe stays outside required hosted coverage. The local-Ray
 phase appends to the default-resource coverage data before the target applies the central global,
 worker, and Ray Job floors from `pyproject.toml`.

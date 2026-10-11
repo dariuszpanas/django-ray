@@ -629,9 +629,12 @@ def coverage_phases(
         "--cov-fail-under=0",
         "--maxfail=1",
     )
+    default_selection = (
+        "not real_ray and not live_cluster and (not postgresql or sqlite_compatible)"
+    )
     default_resources = CoveragePhase(
         name="default-resources",
-        selection="not real_ray and not live_cluster and not postgresql",
+        selection=default_selection,
         coverage_mode="replace",
         timeout_seconds=default_timeout_seconds,
         command=(
@@ -639,7 +642,7 @@ def coverage_phases(
             "-m",
             "pytest",
             "-m",
-            "not real_ray and not live_cluster and not postgresql",
+            default_selection,
             *coverage_arguments,
             "-q",
         ),
