@@ -306,6 +306,7 @@ def test_owned_group_stop_kills_ready_descendant_that_ignores_term(tmp_path):
 
 
 def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
+    from qualification.application.result_presentation import EVIDENCE as RESULT_EVIDENCE
     from qualification.application.run_chainsaw import parse_receipts
     from qualification.application.runtime_env_refusal import CASES, FACTS
 
@@ -319,6 +320,7 @@ def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
             "status": "passed",
             "complete_application_gate": False,
             "runtime_env_refusals": {case: dict.fromkeys(FACTS, True) for case in CASES},
+            "ordinary_results": dict(RESULT_EVIDENCE),
         }
     ).encode()
     assert set(parse_receipts(raw, ("before-core",))) == {"before-core"}

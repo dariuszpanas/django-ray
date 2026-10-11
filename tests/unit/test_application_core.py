@@ -270,7 +270,11 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
 ):
     import django
 
-    from qualification.application import dashboard_browser, runtime_env_refusal
+    from qualification.application import (
+        dashboard_browser,
+        result_presentation,
+        runtime_env_refusal,
+    )
     from qualification.application.api import ApiEvidence
 
     monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
@@ -280,6 +284,11 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
     monkeypatch.setattr(run_core, "verify_durable_task", lambda *args, **kwargs: {})
     monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *args, **kwargs: TASK_ID)
     monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *args: {})
+    monkeypatch.setattr(
+        result_presentation,
+        "observe_result_presentation",
+        lambda **kwargs: dict(result_presentation.EVIDENCE),
+    )
 
     def verify(request, *, evidence, **kwargs):
         for case in runtime_env_refusal.CASES:
@@ -305,3 +314,54 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
         assert (
             json.loads(path.read_bytes())["runtime_env_refusals"] == receipt["runtime_env_refusals"]
         )
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_core_requires_result_presentation_before_writing_a_passing_receipt(
+    tmp_path, monkeypatch, capsys, failed
+):
+    from qualification.application import (
+        dashboard_browser,
+        result_presentation,
+        runtime_env_refusal,
+    )
+    from qualification.application.api import ApiEvidence
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setattr("django.setup", lambda: None)
+    monkeypatch.setattr(run_core, "read_token", lambda _path: "fixed-token")
+    monkeypatch.setattr(
+        run_core, "verify_application_api", lambda *_a, **_k: ApiEvidence(task_id=TASK_ID)
+    )
+    monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {})
+    monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *_a, **_k: TASK_ID)
+    monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *_a: {})
+
+    def verify_refusals(request, *, evidence, **kwargs):
+        evidence.update(
+            {
+                case: dict.fromkeys(runtime_env_refusal.FACTS, True)
+                for case in runtime_env_refusal.CASES
+            }
+        )
+
+    monkeypatch.setattr(runtime_env_refusal, "verify_refusals", verify_refusals)
+
+    def observe(*, token):
+        assert token == "fixed-token"
+        if failed:
+            raise ValueError("private result response must not be emitted")
+        return dict(result_presentation.EVIDENCE)
+
+    monkeypatch.setattr(result_presentation, "observe_result_presentation", observe)
+    path = tmp_path / "core.json"
+    assert run_core.main(["--token-file", "unused", "--receipt", str(path)]) == int(failed)
+    output = capsys.readouterr().out
+    assert "private result response" not in output
+    receipt = json.loads(output)
+    assert path.exists() is not failed
+    if failed:
+        assert receipt["failed_stage"] == "ordinary_result_presentation"
+        assert "ordinary_results" not in receipt
+    else:
+        result_presentation.validate_evidence(receipt["ordinary_results"])

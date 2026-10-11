@@ -273,6 +273,10 @@ def main(argv: list[str] | None = None) -> int:
             manager_prefix=args.manager_prefix,
             evidence=receipt["runtime_env_refusals"],
         )
+        receipt["failed_stage"] = "ordinary_result_presentation"
+        from qualification.application.result_presentation import observe_result_presentation
+
+        receipt["ordinary_results"] = observe_result_presentation(token=read_token(args.token_file))
         receipt["failed_stage"] = "receipt"
         encoded = json.dumps(
             {**receipt, "status": "passed", "failed_stage": None}, sort_keys=True
