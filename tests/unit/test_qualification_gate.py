@@ -26,12 +26,14 @@ def results():
                 "native": "false",
                 "latency": "true",
                 "cancellation": "true",
+                "monitoring": "true",
             },
         },
         "application": {"result": "success"},
         "native": {"result": "skipped"},
         "latency": {"result": "success"},
         "cancellation": {"result": "success"},
+        "monitoring": {"result": "success"},
     }
 
 
@@ -48,9 +50,16 @@ def test_workflow_owns_selection_and_every_qualification_dependency():
         "native",
         "latency",
         "cancellation",
+        "monitoring",
     }
     assert gate["jobs"]["qualification-gate"]["if"] == "always()"
-    assert {entry["id"] for entry in policy} == {"application", "native", "latency", "cancellation"}
+    assert {entry["id"] for entry in policy} == {
+        "application",
+        "native",
+        "latency",
+        "cancellation",
+        "monitoring",
+    }
     for entry in policy:
         child = yaml.load(
             (root / ".github/workflows" / entry["workflow"]).read_text(), Loader=yaml.BaseLoader
@@ -93,16 +102,34 @@ def test_cancellation_consumed_manager_and_request_paths_are_selected(path):
     assert "cancellation" in {item["id"] for item in select(policy, {"src/django_ray/" + path})}
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/django_ray/metrics.py",
+        "testproject/api.py",
+        "testproject/api_boundary.py",
+        "testproject/route_policy.py",
+        "testproject/settings.py",
+        "testproject/urls.py",
+    ],
+)
+def test_monitoring_selects_real_metrics_probe_routing_and_authentication_owners(path):
+    root = Path(__file__).resolve().parents[2]
+    policy = json.loads((root / "scripts/qualification_policy.json").read_text())
+    assert "monitoring" in {entry["id"] for entry in select(policy, {path})}
+
+
 def test_only_selected_success_and_explicit_unselected_skip_pass():
     assert verify(results()) == {
         "application": "passed",
         "native": "not_applicable",
         "latency": "passed",
         "cancellation": "passed",
+        "monitoring": "passed",
     }
 
 
-@pytest.mark.parametrize("name", ["application", "latency", "cancellation"])
+@pytest.mark.parametrize("name", ["application", "latency", "cancellation", "monitoring"])
 @pytest.mark.parametrize("state", ["failure", "cancelled", "skipped", "", None])
 def test_selected_missing_or_failed_result_never_passes(name, state):
     value = results()

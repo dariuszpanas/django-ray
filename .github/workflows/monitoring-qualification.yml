@@ -1,0 +1,140 @@
+name: Monitoring Qualification
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: read
+  actions: read
+
+concurrency:
+  group: monitoring-qualification-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  monitoring:
+    if: github.event_name != 'pull_request_target'
+    name: Monitoring Qualification (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require the exact-source Linux CI checkpoint
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/wait_for_ci_checkpoint.py
+
+      - name: Admit only the disposable hosted capacity
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/monitoring-build"
+          python -m qualification.monitoring.admission > "$RUNNER_TEMP/monitoring-build/admission.json"
+
+      - name: Install pinned public tools
+        timeout-minutes: 5
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo 'aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind' | sha256sum -c -
+          curl -fsSL -o helm.tar.gz https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          echo 'a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496  helm.tar.gz' | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          curl -fsSL -o kubectl https://dl.k8s.io/release/v1.35.8/bin/linux/amd64/kubectl
+          echo '874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf  kubectl' | sha256sum -c -
+          sudo install kind kubectl linux-amd64/helm /usr/local/bin/
+          python -m pip install PyYAML==6.0.3
+
+      - name: Build the committed candidate before allocating Kind
+        timeout-minutes: 15
+        run: |
+          docker run -d --name monitoring-registry --cpus=0.25 --memory=128m \
+            --label "qualification.django-ray/namespace=monitoring-${GITHUB_RUN_ID}" \
+            --memory-swap=128m --pids-limit=128 -p 127.0.0.1:5001:5000 \
+            registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
+          mkdir "$RUNNER_TEMP/monitoring-source"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          git archive --format=tar HEAD > "$RUNNER_TEMP/monitoring-build/source.tar"
+          tar -xf "$RUNNER_TEMP/monitoring-build/source.tar" -C "$RUNNER_TEMP/monitoring-source"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/monitoring-build/source.txt"
+          sha256sum "$RUNNER_TEMP/monitoring-build/source.tar" > "$RUNNER_TEMP/monitoring-build/source.sha256"
+          docker build --platform linux/amd64 --provenance=false -t localhost:5001/monitoring-base:candidate "$RUNNER_TEMP/monitoring-source"
+          docker push localhost:5001/monitoring-base:candidate
+          base=$(docker image inspect localhost:5001/monitoring-base:candidate --format '{{index .RepoDigests 0}}')
+          docker build --platform linux/amd64 --provenance=false \
+            -f "$RUNNER_TEMP/monitoring-source/qualification/monitoring/Dockerfile" \
+            --build-arg DJANGO_RAY_RUNTIME_IMAGE="$base" \
+            -t localhost:5001/monitoring:candidate "$RUNNER_TEMP/monitoring-source"
+          docker push localhost:5001/monitoring:candidate
+          image=$(docker image inspect localhost:5001/monitoring:candidate --format '{{index .RepoDigests 0}}')
+          echo "MONITORING_BASE_IMAGE=$base" >> "$GITHUB_ENV"
+          echo "MONITORING_IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: Resolve exact source-selected component images
+        timeout-minutes: 10
+        run: python -m qualification.monitoring.images
+
+      - name: Recheck capacity and create bounded Kind
+        timeout-minutes: 10
+        run: |
+          python -m qualification.monitoring.admission > "$RUNNER_TEMP/monitoring-build/admission-before-kind.json"
+          kind create cluster --name monitoring-qualification --wait 180s \
+            --image kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          docker update --cpus=3.25 --memory=12g --memory-swap=12g --pids-limit=4096 monitoring-qualification-control-plane
+          python - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          node, registry = json.loads(subprocess.check_output(['docker', 'inspect', 'monitoring-qualification-control-plane', 'monitoring-registry']))
+          records = []
+          for container, cpu, memory, pids in ((node, 3250000000, 12*1024**3, 4096), (registry, 250000000, 128*1024**2, 128)):
+              limits = container['HostConfig']
+              records.append({key: limits[key] for key in ('NanoCpus', 'Memory', 'MemorySwap', 'PidsLimit')})
+              assert (limits['NanoCpus'], limits['Memory'], limits['MemorySwap'], limits['PidsLimit']) == (cpu, memory, memory, pids)
+          (Path(os.environ['RUNNER_TEMP']) / 'monitoring-build/container-limits.json').write_text(json.dumps(records))
+          PY
+          docker network connect kind monitoring-registry
+          docker exec monitoring-qualification-control-plane mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://monitoring-registry:5000"]\n' | \
+            docker exec -i monitoring-qualification-control-plane cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+          helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+          helm install kuberay-operator kuberay/kuberay-operator --version 1.6.2 \
+            --kube-context kind-monitoring-qualification -n kuberay-system --create-namespace \
+            --set image.repository=quay.io/kuberay/operator \
+            --set image.tag='v1.6.2@sha256:2602383ef61afe1b4c55bdcb24da2ff55ee31b6674cbe53b1583e5219e5e3376' \
+            --set resources.requests.cpu=100m --set resources.limits.cpu=100m \
+            --set resources.requests.memory=512Mi --set resources.limits.memory=512Mi \
+            --wait --timeout 180s
+
+      - name: Observe the shipped monitoring contracts within ten minutes
+        timeout-minutes: 15
+        run: |
+          python -m qualification.monitoring.run \
+            --images "$RUNNER_TEMP/monitoring-build/images.json" \
+            --output "$RUNNER_TEMP/monitoring-evidence"
+
+      - name: Remove only this job's disposable infrastructure
+        if: always()
+        timeout-minutes: 5
+        run: |
+          python -m qualification.monitoring.cleanup --output "$RUNNER_TEMP/monitoring-evidence"
+
+      - name: Retain bounded receipts and build identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: monitoring-qualification-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/monitoring-evidence/
+            ${{ runner.temp }}/monitoring-build/*.json
+            ${{ runner.temp }}/monitoring-build/source.txt
+            ${{ runner.temp }}/monitoring-build/source.sha256
+          retention-days: 14
+          if-no-files-found: error

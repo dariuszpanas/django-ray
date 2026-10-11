@@ -131,7 +131,7 @@ jobs:
             --wait --timeout 180s
 
       - name: Run the native application core test
-        timeout-minutes: 35
+        timeout-minutes: 41
         run: |
           python -m qualification.application.run_chainsaw --context kind-application-core \
             --image "$APPLICATION_IMAGE" --storage-class standard --output "$RUNNER_TEMP/application-evidence" \

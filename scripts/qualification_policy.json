@@ -95,5 +95,33 @@
       "pyproject.toml",
       "uv.lock"
     ]
+  },
+  {
+    "workflow": "monitoring-qualification.yml",
+    "paths": [
+      ".github/workflows/qualification-gate.yml",
+      "scripts/qualification_gate.py",
+      "scripts/qualification_policy.json",
+      "tests/unit/test_qualification_gate.py",
+      "scripts/wait_for_ci_checkpoint.py",
+      ".github/workflows/monitoring-qualification.yml",
+      "qualification/monitoring/**",
+      "tests/unit/test_monitoring_qualification.py",
+      "src/django_ray/metrics.py",
+      "testproject/api.py",
+      "testproject/api_boundary.py",
+      "testproject/route_policy.py",
+      "testproject/settings.py",
+      "testproject/urls.py",
+      "k8s/base/monitoring.yaml",
+      "k8s/base/django-web.yaml",
+      "k8s/base/configmap.yaml",
+      "k8s/overlays/kuberay-kind/**",
+      "Dockerfile",
+      "docker-entrypoint.sh",
+      "pyproject.toml",
+      "uv.lock"
+    ],
+    "id": "monitoring"
   }
 ]

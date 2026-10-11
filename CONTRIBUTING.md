@@ -328,7 +328,7 @@ Commit spelling through YAGA is qualified separately under issue #521.
 ## Conditional qualification merge gate
 
 `Qualification Gate` is the single required aggregate for path-selected application,
-native upgrade (all four recipes), latency and cancellation qualification. Keep `CI Gate` and
+native upgrade (all four recipes), latency, cancellation and monitoring qualification. Keep `CI Gate` and
 `Commit Messages` required independently; qualification waits for Linux CI and
 must not become a prerequisite of `CI Gate`.
 

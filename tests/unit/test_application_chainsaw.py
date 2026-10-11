@@ -157,7 +157,7 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
     def run(argv, *_args):
         assert argv[:2] == ["chainsaw", "test"]
         if failure == "timeout":
-            raise subprocess.TimeoutExpired(argv, 1800)
+            raise subprocess.TimeoutExpired(argv, runner.TEST_SECONDS)
         if failure == "test":
             raise RuntimeError("Test failed")
 
@@ -357,6 +357,79 @@ def test_failure_diagnostics_do_not_prevent_cleanup_on_api_failure(tmp_path, mon
     monkeypatch.setattr(runner, "checked", failed)
     runner.diagnose(["kubectl"], "owned", tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("completion_seconds", "ignore_terminate"),
+    [(1801, False), (2159.5, False), (2161, False), (2161, True)],
+)
+def test_outer_budget_accounts_for_both_rq2_phases_and_still_stops(
+    monkeypatch, completion_seconds, ignore_terminate
+):
+    clock = [100.0]
+    started = clock[0]
+    monitored_waits = []
+    cleanup_waits = []
+    health_checks = []
+
+    class Process:
+        stopped = False
+        terminated_at = None
+        killed = False
+
+        def wait(self, timeout):
+            if self.terminated_at is not None:
+                cleanup_waits.append(timeout)
+                if ignore_terminate and not self.killed:
+                    clock[0] += timeout
+                    raise subprocess.TimeoutExpired("chainsaw", timeout)
+                self.stopped = True
+                return 0
+            assert 0 < timeout <= 15
+            monitored_waits.append(timeout)
+            remaining = started + completion_seconds - clock[0]
+            if remaining <= timeout:
+                clock[0] += remaining
+                self.stopped = True
+                return 0
+            clock[0] += timeout
+            raise subprocess.TimeoutExpired("chainsaw", timeout)
+
+        def poll(self):
+            return 0 if self.stopped else None
+
+        def terminate(self):
+            self.terminated_at = clock[0] - started
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+
+    def checked(argv):
+        assert argv[:2] == ["kubectl", "get"]
+        assert argv[2] in {"pods", "rayclusters"}
+        assert argv[3:] == ["-n", "owned", "-o", "json"]
+        health_checks.append(argv[2])
+        return b'{"items": []}'
+
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_a, **_k: process)
+    monkeypatch.setattr(runner, "checked", checked)
+    if completion_seconds < 2160:
+        runner.run_test(["chainsaw", "test"], ["kubectl"], "owned")
+        assert clock[0] - started == completion_seconds > 1800
+        assert process.terminated_at is None
+        assert cleanup_waits == []
+    else:
+        with pytest.raises(TimeoutError, match="exceeded 2160 seconds"):
+            runner.run_test(["chainsaw", "test"], ["kubectl"], "owned")
+        assert sum(monitored_waits) == 2160
+        assert process.terminated_at == 2160
+        assert cleanup_waits == ([10, 10] if ignore_terminate else [10])
+    assert health_checks
+    assert process.stopped
+    assert process.killed is ignore_terminate
 
 
 @pytest.mark.parametrize("deleting", [None, "pod", "owner", "owner-absent"])
