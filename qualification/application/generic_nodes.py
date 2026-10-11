@@ -78,6 +78,8 @@ def make_node_probe():
                             "django/__init__.py",
                             "psycopg/__init__.py",
                             "unfold/__init__.py",
+                            "testproject/settings_qualification_jobs.py",
+                            "testproject/qualification_rq2_tasks.py",
                         }
                     if not required <= set(archive.namelist()):
                         raise ValueError("RuntimeEnv archive lacks required task modules")

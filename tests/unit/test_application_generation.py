@@ -57,12 +57,13 @@ def test_generation_retains_fixed_order_receipts_and_previous_generation(generat
     commands = runner.generation_commands(
         generation, "http://django-web:8000", Path("/credentials/token")
     )
-    assert [name for name, _ in commands] == ["first", "nodes", "core", "workflows"]
+    assert [name for name, _ in commands] == ["first", "nodes", "core", "workflows", "rq2"]
     assert [argv[2] for _, argv in commands] == [
         "qualification.application.run_first_workflows",
         "qualification.application.generic_nodes",
         "qualification.application.run_core",
         "qualification.application.run_workflows",
+        "qualification.application.run_rq2",
     ]
     for name, argv in commands:
         assert argv[:2] == [sys.executable, "-m"]
@@ -75,13 +76,13 @@ def test_generation_retains_fixed_order_receipts_and_previous_generation(generat
 
 
 def _commands():
-    return tuple((name, [name]) for name in ("first", "nodes", "core", "workflows"))
+    return tuple((name, [name]) for name in ("first", "nodes", "core", "workflows", "rq2"))
 
 
 def test_existing_commands_share_one_budget_without_unused_first_time(monkeypatch, capsys):
     now = [0.0]
     observed = []
-    durations = iter([30, 200, 100, 250])
+    durations = iter([30, 200, 100, 250, 60])
     monkeypatch.setattr(runner.time, "monotonic", lambda: now[0])
 
     def execute(argv, timeout):
@@ -91,15 +92,24 @@ def test_existing_commands_share_one_budget_without_unused_first_time(monkeypatc
 
     monkeypatch.setattr(runner, "run_command", execute)
     assert runner.run_phases(_commands()) == 0
-    assert observed == [("first", 180), ("nodes", 600), ("core", 400), ("workflows", 300)]
+    assert observed == [
+        ("first", 180),
+        ("nodes", 600),
+        ("core", 400),
+        ("workflows", 300),
+        ("rq2", 180),
+    ]
     markers = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [(m["generation_phase"], m["status"]) for m in markers] == [
         ("first", "started"),
         ("first", "passed"),
         ("existing", "started"),
         ("existing", "passed"),
+        ("rq2", "started"),
+        ("rq2", "passed"),
     ]
-    assert markers[-1]["elapsed_seconds"] == 550
+    assert markers[-3]["elapsed_seconds"] == 550
+    assert markers[-1]["elapsed_seconds"] == 60
 
 
 def test_first_failure_stops_all_remaining_work(monkeypatch, capsys):
@@ -174,19 +184,26 @@ Path(sys.argv[2]).write_text(json.dumps(value))
     assert os.environ[OUTER_DEADLINE_ENV] == "invalid-parent-context"
 
 
-@pytest.mark.parametrize("phase", ["first", "existing"])
+@pytest.mark.parametrize("phase", ["first", "existing", "rq2"])
 def test_timeout_stops_later_commands_and_never_emits_success(monkeypatch, capsys, phase):
     calls = []
 
     def execute(argv, timeout):
         calls.append(argv[0])
-        if argv[0] == ("first" if phase == "first" else "core"):
+        if argv[0] == {"first": "first", "existing": "core", "rq2": "rq2"}[phase]:
             raise subprocess.TimeoutExpired(argv, timeout)
         return 0
 
     monkeypatch.setattr(runner, "run_command", execute)
     assert runner.run_phases(_commands()) == 124
-    assert calls == (["first"] if phase == "first" else ["first", "nodes", "core"])
+    assert (
+        calls
+        == {
+            "first": ["first"],
+            "existing": ["first", "nodes", "core"],
+            "rq2": ["first", "nodes", "core", "workflows", "rq2"],
+        }[phase]
+    )
     last = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert last == {
         "generation_phase": phase,

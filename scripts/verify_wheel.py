@@ -355,6 +355,80 @@ def _verify_registered_payload_purge() -> None:
     )
 
 
+def _verify_rq2_reference_discriminator() -> None:
+    """Read current/history locators and enforce typed installed cleanup."""
+    from dataclasses import replace
+    from unittest.mock import patch
+
+    import django_ray.input_storage as input_storage
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        ExecutionRequest,
+        encode_execution_request,
+    )
+    from django_ray.ray_job_request_storage import (
+        RAY_JOB_REQUEST_REFERENCE_PREFIX,
+        RayJobRequestLoadError,
+        delete_ray_job_request_reference,
+        encode_ray_job_request_locator,
+        load_ray_job_request,
+        prepare_ray_job_request,
+    )
+
+    request = ExecutionRequest(
+        identity=ExecutionIdentity(
+            task_execution_pk=1,
+            task_id="installed-request-fixture",
+            attempt_number=1,
+            execution_generation=1,
+        ),
+        execution_protocol_version=1,
+        callable_path="operator.add",
+        transport_version=1,
+        serialized_args="[1,2]",
+        serialized_kwargs="{}",
+        input_reference=None,
+        runtime_env_profile=None,
+        runtime_env_hash="a" * 64,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport="ray-job",
+    )
+    with TemporaryDirectory(prefix="django-ray-installed-rq2-") as directory:
+        config = {"INPUT_STORAGE_BACKEND": "filesystem", "INPUT_STORAGE_FILESYSTEM_PATH": directory}
+        prepared = prepare_ray_job_request(encode_execution_request(request), config)
+        if not prepared.reference.startswith(RAY_JOB_REQUEST_REFERENCE_PREFIX):
+            raise RuntimeError("Installed request writer omitted its discriminator")
+        historical = replace(
+            prepared.locator,
+            reference=prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX),
+        )
+        with patch.object(
+            input_storage,
+            "_storage_backend_for_reference",
+            side_effect=RuntimeError("Generic deleter selected request storage"),
+        ) as backend:
+            try:
+                input_storage.delete_input_reference(prepared.reference, config)
+            except input_storage.InputPayloadValidationError:
+                pass
+            else:
+                raise RuntimeError("Generic input deleter accepted a request reference")
+            if backend.called:
+                raise RuntimeError("Generic input deleter selected a request backend")
+        for locator in (prepared.encoded_locator, encode_ray_job_request_locator(historical)):
+            if load_ray_job_request(locator).request != request:
+                raise RuntimeError("Installed request locator did not preserve payload identity")
+        delete_ray_job_request_reference(prepared.reference, config)
+        try:
+            load_ray_job_request(prepared.encoded_locator)
+        except RayJobRequestLoadError:
+            pass
+        else:
+            raise RuntimeError("Typed request cleanup did not remove its fixture")
+    if Path(directory).exists():
+        raise RuntimeError("Installed request fixture cleanup was not observed")
+
+
 def verify_installed_wheel(expected_version: str) -> None:
     """Check metadata, import version, migrations, command discovery, and contents."""
     distribution = importlib.metadata.distribution("django-ray")
@@ -538,6 +612,7 @@ def verify_installed_wheel(expected_version: str) -> None:
         raise RuntimeError("django_ray_protocol_status did not emit its versioned JSON schema")
 
     _verify_registered_payload_purge()
+    _verify_rq2_reference_discriminator()
 
 
 def main() -> int:

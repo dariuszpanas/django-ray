@@ -10,12 +10,16 @@ import subprocess
 import sys
 import traceback
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from io import StringIO
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db.models import QuerySet
+from django.utils import timezone
 
 import django_ray.ray_job_request_storage as request_storage
 from django_ray.execution_codec import (
@@ -34,11 +38,13 @@ from django_ray.models import (
 from django_ray.ray_job_request_storage import (
     RAY_JOB_REQUEST_LOCATOR_MAX_CHARS,
     RAY_JOB_REQUEST_REFERENCE_MAX_BYTES,
+    RAY_JOB_REQUEST_REFERENCE_PREFIX,
     RayJobRequestLoadError,
     RayJobRequestLocator,
     RayJobRequestStorageError,
     RayJobRequestStorageRejection,
     decode_ray_job_request_locator,
+    delete_ray_job_request_reference,
     encode_ray_job_request_locator,
     load_ray_job_request,
     prepare_ray_job_request,
@@ -194,7 +200,7 @@ def test_prepare_and_pre_django_load_round_trip(tmp_path: Path) -> None:
     decoded = decode_ray_job_request_locator(prepared.encoded_locator)
     loaded = load_ray_job_request(decoded)
 
-    assert prepared.reference.startswith("resultfs://sha256/")
+    assert prepared.reference.startswith("rq2ref:v1:resultfs://sha256/")
     assert prepared.digest == decoded.digest == loaded.digest
     assert prepared.size_bytes == decoded.size_bytes == loaded.size_bytes
     assert prepared.locator_json.encode("utf-8")
@@ -233,7 +239,7 @@ def test_object_storage_locator_round_trip_uses_only_ambient_credentials(
     decoded = decode_ray_job_request_locator(prepared.encoded_locator)
     loaded = load_ray_job_request(prepared.encoded_locator)
 
-    assert prepared.reference.startswith(reference_prefix)
+    assert prepared.reference.startswith("rq2ref:v1:" + reference_prefix)
     assert prepared.backend == decoded.backend == backend
     assert loaded.serialized_request == serialized
     assert loaded.request == _request()
@@ -1093,7 +1099,7 @@ def test_register_locks_registry_before_execution_and_attaches_exact_reservation
 
     execution.refresh_from_db()
     payload = TaskInputPayload.objects.get(pk=reference)
-    assert lock_order[:2] == [TaskInputPayload, RayTaskExecution]
+    assert lock_order[:3] == [TaskInputPayload, TaskInputPayload, RayTaskExecution]
     assert payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST
     assert payload.state == InputPayloadState.ACTIVE
     assert execution.ray_job_request_reference == reference
@@ -1503,3 +1509,285 @@ def test_release_requires_typed_registry_row_for_attached_reference(tmp_path: Pa
     assert execution.ray_job_id == handle.ray_job_id
     assert execution.ray_address == handle.ray_address
     assert execution.ray_job_request_reference == prepared.reference
+
+
+@pytest.mark.parametrize("backend", ["filesystem", "s3", "gcs"])
+def test_native_historical_request_locator_remains_readable(tmp_path, monkeypatch, backend):
+    config = _filesystem_config(tmp_path)
+    if backend != "filesystem":
+        storage_type = _MemoryS3Storage if backend == "s3" else _MemoryGCSStorage
+        storage_type.payloads.clear()
+        monkeypatch.setattr(
+            request_storage,
+            "S3ResultStorage" if backend == "s3" else "GCSResultStorage",
+            storage_type,
+        )
+        config = _s3_config() if backend == "s3" else _gcs_config()
+    prepared = prepare_ray_job_request(encode_execution_request(_request()), config)
+    assert prepared.reference.startswith(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    native = prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    historical = replace(prepared.locator, reference=native)
+    loaded = load_ray_job_request(encode_ray_job_request_locator(historical))
+    assert loaded.serialized_request == prepared.serialized_request
+    assert loaded.reference == native
+    assert loaded.request == prepared.request
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "rq2ref:v2:",
+        "RQ2REF:v1:",
+        "rq2ref:V1:",
+        "rq2ref:v1:rq2ref:v1:",
+        "rq2ref:v1: ",
+        "rq2ref:v1:\n",
+    ],
+)
+def test_discriminator_rejects_noncanonical_and_nested_forms_before_storage(
+    tmp_path, monkeypatch, prefix
+):
+    prepared = prepare_ray_job_request(
+        encode_execution_request(_request()), _filesystem_config(tmp_path)
+    )
+    value = json.loads(prepared.locator_json)
+    value["reference"] = prefix + prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    monkeypatch.setattr(
+        request_storage, "_storage_for_locator", lambda *_: pytest.fail("storage I/O")
+    )
+    with pytest.raises(RayJobRequestLoadError) as caught:
+        load_ray_job_request(_locator_token(value))
+    assert caught.value.classification is RayJobRequestStorageRejection.INVALID_LOCATOR
+
+
+@pytest.mark.parametrize("scheme", ["s3", "gs"])
+def test_discriminator_reference_limit_includes_prefix_and_encoded_location(scheme):
+    digest = "a" * 64
+    base = request_storage._object_reference(
+        scheme=scheme,
+        bucket="bucket",
+        key=request_storage._build_object_key("", digest),
+        size_bytes=1,
+    )
+    room = (
+        RAY_JOB_REQUEST_REFERENCE_MAX_BYTES - len(RAY_JOB_REQUEST_REFERENCE_PREFIX) - len(base) - 1
+    )
+    native = request_storage._object_reference(
+        scheme=scheme,
+        bucket="bucket",
+        key=request_storage._build_object_key("p" * room, digest),
+        size_bytes=1,
+    )
+    wrapped = request_storage._wrap_request_reference(native)
+    assert len(wrapped.encode()) == RAY_JOB_REQUEST_REFERENCE_MAX_BYTES
+    assert ray_job_request_reference_content_identity(wrapped) == (digest, 1)
+    with pytest.raises(RayJobRequestStorageError):
+        request_storage._wrap_request_reference(native.replace("/p", "/pp", 1))
+    # A native historical value can still use the entire old ceiling.
+    historical = native.replace("/p", "/" + "p" * (len(RAY_JOB_REQUEST_REFERENCE_PREFIX) + 1), 1)
+    assert len(historical) == RAY_JOB_REQUEST_REFERENCE_MAX_BYTES
+    assert ray_job_request_reference_content_identity(historical) == (digest, 1)
+    encoded = request_storage._object_reference(
+        scheme=scheme,
+        bucket="bucket",
+        key=request_storage._build_object_key("\u00e9", digest),
+        size_bytes=1,
+    )
+    assert "%C3%A9" in request_storage._wrap_request_reference(encoded)
+    with pytest.raises(RayJobRequestStorageError):
+        ray_job_request_reference_content_identity(
+            RAY_JOB_REQUEST_REFERENCE_PREFIX + encoded.replace("%C3%A9", "\u00e9")
+        )
+
+
+def test_discriminator_configuration_budget_is_checked_before_backend_construction(monkeypatch):
+    monkeypatch.setattr(
+        request_storage, "S3ResultStorage", lambda **_: pytest.fail("backend construction")
+    )
+    config = {**_s3_config(), "INPUT_STORAGE_S3_PREFIX": "p" * 500}
+    with pytest.raises(RayJobRequestStorageError) as caught:
+        prepare_ray_job_request(encode_execution_request(_request()), config)
+    assert caught.value.classification is RayJobRequestStorageRejection.CONFIGURATION
+
+
+def test_generic_input_deletion_refuses_wrapped_request_before_selecting_backend(
+    tmp_path, monkeypatch
+):
+    import django_ray.input_storage as input_storage
+
+    config = _filesystem_config(tmp_path)
+    prepared = prepare_ray_job_request(encode_execution_request(_request()), config)
+    monkeypatch.setattr(
+        input_storage, "_storage_backend_for_reference", lambda *_: pytest.fail("backend selection")
+    )
+    with pytest.raises(input_storage.InputPayloadValidationError):
+        input_storage.delete_input_reference(prepared.reference, config)
+    assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_typed_request_deletion_accepts_only_authorized_current_or_historical_location(
+    tmp_path, historical
+):
+    config = _filesystem_config(tmp_path)
+    prepared = prepare_ray_job_request(encode_execution_request(_request()), config)
+    reference = (
+        prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+        if historical
+        else prepared.reference
+    )
+    delete_ray_job_request_reference(reference, config)
+    with pytest.raises(RayJobRequestLoadError) as caught:
+        load_ray_job_request(prepared.encoded_locator)
+    assert caught.value.classification is RayJobRequestStorageRejection.STORAGE_UNAVAILABLE
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("historical", [False, True])
+def test_typed_object_request_delete_authorizes_location_before_client(
+    tmp_path, monkeypatch, backend, historical
+):
+    import django_ray.input_storage as input_storage
+
+    storage_type = _MemoryS3Storage if backend == "s3" else _MemoryGCSStorage
+    storage_name = "S3ResultStorage" if backend == "s3" else "GCSResultStorage"
+    storage_type.payloads.clear()
+    monkeypatch.setattr(request_storage, storage_name, storage_type)
+    config = _s3_config() if backend == "s3" else _gcs_config()
+    prepared = prepare_ray_job_request(encode_execution_request(_request()), config)
+    reference = (
+        prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+        if historical
+        else prepared.reference
+    )
+    monkeypatch.setattr(input_storage, storage_name, lambda **_: pytest.fail("unauthorized client"))
+    field = "INPUT_STORAGE_S3_BUCKET" if backend == "s3" else "INPUT_STORAGE_GCS_BUCKET"
+    with pytest.raises(input_storage.InputPayloadValidationError):
+        delete_ray_job_request_reference(reference, {**config, field: "other-bucket"})
+    assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
+    monkeypatch.setattr(input_storage, storage_name, storage_type)
+    delete_ray_job_request_reference(reference, config)
+    assert not storage_type.payloads
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+@pytest.mark.parametrize("kind", [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST])
+def test_current_attachment_refuses_native_registry_alias_without_mutation(tmp_path, state, kind):
+    execution, handle = _reserved_execution()
+    prepared = _prepared_for_execution(execution, tmp_path)
+    native = prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    alias = TaskInputPayload.objects.create(
+        reference=native,
+        payload_kind=kind,
+        backend=prepared.backend,
+        digest=prepared.digest,
+        size_bytes=prepared.size_bytes,
+        envelope_version=prepared.envelope_version,
+        state=state,
+    )
+    before = TaskInputPayload.objects.values().get(pk=alias.pk)
+    with pytest.raises(RayJobRequestStorageError) as caught:
+        register_and_attach_ray_job_request(
+            prepared, task_execution=execution, submission_handle=handle
+        )
+    assert caught.value.classification is RayJobRequestStorageRejection.REGISTRY_MISMATCH
+    assert TaskInputPayload.objects.values().get(pk=alias.pk) == before
+    assert not TaskInputPayload.objects.filter(pk=prepared.reference).exists()
+    execution.refresh_from_db()
+    assert execution.ray_job_request_reference is None
+    assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
+
+
+@pytest.mark.django_db(transaction=True)
+def test_new_registration_refuses_native_prepared_request_but_keeps_history_readable(tmp_path):
+    execution, handle = _reserved_execution()
+    prepared = _prepared_for_execution(execution, tmp_path)
+    native = prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    locator = replace(prepared.locator, reference=native)
+    legacy = replace(
+        prepared,
+        reference=native,
+        locator=locator,
+        locator_json=request_storage.serialize_ray_job_request_locator(locator),
+        encoded_locator=encode_ray_job_request_locator(locator),
+    )
+    with pytest.raises(RayJobRequestStorageError) as caught:
+        register_and_attach_ray_job_request(
+            legacy, task_execution=execution, submission_handle=handle
+        )
+    assert caught.value.classification is RayJobRequestStorageRejection.INVALID_REQUEST
+    assert not TaskInputPayload.objects.exists()
+    assert load_ray_job_request(legacy.encoded_locator).request == prepared.request
+
+
+@pytest.mark.django_db(transaction=True)
+def test_wrapped_request_purge_deletes_only_old_terminal_payload_and_keeps_reference(
+    tmp_path, monkeypatch
+):
+    import django_ray.input_storage as input_storage
+
+    config = _filesystem_config(tmp_path)
+    monkeypatch.setattr(input_storage, "get_settings", lambda: config)
+    execution, handle = _reserved_execution()
+    prepared = _prepared_for_execution(execution, tmp_path)
+    register_and_attach_ray_job_request(
+        prepared, task_execution=execution, submission_handle=handle
+    )
+    old = timezone.now() - timedelta(days=60)
+    RayTaskExecution.objects.filter(pk=execution.pk).update(
+        state=TaskState.SUCCEEDED, finished_at=old
+    )
+    TaskInputPayload.objects.filter(pk=prepared.reference).update(last_used_at=old)
+    output = StringIO()
+    call_command("django_ray_purge_inputs", delete=True, format="json", stdout=output)
+    assert json.loads(output.getvalue())["counts"]["purged"] == 1
+    assert prepared.reference not in output.getvalue()
+    assert TaskInputPayload.objects.get(pk=prepared.reference).state == InputPayloadState.PURGED
+    execution.refresh_from_db()
+    assert execution.ray_job_request_reference == prepared.reference
+    with pytest.raises(RayJobRequestLoadError):
+        load_ray_job_request(prepared.encoded_locator)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("delete", [False, True])
+@pytest.mark.parametrize(
+    "native_kind", [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST]
+)
+@pytest.mark.parametrize("wrapped_state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+def test_purge_retains_duplicate_native_and_wrapped_registry_identities(
+    tmp_path, monkeypatch, delete, native_kind, wrapped_state
+):
+    import django_ray.input_storage as input_storage
+
+    prepared = prepare_ray_job_request(
+        encode_execution_request(_request()), _filesystem_config(tmp_path)
+    )
+    native = prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    for reference in (native, prepared.reference):
+        TaskInputPayload.objects.create(
+            reference=reference,
+            payload_kind=native_kind if reference == native else InputPayloadKind.RAY_JOB_REQUEST,
+            state=InputPayloadState.ACTIVE if reference == native else wrapped_state,
+            backend=prepared.backend,
+            digest=prepared.digest,
+            size_bytes=prepared.size_bytes,
+            envelope_version=prepared.envelope_version,
+            last_used_at=timezone.now() - timedelta(days=60),
+        )
+    monkeypatch.setattr(
+        input_storage, "delete_input_reference", lambda *_: pytest.fail("ambiguous deletion")
+    )
+    before = list(TaskInputPayload.objects.order_by("reference").values())
+    output = StringIO()
+    with pytest.raises(CommandError) as caught:
+        call_command("django_ray_purge_inputs", delete=delete, format="json", stdout=output)
+    assert caught.value.returncode == 2
+    report = json.loads(output.getvalue())
+    expected = 2 if wrapped_state == InputPayloadState.ACTIVE else 1
+    assert report["counts"]["incomplete"] == report["counts"]["retained"] == expected
+    assert report["counts"]["purged"] == 0
+    assert native not in output.getvalue()
+    assert list(TaskInputPayload.objects.order_by("reference").values()) == before
+    assert load_ray_job_request(prepared.encoded_locator).request == prepared.request

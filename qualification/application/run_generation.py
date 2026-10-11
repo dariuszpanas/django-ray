@@ -15,6 +15,7 @@ from qualification.application.http_context import OUTER_DEADLINE_ENV
 
 FIRST_SECONDS = 180
 EXISTING_SECONDS = 600
+RQ2_SECONDS = 180
 TERMINATE_SECONDS = 2
 KILL_WAIT_SECONDS = 2
 
@@ -52,6 +53,13 @@ def generation_commands(generation: str, base_url: str, token_file: Path) -> tup
         (
             "workflows",
             command("run_workflows", [*api, "--receipt", f"/receipts/{generation}-workflows.json"]),
+        ),
+        (
+            "rq2",
+            command(
+                "run_rq2",
+                ["--generation", generation, "--receipt", f"/receipts/{generation}-rq2.json"],
+            ),
         ),
     )
 
@@ -104,7 +112,8 @@ def _marker(phase: str, status: str, **fields: object) -> None:
 def run_phases(commands: tuple) -> int:
     for phase, selected, seconds in (
         ("first", commands[:1], FIRST_SECONDS),
-        ("existing", commands[1:], EXISTING_SECONDS),
+        ("existing", commands[1:4], EXISTING_SECONDS),
+        ("rq2", commands[4:], RQ2_SECONDS),
     ):
         started = time.monotonic()
         deadline = started + seconds

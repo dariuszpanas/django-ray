@@ -47,11 +47,11 @@ RECEIPTS = {
     "django-web": ("setup", ("setup",)),
     "assert-before": (
         "assertions",
-        ("before-first", "before-nodes", "before-core", "before-workflows"),
+        ("before-first", "before-nodes", "before-core", "before-workflows", "before-rq2"),
     ),
     "assert-after": (
         "assertions",
-        ("after-first", "after-nodes", "after-core", "after-workflows"),
+        ("after-first", "after-nodes", "after-core", "after-workflows", "after-rq2"),
     ),
     "reporting-benchmark": ("assertions", ("reporting",)),
 }
@@ -62,6 +62,7 @@ LAYERS = {
     "core": "application_core",
     "workflows": "workflow_api_admin",
     "first": FIRST_WORKFLOW_LAYER,
+    "rq2": "application_rq2",
 }
 
 
@@ -109,6 +110,10 @@ def parse_receipts(
             from qualification.application.runtime_env_refusal import validate_evidence
 
             validate_evidence(value.get("runtime_env_refusals"))
+        elif value["layer"] == "application_rq2":
+            from qualification.application.run_rq2 import validate_receipt
+
+            validate_receipt(value)
         parsed.append((value, line))
     if len(parsed) != len(names):
         raise ValueError("Receipt count differs from the required assertions")
@@ -116,6 +121,8 @@ def parse_receipts(
     for name, (value, line) in zip(names, parsed, strict=True):
         if value["layer"] != LAYERS[name.rsplit("-", 1)[-1]]:
             raise ValueError("Receipt order differs from the required assertions")
+        if value["layer"] == "application_rq2" and value["generation"] != name.split("-")[0]:
+            raise ValueError("Request-reference receipt belongs to another generation")
         result[name] = line
     return result
 

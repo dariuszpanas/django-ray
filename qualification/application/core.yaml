@@ -402,6 +402,8 @@ spec:
                   - qualification.application.setup_core
                   - --receipt
                   - /receipts/setup.json
+                  - --rq2-root
+                  - /receipts/rq2
                   volumeMounts:
                   - name: runtime
                     mountPath: /runtime
@@ -536,6 +538,10 @@ spec:
                     - name: runtime
                       mountPath: /runtime
                       readOnly: true
+                    - name: receipts
+                      mountPath: /rq2
+                      subPath: rq2
+                      readOnly: false
                     - name: tmp
                       mountPath: /tmp
                       readOnly: false
@@ -550,6 +556,9 @@ spec:
                   - name: runtime
                     persistentVolumeClaim:
                       claimName: runtime
+                  - name: receipts
+                    persistentVolumeClaim:
+                      claimName: receipts
                   - name: tmp
                     emptyDir:
                       sizeLimit: 1Gi
@@ -656,6 +665,10 @@ spec:
                     - name: runtime
                       mountPath: /runtime
                       readOnly: true
+                    - name: receipts
+                      mountPath: /rq2
+                      subPath: rq2
+                      readOnly: false
                     - name: tmp
                       mountPath: /tmp
                       readOnly: false
@@ -666,6 +679,9 @@ spec:
                   - name: runtime
                     persistentVolumeClaim:
                       claimName: runtime
+                  - name: receipts
+                    persistentVolumeClaim:
+                      claimName: receipts
                   - name: tmp
                     emptyDir:
                       sizeLimit: 1Gi
@@ -806,7 +822,7 @@ spec:
             name: assert-before
           spec:
             backoffLimit: 0
-            activeDeadlineSeconds: 810
+            activeDeadlineSeconds: 990
             parallelism: 1
             completions: 1
             template:
@@ -875,6 +891,10 @@ spec:
                     mountPath: /runtime
                     readOnly: true
                   - name: receipts
+                    mountPath: /rq2
+                    subPath: rq2
+                    readOnly: false
+                  - name: receipts
                     mountPath: /receipts
                     readOnly: false
                   - name: credentials
@@ -902,7 +922,7 @@ spec:
                     sizeLimit: 256Mi
                     medium: ''
     - assert:
-        timeout: 825s
+        timeout: 1005s
         resource:
           apiVersion: batch/v1
           kind: Job
@@ -1025,6 +1045,10 @@ spec:
                     - name: runtime
                       mountPath: /runtime
                       readOnly: true
+                    - name: receipts
+                      mountPath: /rq2
+                      subPath: rq2
+                      readOnly: false
                     - name: tmp
                       mountPath: /tmp
                       readOnly: false
@@ -1039,6 +1063,9 @@ spec:
                   - name: runtime
                     persistentVolumeClaim:
                       claimName: runtime
+                  - name: receipts
+                    persistentVolumeClaim:
+                      claimName: receipts
                   - name: tmp
                     emptyDir:
                       sizeLimit: 1Gi
@@ -1145,6 +1172,10 @@ spec:
                     - name: runtime
                       mountPath: /runtime
                       readOnly: true
+                    - name: receipts
+                      mountPath: /rq2
+                      subPath: rq2
+                      readOnly: false
                     - name: tmp
                       mountPath: /tmp
                       readOnly: false
@@ -1155,6 +1186,9 @@ spec:
                   - name: runtime
                     persistentVolumeClaim:
                       claimName: runtime
+                  - name: receipts
+                    persistentVolumeClaim:
+                      claimName: receipts
                   - name: tmp
                     emptyDir:
                       sizeLimit: 1Gi
@@ -1184,7 +1218,7 @@ spec:
             name: assert-after
           spec:
             backoffLimit: 0
-            activeDeadlineSeconds: 810
+            activeDeadlineSeconds: 990
             parallelism: 1
             completions: 1
             template:
@@ -1253,6 +1287,10 @@ spec:
                     mountPath: /runtime
                     readOnly: true
                   - name: receipts
+                    mountPath: /rq2
+                    subPath: rq2
+                    readOnly: false
+                  - name: receipts
                     mountPath: /receipts
                     readOnly: false
                   - name: credentials
@@ -1280,7 +1318,7 @@ spec:
                     sizeLimit: 256Mi
                     medium: ''
     - assert:
-        timeout: 825s
+        timeout: 1005s
         resource:
           apiVersion: batch/v1
           kind: Job

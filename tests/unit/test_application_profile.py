@@ -105,7 +105,7 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
         job = resources()["Job", f"assert-{generation}"]
         assert job["spec"]["parallelism"] == job["spec"]["completions"] == 1
         assert job["spec"]["backoffLimit"] == 0
-        assert job["spec"]["activeDeadlineSeconds"] == 810
+        assert job["spec"]["activeDeadlineSeconds"] == 990
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
         assert command == [
             "python",
@@ -124,7 +124,7 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
             if op.get("assert", {}).get("resource", {}).get("metadata", {}).get("name")
             == f"assert-{generation}"
         )
-        assert assertion["timeout"] == "825s"
+        assert assertion["timeout"] == "1005s"
     assert resources()["Job", "reporting-benchmark"]["spec"]["activeDeadlineSeconds"] == 600
     config = yaml.safe_load((ROOT / "qualification/application/chainsaw.yaml").read_text())
     assert config["spec"]["timeouts"]["assert"] == "600s"
@@ -277,7 +277,12 @@ def test_profile_mounts_same_archive_read_only_outside_setup():
     assert config["DJANGO_RAY_RECOVERY_WORKING_DIR"] == "/runtime/recovery.zip"
     web = inventory["Deployment", "django-web"]["spec"]["template"]["spec"]
     setup = web["initContainers"][0]
-    assert setup["command"][-2:] == ["--receipt", "/receipts/setup.json"]
+    assert setup["command"][-4:] == [
+        "--receipt",
+        "/receipts/setup.json",
+        "--rq2-root",
+        "/receipts/rq2",
+    ]
     assert any(
         mount == {"name": "receipts", "mountPath": "/receipts", "readOnly": False}
         for mount in setup["volumeMounts"]
@@ -322,6 +327,31 @@ def test_ray_workers_use_private_temporary_storage_without_new_credentials():
         assert "os.chmod(path, 0o700)" in command[2]
         assert "info.st_uid == os.geteuid()" in command[2]
         assert "stat.S_IMODE(info.st_mode) == 0o700" in command[2]
+
+
+def test_jobs_storage_is_one_scoped_shared_receipt_mount_on_both_generations():
+    inventory = resources()
+    selected = [template for template, _ in templates(inventory["RayCluster", "ray"])]
+    selected += [
+        inventory["Job", f"assert-{generation}"]["spec"]["template"]
+        for generation in ("before", "after")
+    ]
+    for template in selected:
+        spec = template["spec"]
+        assert {"name": "receipts", "persistentVolumeClaim": {"claimName": "receipts"}} in spec[
+            "volumes"
+        ]
+        mounts = spec["containers"][0]["volumeMounts"]
+        assert {
+            "name": "receipts",
+            "mountPath": "/rq2",
+            "subPath": "rq2",
+            "readOnly": False,
+        } in mounts
+        assert {"name": "runtime", "mountPath": "/runtime", "readOnly": True} in mounts
+    # Core's persistent manager retains its original queue, config and mounts.
+    core = inventory["Deployment", "django-manager"]["spec"]["template"]["spec"]
+    assert not any(mount["mountPath"] == "/rq2" for mount in core["containers"][0]["volumeMounts"])
 
 
 def test_profile_uses_fixed_generic_ray_and_postgresql_images():

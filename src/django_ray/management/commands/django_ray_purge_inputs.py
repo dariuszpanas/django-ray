@@ -247,6 +247,25 @@ class Command(BaseCommand):
             if payload is None or payload.last_used_at > cutoff:
                 return "skipped"
 
+            from django_ray.ray_job_request_storage import (
+                RayJobRequestStorageError,
+                _request_reference_alias,
+            )
+
+            try:
+                alias = _request_reference_alias(reference)
+            except RayJobRequestStorageError:
+                if payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST:
+                    return "incomplete"
+                # Task-input references retain their own validation and limits.
+                alias = None
+            # Supported current writers refuse native aliases under the
+            # registry-first lock. Check every kind: a misclassified native
+            # row must not delete an object used by a wrapped request. Keep
+            # tombstones too. Take no second row lock in reverse order.
+            if alias is not None and TaskInputPayload.objects.filter(reference=alias).exists():
+                return "incomplete"
+
             executions = [
                 _PurgeExecution(*row)
                 for row in RayTaskExecution.objects.select_for_update()
@@ -299,7 +318,12 @@ class Command(BaseCommand):
             try:
                 from django_ray.input_storage import delete_input_reference
 
-                delete_input_reference(reference)
+                if payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST:
+                    from django_ray.ray_job_request_storage import delete_ray_job_request_reference
+
+                    delete_ray_job_request_reference(reference)
+                else:
+                    delete_input_reference(reference)
             except Exception as error:
                 payload.cleanup_error = self._format_cleanup_error(error)
                 payload.save(update_fields=["cleanup_error"])

@@ -23,6 +23,10 @@ from scripts.verify_wheel import (
 )
 
 
+def test_installed_request_reference_fixture_preserves_and_deletes_typed_history() -> None:
+    verify_wheel._verify_rq2_reference_discriminator()
+
+
 def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/execution_codec.py" in EXPECTED_FILES
     assert "django_ray/execution_protocol.py" in EXPECTED_FILES

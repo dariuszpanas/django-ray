@@ -183,6 +183,12 @@ single worker loop. It does not change at-least-once execution or retry eligibil
 
 `django-ray` validates numeric settings at startup, rejects booleans passed as integers, and enforces
 that worker/task-monitor heartbeats are shorter than their lease/stuck-task windows.
+
+All processes sharing the worker lease table must use the same `WORKER_LEASE_SECONDS`.
+Lease cleanup applies the caller's expiry duration across that table; queue names and task backend
+aliases do not isolate it. A shorter duration in one worker can expire another healthy worker
+between its heartbeats. Each worker's heartbeat interval must fit within the common duration.
+
 `django-ray` uses worker lease heartbeats to track worker liveness and task monitor
 heartbeats to show that a worker is still actively reconciling in-flight work. For
 persisted Ray Job handles from inactive workers, another worker will first try to

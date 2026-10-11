@@ -287,9 +287,16 @@ success, and failure details use only a 16-character SHA-256 reference fingerpri
 storage references and provider exception messages are not printed. See
 [Durable Input Storage](input-storage.md#retries-and-retention) before scheduling cleanup.
 Before enabling rq2 writes, upgrade or disable every older scheduled/manual copy of this
-command: released binaries understand neither `payload_kind` nor
-`ray_job_request_reference`; their dry run misreports an aged active rq2 object and
-`--delete` can remove it. Resume cleanup only from the exact final rq2 code.
+command. Pre-rq2 binaries such as 0.4.0 understand neither `payload_kind` nor
+`ray_job_request_reference`; their dry run misreports an aged active rq2 object
+and `--delete` can remove it. Resume cleanup only from the current rq2 code.
+
+Current request references carry the `rq2ref:v1:` discriminator. Typed request
+cleanup accepts this format and historical native references. A native/wrapped
+registry alias pair is retained as incomplete even when either row is a
+tombstone or has a different payload kind. See the
+[reference discriminator contract](input-storage.md#request-reference-discriminator)
+before investigating or upgrading cleanup jobs.
 
 ## django_ray_cleanup_workflow_progress
 
