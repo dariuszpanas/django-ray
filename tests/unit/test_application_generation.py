@@ -290,6 +290,7 @@ def test_owned_group_stop_kills_ready_descendant_that_ignores_term(tmp_path):
 
 def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
     from qualification.application.run_chainsaw import parse_receipts
+    from qualification.application.runtime_env_refusal import CASES, FACTS
 
     monkeypatch.setattr(runner, "run_command", Mock(return_value=0))
     assert runner.run_phases(_commands()) == 0
@@ -300,6 +301,7 @@ def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
             "layer": "application_core",
             "status": "passed",
             "complete_application_gate": False,
+            "runtime_env_refusals": {case: dict.fromkeys(FACTS, True) for case in CASES},
         }
     ).encode()
     assert set(parse_receipts(raw, ("before-core",))) == {"before-core"}

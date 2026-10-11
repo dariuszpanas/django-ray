@@ -105,6 +105,10 @@ def parse_receipts(
             validate_first_workflow_receipt(value)
             if expected_profile is not None and value["qualification_profile"] != expected_profile:
                 raise ValueError("First-workflow receipt belongs to another resource profile")
+        elif value["layer"] == "application_core":
+            from qualification.application.runtime_env_refusal import validate_evidence
+
+            validate_evidence(value.get("runtime_env_refusals"))
         parsed.append((value, line))
     if len(parsed) != len(names):
         raise ValueError("Receipt count differs from the required assertions")

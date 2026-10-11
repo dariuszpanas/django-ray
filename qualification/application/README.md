@@ -169,8 +169,35 @@ fixed profile labels and non-secret storage probe. Credentials are excluded. The
 requires this identity for the explicit environment variables; the locked archive retains its
 separate content identity. This fixture declaration is not a general trust default for consumers.
 Ordinary sample settings remain unchanged. The core task assertions do not certify their
-dependency-download behavior, workflow recovery, negative encryption cases, or a complete release
-upgrade. Workflow evidence requires the separate workflow receipts below.
+dependency-download behavior, workflow recovery, or a complete release upgrade.
+Workflow evidence requires the separate workflow receipts below.
+
+Each core observer also commits exactly two malformed RuntimeEnv fixtures atomically:
+one changed ciphertext and one unavailable key. The existing manager must claim both and
+reject them before dispatch, with the expected fixed failure category, attempt 1 and
+generation 1, one matching failed attempt, and current manager ownership. Neither row may
+retain a Ray job, request reference, execution address, executor version, completion,
+result, progress or traceback. Authenticated retry of each row must return the fixed
+snapshot-validation HTTP 409 and preserve every concrete execution and attempt field.
+The observer compares those snapshots again after both cases finish.
+
+These cases run before and after cold Ray replacement within the existing core Jobs.
+They have a shared 60-second observation budget, bounded 64-KiB HTTP responses, the
+existing per-request transport deadlines and the enclosing 600-second generation phase
+and 1800-second test deadline. No extra cluster, process, queue or resource allocation is
+introduced. Namespace teardown owns the four fixture rows across the two generations.
+The core receipt retains only four booleans per fixed case; a second-case timeout keeps
+the first case's observations but fails the stage. Missing, partial or unexpected negative
+case evidence cannot pass collection. Task identities, snapshot hashes, ciphertext,
+envelopes, keys and raw exceptions from these assertions never enter their receipts.
+
+This adds deployed evidence for manager refusal, absence of retained submission/result
+identity and retry preservation; it does not independently observe every possible external
+effect. The focused worker regression also traps dispatch calls before Ray. This slice does
+not establish bounded protected-value log scanning, ordinary-result escaping, cancellation
+versus observed stopping, arbitrary ingress or monitoring coverage. Those catalogue cases
+remain in #455. A fixture definition or mocked test is not a passing hosted observation;
+acceptance still requires the exact-source receipts and owned cleanup described below.
 
 ### Shared workflow assertions
 

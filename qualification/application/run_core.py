@@ -263,6 +263,16 @@ def main(argv: list[str] | None = None) -> int:
         from qualification.application.dashboard_browser import observe_dashboard
 
         receipt["dashboard"] = observe_dashboard(request, api.task_id)
+        receipt["failed_stage"] = "runtime_env_refusal"
+        from qualification.application.runtime_env_refusal import empty_evidence, verify_refusals
+
+        receipt["runtime_env_refusals"] = empty_evidence()
+        verify_refusals(
+            request,
+            token=read_token(args.token_file),
+            manager_prefix=args.manager_prefix,
+            evidence=receipt["runtime_env_refusals"],
+        )
         receipt["failed_stage"] = "receipt"
         encoded = json.dumps(
             {**receipt, "status": "passed", "failed_stage": None}, sort_keys=True
