@@ -284,7 +284,7 @@ def _verify_registered_payload_purge() -> None:
                 if delete:
                     arguments.append("--delete")
                 if cursor is not None:
-                    arguments.extend(["--cursor", cursor])
+                    arguments.append(f"--cursor={cursor}")
                 try:
                     call_command("django_ray_purge_inputs", *arguments, stdout=output)
                 except CommandError as error:

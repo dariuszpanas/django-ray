@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+import itertools
 import tarfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -206,7 +208,45 @@ def test_distribution_archives_reject_vulnerable_transitive_requirements(
         verify_distribution_archives(tmp_path, "0.4.0")
 
 
+@pytest.fixture
+def leading_dash_purge_nonce(monkeypatch: pytest.MonkeyPatch) -> None:
+    from django_ray.management import purge_cursor
+
+    counter = itertools.count()
+
+    def token_bytes(size: int) -> bytes:
+        assert size == 12
+        return b"\xfb" + next(counter).to_bytes(11, "big")
+
+    # Replace this module's randomness provider, without changing global secrets.
+    monkeypatch.setattr(purge_cursor, "secrets", SimpleNamespace(token_bytes=token_bytes))
+
+
+@pytest.mark.usefixtures("leading_dash_purge_nonce")
+def test_purge_cursor_equals_argument_accepts_authenticated_leading_dash_token() -> None:
+    from django.core.management.base import CommandError
+    from django.utils import timezone
+
+    from django_ray.management.commands.django_ray_purge_inputs import Command
+    from django_ray.management.purge_cursor import (
+        PurgeCursor,
+        decode_purge_cursor,
+        encode_purge_cursor,
+    )
+
+    original = PurgeCursor("fixture", timezone.now(), 30, False)
+    token = encode_purge_cursor(original)
+    assert token.startswith("-")
+    assert decode_purge_cursor(token) == original
+    parser = Command().create_parser("manage.py", "django_ray_purge_inputs")
+    with pytest.raises(CommandError, match="expected one argument"):
+        parser.parse_args(["--cursor", token])
+    options = parser.parse_args([f"--cursor={token}"])
+    assert decode_purge_cursor(options.cursor) == original
+
+
 @pytest.mark.django_db
+@pytest.mark.usefixtures("leading_dash_purge_nonce")
 @pytest.mark.parametrize("fail_deletion", [False, True])
 def test_purge_wheel_smoke_cleans_owned_fixture_after_success_or_partial_deletion_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, fail_deletion: bool
