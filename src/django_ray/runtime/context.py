@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -238,7 +238,7 @@ def durable_task_execution(
     ray_job_driver: bool = False,
     compiled_graph_submission_transport: str | None = None,
     strict_execution_request: bool = False,
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Expose a durable task identity to nested workflow coordination."""
     token = _current_task.set(
         DurableTaskContext(
@@ -273,7 +273,7 @@ def workflow_step_execution(
     progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
     *,
     capture_terminal: bool = False,
-) -> Iterator[WorkflowStepContext | None]:
+) -> Generator[WorkflowStepContext | None, None, None]:
     """Expose the progress actor to code running inside one workflow step."""
     if progress_actor is None and run_identity is None:
         yield None

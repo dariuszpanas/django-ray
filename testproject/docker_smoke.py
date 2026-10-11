@@ -11,7 +11,7 @@ import secrets
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from functools import partial
 from types import SimpleNamespace
@@ -482,7 +482,7 @@ def _validate_existing_workflow_mode(
 
 
 @contextmanager
-def _disposable_admin_headers() -> Iterator[dict[str, str]]:
+def _disposable_admin_headers() -> Generator[dict[str, str], None, None]:
     """Yield a disposable authenticated session without returning its cookie."""
 
     from django.conf import settings

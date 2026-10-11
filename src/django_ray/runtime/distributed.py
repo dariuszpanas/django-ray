@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -230,7 +230,7 @@ def _nested_distributed_leaf_execution(
     expected_runtime_env_transport_digest: str | None,
     *,
     boundary_kind: NestedExecutionBoundaryKind,
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Validate strict controls before loading the still-opaque callable bytes.
 
     Ray has already deserialized this handler's ordinary bootstrap and item

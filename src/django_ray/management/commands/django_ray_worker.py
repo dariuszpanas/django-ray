@@ -6,7 +6,7 @@ import json
 import random
 import signal
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -3414,7 +3414,7 @@ class Command(BaseCommand):
         expected_state: str,
         allow_takeover: bool,
         require_completion_data_match: bool = False,
-    ) -> Iterator[_OwnedTask | None]:
+    ) -> Generator[_OwnedTask | None, None, None]:
         """Yield the exact current execution while lease and task locks are held.
 
         Callers that perform a remote state-changing effect must do so inside

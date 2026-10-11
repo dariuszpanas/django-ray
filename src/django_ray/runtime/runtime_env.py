@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -507,7 +507,7 @@ def _ray_runtime_env_default_excludes() -> list[str]:
 @contextmanager
 def snapshot_local_runtime_env(
     runtime_env: ResolvedRuntimeEnv,
-) -> Iterator[ResolvedRuntimeEnv]:
+) -> Generator[ResolvedRuntimeEnv, None, None]:
     """Yield an immutable temporary snapshot for every local code path.
 
     Directory inputs are packaged with Ray's ignore/exclude semantics and then

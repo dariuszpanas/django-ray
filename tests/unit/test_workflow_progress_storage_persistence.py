@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from contextlib import contextmanager
 from uuid import UUID
 
@@ -335,7 +335,7 @@ def _promote(manifest_id: str) -> None:
 
 
 @contextmanager
-def _captured_queries() -> Iterator[CaptureQueriesContext]:
+def _captured_queries() -> Generator[CaptureQueriesContext, None, None]:
     with CaptureQueriesContext(connection) as queries:
         yield queries
 

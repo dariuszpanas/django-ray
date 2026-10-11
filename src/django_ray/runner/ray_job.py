@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -178,7 +178,7 @@ def _address_pinned_job_client(ray_address: str) -> Any:
 
 
 @contextmanager
-def _bounded_control_requests(client: Any) -> Iterator[None]:
+def _bounded_control_requests(client: Any) -> Generator[None, None, None]:
     """Bound Ray dashboard control calls that may run under a database row lock."""
     previous_timeout = getattr(client, _REQUEST_TIMEOUT_ATTRIBUTE, None)
     setattr(client, _REQUEST_TIMEOUT_ATTRIBUTE, _CONTROL_REQUEST_TIMEOUT_SECONDS)
