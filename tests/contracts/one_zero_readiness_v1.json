@@ -14,7 +14,12 @@
       "required": true,
       "owner": "external",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/606"
+        }
+      ],
       "disposition": "Record one documentation-only installation review by somebody other than the primary implementation author."
     },
     {
@@ -23,7 +28,12 @@
       "required": true,
       "owner": "external",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/606"
+        }
+      ],
       "disposition": "Record sanitized evidence from at least two applications outside the bundled test project."
     },
     {
@@ -32,7 +42,12 @@
       "required": true,
       "owner": "external",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/606"
+        }
+      ],
       "disposition": "Record at least one sustained Linux Kubernetes and KubeRay deployment outside the bundled test project."
     },
     {
@@ -41,7 +56,12 @@
       "required": true,
       "owner": "maintainer",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/606"
+        }
+      ],
       "disposition": "Accept a sanitized 60 to 90 day observation record, or document an explicit maintainer decision with equivalent evidence."
     },
     {
@@ -50,7 +70,12 @@
       "required": true,
       "owner": "external",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/606"
+        }
+      ],
       "disposition": "Record one coordinated adopter upgrade with completed drain and preserved historical tasks, results and referenced artifacts; never silently discard queued or unresolved work."
     },
     {
@@ -76,10 +101,14 @@
       "evidence": [
         {
           "kind": "issue",
-          "value": "https://github.com/dariuszpanas/django-ray/issues/361"
+          "value": "https://github.com/dariuszpanas/django-ray/issues/526"
+        },
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/372"
         }
       ],
-      "disposition": "Retain a repository-owned released-baseline to candidate rehearsal with drain, backup/restore, stopped-writer migrations, coordinated updates, historical readability and rollback evidence."
+      "disposition": "Issue 526 records the earlier 0.5.0-to-0.6.0 rehearsal. Issue 372 retains the final-candidate gate: repeat the documented released-baseline upgrade with drain, backup/restore, stopped-writer migrations, historical readability and rollback evidence."
     },
     {
       "id": "operations.protocol-fencing",
@@ -91,9 +120,13 @@
         {
           "kind": "issue",
           "value": "https://github.com/dariuszpanas/django-ray/issues/361"
+        },
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/386"
         }
       ],
-      "disposition": "Issue 361 owns execution-protocol versioning, unsupported-worker rejection, current-version manager recovery and rollback boundaries; mixed-version rolling handoff requires a separate product decision."
+      "disposition": "Issue 361 delivered the protocol foundation. Issue 386 owns remaining coordinated target compatibility; final-candidate evidence must verify unsupported-worker rejection, current-version manager recovery and rollback boundaries. Mixed-version rolling handoff is outside the accepted Beta contract."
     },
     {
       "id": "operations.soak-certification",
@@ -119,6 +152,10 @@
         {
           "kind": "path",
           "value": "docs/compatibility.md"
+        },
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/607"
         }
       ],
       "disposition": "The current matrix is published; accept its final 1.0 dependency and platform boundaries during release-candidate review."
@@ -151,7 +188,12 @@
       "required": true,
       "owner": "maintainer",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/372"
+        }
+      ],
       "disposition": "Perform a release-blocker triage and record that no known critical or high-severity core defect remains open."
     },
     {
@@ -168,6 +210,10 @@
         {
           "kind": "path",
           "value": "tests/contracts/public_api_v1.json"
+        },
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/607"
         }
       ],
       "disposition": "The checked public API is still a candidate and must be explicitly accepted before 1.0."
@@ -190,6 +236,10 @@
         {
           "kind": "path",
           "value": "docs/deployment/local-kuberay-gate.md"
+        },
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/372"
         }
       ],
       "disposition": "Retain passing Linux and KubeRay, PostgreSQL, upgrade, soak, security, documentation, wheel, and sdist evidence for the exact final candidate."
@@ -222,7 +272,12 @@
       "required": true,
       "owner": "maintainer",
       "status": "pending",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/607"
+        }
+      ],
       "disposition": "Publish a realistic maintainer-capacity statement with non-guaranteed response and support times."
     },
     {
@@ -239,6 +294,10 @@
         {
           "kind": "path",
           "value": "docs/changelog.md"
+        },
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/607"
         }
       ],
       "disposition": "Promote the existing release automation and version-specific migration notes into an accepted 1.x release and rollback procedure."
@@ -253,6 +312,10 @@
         {
           "kind": "path",
           "value": "SECURITY.md"
+        },
+        {
+          "kind": "issue",
+          "value": "https://github.com/dariuszpanas/django-ray/issues/607"
         }
       ],
       "disposition": "The pre-1.0 latest-release policy exists; define the supported 1.x security-fix and backport boundary before acceptance."

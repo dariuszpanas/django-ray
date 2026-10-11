@@ -16,6 +16,40 @@ disposition updates readiness state; removing, renaming, re-owning, or making a
 v1 criterion optional requires an explicit versioned contract change and cannot
 be accomplished by editing the registry and documentation together.
 
+## Delivery sequence after 0.6
+
+Version 0.6.0 was published on 2026-09-27 with the Beta classifier. The
+[graduation roadmap](https://github.com/dariuszpanas/django-ray/issues/372)
+tracks the remaining work. Closed issues for API definitions, readiness
+validation, and an earlier release's upgrade rehearsal establish those
+deliverables; they do not accept a later release candidate.
+
+Use the following sequence to select small releases. These are work stages,
+not assigned version numbers, dates, or a promise that each stage fits in one
+release. Each release selects and qualifies its own scope.
+
+| Stage | Work and exit evidence |
+|---|---|
+| Maintenance | Deliver validated dependency and correctness repairs; keep unresolved native shutdown and workflow-publication findings visible. A passing rerun alone does not establish a repair. |
+| Operational hardening | Complete bounded operator diagnosis and maintenance controls, safe artifact cleanup, and the selected upgrade and encryption lifecycle work. Retain the affected concurrency and deployed-behavior evidence. |
+| Certification candidate | Freeze the proposed stable API and support policies, run sustained soak/failure certification, rehearse the released-baseline upgrade, and review adopter observations. Accept only scoped fixes and compatibility work against that candidate. |
+| Stable 1.0 | Accept every required registry criterion, retain final source-matching evidence, then make the classifier and release decision. |
+
+Start [adopter evidence collection](https://github.com/dariuszpanas/django-ray/issues/606)
+during the Beta releases so its observation window can overlap implementation.
+The [API and support acceptance tracker](https://github.com/dariuszpanas/django-ray/issues/607)
+owns the final contract review. Operator controls remain in
+[#368](https://github.com/dariuszpanas/django-ray/issues/368), and sustained
+certification remains in [#370](https://github.com/dariuszpanas/django-ray/issues/370).
+Each issue records work toward the registry; closing a tracker never substitutes
+for reviewing its evidence.
+
+Durable step resume, paged map inputs, shared workflow budgets, larger graph
+profiles, optional tracing, and Compiled Graph support are separate feature
+decisions. They are not prerequisites for stabilizing the documented dynamic
+workflow and entry-point replay contract. An observed defect in that supported
+contract still needs an explicit severity and release disposition.
+
 ## Decision states
 
 The registry-level decision has two states:
