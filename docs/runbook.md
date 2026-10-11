@@ -642,6 +642,10 @@ Recovery:
    unreadable rq2 object observed by a started driver does not authorize replay.
 3. Preview retention with `django_ray_purge_inputs --retention-days=30` before using
    `--delete`. Increase retention when historical manual retry or audit access is needed.
+   Cleanup now stops after a bounded batch. Follow the
+   [cursor and exit-status contract](reference/cli.md#django_ray_purge_inputs), retain
+   every page's failures/incomplete outcomes, and revisit unresolved rows in a fresh
+   pass. Repeating a status-2 invocation without its cursor can starve later rows.
 
 Do not edit either reference column, the payload kind, digest metadata, or JSON
 placeholders by hand. Successful cleanup retains a `PURGED` tombstone and execution

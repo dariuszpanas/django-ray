@@ -3536,6 +3536,397 @@ def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_p
     ) == ([large_value], {})
 
 
+def test_input_reenqueue_waits_for_purge_then_restores_shared_payload(
+    settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Force purge-first input restoration through independent connections."""
+    import django_ray.input_storage as input_storage_module
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    prepared = prepare_task_input(("restored input",), {})
+    assert prepared.input_reference is not None
+    assert prepared.digest is not None
+    reference = prepared.input_reference
+    with transaction.atomic():
+        payload = register_task_input(prepared)
+    assert payload is not None
+    old_timestamp = timezone.now() - timedelta(days=60)
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=old_timestamp)
+    old_execution = _execution(
+        "bounded-input-purge-first-old",
+        state=TaskState.SUCCEEDED,
+        finished_at=old_timestamp,
+        input_reference=reference,
+    )
+    path = tmp_path / prepared.digest[:2] / prepared.digest[2:4] / f"{prepared.digest}.json"
+    original_bytes = path.read_bytes()
+    cutoff = timezone.now() - timedelta(days=30)
+    deletion_started, release_deletion, writer_connected = Event(), Event(), Event()
+    writer_pid: list[int] = []
+    original_delete = input_storage_module.delete_input_reference
+
+    def blocking_delete(reference: str) -> None:
+        original_delete(reference)
+        deletion_started.set()
+        assert release_deletion.wait(timeout=10)
+
+    monkeypatch.setattr(input_storage_module, "delete_input_reference", blocking_delete)
+
+    def purge() -> str:
+        close_old_connections()
+        try:
+            return PurgeInputsCommand()._process_reference(
+                reference, cutoff=cutoff, delete=True, max_attachments=1
+            )
+        finally:
+            close_old_connections()
+
+    def reenqueue() -> int:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pid.append(int(cursor.fetchone()[0]))
+            writer_connected.set()
+            with transaction.atomic():
+                register_task_input(prepared)
+                return int(
+                    _execution(
+                        "bounded-input-purge-first-new",
+                        args_json=prepared.args_json,
+                        kwargs_json=prepared.kwargs_json,
+                        input_reference=reference,
+                    ).pk
+                )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        purge_future = executor.submit(purge)
+        try:
+            assert deletion_started.wait(timeout=10)
+            assert not path.exists()
+            writer_future = executor.submit(reenqueue)
+            assert writer_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(writer_pid[0])
+        finally:
+            release_deletion.set()
+        assert purge_future.result(timeout=20) == "purged"
+        replacement = RayTaskExecution.objects.get(pk=writer_future.result(timeout=20))
+
+    payload.refresh_from_db()
+    old_execution.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+    assert payload.purged_at is None
+    assert payload.last_used_at > cutoff
+    assert old_execution.input_reference == reference
+    assert replacement.state == TaskState.QUEUED
+    assert replacement.input_reference == reference
+    assert path.read_bytes() == original_bytes
+    assert load_task_input(
+        args_json=replacement.args_json,
+        kwargs_json=replacement.kwargs_json,
+        input_reference=replacement.input_reference,
+    ) == (["restored input"], {})
+
+
+@pytest.mark.parametrize("transition", ["cancel", "complete", "retry"])
+def test_bounded_input_purge_revalidates_execution_after_lifecycle_lock(
+    settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transition: str
+) -> None:
+    """Projected eligibility must use the row committed after the lock wait."""
+    import django_ray.input_storage as input_storage_module
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    prepared = prepare_task_input(("retained lifecycle input",), {})
+    assert prepared.input_reference is not None
+    with transaction.atomic():
+        payload = register_task_input(prepared)
+    assert payload is not None
+    old_timestamp = timezone.now() - timedelta(days=60)
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=old_timestamp)
+    execution = _execution(
+        f"bounded-input-lifecycle-{transition}",
+        state=TaskState.FAILED if transition == "retry" else TaskState.RUNNING,
+        input_reference=prepared.input_reference,
+        finished_at=old_timestamp if transition == "retry" else None,
+        execution_generation=1,
+    )
+    cutoff = timezone.now() - timedelta(days=30)
+    writer_ready, release_writer, purge_connected = Event(), Event(), Event()
+    purge_pid: list[int] = []
+    observed = []
+    original_check = PurgeInputsCommand._all_references_are_old_and_terminal
+
+    def observe_locked_values(executions, **kwargs):
+        assert len(executions) == 1
+        observed.append((executions[0].state_is_terminal, executions[0].finished_at))
+        return original_check(executions, **kwargs)
+
+    monkeypatch.setattr(
+        PurgeInputsCommand,
+        "_all_references_are_old_and_terminal",
+        staticmethod(observe_locked_values),
+    )
+    monkeypatch.setattr(
+        input_storage_module,
+        "delete_input_reference",
+        lambda reference: pytest.fail("fresh lifecycle state must retain the payload"),
+    )
+
+    def transition_execution() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                if transition == "cancel":
+                    assert request_task_cancellation(
+                        execution.pk, expected_attempt_number=1, expected_execution_generation=1
+                    ).accepted
+                elif transition == "complete":
+                    assert succeed_task(
+                        execution,
+                        result_data="3",
+                        result_reference=None,
+                        expected_execution_generation=1,
+                    )
+                else:
+                    assert (
+                        retry_task(
+                            execution.pk, expected_attempt_number=1, expected_execution_generation=1
+                        )
+                        is not None
+                    )
+                writer_ready.set()
+                assert release_writer.wait(timeout=10)
+        finally:
+            close_old_connections()
+
+    def purge() -> str:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                purge_pid.append(int(cursor.fetchone()[0]))
+            purge_connected.set()
+            return PurgeInputsCommand()._process_reference(
+                prepared.input_reference, cutoff=cutoff, delete=True, max_attachments=1
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        writer_future = executor.submit(transition_execution)
+        try:
+            assert writer_ready.wait(timeout=10)
+            purge_future = executor.submit(purge)
+            assert purge_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(purge_pid[0])
+        finally:
+            release_writer.set()
+        writer_future.result(timeout=20)
+        assert purge_future.result(timeout=20) == "skipped"
+
+    payload.refresh_from_db()
+    execution.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+    assert payload.last_used_at <= cutoff  # Eligibility changed on execution, not registry.
+    assert observed == [(transition == "complete", execution.finished_at)]
+    assert (
+        execution.state
+        == {
+            "cancel": TaskState.CANCELLING,
+            "complete": TaskState.SUCCEEDED,
+            "retry": TaskState.QUEUED,
+        }[transition]
+    )
+    if transition == "complete":
+        assert execution.finished_at is not None and execution.finished_at > cutoff
+    assert load_task_input(
+        args_json=prepared.args_json,
+        kwargs_json=prepared.kwargs_json,
+        input_reference=prepared.input_reference,
+    ) == (["retained lifecycle input"], {})
+
+
+@pytest.mark.parametrize(
+    "payload_kind", [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST]
+)
+def test_bounded_input_purge_waits_for_writer_and_preserves_current_reference(
+    settings,
+    tmp_path: Path,
+    payload_kind: str,
+) -> None:
+    """A writer-first lock cannot be bypassed by a capped attachment query."""
+    from django_ray.ray_job_request_storage import (
+        load_ray_job_request,
+        register_and_attach_ray_job_request,
+    )
+
+    storage_config = {
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **storage_config}
+    if payload_kind == InputPayloadKind.TASK_INPUT:
+        prepared_input = prepare_task_input(("retained input",), {})
+        assert prepared_input.input_reference is not None
+        with transaction.atomic():
+            payload = register_task_input(prepared_input)
+        assert payload is not None
+        reference = prepared_input.input_reference
+
+        def write_reference() -> None:
+            register_task_input(prepared_input)
+            _execution(
+                "bounded-purge-writer-first-input",
+                input_reference=reference,
+                args_json=prepared_input.args_json,
+                kwargs_json=prepared_input.kwargs_json,
+            )
+
+    else:
+        execution, handle = _rq2_reserved_execution("bounded-purge-writer-first-rq2")
+        prepared_request = _prepared_rq2_request(execution, tmp_path)
+        reference = prepared_request.reference
+        payload = TaskInputPayload.objects.create(
+            reference=reference,
+            payload_kind=payload_kind,
+            backend=prepared_request.backend,
+            digest=prepared_request.digest,
+            size_bytes=prepared_request.size_bytes,
+            envelope_version=prepared_request.envelope_version,
+        )
+
+        def write_reference() -> None:
+            register_and_attach_ray_job_request(
+                prepared_request,
+                task_execution=execution,
+                submission_handle=handle,
+            )
+
+    TaskInputPayload.objects.filter(pk=payload.pk).update(
+        last_used_at=timezone.now() - timedelta(days=60)
+    )
+    cutoff = timezone.now() - timedelta(days=30)
+    writer_ready, release_writer, purge_connected = Event(), Event(), Event()
+    purge_pid: list[int] = []
+
+    def writer() -> None:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                write_reference()
+                writer_ready.set()
+                assert release_writer.wait(timeout=10)
+        finally:
+            close_old_connections()
+
+    def purge() -> str:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                purge_pid.append(int(cursor.fetchone()[0]))
+            purge_connected.set()
+            return PurgeInputsCommand()._process_reference(
+                reference,
+                cutoff=cutoff,
+                delete=True,
+                max_attachments=1,
+            )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        writer_future = executor.submit(writer)
+        try:
+            assert writer_ready.wait(timeout=10)
+            purge_future = executor.submit(purge)
+            assert purge_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(purge_pid[0])
+        finally:
+            release_writer.set()
+        writer_future.result(timeout=20)
+        assert purge_future.result(timeout=20) == "skipped"
+
+    payload.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+    assert payload.last_used_at > cutoff
+    if payload_kind == InputPayloadKind.TASK_INPUT:
+        assert load_task_input(
+            args_json=prepared_input.args_json,
+            kwargs_json=prepared_input.kwargs_json,
+            input_reference=reference,
+        ) == (["retained input"], {})
+    else:
+        assert (
+            load_ray_job_request(prepared_request.encoded_locator).request
+            == prepared_request.request
+        )
+
+
+def test_bounded_input_purge_overflow_never_deletes_shared_payload(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a terminal prefix cannot authorize deletion of uninspected history."""
+    import django_ray.input_storage as input_storage_module
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    prepared = prepare_task_input(("shared input",), {})
+    with transaction.atomic():
+        payload = register_task_input(prepared)
+    assert payload is not None
+    assert prepared.input_reference is not None
+    timestamp = timezone.now() - timedelta(days=60)
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=timestamp)
+    for index, state in enumerate((TaskState.SUCCEEDED, TaskState.QUEUED)):
+        _execution(
+            f"bounded-purge-overflow-{index}",
+            input_reference=prepared.input_reference,
+            state=state,
+            finished_at=timestamp if state == TaskState.SUCCEEDED else None,
+        )
+    monkeypatch.setattr(
+        input_storage_module,
+        "delete_input_reference",
+        lambda reference: pytest.fail("incomplete history must not reach backend deletion"),
+    )
+    with CaptureQueriesContext(connection) as queries:
+        outcome = PurgeInputsCommand()._process_reference(
+            prepared.input_reference,
+            cutoff=timezone.now() - timedelta(days=30),
+            delete=True,
+            max_attachments=1,
+        )
+    assert outcome == "incomplete"
+    assert any("LIMIT 2" in query["sql"] and "FOR UPDATE" in query["sql"] for query in queries)
+    payload.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+    assert load_task_input(
+        args_json=prepared.args_json,
+        kwargs_json=prepared.kwargs_json,
+        input_reference=prepared.input_reference,
+    ) == (["shared input"], {})
+
+
 def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
     settings,
     tmp_path: Path,
@@ -3591,6 +3982,7 @@ def test_rq2_attach_waits_for_purge_then_restores_the_exact_request(
                 prepared.reference,
                 cutoff=cutoff,
                 delete=True,
+                max_attachments=1,
             )
         finally:
             close_old_connections()

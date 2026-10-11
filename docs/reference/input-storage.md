@@ -200,9 +200,11 @@ python manage.py django_ray_purge_inputs --retention-days=30 --delete
 
 A payload is eligible only when its registry entry is old enough and every execution
 referencing the kind's exact column is terminal with an old enough `finished_at`.
-Cleanup locks the registry first and then all executions referencing either payload
-column, so a concurrent writer cannot lose a shared payload and a cross-kind collision
-fails closed. Successful cleanup keeps execution references and a `PURGED` tombstone for
+Cleanup locks the registry first and then a bounded set of executions referencing
+either payload column. Deletion requires the complete history to fit within the
+attachment budget; overflow retains the object. A concurrent writer cannot lose a
+shared payload and a cross-kind collision fails closed. Successful cleanup keeps
+execution references and a `PURGED` tombstone for
 audit. A future writer of the same kind and content may reactivate the object.
 Every attachment/reactivation path must lock or register the payload before it locks and
 updates the execution row. Cleanup safety depends on that common lock order; rq2
@@ -212,6 +214,17 @@ Command output identifies a reference only by a 16-character SHA-256 fingerprint
 does not print the bucket, prefix, digest locator, provider exception text, or full
 reference. `cleanup_error` retains only the bounded exception class so command logs and
 database diagnostics cannot become a storage-URI or credential oracle.
+
+Cleanup now processes finite batches: by default 100 registry candidates and 100
+attachments per payload, each with a hard maximum of 1,000. The report emits at
+most 20 detailed rows by default and never more than 16 KiB. Exit status 2 reports
+more candidates or incomplete attachment evidence; use the opaque continuation
+cursor to keep the same cutoff and mode. Retained/incomplete earlier rows and
+concurrent earlier-key inserts require a fresh pass, so finishing a cursor range
+is not a global inventory certificate. These bounds do not impose a query or
+backend-I/O deadline. See the [CLI contract](cli.md#django_ray_purge_inputs) for
+JSON fields, limits, status precedence, interruption handling, and cursor key
+rotation. This command still cannot discover objects absent from the registry.
 
 Purging makes historical manual retry impossible until the same object is restored or
 reactivated. Choose a retention window that covers the application's audit and manual
