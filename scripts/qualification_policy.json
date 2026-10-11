@@ -56,5 +56,44 @@
       "tests/unit/test_latency_qualification.py"
     ],
     "id": "latency"
+  },
+  {
+    "id": "cancellation",
+    "workflow": "cancellation-qualification.yml",
+    "paths": [
+      ".github/workflows/qualification-gate.yml",
+      ".github/workflows/cancellation-qualification.yml",
+      "scripts/qualification_gate.py",
+      "scripts/qualification_policy.json",
+      "scripts/wait_for_ci_checkpoint.py",
+      "tests/unit/test_qualification_gate.py",
+      "tests/unit/test_cancellation_qualification.py",
+      "tests/integration/test_live_failure_injection.py",
+      "qualification/cancellation/**",
+      "qualification/transactions/Dockerfile",
+      "qualification/transactions/probe.py",
+      "qualification/upgrade/scenario.py",
+      "qualification/docker/scenario.py",
+      "src/django_ray/runner/**",
+      "src/django_ray/management/commands/django_ray_worker.py",
+      "src/django_ray/conf/**",
+      "src/django_ray/backends.py",
+      "src/django_ray/lifecycle.py",
+      "src/django_ray/models.py",
+      "src/django_ray/execution_codec.py",
+      "src/django_ray/execution_protocol.py",
+      "src/django_ray/ray_job_protocol.py",
+      "src/django_ray/ray_job_request_storage.py",
+      "src/django_ray/input_storage.py",
+      "src/django_ray/result_storage.py",
+      "src/django_ray/runtime/entrypoint.py",
+      "src/django_ray/runtime/context.py",
+      "src/django_ray/runtime/runtime_env.py",
+      "src/django_ray/runtime/runtime_env_encryption.py",
+      "src/django_ray/runtime/serialization.py",
+      "src/django_ray/runtime/import_utils.py",
+      "pyproject.toml",
+      "uv.lock"
+    ]
   }
 ]

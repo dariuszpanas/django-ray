@@ -1,0 +1,95 @@
+name: Cancellation Qualification
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: read
+  actions: read
+
+concurrency:
+  group: cancellation-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  cancellation:
+    name: Cancellation Qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      COMPOSE_PROJECT_NAME: cancellation-qualification
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the current source Linux CI checkpoint
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/wait_for_ci_checkpoint.py
+
+      - name: Admit resources and export the exact clean source
+        run: |
+          set -euo pipefail
+          test "$(nproc)" -ge 4
+          awk '/MemTotal/ { exit ($2 < 14000000) }' /proc/meminfo
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4}')" -ge 20000000
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          source_dir="$RUNNER_TEMP/cancellation-source"
+          mkdir -m 755 "$source_dir"
+          git archive HEAD | tar -x -C "$source_dir"
+          export CANCELLATION_EVIDENCE_DIR="$RUNNER_TEMP/cancellation-receipts"
+          mkdir -m 700 "$CANCELLATION_EVIDENCE_DIR"
+          sudo chown 10001:10001 "$CANCELLATION_EVIDENCE_DIR"
+          {
+            echo "CANCELLATION_EVIDENCE_DIR=$CANCELLATION_EVIDENCE_DIR"
+            echo "COMPOSE_FILE=$source_dir/qualification/cancellation/jobs.yaml"
+          } >> "$GITHUB_ENV"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/cancellation-source.txt"
+
+      - name: Build the source-matched installed-wheel fixture
+        timeout-minutes: 10
+        run: |
+          docker compose config --quiet
+          docker compose build cancellation
+          docker image inspect django-ray-cancellation-qualification:local --format '{{.Id}}' > "$RUNNER_TEMP/cancellation-image.txt"
+
+      - name: Observe no-cancel completion and actual cancelled driver exit
+        timeout-minutes: 6
+        run: |
+          set -o pipefail
+          timeout --signal=INT --kill-after=20s 280s \
+            docker compose run --no-deps --rm cancellation 2>&1 |
+            tee "$RUNNER_TEMP/cancellation-execution.log"
+
+      - name: Remove owned resources
+        if: always()
+        timeout-minutes: 2
+        run: |
+          if [[ -n "$COMPOSE_FILE" ]]; then
+            docker compose down --timeout 20 --remove-orphans
+          fi
+          if [[ -n "$CANCELLATION_EVIDENCE_DIR" && -d "$CANCELLATION_EVIDENCE_DIR" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$CANCELLATION_EVIDENCE_DIR"
+          fi
+          test -z "$(docker ps -aq --filter label=com.docker.compose.project=cancellation-qualification)"
+
+      - name: Retain source and bounded cancellation receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cancellation-qualification
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/cancellation-receipts/
+            ${{ runner.temp }}/cancellation-source.txt
+            ${{ runner.temp }}/cancellation-image.txt
+            ${{ runner.temp }}/cancellation-execution.log

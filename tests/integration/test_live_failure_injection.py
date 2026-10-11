@@ -292,35 +292,145 @@ class TestLiveFailureInjection:
         assert cmd.ray_core_runner._pending_tasks == {}
 
     def test_cancellation_finalizes_live_pending_task(self, live_ray_cluster):
-        """Cancelling a live pending Ray Core task should finalize CANCELLED state."""
-        cmd = _make_live_command()
-        task = RayTaskExecution.objects.create(
-            task_id="live-fi-cancel-001",
-            callable_path="time.sleep",
-            queue_name="default",
-            state=TaskState.CANCELLING,
-            args_json="[30]",
-            kwargs_json="{}",
-            attempt_number=1,
-            started_at=datetime.now(UTC),
-            claimed_by_worker=cmd.worker_id,
-        )
+        """Separate requested/durable cancellation from observed callable stopping."""
+        from ray.exceptions import GetTimeoutError, TaskCancelledError
 
-        object_ref = _submit_live_sleep_task(live_ray_cluster, sleep_seconds=30)
-        cmd.ray_core_runner._pending_tasks[task.pk] = RayCoreHandle(
-            task_pk=task.pk,
-            object_ref=object_ref,
-            submitted_at=datetime.now(UTC),
-            task_name="live_sleep",
-            attempt_number=task.attempt_number,
-            execution_generation=task.execution_generation,
-        )
-        cmd.active_tasks[task.pk] = f"ray_core:{task.pk}"
+        from django_ray.lifecycle import request_task_cancellation
+        from django_ray.models import CancellationStatus, TaskAttempt
+        from django_ray.runner.leasing import release_lease
 
-        cmd.process_cancellations()
+        ray = live_ray_cluster
 
-        task.refresh_from_db()
-        assert task.state == TaskState.CANCELLED
-        assert task.finished_at is not None
-        assert task.pk not in cmd.active_tasks
-        assert task.pk not in cmd.ray_core_runner._pending_tasks
+        @ray.remote(num_cpus=0)
+        class Witness:
+            def __init__(self):
+                self.progress = 0
+                self.released = False
+                self.completed = False
+                self.stopped = False
+                self.expired = False
+
+            def tick(self):
+                self.progress += 1
+                return self.released
+
+            def release(self):
+                self.released = True
+
+            def finish(self, completed, expired):
+                self.completed = completed
+                self.expired = expired
+                self.stopped = True
+
+            def snapshot(self):
+                return dict(vars(self))
+
+        @ray.remote(num_cpus=1, max_retries=0)
+        def controlled(witness):
+            completed = expired = False
+            try:
+                deadline = time.monotonic() + 90
+                while time.monotonic() < deadline:
+                    if ray.get(witness.tick.remote(), timeout=2):
+                        completed = True
+                        return "released"
+                    time.sleep(0.05)
+                expired = True
+                raise TimeoutError("Owned cancellation fixture was not released")
+            finally:
+                ray.get(witness.finish.remote(completed, expired), timeout=2)
+
+        def observe(witness, predicate):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                state = ray.get(witness.snapshot.remote(), timeout=2)
+                if predicate(state):
+                    return state
+                time.sleep(0.05)
+            raise AssertionError("Owned cancellation observation deadline expired")
+
+        # An independent no-cancel control proves this callable remains active
+        # until released; a missing progress update alone is never stop proof.
+        for cancel in (False, True):
+            witness = Witness.remote()
+            object_ref = None
+            cmd = None
+            try:
+                object_ref = controlled.remote(witness)
+                started = observe(witness, lambda state: state["progress"] >= 2)
+                assert not started["stopped"] and not started["completed"]
+                with pytest.raises(GetTimeoutError):
+                    ray.get(object_ref, timeout=0)
+                if not cancel:
+                    progressed = observe(
+                        witness,
+                        lambda state, started=started: state["progress"] > started["progress"],
+                    )
+                    assert not progressed["stopped"]
+                    ray.get(witness.release.remote(), timeout=2)
+                    assert ray.get(object_ref, timeout=10) == "released"
+                    stopped = observe(witness, lambda state: state["stopped"])
+                    assert stopped["released"] and stopped["completed"]
+                    assert not stopped["expired"]
+                    continue
+
+                cmd = _make_live_command()
+                task = RayTaskExecution.objects.create(
+                    task_id="live-fi-cancel-001",
+                    callable_path="owned_live_cancellation_fixture",
+                    queue_name="default",
+                    state=TaskState.RUNNING,
+                    args_json="[]",
+                    kwargs_json="{}",
+                    attempt_number=1,
+                    started_at=datetime.now(UTC),
+                    claimed_by_worker=cmd.worker_id,
+                )
+                identity = (task.task_id, task.attempt_number, task.execution_generation)
+                cmd.ray_core_runner._pending_tasks[task.pk] = RayCoreHandle(
+                    task_pk=task.pk,
+                    object_ref=object_ref,
+                    submitted_at=datetime.now(UTC),
+                    task_name="owned_live_cancellation_fixture",
+                    attempt_number=task.attempt_number,
+                    execution_generation=task.execution_generation,
+                )
+                cmd.active_tasks[task.pk] = f"ray_core:{task.pk}"
+                outcome = request_task_cancellation(
+                    task.pk,
+                    expected_attempt_number=task.attempt_number,
+                    expected_execution_generation=task.execution_generation,
+                )
+                assert outcome.accepted and outcome.state == TaskState.CANCELLING
+                assert cmd.process_cancellations() == 1
+                task.refresh_from_db()
+                assert task.state == TaskState.CANCELLED
+                assert task.cancellation_status == CancellationStatus.REQUESTED
+                assert task.finished_at is not None
+                assert (task.task_id, task.attempt_number, task.execution_generation) == identity
+                assert task.completion_data is None and task.result_data is None
+                assert task.result_reference is None and task.run_after is None
+                assert task.pk not in cmd.active_tasks
+                assert task.pk not in cmd.ray_core_runner._pending_tasks
+                attempt = TaskAttempt.objects.get(execution=task)
+                assert attempt.attempt_number == task.attempt_number
+                assert attempt.state == TaskState.CANCELLED
+                assert attempt.result_data is None and attempt.result_reference is None
+
+                # The durable state above records a best-effort request. These
+                # independent observations prove stopping for this exact task.
+                with pytest.raises(TaskCancelledError):
+                    ray.get(object_ref, timeout=10)
+                stopped = observe(witness, lambda state: state["stopped"])
+                assert not stopped["released"] and not stopped["completed"]
+                assert not stopped["expired"]
+            finally:
+                try:
+                    if object_ref is not None:
+                        ray.cancel(object_ref, force=True, recursive=True)
+                finally:
+                    try:
+                        ray.kill(witness, no_restart=True)
+                    finally:
+                        if cmd is not None:
+                            release_lease(cmd.lease_identity)
