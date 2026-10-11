@@ -630,6 +630,36 @@ for state in TaskState:
 "
 ```
 
+### Monitoring versions and upgrades
+
+The bundled manifests pin Prometheus 3.13.4 and Grafana 12.4.12 by multi-platform
+image digest. Prometheus 3.13 is an [upstream LTS line](https://prometheus.io/docs/introduction/release-cycle/)
+supported through July 2027; Grafana 12.4 has
+[extended patch support](https://grafana.com/docs/grafana/latest/upgrade-guide/when-to-upgrade/)
+through May 2027. Review upstream support and patch releases before each django-ray
+release, resolve both the version and digest, and repeat the affected deployment
+qualification when either image changes.
+
+These replace the earlier bundled Prometheus 2.48 and Grafana 10.2 images.
+Read the [Prometheus 3 migration guide](https://prometheus.io/docs/prometheus/latest/migration/)
+and the [Grafana upgrade guides](https://grafana.com/docs/grafana/latest/upgrade-guide/)
+before upgrading a customized deployment. Prometheus 3 requires a valid scrape
+content type and changes some query semantics. Its TSDB cannot be read by the
+previously bundled Prometheus 2.48. Take independent backups of persistent
+monitoring data and Grafana configuration, plugins, and database before upgrading;
+rollback to the old images requires restoring their compatible backups.
+
+The bundled sample uses an ephemeral Prometheus data volume and does not persist
+Grafana's database. Replacing these pods can discard collected history and
+unprovisioned dashboards. File provisioning recreates the shipped overview; the
+Ray dashboard importer runs once and then sleeps. Replacing only Grafana requires
+rerunning that importer to restore the generated Ray dashboards. Before accepting
+an image update, disposable qualification must verify both dashboard sources,
+authenticated data-source queries, and exact scrape ownership. API import success
+alone does not prove that legacy Ray panels render correctly in the browser.
+This does not prove migration of an operator's persistent monitoring database or
+plugins.
+
 ### Prometheus Metrics
 
 Metrics are available at `/api/metrics`:
