@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from qualification.application import run_chainsaw as runner
+from qualification.application.result_presentation import EVIDENCE as RESULT_EVIDENCE
 from qualification.application.runtime_env_refusal import CASES, FACTS
 
 
@@ -13,6 +14,7 @@ def receipt(layer="application_setup", **changes):
     defaults = {}
     if layer == "application_core":
         defaults["runtime_env_refusals"] = {case: dict.fromkeys(FACTS, True) for case in CASES}
+        defaults["ordinary_results"] = dict(RESULT_EVIDENCE)
     return json.dumps(
         {
             "schema_version": 1,
@@ -36,6 +38,24 @@ def test_core_receipt_requires_both_exact_negative_runtime_env_cases(failure):
         value["runtime_env_refusals"][CASES[1]][FACTS[0]] = 1 if failure == "non-boolean" else False
     with pytest.raises(ValueError):
         runner.parse_receipts(json.dumps(value).encode(), ("after-core",))
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        None,
+        {},
+        {**RESULT_EVIDENCE, "owned_rows_removed": False},
+        {**RESULT_EVIDENCE, "current_api": 1},
+    ],
+)
+def test_core_receipts_require_complete_typed_result_presentation_in_both_generations(evidence):
+    for generation in ("before", "after"):
+        with pytest.raises(ValueError, match="result evidence"):
+            runner.parse_receipts(
+                receipt("application_core", ordinary_results=evidence),
+                (f"{generation}-core",),
+            )
 
 
 @pytest.mark.parametrize("extra", [0, 1])

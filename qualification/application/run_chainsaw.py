@@ -17,6 +17,9 @@ from qualification.application.resource_profiles import (
     chainsaw_values,
     select_profile,
 )
+from qualification.application.result_presentation import (
+    validate_evidence as validate_result_evidence,
+)
 from qualification.application.run_first_workflows import (
     LAYER as FIRST_WORKFLOW_LAYER,
 )
@@ -110,6 +113,7 @@ def parse_receipts(
             from qualification.application.runtime_env_refusal import validate_evidence
 
             validate_evidence(value.get("runtime_env_refusals"))
+            validate_result_evidence(value.get("ordinary_results"))
         elif value["layer"] == "application_rq2":
             from qualification.application.run_rq2 import validate_receipt
 

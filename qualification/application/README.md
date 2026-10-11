@@ -617,3 +617,29 @@ assertion only. A browser
 failure may retain the verifier source line, without exception text. A failed browser
 observation fails qualification; unit mocks are not rendered evidence. Source-matched Linux execution
 before and after cold Ray is required before this workload can be accepted.
+
+### Ordinary result presentation
+
+Each generation's core receipt also requires `ordinary_results`: fixed scalar
+observations of the ordinary current execution and archived attempt Admin pages,
+plus the current execution API detail. There is no archived-result API endpoint;
+the archived result assertion uses the ordinary TaskAttempt Admin page.
+
+This presentation-only fixture creates one terminal execution and one archived
+attempt with distinct fixed JSON markup and sensitive-key canaries. It does not
+enqueue these synthetic rows or claim that a task produced their values. Actual
+HTTP reads must deny anonymous access, render the markup as escaped inert text,
+redact the sensitive key and value, and leave every original row field unchanged.
+The HTML parser rejects injected canary elements, attributes or executable text;
+this is server-HTML evidence, not a claim that a browser executed the page. The
+fixture removes only its opaque-identity-bound rows and temporary session, even
+after an observation fails; missing cleanup prevents a passing receipt.
+
+The fixed six HTTP reads use five-second-or-shorter request timeouts and a
+30-second observation budget. HTML is capped at 1 MiB per response, API data at
+64 KiB, and the existing core receipt remains capped at 16 KiB. ORM work and
+cleanup are not independently interrupted by the observation budget; the existing
+generation supervisor still enforces the unchanged 600-second process budget.
+The collector requires every typed result-presentation field in both generations.
+These assertions cover the ordinary-result presentation part of #455; they do
+not complete the whole application catalogue or the release checklist in #372.
