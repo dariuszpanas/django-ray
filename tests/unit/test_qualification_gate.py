@@ -21,11 +21,17 @@ def results():
     return {
         "selection": {
             "result": "success",
-            "outputs": {"application": "true", "native": "false", "latency": "true"},
+            "outputs": {
+                "application": "true",
+                "native": "false",
+                "latency": "true",
+                "cancellation": "true",
+            },
         },
         "application": {"result": "success"},
         "native": {"result": "skipped"},
         "latency": {"result": "success"},
+        "cancellation": {"result": "success"},
     }
 
 
@@ -41,9 +47,10 @@ def test_workflow_owns_selection_and_every_qualification_dependency():
         "application",
         "native",
         "latency",
+        "cancellation",
     }
     assert gate["jobs"]["qualification-gate"]["if"] == "always()"
-    assert {entry["id"] for entry in policy} == {"application", "native", "latency"}
+    assert {entry["id"] for entry in policy} == {"application", "native", "latency", "cancellation"}
     for entry in policy:
         child = yaml.load(
             (root / ".github/workflows" / entry["workflow"]).read_text(), Loader=yaml.BaseLoader
@@ -65,15 +72,37 @@ def test_applicability_is_explicit():
     assert select([ENTRY], {"src/nested/code.py"}) == [ENTRY]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "runner/leasing.py",
+        "runner/reconciliation.py",
+        "runner/retry.py",
+        "runner/polling.py",
+        "management/commands/django_ray_worker.py",
+        "ray_job_protocol.py",
+        "ray_job_request_storage.py",
+        "conf/settings.py",
+        "backends.py",
+        "runtime/entrypoint.py",
+    ],
+)
+def test_cancellation_consumed_manager_and_request_paths_are_selected(path):
+    root = Path(__file__).resolve().parents[2]
+    policy = json.loads((root / "scripts/qualification_policy.json").read_text())
+    assert "cancellation" in {item["id"] for item in select(policy, {"src/django_ray/" + path})}
+
+
 def test_only_selected_success_and_explicit_unselected_skip_pass():
     assert verify(results()) == {
         "application": "passed",
         "native": "not_applicable",
         "latency": "passed",
+        "cancellation": "passed",
     }
 
 
-@pytest.mark.parametrize("name", ["application", "latency"])
+@pytest.mark.parametrize("name", ["application", "latency", "cancellation"])
 @pytest.mark.parametrize("state", ["failure", "cancelled", "skipped", "", None])
 def test_selected_missing_or_failed_result_never_passes(name, state):
     value = results()

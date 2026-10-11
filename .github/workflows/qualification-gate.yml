@@ -22,6 +22,7 @@ jobs:
       application: ${{ steps.select.outputs.application }}
       native: ${{ steps.select.outputs.native }}
       latency: ${{ steps.select.outputs.latency }}
+      cancellation: ${{ steps.select.outputs.cancellation }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,10 +50,15 @@ jobs:
     if: needs.selection.outputs.latency == 'true'
     uses: ./.github/workflows/latency-qualification.yml
 
+  cancellation:
+    needs: selection
+    if: needs.selection.outputs.cancellation == 'true'
+    uses: ./.github/workflows/cancellation-qualification.yml
+
   qualification-gate:
     name: Qualification Gate
     if: always()
-    needs: [selection, application, native, latency]
+    needs: [selection, application, native, latency, cancellation]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
