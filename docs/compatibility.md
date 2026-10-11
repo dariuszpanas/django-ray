@@ -266,6 +266,13 @@ dependency is no longer supportable. A published dependency security fix is such
 support boundary: the repository lock protects its own reproducible environment, while
 the declared lower bound controls what a downstream fresh install may resolve.
 
+The runtime security floors also require `multidict>=6.9.1`, `urllib3>=2.8.0`,
+and `virtualenv>=21.7.13`. These dependencies arrive through Ray's mandatory
+extras; explicit package requirements protect fresh downstream installs as well
+as the committed lock. Updating an unrelated dependency does not necessarily
+refresh these transitive packages. Current advisory checks can therefore fail
+on an unchanged source commit even when its Python tests continue to pass.
+
 ## Platforms
 
 Ray publishes platform-specific wheels. A pure-Python django-ray wheel does not imply

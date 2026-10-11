@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Require patched `multidict>=6.9.1`, `urllib3>=2.8.0`, and
+  `virtualenv>=21.7.13` in package metadata and the contributor lock. This repairs
+  runtime dependency audit failures and protects fresh installs of Ray's
+  mandatory dependency graph without changing the Ray support floor.
+
 ## [0.6.0] - 2026-09-27
 
 ### Changed

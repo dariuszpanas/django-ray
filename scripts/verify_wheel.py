@@ -11,7 +11,15 @@ import zipfile
 from email.parser import Parser
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
+
+TRANSITIVE_SECURITY_FLOORS = {
+    "multidict": "6.9.1",
+    "urllib3": "2.8.0",
+    "virtualenv": "21.7.13",
+}
 
 EXPECTED_TARGET_MODULE_FILES = {
     "django_ray/target/__init__.py",
@@ -154,10 +162,30 @@ def _verify_archive_metadata(metadata_text: str, *, expected_version: str, sourc
             f"{source} metadata version {metadata.get('Version')!r} != {expected_version!r}"
         )
     _verify_ray_security_floor(metadata.get_all("Requires-Dist", []), source=source)
+    _verify_transitive_security_floors(metadata.get_all("Requires-Dist", []), source=source)
+
+
+def _verify_transitive_security_floors(requirements: list[str], *, source: str) -> None:
+    """Published requirements must exclude vulnerable mandatory Ray dependencies."""
+    parsed = [Requirement(requirement) for requirement in requirements]
+    for name, floor in TRANSITIVE_SECURITY_FLOORS.items():
+        matching = [
+            requirement for requirement in parsed if canonicalize_name(requirement.name) == name
+        ]
+        if (
+            len(matching) != 1
+            or matching[0].marker is not None
+            or matching[0].url is not None
+            or matching[0].extras
+            or str(matching[0].specifier) != f">={floor}"
+        ):
+            raise RuntimeError(
+                f"{source} must contain exactly one unconditional {name}>={floor} security floor"
+            )
 
 
 def verify_distribution_archives(dist_dir: Path, expected_version: str) -> None:
-    """Verify the built wheel and sdist publish the same Ray security floor."""
+    """Verify the built wheel and sdist publish the mandatory security floors."""
     wheels = sorted(dist_dir.glob("*.whl"))
     sdists = sorted(dist_dir.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sdists) != 1:
@@ -276,6 +304,17 @@ def verify_installed_wheel(expected_version: str) -> None:
     installed_ray = Version(importlib.metadata.version("ray"))
     if installed_ray < Version("2.58.0"):
         raise RuntimeError(f"installed Ray {installed_ray} is below the 2.58.0 security floor")
+
+    _verify_transitive_security_floors(
+        list(distribution.requires or ()),
+        source="installed wheel metadata",
+    )
+    for name, floor in TRANSITIVE_SECURITY_FLOORS.items():
+        installed_version = Version(importlib.metadata.version(name))
+        if installed_version < Version(floor):
+            raise RuntimeError(
+                f"installed {name} {installed_version} is below the {floor} security floor"
+            )
 
     import cryptography
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
