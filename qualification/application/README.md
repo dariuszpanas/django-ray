@@ -279,6 +279,18 @@ It never signals a group whose leader it has already reaped. The runner is the c
 initial process, and Pod teardown bounds remaining descendants after an ordinary child
 failure. This adds no retries or product runtime deadline changes.
 
+The workflow API/graph observer opts into one additional GET attempt only after a
+connection reset or remote disconnect while awaiting response headers, before any
+HTTP status arrives. The attempts share the original request-timeout window (at most
+10 seconds), with the remaining time used for the next connection; an expired response
+cannot pass. Socket timeouts still bound individual blocking operations, so the outer
+Job remains the hard bound for slow streaming. Timeouts, writes, HTTP statuses, response
+bodies and contract mismatches are never retried. Other transports retain fail-fast
+behavior. Passing workflow receipts retain fixed-category `http_transport_recoveries`
+counts, and transport failures expose a fixed `transport_failure` category without
+dependency exception text. A hosted pre-status failure coincided with Gunicorn worker
+recycling; the retained evidence did not establish which transport exception occurred.
+
 The runner retrieves at most 64 KiB from each exact setup/assertion container's log. It requires
 zero successful-container restarts, exit zero, the requested immutable image with its manifest
 digest in the observed container image ID, and every expected

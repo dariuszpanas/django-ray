@@ -9,6 +9,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -122,12 +123,13 @@ def test_http_transport_ignores_proxies_and_does_not_follow_redirects(server, mo
 
 @pytest.mark.parametrize("status", [200, 403, 500])
 def test_http_transport_enforces_limits_for_success_and_error_bodies(server, status):
-    origin, _, replies = server
+    origin, requests, replies = server
     replies.extend([(status, {}, b"1234"), (status, {}, b"12345")])
-    transport = run_api.ApplicationHttp(origin)
+    transport = run_api.ApplicationHttp(origin, retry_read_disconnects=True)
     assert transport("/api/metrics", method="GET", response_limit=4) == (status, b"1234")
     with pytest.raises(ValueError, match="byte limit"):
         transport("/api/metrics", method="GET", response_limit=4)
+    assert len(requests) == 2
 
 
 def test_http_transport_requires_response_headers(server):
@@ -202,7 +204,11 @@ def test_http_failure_closes_connection_and_discards_private_exception(monkeypat
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None
     assert closed == [True]
-    assert caught.value.diagnostic() == {"code": "request_failed", "status": None}
+    assert caught.value.diagnostic() == {
+        "code": "request_failed",
+        "status": None,
+        "transport_failure": "os_error",
+    }
 
 
 @pytest.mark.parametrize("stage", ["headers", "body"])
@@ -237,6 +243,7 @@ def test_http_read_failures_keep_only_fixed_stage_and_status(monkeypatch, stage)
     assert caught.value.diagnostic() == {
         "code": "response_headers_failed" if stage == "headers" else "body_read_failed",
         "status": None if stage == "headers" else 200,
+        "transport_failure": "remote_disconnected" if stage == "headers" else "os_error",
     }
     assert "secret" not in str(caught.value)
     assert caught.value.__context__ is None
@@ -252,12 +259,166 @@ def test_http_read_failures_keep_only_fixed_stage_and_status(monkeypatch, stage)
     ],
 )
 def test_http_contract_failure_categories_exclude_private_response(server, options, code):
-    origin, _, replies = server
+    origin, requests, replies = server
     replies.append((200, {"X-Test": "private-header"}, b"private-body"))
     with pytest.raises(run_api.ApplicationHttpError) as caught:
-        run_api.ApplicationHttp(origin)("/private", method="GET", **options)
+        run_api.ApplicationHttp(origin, retry_read_disconnects=True)(
+            "/private", method="GET", **options
+        )
     assert caught.value.diagnostic() == {"code": code, "status": 200}
     assert "private" not in str(caught.value)
+    assert len(requests) == 1
+
+
+@pytest.fixture
+def scripted_http(monkeypatch):
+    state = SimpleNamespace(now=0.0, replies=[], timeouts=[], requests=[], closed=[])
+
+    class Response:
+        status = 200
+
+        def __init__(self, reply):
+            self.reply = reply
+
+        def getheader(self, _name):
+            return None
+
+        def read(self, _limit):
+            if self.reply.get("stage") == "body":
+                raise self.reply["error"]
+            return b"{}"
+
+    class Connection:
+        def __init__(self, _hostname, _port, *, timeout):
+            state.timeouts.append(timeout)
+            self.reply = state.replies.pop(0)
+
+        def request(self, method, path, *, headers):
+            state.requests.append((method, path, headers))
+            if self.reply.get("stage") == "request":
+                raise self.reply["error"]
+
+        def getresponse(self):
+            state.now += self.reply.get("elapsed", 0)
+            if self.reply.get("stage") == "headers":
+                raise self.reply["error"]
+            return Response(self.reply)
+
+        def close(self):
+            state.closed.append(True)
+
+    monkeypatch.setattr(http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(run_api.time, "monotonic", lambda: state.now)
+    return state
+
+
+@pytest.mark.parametrize(
+    "error_type,category",
+    [
+        (http.client.RemoteDisconnected, "remote_disconnected"),
+        (ConnectionResetError, "connection_reset"),
+    ],
+)
+def test_read_observer_recovers_one_pre_status_disconnect_with_remaining_budget(
+    scripted_http, error_type, category
+):
+    scripted_http.replies = [
+        {"stage": "headers", "error": error_type("private header"), "elapsed": 2.5},
+        {},
+    ]
+    transport = run_api.ApplicationHttp("http://app", retry_read_disconnects=True)
+    assert transport("/private", method="GET", headers={"Authorization": "private"}) == (200, b"{}")
+    assert scripted_http.timeouts == [10, 7.5]
+    assert scripted_http.requests == [("GET", "/private", {"Authorization": "private"})] * 2
+    assert scripted_http.closed == [True, True]
+    assert transport.requests == 2
+    assert transport.transport_recoveries[category] == 1
+    assert sum(transport.transport_recoveries.values()) == 1
+
+
+def test_read_observer_stops_after_two_disconnects(scripted_http):
+    scripted_http.replies = [
+        {"stage": "headers", "error": http.client.RemoteDisconnected("private")} for _ in range(2)
+    ]
+    transport = run_api.ApplicationHttp("http://app", retry_read_disconnects=True)
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        transport("/private", method="GET")
+    assert caught.value.diagnostic() == {
+        "code": "response_headers_failed",
+        "status": None,
+        "transport_failure": "remote_disconnected",
+    }
+    assert caught.value.__context__ is None
+    assert "private" not in str(caught.value)
+    assert transport.requests == 2
+    assert scripted_http.closed == [True, True]
+    assert sum(transport.transport_recoveries.values()) == 0
+
+
+@pytest.mark.parametrize(
+    "method,enabled,stage,error_type,category",
+    [
+        ("GET", False, "headers", http.client.RemoteDisconnected, "remote_disconnected"),
+        ("POST", True, "headers", http.client.RemoteDisconnected, "remote_disconnected"),
+        ("DELETE", True, "headers", ConnectionResetError, "connection_reset"),
+        ("GET", True, "request", ConnectionResetError, "connection_reset"),
+        ("GET", True, "headers", TimeoutError, "timeout"),
+        ("GET", True, "headers", http.client.BadStatusLine, "http_protocol_error"),
+        ("GET", True, "headers", OSError, "os_error"),
+        ("GET", True, "headers", ValueError, "invalid_value"),
+        ("GET", True, "body", http.client.RemoteDisconnected, "remote_disconnected"),
+        ("GET", True, "body", ConnectionResetError, "connection_reset"),
+    ],
+)
+def test_read_retry_policy_does_not_retry_other_failures(
+    scripted_http, method, enabled, stage, error_type, category
+):
+    scripted_http.replies = [{"stage": stage, "error": error_type("private dependency text")}]
+    transport = run_api.ApplicationHttp("http://app", retry_read_disconnects=enabled)
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        transport("/private", method=method)
+    assert caught.value.diagnostic()["transport_failure"] == category
+    assert caught.value.__context__ is None
+    assert "private" not in str(caught.value)
+    assert transport.requests == 1
+    assert scripted_http.closed == [True]
+    assert sum(transport.transport_recoveries.values()) == 0
+
+
+def test_read_retry_window_cannot_restart_after_budget_expires(scripted_http):
+    scripted_http.replies = [
+        {"stage": "headers", "error": http.client.RemoteDisconnected("private"), "elapsed": 10}
+    ]
+    transport = run_api.ApplicationHttp("http://app", retry_read_disconnects=True)
+    with pytest.raises(run_api.ApplicationHttpError):
+        transport("/private", method="GET")
+    assert transport.requests == 1
+    assert sum(transport.transport_recoveries.values()) == 0
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_read_observer_rejects_late_success(scripted_http, retry):
+    scripted_http.replies = (
+        [{"stage": "headers", "error": ConnectionResetError("private"), "elapsed": 1}]
+        if retry
+        else []
+    ) + [{"elapsed": 10}]
+    transport = run_api.ApplicationHttp("http://app", retry_read_disconnects=True)
+    with pytest.raises(run_api.ApplicationHttpError) as caught:
+        transport("/private", method="GET")
+    assert caught.value.diagnostic() == {
+        "code": "body_read_failed",
+        "status": 200,
+        "transport_failure": "timeout",
+    }
+    assert transport.requests == 1 + retry
+    assert sum(transport.transport_recoveries.values()) == 0
+
+
+@pytest.mark.parametrize("policy", [1, None, "true"])
+def test_read_retry_policy_requires_explicit_boolean(policy):
+    with pytest.raises(ValueError, match="policy must be boolean"):
+        run_api.ApplicationHttp("http://app", retry_read_disconnects=policy)
 
 
 @pytest.mark.parametrize("status", [True, 99, 600, "private", None])

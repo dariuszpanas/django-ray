@@ -421,7 +421,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("Default qualification forbids the retired pilot override")
         if get_settings()["WORKFLOW_PROGRESS_REPORTING_POLICY"] != "full":
             raise ValueError("Default qualification requires package-default full reporting")
-        request = ApplicationHttp(args.base_url)
+        request = ApplicationHttp(args.base_url, retry_read_disconnects=True)
+        receipt["http_transport_recoveries"] = request.transport_recoveries
         observations = {}
         for case in workflow_cases():
             receipt["failed_stage"] = case.name

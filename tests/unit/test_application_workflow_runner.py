@@ -23,7 +23,9 @@ def fixture_runner(monkeypatch, tmp_path):
         "django_ray.conf.settings.get_settings",
         lambda: {"WORKFLOW_PROGRESS_REPORTING_POLICY": "full"},
     )
-    monkeypatch.setattr(runner, "ApplicationHttp", Mock())
+    transport = Mock()
+    transport.return_value.transport_recoveries = {"remote_disconnected": 0, "connection_reset": 0}
+    monkeypatch.setattr(runner, "ApplicationHttp", transport)
     monkeypatch.setattr(runner, "read_token", lambda _path: "fixture-token")
     execute = Mock(return_value=[{"state": "observed"}])
     monkeypatch.setattr(runner, "execute_case", execute)
@@ -42,22 +44,57 @@ def test_success_records_all_serial_cases_without_claiming_complete_gate(fixture
     assert value["complete_workflow_gate"] is False
     assert value["publisher"] == "default_terminal"
     assert value["collector_pressure"] == {"actors_removed": True}
+    assert value["http_transport_recoveries"] == {
+        "remote_disconnected": 0,
+        "connection_reset": 0,
+    }
+    runner.ApplicationHttp.assert_called_once_with(
+        "http://django-web:8000", retry_read_disconnects=True
+    )
     assert [call.kwargs["case"] for call in execute.call_args_list] == list(runner.workflow_cases())
 
 
+def test_recovered_transport_failures_remain_in_passing_receipt(fixture_runner, capsys):
+    args, receipt, execute = fixture_runner
+
+    def observe(request, **_kwargs):
+        request.transport_recoveries["remote_disconnected"] += 1
+        return [{"state": "observed"}]
+
+    execute.side_effect = observe
+    assert runner.main(args) == 0
+    value = json.loads(receipt.read_text())
+    assert value == json.loads(capsys.readouterr().out)
+    assert value["http_transport_recoveries"] == {
+        "remote_disconnected": len(runner.workflow_cases()),
+        "connection_reset": 0,
+    }
+
+
 def test_transport_failure_receipt_omits_private_exception(fixture_runner, capsys):
-    from qualification.application.run_api import ApplicationHttpError, HttpFailureCode
+    from qualification.application.run_api import (
+        ApplicationHttpError,
+        HttpFailureCode,
+        HttpTransportFailure,
+    )
 
     args, receipt, execute = fixture_runner
     execute.side_effect = ApplicationHttpError(
-        "private header cookie token and body", code=HttpFailureCode.RESPONSE_HEADERS, status=None
+        "private header cookie token and body",
+        code=HttpFailureCode.RESPONSE_HEADERS,
+        status=None,
+        transport_failure=HttpTransportFailure.DISCONNECTED,
     )
     assert runner.main(args) == 1
     assert execute.call_count == 1
     assert not receipt.exists()
     output = capsys.readouterr().out
     assert "private" not in output
-    assert json.loads(output)["http_failure"] == {"code": "response_headers_failed", "status": None}
+    assert json.loads(output)["http_failure"] == {
+        "code": "response_headers_failed",
+        "status": None,
+        "transport_failure": "remote_disconnected",
+    }
 
 
 @pytest.mark.parametrize("failure_index", range(len(runner.workflow_cases())))
