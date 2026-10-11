@@ -649,6 +649,19 @@ def test_child_command_round_trips_request() -> None:
     assert probe._decode_child_payload(command[4]) == request
 
 
+@pytest.mark.parametrize("remainder", [1, 2])
+def test_child_payload_requires_base64_padding(remainder: int) -> None:
+    request = _request()
+    payload = json.dumps(request.asdict()).encode("ascii")
+    payload += b" " * ((remainder - len(payload)) % 3)
+    encoded = probe.base64.urlsafe_b64encode(payload).decode("ascii")
+
+    assert encoded.endswith("=")
+    assert probe._decode_child_payload(encoded) == request
+    with pytest.raises(ValueError, match="Invalid Compiled Graph probe child payload"):
+        probe._decode_child_payload(encoded.rstrip("="))
+
+
 def test_private_control_record_round_trips_and_helpers_handle_bytes(tmp_path: Path) -> None:
     record_path = tmp_path / "record.json"
 

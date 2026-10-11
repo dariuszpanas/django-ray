@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a blocking Python 3.15 preparation job that builds distributions, compiles
+  source, and runs selected tests against an installed wheel without Ray. Full
+  runtime support remains Python 3.12–3.14 until upstream Ray wheels and complete
+  runtime qualification are available.
+
+### Fixed
+
+- Preserve required Base64 padding for Compiled Graph diagnostic child payloads
+  across Python 3.15's changed URL-safe decoder default.
+- Import Admin URL quoting helpers directly from the standard library so Django
+  startup does not depend on Django's incidental re-exports.
+- Include shared SQLite readiness contracts in monthly coverage collection while
+  keeping PostgreSQL-only and Ray tests in their separate phases.
+
 ### Security
 
 - Require patched `multidict>=6.9.1`, `urllib3>=2.8.0`, and

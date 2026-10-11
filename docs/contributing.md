@@ -35,7 +35,7 @@ compatible.
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.12, 3.13, or 3.14 for the complete development environment
 - [uv](https://github.com/astral-sh/uv) package manager
 - Git
 
@@ -260,6 +260,38 @@ Windows compatibility is hosted-only and advisory: the separate GitHub Actions W
 Python 3.12 package imports, distribution builds, and dependency advisories under a ten-minute limit.
 It starts no Ray runtime and does not block `CI Gate` or release certification. Linux is the supported
 execution target; Windows/macOS remain useful hosts for editing and explicitly admitted Linux workloads.
+
+### Python 3.15 compatibility check
+
+The blocking Linux job **Python 3.15 Compatibility (without Ray Core)** checks
+preparation for the released interpreter while upstream Ray Core wheels remain
+unavailable. It deliberately uses a clean environment and an installed wheel;
+ordinary `uv sync --python 3.15` cannot provide a usable Ray runtime yet.
+
+To reproduce it in an admitted bounded Linux environment, use a fresh output
+directory and environment:
+
+```bash
+uv python install 3.15
+uv build --python 3.15 --out-dir tmp/python315-dist
+uv venv --python 3.15 tmp/python315-venv
+PY315=tmp/python315-venv/bin/python
+"$PY315" scripts/check_python315_compatibility.py --write-requirements tmp/python315-requirements.txt
+uv pip install --python "$PY315" --requirement tmp/python315-requirements.txt
+uv pip install --python "$PY315" --no-deps tmp/python315-dist/*.whl
+"$PY315" scripts/check_python315_compatibility.py --dist-dir tmp/python315-dist
+```
+
+The requirements reuse the project's non-Ray runtime floors and selected test
+dependencies. The runner compiles source, verifies both distribution metadata and
+installed source bytes, and enforces Ray's absence throughout the selected tests.
+It fails on skipped/expected-failure cases and deprecation warnings. Rebuild and
+reinstall the wheel after source changes. A focused `--smoke` selection is available
+on contributor hosts; on Windows use `tmp/python315-venv/Scripts/python.exe`.
+The complete selection remains Linux-only. Neither result is distributed-runtime
+or release qualification; see the [promotion criteria](compatibility.md#python-315-preparation).
+
+### Runtime dependency audits
 
 On Linux, `uv run make ci` runs the required format, lint, type, runtime-dependency advisory,
 coverage, strict-documentation, and package-build checks for the current interpreter.

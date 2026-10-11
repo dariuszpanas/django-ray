@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime
 from types import MethodType
 from typing import Any, cast
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from django.apps import apps
 from django.contrib import admin, messages
@@ -44,7 +44,6 @@ from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.formats import date_format
 from django.utils.html import format_html
-from django.utils.http import quote, unquote
 from django.utils.text import Truncator
 
 from django_ray.conf.settings import get_settings
