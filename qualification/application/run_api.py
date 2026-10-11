@@ -32,18 +32,44 @@ class HttpFailureCode(StrEnum):
     BODY_LIMIT = "body_limit_exceeded"
 
 
+class HttpTransportFailure(StrEnum):
+    """Fixed dependency failure categories without exception text or arguments."""
+
+    DISCONNECTED = "remote_disconnected"
+    RESET = "connection_reset"
+    TIMEOUT = "timeout"
+    PROTOCOL = "http_protocol_error"
+    OS = "os_error"
+    VALUE = "invalid_value"
+
+
 class ApplicationHttpError(ValueError):
     """An HTTP assertion failure with bounded, secret-free receipt fields."""
 
-    def __init__(self, message: str, *, code: HttpFailureCode, status: int | None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: HttpFailureCode,
+        status: int | None,
+        transport_failure: HttpTransportFailure | None = None,
+    ) -> None:
         super().__init__(message)
         if not isinstance(code, HttpFailureCode):
             raise ValueError("Invalid HTTP failure category")
+        if transport_failure is not None and not isinstance(
+            transport_failure, HttpTransportFailure
+        ):
+            raise ValueError("Invalid HTTP transport failure category")
         self.code = code
         self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.transport_failure = transport_failure
 
     def diagnostic(self) -> dict[str, str | int | None]:
-        return {"code": self.code.value, "status": self.status}
+        result: dict[str, str | int | None] = {"code": self.code.value, "status": self.status}
+        if self.transport_failure is not None:
+            result["transport_failure"] = self.transport_failure.value
+        return result
 
 
 class ApplicationHttp:
@@ -53,7 +79,13 @@ class ApplicationHttp:
     bound individual blocking operations, not a whole slow-streaming response.
     """
 
-    def __init__(self, base_url: str, *, request_timeout: float = 10) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        request_timeout: float = 10,
+        retry_read_disconnects: bool = False,
+    ) -> None:
         parsed = urlsplit(base_url)
         if (
             not base_url.isascii()
@@ -72,12 +104,19 @@ class ApplicationHttp:
             raise ValueError("The application URL must be one HTTP(S) origin")
         if not math.isfinite(request_timeout) or not 0 < request_timeout <= 10:
             raise ValueError("The request timeout must be positive and at most 10 seconds")
+        if type(retry_read_disconnects) is not bool:
+            raise ValueError("The read retry policy must be boolean")
         self.hostname = parsed.hostname
         self.port = parsed.port
         self.secure = parsed.scheme == "https"
         self.request_timeout = request_timeout
+        self.retry_read_disconnects = retry_read_disconnects
         self.requests = 0
         self.last_http_status: int | None = None
+        self.transport_recoveries = {
+            HttpTransportFailure.DISCONNECTED.value: 0,
+            HttpTransportFailure.RESET.value: 0,
+        }
 
     def __call__(
         self,
@@ -106,13 +145,74 @@ class ApplicationHttp:
             raise ValueError("Unsupported application assertion method")
         if type(response_limit) is not int or not 0 < response_limit <= MAX_EXPLICIT_RESPONSE_BYTES:
             raise ValueError("The application response limit is invalid")
+        retry_enabled = self.retry_read_disconnects and method == "GET"
+        deadline = time.monotonic() + self.request_timeout
+        recovered = None
+        for attempt in range(2):
+            timeout = deadline - time.monotonic() if retry_enabled else self.request_timeout
+            if timeout <= 0:
+                raise ApplicationHttpError(
+                    "Application HTTP read retry window expired",
+                    code=HttpFailureCode.REQUEST,
+                    status=None,
+                    transport_failure=HttpTransportFailure.TIMEOUT,
+                )
+            try:
+                result = self._request_once(
+                    path,
+                    method=method,
+                    headers=headers,
+                    response_limit=response_limit,
+                    required_response_headers=required_response_headers,
+                    required_cache_directives=required_cache_directives,
+                    required_media_types=required_media_types,
+                    timeout=timeout,
+                )
+            except ApplicationHttpError as error:
+                if (
+                    retry_enabled
+                    and attempt == 0
+                    and error.code == HttpFailureCode.RESPONSE_HEADERS
+                    and error.status is None
+                    and error.transport_failure
+                    in {HttpTransportFailure.DISCONNECTED, HttpTransportFailure.RESET}
+                    and time.monotonic() < deadline
+                ):
+                    recovered = error.transport_failure
+                    continue
+                raise
+            if retry_enabled and time.monotonic() >= deadline:
+                raise ApplicationHttpError(
+                    "Application HTTP read retry window expired",
+                    code=HttpFailureCode.BODY_READ,
+                    status=self.last_http_status,
+                    transport_failure=HttpTransportFailure.TIMEOUT,
+                )
+            if recovered is not None:
+                self.transport_recoveries[recovered.value] += 1
+            return result
+        raise AssertionError("HTTP read retry exhausted without a result")
+
+    def _request_once(
+        self,
+        path: str,
+        *,
+        method: str,
+        headers: dict[str, str] | None,
+        response_limit: int,
+        required_response_headers: dict[str, str] | None,
+        required_cache_directives: frozenset[str],
+        required_media_types: frozenset[str],
+        timeout: float,
+    ) -> tuple[int, bytes]:
         connection_type = http.client.HTTPSConnection if self.secure else http.client.HTTPConnection
-        connection = connection_type(self.hostname, self.port, timeout=self.request_timeout)
+        connection = connection_type(self.hostname, self.port, timeout=timeout)
         self.requests += 1
         self.last_http_status = None
         result: tuple[int, bytes] | None = None
         failure = "Application HTTP request failed"
         failure_code = HttpFailureCode.REQUEST
+        transport_failure = None
         try:
             connection.request(method, path, headers=headers or {})
             failure_code = HttpFailureCode.RESPONSE_HEADERS
@@ -144,13 +244,29 @@ class ApplicationHttp:
                     failure_code = HttpFailureCode.BODY_LIMIT
                 else:
                     result = response.status, body
-        except (OSError, http.client.HTTPException, ValueError):
+        except (OSError, http.client.HTTPException, ValueError) as error:
             # Dependency errors may retain request headers or private responses.
-            pass
+            if type(error) is http.client.RemoteDisconnected:
+                transport_failure = HttpTransportFailure.DISCONNECTED
+            elif type(error) is ConnectionResetError:
+                transport_failure = HttpTransportFailure.RESET
+            elif isinstance(error, TimeoutError):
+                transport_failure = HttpTransportFailure.TIMEOUT
+            elif isinstance(error, http.client.HTTPException):
+                transport_failure = HttpTransportFailure.PROTOCOL
+            elif isinstance(error, OSError):
+                transport_failure = HttpTransportFailure.OS
+            else:
+                transport_failure = HttpTransportFailure.VALUE
         finally:
             connection.close()
         if result is None:
-            raise ApplicationHttpError(failure, code=failure_code, status=self.last_http_status)
+            raise ApplicationHttpError(
+                failure,
+                code=failure_code,
+                status=self.last_http_status,
+                transport_failure=transport_failure,
+            )
         return result
 
 

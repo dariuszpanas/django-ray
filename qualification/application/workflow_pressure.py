@@ -162,7 +162,7 @@ def verify_deployed_pressure() -> dict:
     if os.environ.get("DJANGO_SETTINGS_MODULE") != "testproject.settings_qualification":
         raise ValueError("Pressure fixture requires disposable qualification settings")
     import ray
-    from ray.exceptions import RayActorError
+    from ray.exceptions import ActorDiedError
 
     from django_ray.runtime.remote import WorkflowProgressActor
 
@@ -210,12 +210,18 @@ def verify_deployed_pressure() -> dict:
                     )
                 finally:
                     ray.kill(actor, no_restart=True)
-                    try:
-                        get(actor.snapshot.remote())
-                    except RayActorError:
-                        pass
+                    # Kill submits an asynchronous request; queued snapshots may
+                    # still complete before termination reaches the actor.
+                    while time.monotonic() < deadline:
+                        try:
+                            get(actor.snapshot.remote())
+                        except ActorDiedError:
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining > 0:
+                            time.sleep(min(0.1, remaining))
                     else:
-                        raise ValueError("Pressure fixture actor remained available after cleanup")
+                        raise ValueError("Pressure fixture actor remained available at deadline")
         return {"scope": "collector_and_preparation", "cases": observations, "actors_removed": True}
     finally:
         ray.shutdown()
