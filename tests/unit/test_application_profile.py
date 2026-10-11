@@ -207,6 +207,24 @@ def test_ray_profile_controls_both_identical_generations_and_receipt_environment
         assert {"configMapRef": {"name": "application-config"}} in container["envFrom"]
 
 
+@pytest.mark.parametrize("profile", ["standard", "constrained-ray"])
+def test_owned_web_fixture_disables_only_request_count_recycling(profile):
+    inventory = resources(profile)
+    config = inventory["ConfigMap", "application-config"]["data"]
+    assert {key: value for key, value in config.items() if key.startswith("GUNICORN_")} == {
+        "GUNICORN_WORKERS": "1",
+        "GUNICORN_THREADS": "2",
+        "GUNICORN_MAX_REQUESTS": "0",
+        "GUNICORN_MAX_REQUESTS_JITTER": "0",
+        "GUNICORN_WORKER_TMP_DIR": "/tmp",
+        "GUNICORN_ACCESS_LOGFILE": "off",
+    }
+    web = inventory["Deployment", "django-web"]["spec"]["template"]["spec"]["containers"][0]
+    assert web["args"] == ["web"]
+    assert {"configMapRef": {"name": "application-config"}} in web["envFrom"]
+    assert not any(item["name"].startswith("GUNICORN_") for item in web["env"])
+
+
 def test_hosted_profile_rejection_precedes_build_and_reaches_the_runner():
     workflow = yaml.load(
         (ROOT / ".github/workflows/application-qualification.yml").read_text(),
