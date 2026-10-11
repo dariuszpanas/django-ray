@@ -141,6 +141,39 @@ def test_normal_nonzero_exit_does_not_run_group_cleanup(monkeypatch):
     stop.assert_not_called()
 
 
+def test_local_child_observes_current_budget_without_changing_parent_context(monkeypatch, tmp_path):
+    from qualification.application.http_context import OUTER_DEADLINE_ENV
+
+    monkeypatch.setenv(OUTER_DEADLINE_ENV, "invalid-parent-context")
+    destination = tmp_path / "observation.json"
+    script = """
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from qualification.application.http_context import local_outer_deadline, remaining_seconds
+value = remaining_seconds(local_outer_deadline(), time.monotonic())
+Path(sys.argv[2]).write_text(json.dumps(value))
+"""
+    assert (
+        runner.run_command(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                script,
+                str(Path(__file__).resolve().parents[2]),
+                str(destination),
+            ],
+            30,
+        )
+        == 0
+    )
+    remaining = json.loads(destination.read_text())
+    assert 0 < remaining <= 30
+    assert os.environ[OUTER_DEADLINE_ENV] == "invalid-parent-context"
+
+
 @pytest.mark.parametrize("phase", ["first", "existing"])
 def test_timeout_stops_later_commands_and_never_emits_success(monkeypatch, capsys, phase):
     calls = []
@@ -187,13 +220,16 @@ def test_timeout_escalates_owned_group_even_when_leader_exits_on_term(monkeypatc
     monkeypatch.setattr(
         runner,
         "os",
-        SimpleNamespace(name="posix", killpg=lambda pid, sig: events.append((pid, sig))),
+        SimpleNamespace(
+            name="posix", environ={}, killpg=lambda pid, sig: events.append((pid, sig))
+        ),
     )
     monkeypatch.setattr(runner, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
     monkeypatch.setattr(runner.time, "sleep", lambda seconds: events.append(("grace", seconds)))
     with pytest.raises(subprocess.TimeoutExpired):
         runner.run_command(["child"], 1)
-    assert popen.call_args.kwargs == {"start_new_session": True}
+    assert popen.call_args.kwargs["start_new_session"] is True
+    assert set(popen.call_args.kwargs["env"]) == {runner.OUTER_DEADLINE_ENV}
     assert events == [(123, 15), ("grace", 2), (123, 9)]
     assert process.wait.call_args.kwargs == {"timeout": 2}
 

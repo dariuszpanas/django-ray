@@ -291,6 +291,31 @@ counts, and transport failures expose a fixed `transport_failure` category witho
 dependency exception text. A hosted pre-status failure coincided with Gunicorn worker
 recycling; the retained evidence did not establish which transport exception occurred.
 
+Typed HTTP failures also retain a fixed `observer` (API, core, first-workflow,
+workflow, or nested Admin) and `request_substage` (task status, workflow summary or
+collection, Admin graph or page, or other). These labels never contain paths, query
+strings, task identities, credentials, response bodies or dependency exception text.
+The receipt preserves the existing phase, status and transport category, and adds the
+method, attempt number, configured socket timeout, actual attempt socket timeout,
+effective retry policy and remaining retry window. Socket waits are per blocking
+operation; these fields do not claim a hard whole-request deadline.
+
+The generation runner passes its existing monotonic deadline only to its local child
+process, which shares that clock. It is never sent between hosts, Pods or Ray nodes.
+Failures observe the remaining outer budget when raised; absent, malformed or
+out-of-range context produces `null`. Nested Admin reads additionally report their
+own observer deadline and retain their separate at-most-five-second socket timeout
+with no retry. Their failures propagate through the workflow and first-workflow
+receipts; the main client's recovery counters do not describe nested Admin reads.
+All timing observations are finite, nonnegative and at most 600 seconds. They do not
+change timeout enforcement, retry eligibility or receipt/log byte limits.
+
+The repeated header timeouts tracked in [#613](https://github.com/dariuszpanas/django-ray/issues/613)
+occurred near graceful web-worker recycling, but the historical receipts lack the
+caller and effective deadline needed to establish a cause. Passing an unchanged-source
+repeat does not repair that intermittent failure. Deterministic transport regressions
+verify attribution; source-matched Linux application qualification checks integration.
+
 The runner retrieves at most 64 KiB from each exact setup/assertion container's log. It requires
 zero successful-container restarts, exit zero, the requested immutable image with its manifest
 digest in the observed container image ID, and every expected

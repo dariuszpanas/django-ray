@@ -17,6 +17,7 @@ from qualification.application.api import (
     validate_task_status_payload,
     verify_application_api,
 )
+from qualification.application.http_context import HttpObserver
 from qualification.application.run_api import ApplicationHttp, ApplicationHttpError, read_token
 
 
@@ -239,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         import django
 
         django.setup()
-        request = ApplicationHttp(args.base_url)
+        request = ApplicationHttp(args.base_url, observer=HttpObserver.CORE)
         receipt["failed_stage"] = "application_api"
         api = verify_application_api(
             request,
