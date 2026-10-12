@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The separate phase allows 135 seconds for sequential observation and reserves
   45 seconds for cleanup, retaining fixed failure diagnostics. An ML queue
   observation does not qualify an ML framework.
+- Require all twelve anonymous-denial, invalid-credential-denial and authorized
+  Ray Dashboard, Jobs, Client and GCS observations in monitoring qualification.
+  Use the owned authenticated head and retain only fixed facts. Authentication
+  does not establish target compatibility or execution claim authority.
 
 ### Changed
 
