@@ -750,7 +750,8 @@ test: add unit tests for retry logic
 - [ ] Exact-head hosted `CI Gate` passes before merge
 - [ ] Packaging builds when packaging or release metadata changed (`uv build`)
 - [ ] Documentation updated (if needed)
-- [ ] Changelog updated (for user-facing changes)
+- [ ] User-facing changes update `Unreleased` in the same PR, including compatibility
+      boundaries and material limitations; release preparation dates and groups those entries
 - [ ] Each material retained commit has a descriptive body and exact `Validation:` trailer
 - [ ] Exact aggregate validation commands and results included in the PR description
 - [ ] Concise semantic Local KubeRay gate summary recorded when its trigger matrix is required, or

@@ -13,14 +13,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source, and runs selected tests against an installed wheel without Ray. Full
   runtime support remains Python 3.12–3.14 until upstream Ray wheels and complete
   runtime qualification are available.
+- Add bounded Linux read-only diagnosis through `django_ray_doctor` and
+  `python -m django_ray.doctor`. Reports observe scalar configuration, migration,
+  protocol, lease, work and registered-cleanup state without hydrating task
+  callables or payloads. Remote readiness, capacity, artifact availability and
+  orphan inventory remain unavailable, so an otherwise clear report returns
+  incomplete exit status 2. This does not authorize maintenance; trusted settings
+  imports are not sandboxed.
+- Extend the owned application qualification with two invalid encrypted
+  RuntimeEnv cases per Ray generation: changed ciphertext and an unavailable
+  key. Require manager refusal before dispatch, no retained submission or result
+  identity, and retry HTTP 409 preserving execution and attempt fields. These
+  selected refusal cases do not certify the complete deployment catalogue.
+- Add direct Jobs qualification before and after cold Ray replacement. Require
+  exact request carrier/registry binding, one effect across manager replacement,
+  and missing-request refusal before setup or callable execution without retry.
+- Add controlled Core and Jobs cancellation qualification with actual progress,
+  a completed no-cancel control, and independent callable or original-driver
+  exit observations. Accepted cancellation and durable state remain distinct
+  from observed stopping; arbitrary descendants and external effects are outside
+  this proof. Cancellation policy is unchanged ([#626](https://github.com/dariuszpanas/django-ray/pull/626)).
+- Add ordinary-result presentation checks for seeded current and archived Admin
+  rows and the current API: escaped server HTML, sensitive-value redaction,
+  anonymous denial and raw-row preservation. These checks do not establish
+  browser execution or task-produced-result behavior.
+- Add bounded monitoring recovery qualification with real Prometheus targets,
+  Grafana access checks, dashboard reimport after Grafana replacement, and one
+  rendered legacy Ray panel bound to its CPU query. Require exact source/image
+  correspondence and owned cleanup; cold Ray and the broader release matrix
+  remain separate ([#627](https://github.com/dariuszpanas/django-ray/pull/627)).
+
+### Changed
+
+- **Stored-reference compatibility change:** New Ray Job request references use
+  the `rq2ref:v1:` discriminator within the existing 500-byte limit. Current
+  readers and authorized cleanup preserve canonical historical references;
+  current attachment refuses native registry aliases, and cleanup retains
+  ambiguous aliases. Stop old writers and cleanup during upgrade. After new
+  wrapped references are stored, rollback to 0.6.0 requires an independently
+  restored pre-upgrade database and matching artifacts, with later writes
+  reconciled. Removing the prefix is not a supported rollback path. Execution
+  protocol 1 remains unchanged.
+- Refresh eleven locked dependencies and update generator annotations for the
+  current type checker. The supported Linux runtime remains Python 3.12–3.14
+  with Ray 2.58 or later.
+- Explain scoped exceptions for required OpenTelemetry prerelease dependencies
+  when an installation project enforces a stable-only resolver policy. Ordinary
+  installation with the default policy is unchanged.
+- **Breaking deployment boundary:** Update the bundled monitoring images to
+  Prometheus 3.13.4 LTS and Grafana 12.4.12. Prometheus 3 data cannot be read by
+  the formerly bundled 2.48 image. Persistent deployments need compatible
+  backups and the upstream upgrade procedures; the sample remains ephemeral.
+  Back up Grafana configuration, plugins and its database separately; the sample
+  does not qualify persistent monitoring-data migrations. No Django database or
+  execution-protocol migration is introduced.
+- Add `python /scripts/import_dashboards.py --once` to restore generated Ray
+  dashboards after ephemeral Grafana replacement. The command confirms every
+  generated dashboard UID and returns nonzero on a failed import, while the
+  default sidecar keeps its existing lifetime. Imports overwrite generated
+  dashboards; bounded reads and retries do not imply a hard wall-time deadline.
 
 ### Fixed
 
+- Keep strict Ray Job request-refusal diagnostics from importing application
+  settings through configurable redaction. Fixed refusal output and exit 78 are
+  preserved; ordinary execution retains configured redaction
+  ([#628](https://github.com/dariuszpanas/django-ray/issues/628)).
 - **Breaking CLI change:** Bound `django_ray_purge_inputs` to finite registry,
   attachment, and output budgets. The default now stops after 100 candidates
   and returns status 2 when continuation or incomplete attachment evidence
   remains. Update scheduled cleanup to retain every page's JSON outcome and
-  follow the opaque cursor with the same explicit deletion mode; repeating the
+  follow the opaque cursor with the same explicit deletion mode. Pass it as
+  `--cursor=TOKEN` so a token beginning with `-` remains a value. Repeating the
   original command can revisit retained leading rows. A fresh pass revisits
   unresolved candidates and concurrent earlier-key inserts. Oversized histories
   remain retained, dry-run remains the default, and no hard I/O deadline is
@@ -32,6 +96,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup does not depend on Django's incidental re-exports.
 - Include shared SQLite readiness contracts in monthly coverage collection while
   keeping PostgreSQL-only and Ray tests in their separate phases.
+- Retain fixed HTTP caller, substage, deadline and retry categories in failed
+  qualification receipts without exposing paths, identifiers or raw exceptions.
+  A bounded locked-Gunicorn experiment separately demonstrates a single-worker
+  recycling gap and its no-recycle control. The owned acceptance fixture disables
+  spontaneous request-count recycling while keeping its declared lifecycle
+  faults. Production defaults, timeouts and retry policy remain unchanged; this
+  does not establish the cause of earlier timeout samples.
+- Bound acceptance-fixture actor cleanup and tolerate disappearing process entries
+  while observing exit. Retry one workflow HTTP GET after a confirmed disconnect
+  or reset before any response status, within the original request budget;
+  timeout and write failures remain strict. These are qualification controls,
+  not changes to production retry or cancellation policy.
+
+### Known limitations
+
+- Ray Client startup and native shutdown investigations remain separate from
+  these fixes. A passing retry or pytest result does not establish a native
+  crash repair; final-candidate review includes observed process exits and
+  cleanup. See [compatibility](compatibility.md) and the
+  [shutdown investigation](https://github.com/dariuszpanas/django-ray/issues/557).
+- The release remains Beta and requires the standard acceptance profile.
+  Standard-profile proof does not certify the constrained diagnostic envelope
+  or establish the cause of its earlier readiness failure
+  ([#608](https://github.com/dariuszpanas/django-ray/issues/608)). The
+  [1.0 readiness decision](one-zero-readiness.md) remains separate.
 
 ### Security
 
