@@ -11,9 +11,87 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+TRANSIENT_HTTP = frozenset({408, 429, 502, 503, 504})
+MAX_METADATA_RETRIES = 3
+DEADLINE_ERROR = "No passing exact-source CI attempt within the checkpoint deadline"
+
 
 class CheckpointError(RuntimeError):
     """A fixed, secret-free qualification prerequisite failure."""
+
+
+class MetadataReadError(CheckpointError):
+    """An allowlisted transport category, never captured command output."""
+
+    def __init__(self, category: str, status: int | None = None):
+        if category not in {
+            "timeout",
+            "http_transient",
+            "http_permission",
+            "http_rejected",
+            "command",
+            "malformed_response",
+            "malformed_contract",
+        } or (status is not None and status not in TRANSIENT_HTTP):
+            raise ValueError("Invalid metadata failure category")
+        self.category = category
+        self.status = status
+        self.retryable = category in {"timeout", "http_transient"}
+        super().__init__(f"Unable to read CI checkpoint metadata ({category})")
+
+
+def read_metadata(endpoint: str, *, timeout: float) -> dict[str, Any]:
+    """Classify the real HTTP status without rendering headers, bodies or stderr."""
+    if timeout <= 0:
+        raise CheckpointError(DEADLINE_ERROR)
+    try:
+        result = subprocess.run(
+            ["gh", "api", "--include", "--method", "GET", endpoint],
+            capture_output=True,
+            check=False,
+            timeout=min(20, timeout),
+        )
+    except subprocess.TimeoutExpired:
+        raise MetadataReadError("timeout") from None
+    except (subprocess.SubprocessError, OSError):
+        raise MetadataReadError("command") from None
+
+    raw = result.stdout
+    boundary = re.search(rb"\r?\n\r?\n", raw[:65540])
+    if boundary is None:
+        raise MetadataReadError("command" if result.returncode else "malformed_response")
+    header, body = raw[: boundary.start()], raw[boundary.end() :]
+    first = header.splitlines()[0] if header else b""
+    match = re.fullmatch(rb"HTTP/[123](?:\.[01])? ([1-5][0-9]{2})(?: [^\r\n]*)?", first)
+    if len(header) > 65536 or len(first) > 256 or match is None:
+        raise MetadataReadError("command" if result.returncode else "malformed_response")
+    status = int(match[1])
+    if status in TRANSIENT_HTTP:
+        raise MetadataReadError("http_transient", status)
+    if status in {401, 403}:
+        raise MetadataReadError("http_permission")
+    if status != 200:
+        raise MetadataReadError("http_rejected")
+    if result.returncode:
+        raise MetadataReadError("command")
+    try:
+        value = json.loads(body)
+    except ValueError:
+        raise MetadataReadError("malformed_response") from None
+    if not isinstance(value, dict):
+        raise MetadataReadError("malformed_contract")
+    return value
+
+
+def inventory(payload: dict[str, Any], field: str) -> list[dict[str, Any]]:
+    count, rows = payload.get("total_count"), payload.get(field)
+    if type(count) is not int or count < 0 or not isinstance(rows, list):
+        raise MetadataReadError("malformed_contract")
+    if count > 100:
+        raise CheckpointError("CI inventory exceeds the bounded checkpoint window")
+    if len(rows) != count or any(not isinstance(row, dict) for row in rows):
+        raise MetadataReadError("malformed_contract")
+    return rows
 
 
 @dataclass(frozen=True)
@@ -23,11 +101,23 @@ class Checkpoint:
 
 
 def latest_run(payload: dict[str, Any], sha: str) -> dict[str, Any] | None:
-    if payload.get("total_count", 0) > 100:
-        raise CheckpointError("CI run inventory exceeds the bounded checkpoint window")
+    rows = inventory(payload, "workflow_runs")
+    for row in rows:
+        if (
+            any(
+                type(row.get(key)) is not int or row[key] <= 0
+                for key in ("id", "run_number", "run_attempt")
+            )
+            or any(
+                not isinstance(row.get(key), str) or not row[key]
+                for key in ("head_sha", "path", "event", "status")
+            )
+            or not (row.get("conclusion") is None or isinstance(row["conclusion"], str))
+        ):
+            raise MetadataReadError("malformed_contract")
     runs = [
         run
-        for run in payload.get("workflow_runs", [])
+        for run in rows
         if run.get("head_sha") == sha
         and run.get("path") == ".github/workflows/ci.yml"
         and run.get("event") in {"pull_request", "push", "workflow_dispatch"}
@@ -52,9 +142,14 @@ def inspect_checkpoint(
         raise CheckpointError("Current exact-source CI workflow did not pass")
     run_id, attempt = run["id"], run["run_attempt"]
     jobs = api(f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
-    if jobs.get("total_count", 0) > 100:
-        raise CheckpointError("CI job inventory exceeds the bounded checkpoint window")
-    gates = [job for job in jobs.get("jobs", []) if job.get("name") == "CI Gate"]
+    rows = inventory(jobs, "jobs")
+    if any(
+        not isinstance(job.get("name"), str)
+        or not (job.get("conclusion") is None or isinstance(job["conclusion"], str))
+        for job in rows
+    ):
+        raise MetadataReadError("malformed_contract")
+    gates = [job for job in rows if job.get("name") == "CI Gate"]
     if len(gates) != 1 or gates[0].get("conclusion") != "success":
         raise CheckpointError("Current CI attempt has no unique passing CI Gate")
     # Detect a new workflow or rerun appearing while the gate was inspected.
@@ -75,39 +170,64 @@ def wait_for_checkpoint(
     interval: float = 25,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    deadline: float | None = None,
 ) -> Checkpoint:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise CheckpointError("Invalid repository identity")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise CheckpointError("Invalid source identity")
-    deadline = clock() + timeout
+    if deadline is None:
+        deadline = clock() + timeout
+    retries = 0
     while clock() < deadline:
-        run_id = inspect_checkpoint(api, repo, sha)
+        try:
+            run_id = inspect_checkpoint(api, repo, sha)
+        except MetadataReadError as error:
+            if not error.retryable:
+                raise
+            if clock() >= deadline:
+                raise CheckpointError(DEADLINE_ERROR) from None
+            if retries == MAX_METADATA_RETRIES:
+                raise CheckpointError(
+                    f"CI metadata retry limit exhausted ({error.category})"
+                ) from None
+            retries += 1
+            print(
+                json.dumps(
+                    {
+                        "status": "retrying",
+                        "checkpoint": "ci_metadata",
+                        "category": error.category,
+                        "http_status": error.status,
+                        "retry": retries,
+                        "retry_limit": MAX_METADATA_RETRIES,
+                    },
+                    sort_keys=True,
+                )
+            )
+            run_id = None
         if run_id is not None and clock() < deadline:
             return run_id
         remaining = deadline - clock()
         if remaining > 0:
             sleep(min(interval, remaining))
-    raise CheckpointError("No passing exact-source CI attempt within the checkpoint deadline")
+    raise CheckpointError(DEADLINE_ERROR)
 
 
 def main() -> int:
+    deadline = time.monotonic() + 1080
+
     def api(endpoint: str) -> dict[str, Any]:
-        try:
-            result = subprocess.run(
-                ["gh", "api", endpoint],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=20,
-            )
-            return json.loads(result.stdout)
-        except (subprocess.SubprocessError, OSError, ValueError):
-            raise CheckpointError("Unable to read CI checkpoint metadata") from None
+        return read_metadata(endpoint, timeout=deadline - time.monotonic())
 
     try:
         run_id = wait_for_checkpoint(
-            api, os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("SOURCE_SHA", "")
+            api,
+            os.environ.get("GITHUB_REPOSITORY", ""),
+            os.environ.get("SOURCE_SHA", ""),
+            deadline=deadline,
+            clock=time.monotonic,
+            sleep=time.sleep,
         )
     except CheckpointError as error:
         print(f"::error::{error}")

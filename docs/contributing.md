@@ -13,8 +13,17 @@ inspect the latest `CI` workflow run for the exact source commit and its current
 attempt. They wait for
 an active replacement instead of treating a cancelled predecessor's aggregate
 check as authoritative. Completed failures remain blocking. The checkpoint logs
-the source commit, CI run and attempt; its wait deadline is finite. Moving a PR
+the source commit, CI run and attempt; its wait deadline is 1080 seconds. Moving a PR
 from draft to ready does not restart the broad CI matrix.
+
+Metadata reads have at most three retries across the entire checkpoint, only for
+HTTP 408, 429, 502, 503 or 504 and a timed-out API command. Each retry restarts the
+full source/run/attempt check after the existing 25-second polling interval;
+neither successful pending polls nor retries reset the deadline. Each API command
+is capped at 20 seconds or the remaining deadline, whichever is shorter. Permission,
+other HTTP, command-launch, malformed-response and genuine CI failures are refused
+immediately. Diagnostics expose fixed categories, never captured headers, bodies or
+stderr. These metadata retries do not rerun CI or deployed workloads.
 
 After repairing or retrying a genuine CI failure, explicitly rerun any affected
 qualification that stopped at its prerequisite and inspect its receipts. A green
