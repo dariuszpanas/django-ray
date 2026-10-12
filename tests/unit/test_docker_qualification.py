@@ -332,11 +332,70 @@ def test_bounded_command_timeout_terminates_its_process_group(tmp_path: Path) ->
         except ProcessLookupError:
             break
         status = Path(f"/proc/{pid}/stat")
-        if status.is_file() and status.read_text(encoding="ascii").split()[2] == "Z":
-            break
+        if status.is_file():
+            try:
+                state = status.read_text(encoding="ascii").split()[2]
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            if state == "Z":
+                break
         time.sleep(0.02)
     else:
         pytest.fail("qualification grandchild remained alive after process-group timeout")
+
+
+@pytest.mark.parametrize(
+    "read_error", [FileNotFoundError, ProcessLookupError, PermissionError, OSError]
+)
+def test_process_group_exit_observer_handles_only_disappearing_proc_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_error: type[OSError],
+) -> None:
+    """Exercise the real observer without starting or signaling any process."""
+    pid = 4321
+    status = Path(f"/proc/{pid}/stat")
+    (tmp_path / "grandchild.pid").write_text(str(pid), encoding="ascii")
+    original_read = Path.read_text
+    observed: list[str] = []
+    error = read_error("owned proc entry read failed")
+
+    def command_timeout(*args, **kwargs):
+        observed.append("timeout")
+        raise scenario.BoundedProcessError("command-timeout", b"", b"")
+
+    def signal_probe(actual_pid, signal):
+        assert (actual_pid, signal) == (pid, 0)
+        observed.append("signal")
+
+    def is_file(path):
+        assert path == status
+        observed.append("stat")
+        return True
+
+    def read_text(path, *args, **kwargs):
+        if path != status:
+            return original_read(path, *args, **kwargs)
+        assert kwargs == {"encoding": "ascii"}
+        observed.append("read")
+        raise error
+
+    clock = iter((0.0, 0.1))
+    with monkeypatch.context() as patch:
+        patch.setattr(scenario, "_run_bounded_command", command_timeout)
+        patch.setattr(os, "kill", signal_probe)
+        patch.setattr(Path, "is_file", is_file)
+        patch.setattr(Path, "read_text", read_text)
+        patch.setattr(time, "monotonic", lambda: next(clock))
+        patch.setattr(time, "sleep", lambda _: pytest.fail("observer must not wait"))
+        if read_error in (FileNotFoundError, ProcessLookupError):
+            test_bounded_command_timeout_terminates_its_process_group(tmp_path)
+        else:
+            with pytest.raises(read_error) as captured:
+                test_bounded_command_timeout_terminates_its_process_group(tmp_path)
+            assert captured.value is error
+
+    assert observed == ["timeout", "signal", "stat", "read"]
 
 
 def test_pytest_environment_puts_installed_target_before_source(tmp_path: Path) -> None:
