@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 from qualification.monitoring.render import config_digest, pod_limits, render, validate_resources
+from qualification.platform_auth import observe as observe_ray_auth
 
 CONTEXT = "kind-monitoring-qualification"
 MAX_COMMAND_BYTES = 2 * 1024 * 1024
@@ -29,6 +30,7 @@ PHASES = {
     "create",
     "readiness",
     "ray",
+    "ray_auth",
     "http",
     "census",
     "cleanup",
@@ -405,6 +407,8 @@ def run(images: dict[str, str], output: Path) -> int:
         )
         if receipt["after_replay"].get("status") != "passed":
             raise ValueError("Dashboard replay did not restore monitoring")
+        receipt["phase"] = "ray_auth"
+        receipt["ray_auth"] = observe_ray_auth(kube, head)
         receipt["phase"] = "browser"
         from qualification.monitoring.host_browser import observe
 

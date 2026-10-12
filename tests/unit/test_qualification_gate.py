@@ -119,6 +119,22 @@ def test_monitoring_selects_real_metrics_probe_routing_and_authentication_owners
     assert "monitoring" in {entry["id"] for entry in select(policy, {path})}
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "qualification/platform_auth.py",
+        "scripts/local_kuberay_auth.py",
+        "tests/unit/test_monitoring_auth_orchestration.py",
+        "tests/unit/test_platform_auth.py",
+    ],
+)
+def test_isolated_auth_owner_changes_select_monitoring_without_another_fixture_change(path):
+    root = Path(__file__).resolve().parents[2]
+    policy = json.loads((root / "scripts/qualification_policy.json").read_text())
+    assert (root / path).is_file()
+    assert {item["id"] for item in select(policy, {path})} == {"monitoring"}
+
+
 def test_only_selected_success_and_explicit_unselected_skip_pass():
     assert verify(results()) == {
         "application": "passed",

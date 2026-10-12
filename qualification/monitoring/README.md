@@ -87,6 +87,16 @@ The generic source-locked Ray image independently verifies that panel's title,
 UID and legacy `graph` definition. This proves one actual migration/render path,
 not every dashboard, plugin or browser. Browser and forward cleanup are required.
 
+After dashboard replay, the existing owned head also runs the source-owned
+Ray authentication probe. All twelve fixed Dashboard, Jobs, Client and GCS
+authentication facts must pass. The adapter requires 220 seconds remaining,
+limits the remote child with a 65-second alarm and kubectl to 70 seconds, and
+reserves 150 seconds for the following browser phase. This shares the existing
+ten-minute observation window and creates no task, actor or extra service.
+Only the validated, at-most-4-KiB boolean receipt is retained; credentials remain
+in the existing container environment. An unexpected authentication acceptance
+requires private review under SECURITY.md rather than public reproduction details.
+
 The cold-Ray decision is **skip**: this finite platform observation does not
 replace the separate application task/workflow cold-generation gate or the Beta
 upgrade rehearsal. Grafana replacement does not count as a cold Ray generation.
