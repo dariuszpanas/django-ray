@@ -126,6 +126,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or reset before any response status, within the original request budget;
   timeout and write failures remain strict. These are qualification controls,
   not changes to production retry or cancellation policy.
+- Retry transient CI metadata reads at most three times across the entire
+  checkpoint after the initial read, within the existing 1080-second deadline.
+  Pending polls do not replenish the retry allowance. Keep exact
+  source, run and attempt checks and fail closed on permanent or malformed
+  responses and completed CI failures. These metadata-read retries do not retry
+  qualification workloads or change application HTTP policy.
 
 ### Known limitations
 
