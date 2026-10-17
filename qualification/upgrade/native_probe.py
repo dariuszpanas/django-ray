@@ -477,7 +477,7 @@ def main():
                 assert cursor.fetchone() == ("on",)
         assert (
             MigrationRecorder.Migration.objects.filter(
-                app="django_ray", name__startswith="0026_"
+                app="django_ray", name="0027_workflow_reporting_diagnostics"
             ).count()
             == 1
         )

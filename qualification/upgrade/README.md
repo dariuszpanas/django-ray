@@ -3,7 +3,7 @@
 This public Docker Compose recipe runs the first bounded part of
 [#381](https://github.com/dariuszpanas/django-ray/issues/381): preserve released
 database history and filesystem artifacts across a stopped-writer migration.
-It selects a reviewed `v0.4.0` or `v0.5.0` Git archive and independently installs
+It selects a reviewed `v0.4.0`, `v0.5.0` or `v0.6.0` Git archive and independently installs
 released and candidate wheels. Each version uses its own locked dependency environment.
 No task manager, Ray process, Kubernetes client or shared database starts.
 
@@ -31,8 +31,8 @@ outcomes were produced by real remote execution.
    Temporarily missing and corrupt result files are rejected by the storage API;
    the original bytes are restored and the complete artifact digest must match.
 6. Enqueue one current task without starting a worker.
-7. Open the migrated database with a fresh exact 0.4.0 process in database-enforced
-   read-only mode. Retain migrations through `0026`, compare the original history,
+7. Open the migrated database with a fresh selected-baseline process in database-enforced
+   read-only mode. Retain migrations through `0027`, compare the original history,
    read the original artifacts, and fetch the candidate's queued task through the
    released backend. No reverse migration, old writer, or task execution runs.
 8. Restore the original backup into a second independent database and read it
@@ -46,7 +46,7 @@ encrypted RuntimeEnv delivery or execution from that archive. The installed
 package bytes and the backup are checked again after all child processes exit.
 The read-only code rollback proves this fixture's data readability after an enqueue;
 it does not qualify restarting old managers or reading every result produced by
-current execution. See the [0.5 upgrade procedure](../../docs/deployment/upgrading-0.5.md)
+current execution. See the [0.6 to 0.7 upgrade procedure](../../docs/deployment/upgrading-from-0.6.md)
 for the migration and rollback boundaries that still need deployed rehearsal.
 
 ## Public Linux invocation
@@ -65,7 +65,7 @@ set -euo pipefail
 test -z "$(git status --porcelain)"
 baseline_parent=$(mktemp -d)
 export UPGRADE_BASELINE_SOURCE="$baseline_parent/released"
-export DJANGO_RAY_UPGRADE_BASELINE=0.5.0
+export DJANGO_RAY_UPGRADE_BASELINE=0.6.0
 export UPGRADE_BASELINE_COMMIT=$(python -c 'from qualification.upgrade.contract import BASELINE_COMMIT; print(BASELINE_COMMIT)')
 python -m qualification.upgrade.prepare "$UPGRADE_BASELINE_SOURCE"
 sha256sum "$UPGRADE_BASELINE_SOURCE/source.tar" | cut -d ' ' -f 1 > "$baseline_parent/baseline-sha256.txt"
@@ -119,13 +119,20 @@ stage. The caller's Compose trap removes the container after failure or cancella
 
 ## Selecting the release boundary
 
-`DJANGO_RAY_UPGRADE_BASELINE` accepts only `0.4.0` and `0.5.0`; its default remains
+`DJANGO_RAY_UPGRADE_BASELINE` accepts only `0.4.0`, `0.5.0` and `0.6.0`; its default remains
 `0.4.0` for existing callers. Each entry pins a reviewed released commit. Export
 `UPGRADE_BASELINE_COMMIT` from that selection before building so the image checks
 the same archive identity; the runtime independently verifies the selected pin.
-Use `0.5.0` for next-release qualification under
+Use `0.6.0` for the 0.7.0 Beta candidate qualification under
 [#526](https://github.com/dariuszpanas/django-ray/issues/526). Hosted database
-qualification runs both baselines separately and retains distinct artifacts.
+qualification runs all three baselines separately and retains distinct artifacts.
+
+The 0.6.0 tag is pinned to its released source. These recipes rebuild its wheel
+with that release's locked dependencies; they do not install the separately
+published PyPI wheel or source distribution. Published-artifact availability and
+installation checks are a separate release obligation. Adding the baseline and
+workflow selection prepares the rehearsal; only a passing receipt for the final
+candidate source establishes its result.
 
 The candidate version comes from the selected source checkout's `pyproject.toml`.
 Its installed wheel must match that version, while source and package digests
@@ -145,12 +152,12 @@ receipts continue to report `complete_upgrade_gate: false`.
 `native.yaml` adds a sequential real-manager rehearsal on the same exact released
 and candidate wheels. The path-selected [Upgrade Native Qualification workflow](../../.github/workflows/upgrade-native-qualification.yml)
 runs Core, Jobs, Jobs manager crash and Core/Ray loss serially on disposable
-hosted Linux runners against the reviewed 0.5.0 baseline. It waits for the exact
+hosted Linux runners against the reviewed 0.6.0 baseline. It waits for the exact
 source CI Gate before building, checks runner capacity, and retains separate
 source, archive, image, log and runtime receipts for each scenario. Every runtime
 container retains the limits below and a 1,200-second execution deadline. A
-passing run qualifies these native assertions only; it does not clear the
-remaining acceptance list or certify the inaccessible private deployment.
+passing run qualifies these native assertions only; the remaining acceptance
+list still applies.
 
 For an admitted standalone environment, use the source
 export and baseline preparation above, select `qualification/upgrade/native.yaml`,
@@ -179,7 +186,7 @@ settings through its RuntimeEnv. Jobs run serially through the actual manager;
 the receipt identifies the runner. No Ray Client connection is used.
 
 Both runtime recipes finish with a fresh selected-baseline reader after candidate execution.
-Database-enforced read-only mode retains migrations through `0026` and checks
+Database-enforced read-only mode retains migrations through `0027` and checks
 all nine old/current task records, attempts and input/result artifacts. The
 candidate adds one nonfinite-result task after the existing execution cases.
 It must fail with a fixed completion-encoding diagnostic after one invocation;
@@ -200,8 +207,9 @@ or incorrect keys must fail before application invocation. The archive is covere
 by the existing artifact backup/digest checks. This does not qualify key rotation
 or replace the separate manager-crash recovery requirement.
 
-The success task also executes a two-step Ray workflow with schema-v3 reporting
-explicitly enabled. The snapshot includes its run, topology and node-detail rows,
+The success task also executes a two-step Ray workflow with schema-v3 reporting.
+The 0.6.0 baseline and candidate use their package defaults; the historical 0.5.0
+baseline uses its required opt-in. The snapshot includes its run, topology and node-detail rows,
 including binary page content. Each version's own authorized progress readers and
 admin graph projection must produce a complete two-node, one-edge successful graph
 after restore. Old read-only SQLite code checks both old and candidate-created

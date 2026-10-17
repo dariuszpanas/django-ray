@@ -245,7 +245,7 @@ def test_archive_failure_retains_failed_manifest_without_rehashing_missing_file(
     assert ElementTree.fromstring(output["junit.xml"]).attrib["failures"] == "1"
 
 
-@pytest.mark.parametrize("baseline", ["0.4.0", "0.5.0"])
+@pytest.mark.parametrize("baseline", ["0.4.0", "0.5.0", "0.6.0"])
 def test_reviewed_baseline_selection_matches_candidate_source(baseline):
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
@@ -305,7 +305,7 @@ def test_sqlite_restore_checks_django_constraints_and_closes_connections(tmp_pat
     (tmp_path / "backup").unlink()
 
 
-@pytest.mark.parametrize("version", ["0.4.0", "0.5.0", "0.6.0"])
+@pytest.mark.parametrize("version", ["0.4.0", "0.5.0", "0.6.0", "0.7.0"])
 @pytest.mark.parametrize("refusal", ["25006", "unexpected-error", "accepted"])
 def test_native_graph_read_only_fence_is_independent_of_module_layout(
     monkeypatch, version, refusal

@@ -20,16 +20,16 @@ reproduced the matching gRPC assertion with stock Ray Client; different Python
 matrix lanes failed on different runs. This is not evidence of a deterministic
 Python-version incompatibility.
 
-Prefer direct Ray Core/GCS or explicit HTTP(S) Ray Jobs configuration for 0.5
+Prefer direct Ray Core/GCS or explicit HTTP(S) Ray Jobs configuration for Beta
 deployments that need to avoid this Client startup path. Using `ray://` starts a
 Client connection and remains subject to the limitation. A passing retry does
 not establish that the race is fixed, and an ambiguous task submission must not
 be replayed merely because connection setup failed.
 
 [Upstream PR #65982](https://github.com/ray-project/ray/pull/65982) was unmerged
-when reviewed on 2026-09-12; it has not been adopted or backported here. Further
-investigation and requalification are deferred to **0.6.0 or later**, after an
-upstream fix is available. Verify startup and abrupt-parent-death cleanup before
+when reviewed on 2026-10-17; it has not been adopted or backported here. Further
+investigation and requalification require an available upstream fix; the 0.7
+candidate does not establish a repair. Verify startup and abrupt-parent-death cleanup before
 removing this warning: the proposed patch changes child fate sharing. This is
 not a promise that a particular upstream release will contain the fix.
 

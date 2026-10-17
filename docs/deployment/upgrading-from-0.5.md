@@ -239,8 +239,8 @@ and defined manager-loss recovery. The Jobs crash case preserves job, attempt an
 generation with one application invocation. Core/Ray loss records LOST without
 automatic replay, then exercises an explicit retry after old processes retire.
 
-These results cover the qualified source and fixture, not an inaccessible private
-deployment. Receipts deliberately retain `complete_upgrade_gate: false`.
+These results cover only the qualified source and fixture. Receipts deliberately
+retain `complete_upgrade_gate: false`.
 The historical PR #587 candidate also passed rendered current/archived workflow history,
 execution retirement, defined uncertain-outcome recovery and required cold-Ray
 observations, including the fixture's configured Dashboard proxy. Operators must
