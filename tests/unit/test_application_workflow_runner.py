@@ -198,7 +198,9 @@ def test_retired_pilot_override_cannot_qualify_package_defaults(fixture_runner, 
 
 
 @pytest.mark.parametrize(
-    "case", (*runner.workflow_cases(), *runner.first_workflow_cases()), ids=lambda case: case.name
+    "case",
+    (*runner.workflow_cases(), *runner.first_workflow_cases(), runner.showcase_failure_case()),
+    ids=lambda case: case.name,
 )
 @pytest.mark.parametrize("browser_mutates", [False, True])
 @pytest.mark.parametrize("mismatch", [None, "state", "attempt_number", "callable_path"])
@@ -275,7 +277,7 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
         "kwargs": dict(case.options),
     }
     responses = [(200, json.dumps(polling).encode()), (302, b""), (401, b"")]
-    if case.name in {"recovery", "showcase-first", "showcase-warm"}:
+    if case.name in {"recovery", "showcase-first", "showcase-warm", "showcase-failure"}:
         responses.insert(0, (200, json.dumps(submitted).encode()))
     request = Mock(side_effect=responses)
     terminal = Mock()
@@ -319,7 +321,7 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
     assert browser.call_args.kwargs["execution_pk"] == 12
     assert browser.call_args.kwargs["policy"] == case.policy
     assert browser.call_args.kwargs["admin_cookie"] == "fixture-cookie"
-    if case.name not in {"recovery", "showcase-first", "showcase-warm"}:
+    if case.name not in {"recovery", "showcase-first", "showcase-warm", "showcase-failure"}:
         from testproject.apps.cluster_tasks import tasks as fixture_tasks
 
         assert enqueue.call_args.args[0] is getattr(
@@ -338,7 +340,7 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
         enqueue.assert_called_once()
         return
     disabled_storage.assert_not_called()
-    via_http = case.name in {"recovery", "showcase-first", "showcase-warm"}
+    via_http = case.name in {"recovery", "showcase-first", "showcase-warm", "showcase-failure"}
     assert enqueue.call_count == (0 if via_http else 1)
     assert sum(call.kwargs["method"] == "POST" for call in request.call_args_list) == (
         1 if via_http else 0
@@ -346,7 +348,9 @@ def test_execute_observes_each_durable_attempt_after_one_submission(
     assert [call.kwargs["run_identity"] for call in graph.call_args_list] == identities
     assert [call.kwargs["expected_state"] for call in graph.call_args_list] == list(case.states)
     assert [call.kwargs["fixture"] for call in graph.call_args_list] == [
-        "showcase"
+        "showcase-failure"
+        if case.name == "showcase-failure"
+        else "showcase"
         if case.name.startswith("showcase-")
         else case.name
         if case.name in {"recovery", "plan-overflow"} or case.name.startswith("retry-")

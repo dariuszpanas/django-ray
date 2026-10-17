@@ -27,6 +27,7 @@ FACTS = (
     "wrapped_reference_and_registry_bound",
     "carrier_and_metadata_bound",
     "job_info_and_logs_clear",
+    "live_driver_and_visible_argv_clear",
     "manager_killed_and_replaced",
     "same_job_attempt_generation_reference",
     "one_submission_and_effect",
@@ -657,6 +658,10 @@ def verify(generation: str, facts: dict, diagnostics: Diagnostics) -> None:
         facts["wrapped_reference_and_registry_bound"] = True
         facts["carrier_and_metadata_bound"] = True
         facts["job_info_and_logs_clear"] = True
+        from testproject.qualification_process import read_receipt
+
+        read_receipt(root / "success-process.json")
+        facts["live_driver_and_visible_argv_clear"] = True
         diagnostics.enter("manager_crash")
         stop_manager(manager, crash=True)
         if identity(get_row(success.pk)) != original:

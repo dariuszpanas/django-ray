@@ -60,6 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ray Dashboard, Jobs, Client and GCS observations in monitoring qualification.
   Use the owned authenticated head and retain only fixed facts. Authentication
   does not establish target compatibility or execution claim authority.
+- Extend the selected application catalogue with bounded protected HTTP/log and
+  live driver-argument observations, unsupported queued-work preservation and
+  pre-invocation refusal, and the fixed reservation-failure workflow example.
+  Require each assertion before and after cold replacement, with fixed-fact
+  diagnostics and owned cleanup. These checks retain execution protocol 1 and
+  the existing resource footprint; they do not activate a new target protocol
+  or establish arbitrary process-surface secrecy.
 
 ### Changed
 

@@ -1,5 +1,6 @@
 """Two fixed, bounded effects used only by the application Jobs qualification."""
 
+import json
 import time
 
 from django.conf import settings
@@ -16,6 +17,16 @@ def controlled(case: str, marker: str) -> dict:
     ):
         raise ValueError("Unknown Jobs qualification fixture")
     root = settings.RQ2_ROOT
+    if case == "success":
+        from testproject.qualification_process import observe_driver
+
+        try:
+            observed = observe_driver(marker)
+            with (root / "success-process.json").open("x") as stream:
+                stream.write(json.dumps(observed, sort_keys=True))
+        except Exception:
+            # No private argv, canonical request or DB exception enters task logs.
+            raise ValueError("Owned live process qualification failed") from None
     with (root / f"{case}-effects").open("a") as stream:
         stream.write("x")
     if case == "success":

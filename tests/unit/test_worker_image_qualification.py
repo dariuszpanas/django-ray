@@ -740,7 +740,7 @@ def test_host_installs_yaml_for_manifest_rendering_within_existing_tool_budget()
     assert steps.index(tools) < steps.index(execution)
 
 
-def test_hosted_step_adds_only_worker_phase_and_keeps_previous_outer_allowance():
+def test_hosted_step_accounts_for_catalogue_and_worker_phases_with_outer_allowance():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/application-qualification.yml").read_text()
     )
@@ -749,7 +749,7 @@ def test_hosted_step_adds_only_worker_phase_and_keeps_previous_outer_allowance()
         item for item in job["steps"] if item.get("name") == "Run the native application core test"
     )
     assert job["timeout-minutes"] == 75
-    assert step["timeout-minutes"] * 60 - 2160 - probe.PHASE_SECONDS == 300
+    assert step["timeout-minutes"] * 60 - 2820 - probe.PHASE_SECONDS == 300
     assert probe.PHASE_SECONDS == 180
     assert probe.CLEANUP_SECONDS == 45
     assert probe.PHASE_SECONDS - probe.CLEANUP_SECONDS == 135

@@ -9,8 +9,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from qualification.application.budgets import APPLICATION_SECONDS
 from qualification.application.resource_profiles import chainsaw_values, select_profile
-from qualification.application.run_chainsaw import CREDENTIAL_KEYS, TEST_SECONDS
+from qualification.application.run_chainsaw import CREDENTIAL_KEYS
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -90,8 +91,35 @@ def test_profile_waits_for_assertions_around_identical_cold_replacement():
         == "assert-after"
     )
     assert before < deleted < after
-    assert sequence[-3]["assert"]["resource"]["metadata"]["name"] == "assert-after"
-    assert sequence[-3]["assert"]["resource"]["status"] == {"succeeded": 1}
+    completed_after = next(
+        i
+        for i, op in enumerate(sequence)
+        if op.get("assert", {}).get("resource", {}).get("metadata", {}).get("name")
+        == "assert-after"
+    )
+    assert sequence[completed_after]["assert"]["resource"]["status"] == {"succeeded": 1}
+    for generation, completed in (("before", before), ("after", completed_after)):
+        observed = sequence[completed + 1]["command"]
+        assert observed["timeout"] == "30s"
+        assert observed["entrypoint"] == "python"
+        assert observed["workDir"] == "../.."
+        assert observed["args"] == [
+            "-m",
+            "qualification.application.protected_logs",
+            "--context=$OBSERVATION_CONTEXT",
+            "--kubeconfig-paths=$OBSERVATION_KUBECONFIG",
+            "--namespace=$OBSERVATION_NAMESPACE",
+            "--image=$OBSERVATION_IMAGE",
+            f"--generation={generation}",
+            f"--output=$OBSERVATION_OUTPUT/{generation}-protected-logs.json",
+        ]
+        assert {item["name"]: item["value"] for item in observed["env"]} == {
+            "OBSERVATION_NAMESPACE": "($namespace)",
+            "OBSERVATION_CONTEXT": "($values.protectedLogContext)",
+            "OBSERVATION_KUBECONFIG": "($values.protectedLogKubeconfigPaths)",
+            "OBSERVATION_IMAGE": "($values.applicationImage)",
+            "OBSERVATION_OUTPUT": "($values.protectedLogOutput)",
+        }
     assert sequence[-1]["assert"]["resource"]["metadata"]["name"] == "reporting-benchmark"
     assert sequence[-1]["assert"]["resource"]["status"] == {"succeeded": 1}
 
@@ -100,12 +128,12 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
     test = definition()
     assert test["apiVersion"] == "chainsaw.kyverno.io/v1alpha1"
     assert test["kind"] == "Test"
-    assert len(test["spec"]["steps"]) == 14
+    assert len(test["spec"]["steps"]) == 16
     for generation in ("before", "after"):
         job = resources()["Job", f"assert-{generation}"]
         assert job["spec"]["parallelism"] == job["spec"]["completions"] == 1
         assert job["spec"]["backoffLimit"] == 0
-        assert job["spec"]["activeDeadlineSeconds"] == 990
+        assert job["spec"]["activeDeadlineSeconds"] == 1290
         command = job["spec"]["template"]["spec"]["containers"][0]["command"]
         assert command == [
             "python",
@@ -124,7 +152,7 @@ def test_profile_preserves_finite_serial_execution_and_assertion_commands():
             if op.get("assert", {}).get("resource", {}).get("metadata", {}).get("name")
             == f"assert-{generation}"
         )
-        assert assertion["timeout"] == "1005s"
+        assert assertion["timeout"] == "1305s"
     assert resources()["Job", "reporting-benchmark"]["spec"]["activeDeadlineSeconds"] == 600
     config = yaml.safe_load((ROOT / "qualification/application/chainsaw.yaml").read_text())
     assert config["spec"]["timeouts"]["assert"] == "600s"
@@ -238,8 +266,8 @@ def test_hosted_profile_rejection_precedes_build_and_reaches_the_runner():
     native_step = next(
         step for step in job["steps"] if step.get("name") == "Run the native application core test"
     )
-    assert TEST_SECONDS == 2160
-    assert int(native_step["timeout-minutes"]) * 60 == TEST_SECONDS + 180 + 300
+    assert APPLICATION_SECONDS == 2820
+    assert int(native_step["timeout-minutes"]) * 60 == APPLICATION_SECONDS + 180 + 300
     assert "github.event_name == 'workflow_dispatch'" in job["env"]["RESOURCE_PROFILE"]
     assert job["env"]["RESOURCE_PROFILE"].endswith("|| 'standard' }}")
     scripts = [step.get("run", "") for step in job["steps"]]

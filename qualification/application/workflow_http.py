@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlencode
 from uuid import UUID
 
 from qualification.application.run_api import ApplicationHttp
@@ -30,7 +31,7 @@ class WorkflowHttpError(ValueError):
     """Retain only a fixed endpoint category and numeric HTTP status."""
 
     def __init__(self, endpoint: str, status: int):
-        if endpoint not in {"summary", "admin_graph", *COLLECTIONS}:
+        if endpoint not in {"summary", "admin_graph", "node_detail", *COLLECTIONS}:
             raise ValueError("Invalid workflow endpoint category")
         if type(status) is not int or not 100 <= status <= 599:
             raise ValueError("Invalid workflow HTTP status")
@@ -95,6 +96,7 @@ def read_full_workflow_graph(
         "complex",
         "recovery",
         "showcase",
+        "showcase-failure",
         "plan-overflow",
         "retry-success",
         "retry-exhausted",
@@ -105,6 +107,8 @@ def read_full_workflow_graph(
     attempt = run_identity.get("attempt_number")
     if type(attempt) is not int or attempt < 1:
         raise ValueError("Workflow observation requires a positive attempt")
+    if fixture == "showcase-failure" and (not full or expected_state != "FAILED" or attempt != 1):
+        raise ValueError("Showcase failure requires the first full-reporting failed attempt")
     if not token or not admin_cookie:
         raise ValueError("Workflow observation requires both API and Admin credentials")
 
@@ -228,6 +232,26 @@ def read_full_workflow_graph(
         verify_recovery_graph(graph, attempt=attempt)
     elif full and fixture == "showcase":
         verify_showcase_graph(graph)
+    elif full and fixture == "showcase-failure":
+        from qualification.application.showcase_failure import verify_graph
+
+        if expected_state != "FAILED" or attempt != 1:
+            raise ValueError("Showcase failure requires the first failed attempt")
+        details = pages["node_details"]["items"]
+        verify_graph(graph, details)
+        for expected_detail in sorted(details, key=lambda item: item["node_id"]):
+            query = urlencode({"node_id": expected_detail["node_id"], "attempt_number": attempt})
+            indexed = read(f"{root}/node-detail?{query}", endpoint="node_detail")
+            validate_workflow_envelope(
+                indexed,
+                task_id=task_id,
+                endpoint="indexed node detail",
+                schema="django-ray.workflow-progress-node",
+                expected_run_identity=run_identity,
+                expected_publication=publication,
+            )
+            if indexed.get("found") is not True or indexed.get("item") != expected_detail:
+                raise ValueError("Showcase indexed detail differs from its retained node")
     elif full and fixture is not None and fixture.startswith("retry-"):
         from qualification.application.workflow_fixtures import verify_retry_graph
 
@@ -250,7 +274,7 @@ def read_full_workflow_graph(
         "Use supported full reporting for future runs if you need a graph."
     ):
         raise ValueError("Terminal-only Admin did not explain the observed reporting policy")
-    return {
+    observation = {
         "task_id": task_id,
         "run_identity": dict(run_identity),
         "publication": dict(publication),
@@ -261,6 +285,11 @@ def read_full_workflow_graph(
         "fixture_graph_verified": fixture is not None,
         "complete_workflow_gate": False,
     }
+    if fixture == "showcase-failure":
+        from qualification.application.showcase_failure import FACTS
+
+        observation["showcase_failure"] = dict.fromkeys(FACTS, True)
+    return observation
 
 
 def read_disabled_workflow_graph(

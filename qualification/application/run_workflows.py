@@ -133,6 +133,23 @@ def first_workflow_cases() -> tuple[WorkflowCase, ...]:
     )
 
 
+def showcase_failure_case() -> WorkflowCase:
+    """Keep the catalogue's one-attempt failure outside the original matrix budget."""
+    return WorkflowCase(
+        "showcase-failure",
+        "/api/cluster/workflow-showcase",
+        (
+            ("item_count", 1),
+            ("work_seconds", 0.01),
+            ("failure_stage", "reserve_inventory"),
+            ("failure_item", 0),
+        ),
+        ("FAILED",),
+        "full",
+        "testproject.apps.cluster_tasks.tasks.order_fulfillment_showcase_task",
+    )
+
+
 def execute_case(
     request: ApplicationHttp,
     *,
@@ -146,10 +163,10 @@ def execute_case(
 
     from django_ray.models import RayTaskExecution
 
-    if case not in (*workflow_cases(), *first_workflow_cases()):
+    if case not in (*workflow_cases(), *first_workflow_cases(), showcase_failure_case()):
         raise ValueError("Workflow qualification accepts only its fixed cases")
     headers = {"Authorization": f"Bearer {token}"}
-    if case.name not in {"recovery", "showcase-first", "showcase-warm"}:
+    if case.name not in {"recovery", "showcase-first", "showcase-warm", "showcase-failure"}:
         # Production deliberately disables the complex-workflow demo route.
         # Submit these fixed cases through the same bounded Django task API.
         from testproject.admission import enqueue_sample
@@ -226,6 +243,11 @@ def execute_case(
         raise ValueError("Durable workflow attempt count differs")
     if row.callable_path != case.callable_path:
         raise ValueError("Durable workflow callable differs")
+    if case.name == "showcase-failure":
+        from qualification.application.showcase_failure import FAILURE_MESSAGE
+
+        if not RayTaskExecution.objects.filter(pk=row.pk, error_message=FAILURE_MESSAGE).exists():
+            raise ValueError("Showcase failed outside its fixed reservation boundary")
     if on_terminal is not None:
         on_terminal()
     attempts = list(
@@ -312,7 +334,9 @@ def execute_case(
                     admin_cookie=cookie,
                     reporting_policy=case.policy,
                     fixture=(
-                        "showcase"
+                        "showcase-failure"
+                        if case.name == "showcase-failure"
+                        else "showcase"
                         if case.name.startswith("showcase-")
                         else case.name
                         if case.name in {"recovery", "plan-overflow"}

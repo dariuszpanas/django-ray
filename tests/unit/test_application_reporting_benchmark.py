@@ -130,7 +130,11 @@ def test_reporting_job_is_serial_bounded_and_follows_cold_acceptance():
     import yaml
 
     spec = yaml.safe_load(Path("qualification/application/core.yaml").read_text())["spec"]
-    assert spec["steps"][-2]["name"] == "assert-cold-generation"
+    assert [step["name"] for step in spec["steps"][-3:]] == [
+        "assert-cold-generation",
+        "inspect-after-protected-logs",
+        "measure-reporting-policies",
+    ]
     step = spec["steps"][-1]
     assert step["name"] == "measure-reporting-policies"
     job = step["try"][0]["create"]["resource"]
