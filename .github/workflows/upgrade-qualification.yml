@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        baseline: ["0.4.0", "0.5.0"]
+        baseline: ["0.4.0", "0.5.0", "0.6.0"]
     env:
       DJANGO_RAY_UPGRADE_BASELINE: ${{ matrix.baseline }}
       COMPOSE_PROJECT_NAME: upgrade-data-qualification

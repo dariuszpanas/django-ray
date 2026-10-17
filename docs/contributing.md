@@ -1012,6 +1012,57 @@ The production workflow verifies that the pushed ref is an annotated tag and tha
 peeled commit, event SHA, checked-out HEAD, and freshly fetched `origin/main` are all
 the exact authorized commit before it builds.
 
+### Qualify built artifacts without publishing
+
+After the preparation PR has merged and the candidate source is frozen, the
+manual `Release Candidate Qualification` workflow verifies artifacts without
+uploading packages to either package index. Fetch current `main`, wait for its
+Linux `CI Gate`, and record that exact full commit SHA:
+
+```bash
+git fetch origin
+candidate_sha="$(git rev-parse origin/main)"
+gh workflow run release-candidate-qualification.yml --ref main \
+  -f version=0.7.0 -f candidate_sha="$candidate_sha"
+```
+
+The input, workflow event, checkout and freshly fetched `origin/main` must agree.
+The existing candidate validator accepts either nonempty Unreleased development
+notes or a strict-ready, untagged, dated 0.7.0 section with empty Unreleased notes.
+It rejects an already tagged version and preserves the committed-readiness
+evidence checks.
+This command does not invoke the publishing `release.yml` workflow.
+
+The workflow builds the wheel and source distribution once, retains their SHA-256
+checksums and source commit/tree, and checks separate fresh installs on Linux
+Python 3.12, 3.13 and 3.14. Each interpreter verifies both distributions through
+`scripts/verify_wheel.py`, including installed migrations, bounded purge
+continuation/deletion, request-reference compatibility, and the Linux read-only
+doctor preservation/cleanup probe. Require those assertions in all six fresh
+environments; their presence in the workflow is not a passing receipt. Building
+a wheel from an sdist during another job does not replace the independent sdist
+installation and verification.
+It also runs `uv pip check`, the locked-project advisory audit and an independent
+advisory audit of each actual installed dependency set. Only the exact unpublished
+django-ray candidate is excluded from those dependency scans; that exclusion is
+not a vulnerability assessment of the candidate's own code. Dependency audit
+logs distinguish the lock from the independently resolved installations.
+
+The final artifact gate requires successful build and matrix jobs plus all three
+current-source interpreter success receipts, each written only after both artifact
+checks and audits succeed. Review the six per-install verification, consistency
+and resolved-dependency audit results alongside the locked-project audit.
+Artifacts retain the built bytes, hashes, installed inventories and audit results
+for 30 days; preserve the reviewed evidence before it expires. This is
+installed-package evidence, not native Ray execution or complete release
+acceptance. Keep the applicable source-matched application,
+upgrade, transaction and other deployed receipts alongside it. A later source
+change requires new candidate qualification. TestPyPI and production publication
+remain separate, explicitly authorized actions under the procedure above.
+The publication workflow builds its own distributions; retain and verify that
+run's artifact identities separately. Candidate checks do not establish that
+later index downloads are the same bytes.
+
 ### Release failure recovery
 
 - If candidate validation or build fails, fix the source or workflow, create a new

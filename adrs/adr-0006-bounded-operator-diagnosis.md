@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Decision status | Proposed |
-| Implementation status | Partial: bounded read-only first slice implemented and initially qualified; remaining observations and final integrated artifact qualification pending |
+| Implementation status | Partial: bounded read-only first slice implemented; remote, capacity, artifact and orphan observations remain unavailable |
 | Owners | django-ray maintainers |
 | Proposed | 2026-09-21 |
 | Accepted | Not accepted |
@@ -13,7 +13,7 @@
 | Delivery tracking | [#368](https://github.com/dariuszpanas/django-ray/issues/368); bounded first slice [#620](https://github.com/dariuszpanas/django-ray/issues/620) |
 | Supersedes | None |
 | Superseded by | None |
-| Last verified | Initial first-slice source review, Linux supervision, independent PostgreSQL and installed-wheel checks passed; rebased qualification and separate fresh installed-sdist verification remain pending as of 2026-10-12 |
+| Last verified | First-slice Linux supervision, independent PostgreSQL, installed-wheel verification and source-matched cold application qualification passed. Each release still requires fresh wheel and sdist qualification; [#629](https://github.com/dariuszpanas/django-ray/issues/629) tracks the 0.7.0 candidate. |
 
 ## Context and scope
 

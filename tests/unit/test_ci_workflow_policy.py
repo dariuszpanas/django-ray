@@ -74,6 +74,7 @@ def _events(path: Path) -> set[str]:
         ("ci.yml", "docs"),
         ("docs.yml", "build"),
         ("release.yml", "build"),
+        ("release-candidate-qualification.yml", "build"),
     ],
 )
 def test_changelog_tag_validation_jobs_fetch_complete_tag_inventory(
@@ -204,6 +205,82 @@ def test_manual_and_production_release_validation_remain_distinct() -> None:
         'version="$(uv run --no-sync python scripts/validate_release.py "$RELEASE_REF")"'
         in production_validation["run"]
     )
+
+
+def test_candidate_artifact_workflow_is_manual_read_only_and_never_publishes() -> None:
+    workflow = _workflow(WORKFLOWS / "release-candidate-qualification.yml")
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert set(workflow["on"]["workflow_dispatch"]["inputs"]) == {"version", "candidate_sha"}
+    assert workflow["permissions"] == {"contents": "read", "checks": "read", "actions": "read"}
+    assert set(workflow["jobs"]) == {"build", "test", "candidate-gate"}
+    for job in workflow["jobs"].values():
+        assert job["runs-on"] == "ubuntu-latest"
+        assert 1 <= int(job["timeout-minutes"]) <= 35
+        assert "environment" not in job and "permissions" not in job
+        for step in job["steps"]:
+            assert not any(name in str(step) for name in ("secrets.", "pypi-publish", "gh release"))
+            if str(step.get("uses", "")).startswith("actions/checkout@"):
+                assert step["with"]["ref"] == "${{ github.sha }}"
+                assert step["with"]["persist-credentials"] == "false"
+    build = workflow["jobs"]["build"]
+    commands = "\n".join(step.get("run", "") for step in build["steps"])
+    assert 'test "$EVENT_REF" = "refs/heads/$DEFAULT_BRANCH"' in commands
+    assert 'test "$CANDIDATE_SHA" = "$EVENT_SHA"' in commands
+    assert '--manual-candidate "$CANDIDATE_SHA" --event-sha "$EVENT_SHA"' in commands
+    assert commands.index("verify_release_source.py") < commands.index("wait_for_ci_checkpoint.py")
+    assert commands.index("wait_for_ci_checkpoint.py") < commands.index("uv build")
+    assert "--testpypi-candidate" in commands
+    assert commands.count("uv build") == 1
+    assert "HEAD^{tree}" in commands and "sha256sum dist/*.whl dist/*.tar.gz" in commands
+
+
+def test_candidate_artifact_matrix_verifies_both_installs_and_their_actual_dependencies() -> None:
+    job = _jobs(WORKFLOWS / "release-candidate-qualification.yml")["test"]
+    assert _needs(job) == {"build"}
+    assert "if" not in job
+    assert job["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {"python-version": ["3.12", "3.13", "3.14"]},
+    }
+    commands = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "sha256sum --check candidate-evidence/SHA256SUMS" in commands
+    assert commands.index("sha256sum --check") < commands.index("uv pip install")
+    assert "scripts/audit_runtime_dependencies.py" in commands
+    assert "for kind in wheel sdist; do" in commands
+    assert 'uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/candidate-$kind"' in commands
+    assert 'uv pip check --python "$interpreter"' in commands
+    assert '"$interpreter" -I scripts/verify_wheel.py' in commands
+    assert 'uv pip list --python "$interpreter" --format json' in commands
+    assert "scripts/installed_candidate_requirements.py" in commands
+    assert "python -m scripts.retry_pypi_audit" in commands
+    assert "--strict --disable-pip --no-deps" in commands
+    assert commands.index("scripts.retry_pypi_audit") < commands.index("success.txt")
+
+
+@pytest.mark.parametrize("failure", [None, "skipped-build", "skipped-test", "missing", "source"])
+def test_candidate_artifact_gate_requires_each_current_source_matrix_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+) -> None:
+    job = _jobs(WORKFLOWS / "release-candidate-qualification.yml")["candidate-gate"]
+    assert job["if"] == "always()" and _needs(job) == {"build", "test"}
+    run = job["steps"][-1]["run"]
+    script = run.split("python3 - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BUILD_RESULT", "skipped" if failure == "skipped-build" else "success")
+    monkeypatch.setenv("TEST_RESULT", "skipped" if failure == "skipped-test" else "success")
+    monkeypatch.setenv("SOURCE_SHA", "a" * 40)
+    for version in ("3.12", "3.13", "3.14"):
+        root = tmp_path / "candidate-results" / f"release-candidate-evidence-python-{version}"
+        root.mkdir(parents=True)
+        if failure != "missing" or version != "3.13":
+            (root / "success.txt").write_text(version)
+        source = "b" * 40 if failure == "source" and version == "3.13" else "a" * 40
+        (root / "source.txt").write_text(source + "\n" + "c" * 40 + "\n")
+    if failure is None:
+        exec(compile(script, "<candidate-artifact-gate>", "exec"), {})
+    else:
+        with pytest.raises((SystemExit, FileNotFoundError)):
+            exec(compile(script, "<candidate-artifact-gate>", "exec"), {})
 
 
 def _needs(job: dict[str, Any]) -> set[str]:
@@ -1211,7 +1288,7 @@ def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> 
         {"recipe": "jobs-crash", "service": "jobs"},
         {"recipe": "core-loss", "service": "native"},
     ]
-    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "0.5.0"
+    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "0.6.0"
     steps = job["steps"]
     checkout = steps[0]["with"]
     assert checkout["ref"] == job["env"]["SOURCE_SHA"]

@@ -1,0 +1,228 @@
+name: Release Candidate Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Unpublished candidate version to verify without publishing
+        required: true
+        type: string
+      candidate_sha:
+        description: Full current origin/main commit SHA to qualify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+  actions: read
+
+concurrency:
+  group: release-candidate-qualification
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Candidate Artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Validate the manual source selection
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          test "$EVENT_REF" = "refs/heads/$DEFAULT_BRANCH"
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$CANDIDATE_SHA" = "$EVENT_SHA"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the exact current candidate
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          git fetch --force --prune --tags origin "+refs/heads/main:refs/remotes/origin/main"
+          python3 scripts/verify_release_source.py \
+            --manual-candidate "$CANDIDATE_SHA" --event-sha "$EVENT_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Require the exact-source Linux CI checkpoint
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 scripts/wait_for_ci_checkpoint.py
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.9.18"
+          enable-cache: "false"
+
+      - name: Install the locked build environment
+        run: |
+          uv python install 3.12
+          uv sync --frozen --python 3.12
+
+      - name: Validate changelog release tags
+        run: >-
+          uv run --no-sync python scripts/validate_release.py
+          --development --require-git-tags --allow-release-candidate
+
+      - name: Validate the unpublished candidate version
+        id: version
+        env:
+          RELEASE_REF: ${{ inputs.version }}
+        run: |
+          version="$(uv run --no-sync python scripts/validate_release.py --testpypi-candidate "$RELEASE_REF")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir candidate-evidence
+          printf '%s\n' "$version" > candidate-evidence/version.txt
+
+      - name: Build once and record source and artifact identities
+        run: |
+          uv build
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          git rev-parse HEAD 'HEAD^{tree}' > candidate-evidence/source.txt
+          sha256sum dist/*.whl dist/*.tar.gz > candidate-evidence/SHA256SUMS
+
+      - name: Retain candidate artifacts for qualification only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-candidate-artifacts
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            dist/
+            candidate-evidence/
+
+  test:
+    name: Installed Artifacts (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+      CANDIDATE_VERSION: ${{ needs.build.outputs.version }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download the single candidate build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate-artifacts
+
+      - name: Verify downloaded source and distribution identities
+        run: |
+          test "$(sed -n '1p' candidate-evidence/source.txt)" = "$SOURCE_SHA"
+          test "$(sed -n '2p' candidate-evidence/source.txt)" = "$(git rev-parse 'HEAD^{tree}')"
+          test "$(cat candidate-evidence/version.txt)" = "$CANDIDATE_VERSION"
+          sha256sum --check candidate-evidence/SHA256SUMS
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.9.18"
+          enable-cache: "false"
+
+      - name: Install the locked audit environment
+        run: |
+          uv python install "$PYTHON_VERSION"
+          uv sync --locked --only-group dev --no-install-project --python "$PYTHON_VERSION"
+
+      - name: Audit locked runtime dependencies against current advisories
+        run: |
+          set -o pipefail
+          uv run --no-sync --python "$PYTHON_VERSION" \
+            python scripts/audit_runtime_dependencies.py 2>&1 | tee candidate-evidence/dependency-audit.log
+
+      - name: Verify separate wheel and source-distribution installations
+        run: |
+          set -o pipefail
+          for kind in wheel sdist; do
+            if [[ "$kind" = wheel ]]; then
+              artifact="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+            else
+              artifact="$(find dist -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+            fi
+            test -n "$artifact"
+            interpreter="$RUNNER_TEMP/candidate-$kind/bin/python"
+            uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/candidate-$kind"
+            uv pip install --python "$interpreter" "$artifact"
+            uv pip check --python "$interpreter" 2>&1 | tee "candidate-evidence/$kind-consistency.log"
+            "$interpreter" -I -c 'import os, sys; assert ".".join(map(str, sys.version_info[:2])) == os.environ["PYTHON_VERSION"]'
+            "$interpreter" -I scripts/verify_wheel.py \
+              --version "$CANDIDATE_VERSION" --dist-dir dist 2>&1 | tee "candidate-evidence/$kind-verification.log"
+            uv pip list --python "$interpreter" --format json > "candidate-evidence/$kind-installed.json"
+            uv run --no-sync python scripts/installed_candidate_requirements.py \
+              --inventory "candidate-evidence/$kind-installed.json" --version "$CANDIDATE_VERSION" \
+              --output "candidate-evidence/$kind-requirements.txt"
+            uv run --no-sync python -m scripts.retry_pypi_audit \
+              --strict --disable-pip --no-deps --vulnerability-service pypi \
+              --progress-spinner off --timeout 30 --cache-dir "$RUNNER_TEMP/audit-$kind" \
+              --requirement "candidate-evidence/$kind-requirements.txt" \
+              --format json --output "candidate-evidence/$kind-audit.json" 2>&1 | tee "candidate-evidence/$kind-audit.log"
+          done
+          printf '%s\n' "$PYTHON_VERSION" > candidate-evidence/success.txt
+
+      - name: Retain audit and installed-artifact evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-candidate-evidence-python-${{ matrix.python-version }}
+          retention-days: 30
+          if-no-files-found: error
+          path: candidate-evidence/
+
+  candidate-gate:
+    name: Release Candidate Artifact Gate
+    if: always()
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download every interpreter receipt
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-candidate-evidence-python-*
+          path: candidate-results/
+
+      - name: Require every candidate artifact stage
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          if any(os.environ[name] != "success" for name in ("BUILD_RESULT", "TEST_RESULT")):
+              raise SystemExit("Candidate artifact stages did not all pass")
+          for version in ("3.12", "3.13", "3.14"):
+              root = Path("candidate-results") / f"release-candidate-evidence-python-{version}"
+              if (root / "success.txt").read_text().strip() != version:
+                  raise SystemExit("Missing successful installed-artifact matrix entry")
+              if (root / "source.txt").read_text().splitlines()[0] != os.environ["SOURCE_SHA"]:
+                  raise SystemExit("Candidate artifact receipt source differs")
+          print("All three Python versions passed wheel, sdist and dependency qualification")
+          PY

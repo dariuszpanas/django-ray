@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-17
+
+This is the candidate preparation date. The release remains unpublished pending
+frozen-source qualification and a separate publication decision.
+
 ### Added
 
 - Add a blocking Python 3.15 preparation job that builds distributions, compiles
@@ -66,10 +71,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Require each assertion before and after cold replacement, with fixed-fact
   diagnostics and owned cleanup. These checks retain execution protocol 1 and
   the existing resource footprint; they do not activate a new target protocol
-  or establish arbitrary process-surface secrecy.
+  or establish arbitrary process-surface secrecy. The refusal fixture ships its
+  executor by value, matching the production Core runner's generic-head setup.
+  Protected-log failures retain only fixed phase and failure categories; raw
+  logs, subprocess responses and exception text remain private. The status
+  command allows seven host seconds around its four-second private checker,
+  including transport and initial module loading, within the unchanged
+  30-second observer. Bounded read-only PostgreSQL projections avoid repeating
+  Django/Admin initialization in private checks while preserving the shared
+  row, envelope and task-identity assertions. It adds no retry or resource
+  allocation.
+- Document the coordinated 0.6.0 to 0.7.0 Beta upgrade procedure and add the
+  released 0.6.0 source baseline to database and native qualification. Historical
+  0.4.0 and 0.5.0 database rehearsals remain available. Final-candidate
+  qualification is still required before release.
+- Add manual, nonpublishing candidate qualification that binds one build to the
+  exact current-main source, verifies separate wheel and source-distribution
+  installations on Python 3.12–3.14, and audits their resolved dependencies.
 
 ### Changed
 
+- Align the disabled Compiled Graph pilot's django-ray source pin with the
+  0.7.0 candidate. Its historical runtime profile remains unchanged; this does
+  not enable Compiled Graph or promote its prior cleanup evidence.
 - Document public Linux CI, finite test stages and hosted qualification
   entrypoints in the Docker, Kubernetes, latency, results and runtime guides.
   Separate source tests from installed-package evidence and optional historical
@@ -1974,7 +1998,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/dariuszpanas/django-ray/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dariuszpanas/django-ray/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dariuszpanas/django-ray/compare/v0.3.1...v0.4.0

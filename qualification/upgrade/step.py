@@ -284,7 +284,7 @@ def _code_rollback_read(root, artifacts):
         )
         assert cursor.fetchone() == ((1,) if connection.vendor == "sqlite" else ("on",))
     migrations = set(MigrationRecorder(connection).applied_migrations())
-    assert ("django_ray", "0026_ray_task_target_execution_evidence") in migrations
+    assert ("django_ray", "0027_workflow_reporting_diagnostics") in migrations
     observations = _historical(root, artifacts, inert=False)
     task_id = (root / "candidate-task-id").read_text(encoding="utf-8")
     assert RayTaskExecution.objects.count() == len(FIXTURE_IDS) + 1
