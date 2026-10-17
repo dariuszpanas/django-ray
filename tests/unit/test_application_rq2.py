@@ -52,8 +52,12 @@ def test_collector_requires_exact_generation_and_complete_rq2_layer():
     assert parse_receipts(raw, ("before-rq2",)) == {"before-rq2": raw}
     with pytest.raises(ValueError, match="generation"):
         parse_receipts(raw, ("after-rq2",))
-    assert RECEIPTS["assert-before"][1][-1] == "before-rq2"
-    assert RECEIPTS["assert-after"][1][-1] == "after-rq2"
+    for generation in ("before", "after"):
+        assert RECEIPTS[f"assert-{generation}"][1][4:] == (
+            f"{generation}-rq2",
+            f"{generation}-showcase",
+            f"{generation}-protocol",
+        )
 
 
 def test_cli_help_needs_no_django_or_ray(tmp_path):
@@ -510,6 +514,55 @@ def test_real_stored_request_metadata_and_registry_are_bound(bound_job):
     assert probe.inspect_job(row, client, marker) == "RUNNING"
 
 
+@pytest.mark.parametrize("failure", [None, "context", "reference", "args", "carrier"])
+def test_actual_process_observer_binds_real_stored_request(bound_job, monkeypatch, failure):
+    from django_ray.runtime import context
+    from testproject import qualification_process as observer
+
+    row, _, marker, info, prepared = bound_job
+    monkeypatch.setattr(observer, "REQUEST_ROOT", probe.REQUEST_ROOT)
+    task_context = context.DurableTaskContext(
+        task_pk=row.pk,
+        task_id=row.task_id,
+        attempt_number=row.attempt_number,
+        execution_generation=row.execution_generation,
+        ray_job_driver=True,
+        strict_execution_request=True,
+    )
+    monkeypatch.setattr(
+        context, "get_current_task_context", lambda: None if failure == "context" else task_context
+    )
+    argv = info.entrypoint.split(" ")
+    if failure == "carrier":
+        argv[3] = "--payload-b64"
+    monkeypatch.setattr(
+        observer, "_read", lambda *a: b"\0".join(value.encode() for value in argv) + b"\0"
+    )
+    if failure == "reference":
+        row.ray_job_request_reference = "rq2ref:v1:other"
+        row.save(update_fields=["ray_job_request_reference"])
+    if failure == "args":
+        row.args_json = '["different"]'
+        row.save(update_fields=["args_json"])
+    seen = []
+
+    def scan(**kwargs):
+        seen.append(kwargs)
+        return dict.fromkeys(observer.FACTS, True)
+
+    monkeypatch.setattr(observer, "scan_visible_argv", scan)
+    if failure:
+        with pytest.raises(ValueError):
+            observer.observe_driver(marker)
+        assert not seen
+    else:
+        observer.validate(observer.observe_driver(marker))
+        assert seen[0]["expected_argv"] == argv
+        assert row.task_id in seen[0]["forbidden"]
+        assert row.args_json in seen[0]["forbidden"]
+        assert marker in seen[0]["forbidden"]
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -548,9 +601,17 @@ def test_effect_observation_is_bounded_and_never_accepts_replay(tmp_path):
 
 
 @pytest.mark.parametrize("case", ["success", "missing"])
-def test_actual_fixture_callable_writes_only_one_owned_effect(tmp_path, settings, case):
+def test_actual_fixture_callable_writes_only_one_owned_effect(
+    tmp_path, settings, monkeypatch, case
+):
+    from testproject import qualification_process
     from testproject.qualification_rq2_tasks import controlled
 
+    monkeypatch.setattr(
+        qualification_process,
+        "observe_driver",
+        lambda marker: dict.fromkeys(qualification_process.FACTS, True),
+    )
     settings.RQ2_ROOT = tmp_path
     (tmp_path / "success-release").touch()
     assert controlled.func(case, "a" * 32) == {"value": 42, "effect": "once"}

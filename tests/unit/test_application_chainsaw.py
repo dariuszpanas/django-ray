@@ -15,6 +15,11 @@ def receipt(layer="application_setup", **changes):
     if layer == "application_core":
         defaults["runtime_env_refusals"] = {case: dict.fromkeys(FACTS, True) for case in CASES}
         defaults["ordinary_results"] = dict(RESULT_EVIDENCE)
+        defaults["protected_runtime"] = {
+            "api_clear": True,
+            "row_ids": [1, 2, 3],
+            "started_at": "2026-10-12T00:00:00Z",
+        }
     return json.dumps(
         {
             "schema_version": 1,
@@ -60,10 +65,10 @@ def test_core_receipts_require_complete_typed_result_presentation_in_both_genera
 
 @pytest.mark.parametrize("extra", [0, 1])
 def test_workflow_receipt_has_its_own_exact_byte_ceiling(extra):
-    raw = receipt("workflow_api_admin", observation="")
+    raw = receipt("workflow_api_admin", observations="")
     raw = receipt(
         "workflow_api_admin",
-        observation="x" * (runner.WORKFLOW_RECEIPT_MAX_BYTES - len(raw) + extra),
+        observations="x" * (runner.WORKFLOW_RECEIPT_MAX_BYTES - len(raw) + extra),
     )
     assert len(raw) == runner.WORKFLOW_RECEIPT_MAX_BYTES + extra
     if extra:
@@ -121,6 +126,7 @@ def test_receipts_refuse_partial_duplicate_wrong_or_unbounded_evidence(raw):
         "test",
         "timeout",
         "receipt",
+        "receipt-type",
         "cleanup",
         "ownership",
         "source",
@@ -185,7 +191,7 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
     def run(argv, *_args):
         assert argv[:2] == ["chainsaw", "test"]
         if failure == "timeout":
-            raise subprocess.TimeoutExpired(argv, runner.TEST_SECONDS)
+            raise subprocess.TimeoutExpired(argv, runner.APPLICATION_SECONDS)
         if failure == "test":
             raise RuntimeError("Test failed")
         return 0.001  # A prior phase's remaining budget must not constrain the next one.
@@ -214,6 +220,8 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
         assert expected_profile == runner.select_profile(profile, intent)
         if failure in {"receipt", "worker-diagnostic-collection"}:
             raise ValueError("Incomplete receipt")
+        if failure == "receipt-type":
+            raise TypeError("private malformed response")
 
     monkeypatch.setattr(runner, "checked", checked)
     monkeypatch.setattr(runner, "run_test", run)
@@ -347,7 +355,7 @@ def test_failure_diagnostics_exclude_resource_specs_and_bound_records(tmp_path, 
     assert events[0]["reason"] == "FailedCreate"
 
 
-def test_failure_diagnostics_include_bounded_application_logs(tmp_path, monkeypatch):
+def test_failure_diagnostics_never_collect_raw_application_logs(tmp_path, monkeypatch):
     names = [
         "assert-before-one",
         "assert-after-one",
@@ -370,14 +378,8 @@ def test_failure_diagnostics_include_bounded_application_logs(tmp_path, monkeypa
 
     monkeypatch.setattr(runner, "checked", checked)
     runner.diagnose(["kubectl"], "owned", tmp_path)
-    logs = list(tmp_path.glob("*.log"))
-    assert len(logs) == 16
-    assert all(path.stat().st_size == 32768 for path in logs)
-    assert (tmp_path / "django-web-one-previous-False.log").exists()
-    assert (tmp_path / "django-manager-one-previous-True.log").exists()
-    assert (tmp_path / "assert-before-one-previous-False.log").exists()
-    assert (tmp_path / "assert-after-one-previous-False.log").exists()
-    assert not (tmp_path / "ray-4-previous-False.log").exists()
+    assert not list(tmp_path.glob("*.log"))
+    assert (tmp_path / "diagnostic-pods.json").exists()
 
 
 @pytest.mark.parametrize("failure", [None, "timeout", "oversized", "invalid"])
@@ -403,7 +405,20 @@ def test_actor_diagnostics_are_bounded_and_cannot_prevent_owned_cleanup(
             raise subprocess.TimeoutExpired(argv, timeout)
         if failure == "invalid":
             return b"[]"
-        return b"x" * 16385 if failure == "oversized" else b'{"diagnostic_only":true}'
+        return (
+            b"x" * 16385
+            if failure == "oversized"
+            else json.dumps(
+                {
+                    "diagnostic_only": True,
+                    "status": "unavailable",
+                    "resources": {
+                        kind: {"status": "unavailable", "records": []}
+                        for kind in ("actors", "tasks", "nodes")
+                    },
+                }
+            ).encode()
+        )
 
     monkeypatch.setattr(runner, "checked", checked)
     runner.diagnose_progress_actors(["kubectl"], "owned", tmp_path, pods)
@@ -424,9 +439,9 @@ def test_failure_diagnostics_do_not_prevent_cleanup_on_api_failure(tmp_path, mon
 
 @pytest.mark.parametrize(
     ("completion_seconds", "ignore_terminate"),
-    [(1801, False), (2159.5, False), (2161, False), (2161, True)],
+    [(2161, False), (2819.5, False), (2821, False), (2821, True)],
 )
-def test_outer_budget_accounts_for_both_rq2_phases_and_still_stops(
+def test_accounted_outer_budget_completes_or_stops_at_its_bound(
     monkeypatch, completion_seconds, ignore_terminate
 ):
     clock = [100.0]
@@ -479,16 +494,16 @@ def test_outer_budget_accounts_for_both_rq2_phases_and_still_stops(
     monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *_a, **_k: process)
     monkeypatch.setattr(runner, "checked", checked)
-    if completion_seconds < 2160:
+    if completion_seconds < 2820:
         runner.run_test(["chainsaw", "test"], ["kubectl"], "owned")
-        assert clock[0] - started == completion_seconds > 1800
+        assert clock[0] - started == completion_seconds > 2160
         assert process.terminated_at is None
         assert cleanup_waits == []
     else:
-        with pytest.raises(TimeoutError, match="exceeded 2160 seconds"):
+        with pytest.raises(TimeoutError, match="accounted wall-clock"):
             runner.run_test(["chainsaw", "test"], ["kubectl"], "owned")
-        assert sum(monitored_waits) == 2160
-        assert process.terminated_at == 2160
+        assert sum(monitored_waits) == 2820
+        assert process.terminated_at == 2820
         assert cleanup_waits == ([10, 10] if ignore_terminate else [10])
     assert health_checks
     assert process.stopped
@@ -496,7 +511,12 @@ def test_outer_budget_accounts_for_both_rq2_phases_and_still_stops(
 
 
 @pytest.mark.parametrize("deleting", [None, "pod", "owner", "owner-absent"])
-def test_container_failure_stops_chainsaw_but_allows_planned_deletion(monkeypatch, deleting):
+@pytest.mark.parametrize(
+    "exit_code, expected", [(137, 137), ("private-canary", None), (True, None)]
+)
+def test_container_failure_stops_chainsaw_but_allows_planned_deletion(
+    monkeypatch, capsys, deleting, exit_code, expected
+):
     class Process:
         stopped = False
         waits = 0
@@ -519,15 +539,17 @@ def test_container_failure_stops_chainsaw_but_allows_planned_deletion(monkeypatc
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: process)
     pod = {
         "metadata": {
-            "name": "ray-head",
+            "name": "private-canary-pod",
             "ownerReferences": [{"kind": "RayCluster", "uid": "generation"}],
             **({"deletionTimestamp": "now"} if deleting == "pod" else {}),
         },
         "status": {
             "containerStatuses": [
                 {
-                    "name": "ray-head",
-                    "lastState": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}},
+                    "name": "private-canary-container",
+                    "lastState": {
+                        "terminated": {"exitCode": exit_code, "reason": "private-canary-reason"}
+                    },
                 }
             ]
         },
@@ -552,3 +574,9 @@ def test_container_failure_stops_chainsaw_but_allows_planned_deletion(monkeypatc
         with pytest.raises(RuntimeError, match="container failed"):
             runner.run_test(["chainsaw", "test"], ["kubectl"], "owned")
     assert process.stopped
+    output = capsys.readouterr().out
+    assert "private-canary" not in output
+    if deleting:
+        assert not output
+    else:
+        assert json.loads(output) == {"application_container_failed": True, "exit_code": expected}

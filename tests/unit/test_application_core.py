@@ -272,6 +272,7 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
 
     from qualification.application import (
         dashboard_browser,
+        protected_runtime,
         result_presentation,
         runtime_env_refusal,
     )
@@ -281,7 +282,9 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
     monkeypatch.setattr(django, "setup", lambda: None)
     monkeypatch.setattr(run_core, "read_token", lambda path: "unprinted-token")
     monkeypatch.setattr(run_core, "verify_application_api", lambda *args, **kwargs: ApiEvidence())
-    monkeypatch.setattr(run_core, "verify_durable_task", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        run_core, "verify_durable_task", lambda *args, **kwargs: {"execution_id": 1}
+    )
     monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *args, **kwargs: TASK_ID)
     monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *args: {})
     monkeypatch.setattr(
@@ -296,6 +299,13 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
                 raise ValueError("unprinted-envelope-and-exception")
             evidence[case] = dict.fromkeys(runtime_env_refusal.FACTS, True)
 
+        return [2, 3]
+
+    monkeypatch.setattr(
+        protected_runtime.Capture,
+        "finish",
+        lambda self, ids: {"api_clear": True, "row_ids": ids, "started_at": self.started_at},
+    )
     monkeypatch.setattr(runtime_env_refusal, "verify_refusals", verify)
     path = tmp_path / "receipt.json"
     assert run_core.main(["--token-file", "unused", "--receipt", str(path)]) == int(failure)
@@ -322,6 +332,7 @@ def test_core_requires_result_presentation_before_writing_a_passing_receipt(
 ):
     from qualification.application import (
         dashboard_browser,
+        protected_runtime,
         result_presentation,
         runtime_env_refusal,
     )
@@ -333,7 +344,7 @@ def test_core_requires_result_presentation_before_writing_a_passing_receipt(
     monkeypatch.setattr(
         run_core, "verify_application_api", lambda *_a, **_k: ApiEvidence(task_id=TASK_ID)
     )
-    monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {})
+    monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {"execution_id": 1})
     monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *_a, **_k: TASK_ID)
     monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *_a: {})
 
@@ -344,8 +355,14 @@ def test_core_requires_result_presentation_before_writing_a_passing_receipt(
                 for case in runtime_env_refusal.CASES
             }
         )
+        return [2, 3]
 
     monkeypatch.setattr(runtime_env_refusal, "verify_refusals", verify_refusals)
+    monkeypatch.setattr(
+        protected_runtime.Capture,
+        "finish",
+        lambda self, ids: {"api_clear": True, "row_ids": ids, "started_at": self.started_at},
+    )
 
     def observe(*, token):
         assert token == "fixed-token"

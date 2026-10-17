@@ -132,23 +132,13 @@ jobs:
             --wait --timeout 180s
 
       - name: Run the native application core test
-        # 2160s cold workload + 180s worker images; retain the existing 300s
+        # 2820s cold workload + 180s worker images; retain the existing 300s
         # allowance for startup, receipt collection and namespace cleanup.
-        timeout-minutes: 44
+        timeout-minutes: 55
         run: |
           python -m qualification.application.run_chainsaw --context kind-application-core \
             --image "$APPLICATION_IMAGE" --storage-class standard --output "$RUNNER_TEMP/application-evidence" \
             --validation-intent "$VALIDATION_INTENT" --resource-profile "$RESOURCE_PROFILE"
-
-      - name: Retain bounded operator diagnostics on failure
-        if: failure()
-        timeout-minutes: 2
-        run: |
-          mkdir -p "$RUNNER_TEMP/application-evidence"
-          kubectl --context kind-application-core --request-timeout=30s \
-            -n kuberay-system logs deployment/kuberay-operator \
-            --tail=200 --limit-bytes=65536 > "$RUNNER_TEMP/application-evidence/operator.log" 2>&1 || true
-          cat "$RUNNER_TEMP/application-evidence/operator.log"
 
       - name: Remove only this job's disposable infrastructure
         if: always()

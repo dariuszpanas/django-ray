@@ -57,13 +57,23 @@ def test_generation_retains_fixed_order_receipts_and_previous_generation(generat
     commands = runner.generation_commands(
         generation, "http://django-web:8000", Path("/credentials/token")
     )
-    assert [name for name, _ in commands] == ["first", "nodes", "core", "workflows", "rq2"]
+    assert [name for name, _ in commands] == [
+        "first",
+        "nodes",
+        "core",
+        "workflows",
+        "rq2",
+        "showcase",
+        "protocol",
+    ]
     assert [argv[2] for _, argv in commands] == [
         "qualification.application.run_first_workflows",
         "qualification.application.generic_nodes",
         "qualification.application.run_core",
         "qualification.application.run_workflows",
         "qualification.application.run_rq2",
+        "qualification.application.run_showcase_failure",
+        "qualification.application.run_protocol",
     ]
     for name, argv in commands:
         assert argv[:2] == [sys.executable, "-m"]
@@ -76,13 +86,16 @@ def test_generation_retains_fixed_order_receipts_and_previous_generation(generat
 
 
 def _commands():
-    return tuple((name, [name]) for name in ("first", "nodes", "core", "workflows", "rq2"))
+    return tuple(
+        (name, [name])
+        for name in ("first", "nodes", "core", "workflows", "rq2", "showcase", "protocol")
+    )
 
 
 def test_existing_commands_share_one_budget_without_unused_first_time(monkeypatch, capsys):
     now = [0.0]
     observed = []
-    durations = iter([30, 200, 100, 250, 60])
+    durations = iter([30, 200, 100, 250, 60, 40, 20])
     monkeypatch.setattr(runner.time, "monotonic", lambda: now[0])
 
     def execute(argv, timeout):
@@ -98,6 +111,8 @@ def test_existing_commands_share_one_budget_without_unused_first_time(monkeypatc
         ("core", 400),
         ("workflows", 300),
         ("rq2", 180),
+        ("showcase", 176),
+        ("protocol", 116),
     ]
     markers = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [(m["generation_phase"], m["status"]) for m in markers] == [
@@ -107,9 +122,15 @@ def test_existing_commands_share_one_budget_without_unused_first_time(monkeypatc
         ("existing", "passed"),
         ("rq2", "started"),
         ("rq2", "passed"),
+        ("showcase", "started"),
+        ("showcase", "passed"),
+        ("protocol", "started"),
+        ("protocol", "passed"),
     ]
-    assert markers[-3]["elapsed_seconds"] == 550
-    assert markers[-1]["elapsed_seconds"] == 60
+    assert markers[3]["elapsed_seconds"] == 550
+    assert markers[5]["elapsed_seconds"] == 60
+    assert markers[7]["elapsed_seconds"] == 40
+    assert markers[9]["elapsed_seconds"] == 20
 
 
 def test_first_failure_stops_all_remaining_work(monkeypatch, capsys):
@@ -184,13 +205,22 @@ Path(sys.argv[2]).write_text(json.dumps(value))
     assert os.environ[OUTER_DEADLINE_ENV] == "invalid-parent-context"
 
 
-@pytest.mark.parametrize("phase", ["first", "existing", "rq2"])
+@pytest.mark.parametrize("phase", ["first", "existing", "rq2", "showcase", "protocol"])
 def test_timeout_stops_later_commands_and_never_emits_success(monkeypatch, capsys, phase):
     calls = []
 
     def execute(argv, timeout):
         calls.append(argv[0])
-        if argv[0] == {"first": "first", "existing": "core", "rq2": "rq2"}[phase]:
+        if (
+            argv[0]
+            == {
+                "first": "first",
+                "existing": "core",
+                "rq2": "rq2",
+                "showcase": "showcase",
+                "protocol": "protocol",
+            }[phase]
+        ):
             raise subprocess.TimeoutExpired(argv, timeout)
         return 0
 
@@ -202,6 +232,8 @@ def test_timeout_stops_later_commands_and_never_emits_success(monkeypatch, capsy
             "first": ["first"],
             "existing": ["first", "nodes", "core"],
             "rq2": ["first", "nodes", "core", "workflows", "rq2"],
+            "showcase": ["first", "nodes", "core", "workflows", "rq2", "showcase"],
+            "protocol": ["first", "nodes", "core", "workflows", "rq2", "showcase", "protocol"],
         }[phase]
     )
     last = json.loads(capsys.readouterr().out.splitlines()[-1])
@@ -321,6 +353,11 @@ def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
             "complete_application_gate": False,
             "runtime_env_refusals": {case: dict.fromkeys(FACTS, True) for case in CASES},
             "ordinary_results": dict(RESULT_EVIDENCE),
+            "protected_runtime": {
+                "api_clear": True,
+                "row_ids": [1, 2, 3],
+                "started_at": "2026-10-12T00:00:00Z",
+            },
         }
     ).encode()
     assert set(parse_receipts(raw, ("before-core",))) == {"before-core"}

@@ -822,7 +822,7 @@ spec:
             name: assert-before
           spec:
             backoffLimit: 0
-            activeDeadlineSeconds: 990
+            activeDeadlineSeconds: 1290
             parallelism: 1
             completions: 1
             template:
@@ -922,7 +922,7 @@ spec:
                     sizeLimit: 256Mi
                     medium: ''
     - assert:
-        timeout: 1005s
+        timeout: 1305s
         resource:
           apiVersion: batch/v1
           kind: Job
@@ -930,6 +930,32 @@ spec:
             name: assert-before
           status:
             succeeded: 1
+  - name: inspect-before-protected-logs
+    try:
+    - command:
+        timeout: 30s
+        entrypoint: python
+        workDir: ../..
+        env:
+        - name: OBSERVATION_NAMESPACE
+          value: ($namespace)
+        - name: OBSERVATION_CONTEXT
+          value: ($values.protectedLogContext)
+        - name: OBSERVATION_KUBECONFIG
+          value: ($values.protectedLogKubeconfigPaths)
+        - name: OBSERVATION_IMAGE
+          value: ($values.applicationImage)
+        - name: OBSERVATION_OUTPUT
+          value: ($values.protectedLogOutput)
+        args:
+        - -m
+        - qualification.application.protected_logs
+        - --context=$OBSERVATION_CONTEXT
+        - --kubeconfig-paths=$OBSERVATION_KUBECONFIG
+        - --namespace=$OBSERVATION_NAMESPACE
+        - --image=$OBSERVATION_IMAGE
+        - --generation=before
+        - --output=$OBSERVATION_OUTPUT/before-protected-logs.json
   - name: replace-ray-with-cold-generation
     try:
     - delete:
@@ -1218,7 +1244,7 @@ spec:
             name: assert-after
           spec:
             backoffLimit: 0
-            activeDeadlineSeconds: 990
+            activeDeadlineSeconds: 1290
             parallelism: 1
             completions: 1
             template:
@@ -1318,7 +1344,7 @@ spec:
                     sizeLimit: 256Mi
                     medium: ''
     - assert:
-        timeout: 1005s
+        timeout: 1305s
         resource:
           apiVersion: batch/v1
           kind: Job
@@ -1327,6 +1353,32 @@ spec:
           status:
             succeeded: 1
 
+  - name: inspect-after-protected-logs
+    try:
+    - command:
+        timeout: 30s
+        entrypoint: python
+        workDir: ../..
+        env:
+        - name: OBSERVATION_NAMESPACE
+          value: ($namespace)
+        - name: OBSERVATION_CONTEXT
+          value: ($values.protectedLogContext)
+        - name: OBSERVATION_KUBECONFIG
+          value: ($values.protectedLogKubeconfigPaths)
+        - name: OBSERVATION_IMAGE
+          value: ($values.applicationImage)
+        - name: OBSERVATION_OUTPUT
+          value: ($values.protectedLogOutput)
+        args:
+        - -m
+        - qualification.application.protected_logs
+        - --context=$OBSERVATION_CONTEXT
+        - --kubeconfig-paths=$OBSERVATION_KUBECONFIG
+        - --namespace=$OBSERVATION_NAMESPACE
+        - --image=$OBSERVATION_IMAGE
+        - --generation=after
+        - --output=$OBSERVATION_OUTPUT/after-protected-logs.json
   - name: measure-reporting-policies
     try:
     - create:

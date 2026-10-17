@@ -187,7 +187,7 @@ def inspect_failure(fixture: Fixture, *, manager_prefix: str) -> bytes | None:
     return snapshot
 
 
-def verify_refusals(request, *, token: str, manager_prefix: str, evidence: dict) -> None:
+def verify_refusals(request, *, token: str, manager_prefix: str, evidence: dict) -> list[int]:
     """Use one finite observation budget; the generation owns the hard deadline."""
     if (
         os.environ.get("DJANGO_SETTINGS_MODULE") != "testproject.settings_qualification"
@@ -233,3 +233,4 @@ def verify_refusals(request, *, token: str, manager_prefix: str, evidence: dict)
     if time.monotonic() > deadline:
         raise ValueError("RuntimeEnv refusal observation deadline expired")
     validate_evidence(evidence)
+    return [fixture.pk for fixture in fixtures]

@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import secrets
 import subprocess
 import time
 from pathlib import Path
 
+from qualification.application.budgets import APPLICATION_SECONDS
 from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
 from qualification.application.resource_profiles import (
     RESOURCE_PROFILES,
@@ -26,7 +28,6 @@ from qualification.application.run_first_workflows import (
 from qualification.application.run_first_workflows import (
     validate_receipt as validate_first_workflow_receipt,
 )
-from qualification.application.run_generation import RQ2_SECONDS
 from qualification.application.run_reporting_benchmark import (
     LAYER as REPORTING_LAYER,
 )
@@ -36,6 +37,15 @@ from qualification.application.run_reporting_benchmark import (
 from qualification.application.run_reporting_benchmark import (
     validate_receipt as validate_reporting_receipt,
 )
+from qualification.application.run_showcase_failure import (
+    LAYER as SHOWCASE_LAYER,
+)
+from qualification.application.run_showcase_failure import (
+    RECEIPT_MAX_BYTES as SHOWCASE_RECEIPT_MAX_BYTES,
+)
+from qualification.application.run_showcase_failure import (
+    validate_receipt as validate_showcase_receipt,
+)
 from qualification.application.worker_images import WorkerImageObservationError
 from qualification.application.worker_images import run as observe_worker_images
 from qualification.application.worker_images import (
@@ -44,8 +54,6 @@ from qualification.application.worker_images import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "qualification/application"
-# Preserve the qualified pre-rq2 envelope and account for both added phases.
-TEST_SECONDS = 1800 + 2 * RQ2_SECONDS
 CREDENTIAL_KEYS = (
     "DJANGO_API_TOKEN",
     "DJANGO_SECRET_KEY_PART_ONE",
@@ -58,11 +66,27 @@ RECEIPTS = {
     "django-web": ("setup", ("setup",)),
     "assert-before": (
         "assertions",
-        ("before-first", "before-nodes", "before-core", "before-workflows", "before-rq2"),
+        (
+            "before-first",
+            "before-nodes",
+            "before-core",
+            "before-workflows",
+            "before-rq2",
+            "before-showcase",
+            "before-protocol",
+        ),
     ),
     "assert-after": (
         "assertions",
-        ("after-first", "after-nodes", "after-core", "after-workflows", "after-rq2"),
+        (
+            "after-first",
+            "after-nodes",
+            "after-core",
+            "after-workflows",
+            "after-rq2",
+            "after-showcase",
+            "after-protocol",
+        ),
     ),
     "reporting-benchmark": ("assertions", ("reporting",)),
 }
@@ -74,6 +98,8 @@ LAYERS = {
     "workflows": "workflow_api_admin",
     "first": FIRST_WORKFLOW_LAYER,
     "rq2": "application_rq2",
+    "showcase": SHOWCASE_LAYER,
+    "protocol": "application_protocol",
 }
 
 
@@ -96,13 +122,19 @@ def parse_receipts(
         if not line.startswith(b"{"):
             continue
         value = json.loads(line)
-        if not isinstance(value, dict) or value.get("layer") not in LAYERS.values():
+        if (
+            not isinstance(value, dict)
+            or type(value.get("layer")) is not str
+            or value["layer"] not in LAYERS.values()
+        ):
             continue
         receipt_limit = 16384
         if value["layer"] == "workflow_api_admin":
             receipt_limit = WORKFLOW_RECEIPT_MAX_BYTES
         elif value["layer"] == REPORTING_LAYER:
             receipt_limit = MAX_RECEIPT_BYTES
+        elif value["layer"] == SHOWCASE_LAYER:
+            receipt_limit = SHOWCASE_RECEIPT_MAX_BYTES
         if (
             len(line) > receipt_limit
             or type(value.get("schema_version")) is not int
@@ -118,14 +150,25 @@ def parse_receipts(
             if expected_profile is not None and value["qualification_profile"] != expected_profile:
                 raise ValueError("First-workflow receipt belongs to another resource profile")
         elif value["layer"] == "application_core":
+            from qualification.application.protected_runtime import validate as validate_protected
             from qualification.application.runtime_env_refusal import validate_evidence
 
             validate_evidence(value.get("runtime_env_refusals"))
             validate_result_evidence(value.get("ordinary_results"))
+            validate_protected(value.get("protected_runtime"))
         elif value["layer"] == "application_rq2":
             from qualification.application.run_rq2 import validate_receipt
 
             validate_receipt(value)
+        elif value["layer"] == SHOWCASE_LAYER:
+            validate_showcase_receipt(value)
+        elif value["layer"] == "application_protocol":
+            from qualification.application.run_protocol import validate_receipt
+
+            validate_receipt(value)
+        from qualification.application.safe_diagnostics import passed_receipt
+
+        passed_receipt(value)
         parsed.append((value, line))
     if len(parsed) != len(names):
         raise ValueError("Receipt count differs from the required assertions")
@@ -133,6 +176,11 @@ def parse_receipts(
     for name, (value, line) in zip(names, parsed, strict=True):
         if value["layer"] != LAYERS[name.rsplit("-", 1)[-1]]:
             raise ValueError("Receipt order differs from the required assertions")
+        if (
+            value["layer"] in {SHOWCASE_LAYER, "application_protocol"}
+            and value.get("generation") != name.split("-", 1)[0]
+        ):
+            raise ValueError("Receipt belongs to another Ray generation")
         if value["layer"] == "application_rq2" and value["generation"] != name.split("-")[0]:
             raise ValueError("Request-reference receipt belongs to another generation")
         result[name] = line
@@ -170,7 +218,13 @@ def collect(
         )
         if len(raw) > log_limit:
             raise ValueError("Receipt log exceeds its byte limit")
-        (output / f"{app}.log").write_bytes(raw)
+        from qualification.application.safe_diagnostics import lines as safe_lines
+
+        diagnostics = safe_lines(raw)
+        if diagnostics:
+            (output / f"{app}-diagnostics.json").write_text(
+                json.dumps(diagnostics), encoding="utf-8"
+            )
         if (
             spec["image"] != image
             or status.get("imageID", "").removeprefix("containerd://").rsplit("@", 1)[-1]
@@ -197,69 +251,39 @@ def collect(
     ):
         raise ValueError("Cold generation is not bound to the original receipt")
     (output / "producers.json").write_text(json.dumps(identities, indent=2), encoding="utf-8")
+    from qualification.application.protected_logs import validate_receipt as validate_log_receipt
+
+    for generation in ("before", "after"):
+        with (output / f"{generation}-protected-logs.json").open("rb") as stream:
+            raw = stream.read(2049)
+        if len(raw) > 2048:
+            raise ValueError("Protected log receipt exceeds its byte limit")
+        validate_log_receipt(json.loads(raw), generation)
 
 
 def diagnose(kubectl, namespace: str, output: Path) -> None:
-    """Retain bounded status and events before cleanup, excluding specs and Secrets."""
+    """Retain fixed status/event fields; raw Pod logs are never public artifacts."""
     for resource in ("rayclusters", "pods", "events"):
         try:
             items = json.loads(checked([*kubectl, "get", resource, "-n", namespace, "-o", "json"]))[
                 "items"
             ]
-            records = []
-            for item in items[:100]:
-                record = {"name": item["metadata"]["name"]}
-                if resource == "events":
-                    record.update(
-                        {key: item.get(key) for key in ("type", "reason", "message", "count")}
-                    )
-                else:
-                    record["status"] = item.get("status", {})
-                records.append(record)
-            raw = json.dumps(records, indent=2).encode()
+            from qualification.application.safe_diagnostics import resources as safe_resources
+
+            raw = json.dumps(safe_resources(resource, items), indent=2).encode()
             if len(raw) <= 65536:
                 (output / f"diagnostic-{resource}.json").write_bytes(raw)
             if resource == "pods":
                 diagnose_progress_actors(kubectl, namespace, output, items)
-                for pod in [
-                    p
-                    for p in items
-                    if p["metadata"]["name"].startswith(
-                        (
-                            "ray-",
-                            "django-web-",
-                            "django-manager-",
-                            "assert-before-",
-                            "assert-after-",
-                        )
-                    )
-                ][:8]:
-                    for container in pod.get("status", {}).get("containerStatuses", [])[:1]:
-                        for previous in (
-                            (False, True) if container.get("restartCount") else (False,)
-                        ):
-                            try:
-                                raw = checked(
-                                    [
-                                        *kubectl,
-                                        "logs",
-                                        pod["metadata"]["name"],
-                                        "-n",
-                                        namespace,
-                                        "-c",
-                                        container["name"],
-                                        "--tail=100",
-                                        "--limit-bytes=32768",
-                                        "--request-timeout=5s",
-                                        f"--previous={str(previous).lower()}",
-                                    ],
-                                    timeout=10,
-                                )
-                                name = f"{pod['metadata']['name']}-previous-{previous}.log"
-                                (output / name).write_bytes(raw[:32768])
-                            except (OSError, RuntimeError, subprocess.SubprocessError):
-                                pass
-        except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            subprocess.SubprocessError,
+        ):
             print(f"Could not retain bounded {resource} diagnostics", flush=True)
 
 
@@ -298,10 +322,12 @@ def diagnose_progress_actors(kubectl, namespace: str, output: Path, pods: list) 
         )
         if len(raw) > 16384:
             raise ValueError("Oversized actor diagnostics")
-        receipt = json.loads(raw)
-        if not isinstance(receipt, dict) or receipt.get("diagnostic_only") is not True:
-            raise ValueError("Invalid bounded actor diagnostics")
-        (output / "diagnostic-progress-actors.json").write_bytes(raw)
+        from qualification.application.safe_diagnostics import actor as safe_actor
+
+        receipt = safe_actor(json.loads(raw))
+        (output / "diagnostic-progress-actors.json").write_text(
+            json.dumps(receipt), encoding="utf-8"
+        )
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         print("Could not retain bounded actor diagnostics", flush=True)
 
@@ -309,12 +335,12 @@ def diagnose_progress_actors(kubectl, namespace: str, output: Path, pods: list) 
 def run_test(command, kubectl, namespace: str) -> None:
     """Keep progress visible and stop on crashed containers instead of readiness timeout."""
     process = subprocess.Popen(command, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + TEST_SECONDS
+    deadline = time.monotonic() + APPLICATION_SECONDS
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"Application core exceeded {TEST_SECONDS} seconds")
+                raise TimeoutError("Application core exceeded its accounted wall-clock limit")
             try:
                 code = process.wait(timeout=min(15, remaining))
             except subprocess.TimeoutExpired:
@@ -346,9 +372,16 @@ def run_test(command, kubectl, namespace: str) -> None:
                         for state in (container.get("state", {}), container.get("lastState", {})):
                             terminated = state.get("terminated", {})
                             if terminated.get("exitCode", 0) != 0:
+                                exit_code = terminated.get("exitCode")
                                 print(
-                                    f"Container failed: {pod['metadata']['name']}/"
-                                    f"{container['name']} ({terminated.get('reason', 'Error')})",
+                                    json.dumps(
+                                        {
+                                            "application_container_failed": True,
+                                            "exit_code": exit_code
+                                            if type(exit_code) is int and 0 <= exit_code <= 255
+                                            else None,
+                                        }
+                                    ),
                                     flush=True,
                                 )
                                 raise RuntimeError("Application container failed") from None
@@ -364,6 +397,15 @@ def run_test(command, kubectl, namespace: str) -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=10)
+
+
+def caller_kubeconfig_paths() -> str:
+    """Preserve path selection, never read or copy kubeconfig credential content."""
+    configured = os.environ.get("KUBECONFIG", "")
+    paths = [item for item in configured.split(os.pathsep) if item]
+    if not paths:
+        paths = [str(Path.home() / ".kube" / "config")]
+    return os.pathsep.join(str(Path(item).expanduser().resolve()) for item in paths)
 
 
 def main(argv=None) -> int:
@@ -401,6 +443,9 @@ def main(argv=None) -> int:
             {
                 "applicationImage": args.image,
                 "storageClass": args.storage_class,
+                "protectedLogOutput": str(args.output),
+                "protectedLogContext": args.context,
+                "protectedLogKubeconfigPaths": caller_kubeconfig_paths(),
                 **chainsaw_values(profile),
             }
         )
@@ -454,7 +499,15 @@ def main(argv=None) -> int:
                 current_tree = checked([*git, "rev-parse", "HEAD^{tree}"]).decode().strip()
                 passed = passed and current_tree == source_tree
                 passed = passed and not checked([*git, "status", "--porcelain"]).strip()
-            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                subprocess.SubprocessError,
+            ):
                 passed = False
             if not passed:
                 diagnose(kubectl, namespace, args.output)

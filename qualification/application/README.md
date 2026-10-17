@@ -39,7 +39,7 @@ python -m qualification.application.run_api \
 ```
 
 The caller provides the admitted application service origin and a mounted application token file.
-The token must contain 32Ã¢â‚¬â€œ512 ASCII token68 characters, without a trailing newline. It is read only
+The token must contain 32 to 512 ASCII token68 characters, without a trailing newline. It is read only
 after the unauthenticated and schema assertions pass. HTTP(S) origins cannot include credentials,
 paths, queries or fragments. The transport ignores ambient proxies, does not follow redirects,
 verifies HTTPS with the standard system trust store, and enforces response byte limits for success
@@ -150,7 +150,7 @@ Its existence or resource-free unit tests do not establish a passing live generi
 
 ## Offline application core stage
 
-`core.yaml` is a native public Chainsaw Test. Its fourteen steps start disposable PostgreSQL 17,
+`core.yaml` is a native public Chainsaw Test. Its ordered steps start disposable PostgreSQL 17,
 prepare the sample web application and locked recovery archives, and start one current core task
 manager with stock Ray 2.58.0 head/worker nodes. Two serial Jobs require authenticated API execution,
 exact durable task/attempt/current-manager ownership, authenticated encrypted RuntimeEnv snapshots
@@ -188,19 +188,19 @@ The observer compares those snapshots again after both cases finish.
 These cases run before and after cold Ray replacement within the existing core Jobs.
 They have a shared 60-second observation budget, bounded 64-KiB HTTP responses, the
 existing per-request transport deadlines and the enclosing 600-second generation phase
-and 2160-second test deadline. No extra cluster, process, queue or resource allocation is
+and the accounted 2820-second test deadline. No extra cluster, process, queue or resource allocation is
 introduced. Namespace teardown owns the four fixture rows across the two generations.
 The core receipt retains only four booleans per fixed case; a second-case timeout keeps
 the first case's observations but fails the stage. Missing, partial or unexpected negative
 case evidence cannot pass collection. Task identities, snapshot hashes, ciphertext,
 envelopes, keys and raw exceptions from these assertions never enter their receipts.
 
-This adds deployed evidence for manager refusal, absence of retained submission/result
+This provides deployed assertions for manager refusal, absence of retained submission/result
 identity and retry preservation; it does not independently observe every possible external
-effect. The focused worker regression also traps dispatch calls before Ray. This slice does
-not establish bounded protected-value log scanning, ordinary-result escaping, cancellation
-versus observed stopping, arbitrary ingress or monitoring coverage. Those catalogue cases
-remain in #455. A fixture definition or mocked test is not a passing hosted observation;
+effect. The focused worker regression also traps dispatch calls before Ray. Protected-value
+scanning and ordinary-result presentation use the separate observers below; cancellation and
+monitoring have their own qualification fixtures. The broader catalogue remains in #455.
+A fixture definition or mocked test is not a passing hosted observation;
 acceptance still requires the exact-source receipts and owned cleanup described below.
 
 ### Request-reference Jobs assertions
@@ -243,7 +243,7 @@ The setup container creates `/receipts/rq2`; both generic Ray Pod templates and 
 Jobs mount only that subdirectory at `/rq2`, writable by their existing UID 1000. Request objects
 and effect markers never enter `/runtime` or the source archive. Archives retain read-only mounts.
 This reuses the owned receipts claim and current container CPU/memory limits, adding no Pod,
-Deployment, PVC or cluster. Child-manager output is suppressed. Nine fixed boolean assertions are
+Deployment, PVC or cluster. Child-manager output is suppressed. Ten fixed boolean assertions are
 retained separately for each generation; partial or missing evidence cannot pass collection.
 Failure output retains only fixed phase, error and manager-exit categories. Before the first
 effect, at most one task row, two matching leases and one bounded JobInfo call are sampled every
@@ -258,6 +258,79 @@ not necessarily simultaneous with the failure. The first failure remains separat
 Namespace cleanup owns the four fixture rows and their files. These definitions and local tests
 are not a passing deployed receipt: exact-source Linux CI, both live generations, source/archive
 correspondence and owned cleanup must still pass for acceptance.
+
+### Protected application surfaces
+
+The core observer compares its existing RuntimeEnv canary enqueue/poll and two
+refusal retry responses against the fixed marker, unavailable key label and the
+three owned encrypted envelopes, nonces and ciphertexts. Capture stays in memory:
+128 bodies, 64 KiB each and 4 MiB total. It does not add network waits to the
+existing workflow phase. Exact owned row IDs and the observation start time are
+safe coordination fields; protected values never enter receipts. Database-side
+byte guards prevent oversized envelopes from being transferred into the observer.
+
+After each generation finishes, a separate host observer has 30 seconds to read
+the current web and manager container logs and compare them in the existing web
+Pod. It preserves the caller's explicit Kubernetes context and original absolute
+kubeconfig path list across Chainsaw's child environment, without copying config
+contents. It binds the candidate image,
+requires the exact Pod UIDs with no restarts before and after, and rejects a
+replacement or a log whose earliest timestamp does not cover the observation
+start. Each full log has a 1 MiB cap plus one-byte overflow detection; accepting a
+truncated tail cannot pass. Before either log snapshot, a private checker reads
+the two exact refused task-status APIs with one-second socket limits under a
+four-second in-Pod alarm and seven-second host command limit. The host allowance
+also covers exec transport, initial Python module loading and receipt return outside the
+child alarm; it does not extend the child's work deadline. Both must report the
+bounded contract, exact task identity, one failed attempt/generation and no
+protected value. The subsequent log-only checker receives at most 3 MiB on private
+stdin and has a five-second in-Pod alarm and six-second host limit. Both use
+direct read-only PostgreSQL projections of exactly the three owned rows, with
+a two-second connection timeout and one-second statement and lock limits. The
+private processes do not initialize Django or its Admin applications. Database-side
+byte guards bound each encrypted envelope before transfer; shared pure validators
+retain the same row identity, fixture, state, envelope and refused-task UUID checks
+as the ORM observations. Credentials and protected values stay inside the web Pod.
+The connection closes before either status request or the log-only comparison.
+Metadata and receipt reads allow two seconds each, and each full log read allows
+five seconds. These
+seven sequential command limits total 29 seconds within the fixed 30-second
+observer, leaving one second for other overhead including final receipt handling;
+final identity revalidation is already in those command limits. Every command is
+clipped to the remaining observer time, and no command resets that deadline.
+Successful checkers emit only their existing fixed boolean facts. On failure,
+the host emits at most 512 bytes of fixed JSON identifying the observation phase
+and a `timeout`, `invalid` or `unavailable` category. The private checker returns
+the same bounded failure schema over stdout; the host propagates its child phase
+only after exact schema validation on a failed command. Unknown fields, duplicate
+keys, oversized output and arbitrary exception or subprocess text cannot enter
+these diagnostics. A child database or API timeout and a host command timeout remain
+distinct observations; elapsed time alone does not identify a cause. The larger
+status host allowance leaves child deadlines, command order and successful receipt
+schemas unchanged; it adds no retry or resource allocation.
+The API/Admin log surface here means the shared django-web server log, not a
+separate rendered Admin-page assertion.
+
+The fixed positive rq2 callable also inspects actual visible `/proc` argv before
+its first effect. Its strict task context, current process and decoded locator
+must bind the exact persisted canonical request. The scan includes the driver and
+at most 256 visible processes in that owned Ray Pod, capped at 64 KiB per argv,
+1 MiB total and two seconds. Only a verified vanished non-driver PID is tolerated;
+permission failures, reused identities, absent driver or overflow refuse the
+observation. This is one Pod's visible process namespace, not a global secrecy
+claim. The existing rq2 deadline, task result, single effect, recovery and cleanup
+assertions remain required; the process receipt contains three fixed booleans.
+
+Both `before-protected-logs.json` and `after-protected-logs.json` are mandatory.
+Unexpected private bytes are never retained as raw failure artifacts. Successful
+source receipts keep their existing exact-byte identity and layer validators;
+unknown top-level fields are refused. Failed application receipts retain only
+finite HTTP, generation and rq2 diagnostic fields. Resource diagnostics omit
+free-text messages and raw Pod stdout/stderr; the workflow also omits raw operator
+logs. Actor diagnostics are projected
+through fixed categories, bounded numeric values and validated identifiers.
+Actual source-matched Linux execution is required for these assertions. Local
+fixture tests establish validation/refusal behavior, not deployed log or argv proof.
 
 ### Shared workflow assertions
 
@@ -349,26 +422,43 @@ inventory above is unchanged. An fsGroup-backed emptyDir can expose a root-owned
 mode-2777 `/tmp`; the workflow publisher correctly refuses that shared parent for SQLite preparation.
 Creating a private child and explicitly clearing inherited setgid preserves the ownership checks.
 
-Each generation runs the first/warm pair within 180 seconds, then gives the existing
-node, Core and workflow/pressure commands one shared 600-second budget. Unused first-pair
-time does not extend that budget. A final rq2 phase has its own 180-second budget, including
-its child-manager cleanup; unused earlier time does not extend it. The helper reserves
+Each generation preserves the original phase budgets: first/warm pair 180 seconds,
+node/Core/workflow matrix 600 seconds, and rq2 180 seconds including its child-manager
+cleanup. Unused time never extends a later phase. The rq2 helper reserves
 170 seconds including Django bootstrap and observations. A work alarm interrupts blocking calls,
 then only final shutdown receives a five-second alarm: two seconds for TERM, two for KILL/wait,
 and receipt margin. Startup cannot borrow cleanup time. The parent generation retains its
-process-group bound. The generation Job has a
-990-second deadline for these 960 seconds plus startup and termination margin; only its
-Chainsaw assertion uses 1005 seconds. Reporting Jobs and other assertions retain 600 seconds.
-The host runner's 2160-second outer deadline is the qualified pre-rq2 1800-second envelope
-plus one 180-second rq2 allowance for each generation. First/warm was already part of that
-qualified baseline. This preserves the earlier aggregate allowance for setup, cold replacement
-and reporting rather than making the two added rq2 phases consume it. All child deadlines,
-workloads and resource limits stay unchanged. The outer deadline remains authoritative: all
-phase maxima cannot be consumed in one run. Owned namespace deletion has a separate
-180-second allowance. The hosted native step allows 44 minutes: 2160 seconds for Chainsaw,
-180 seconds for worker images and the inherited 300-second external aggregate allowance. That allowance is not guaranteed worst-case startup,
-receipt collection or cleanup coverage. The job retains its 75-minute cap. These are ceilings,
-not expected durations or a performance guarantee.
+process-group bound.
+
+Two additional child phases run serially in that same assertion Job: the single-attempt
+reservation-failure showcase has 180 seconds including cleanup, and unsupported queued
+protocol observation has 120 seconds including cleanup. A separate host-side protected-log
+observer has 30 seconds after each generation's assertion Job, before Ray replacement.
+The showcase's work alarm is 150 seconds. The protocol child reserves 90 seconds for work,
+25 for cleanup and one for its receipt. The parent reserves its four-second TERM/KILL
+allowance inside each new child phase, so their subprocess waits are at most 176 and 116
+seconds respectively. The [protocol observer contract](protocol.md) describes the exact
+queued-row preservation, shared-worker control and admission restoration requirements.
+No new namespace, Pod, cluster, queue capacity or resource reservation is introduced.
+
+`budgets.py` records the explicit additive accounting. The assertion Job deadline is
+1290 seconds (the five child phases plus the original 30-second startup margin), and
+its Chainsaw assertion is 1305 seconds. Reporting Jobs and other assertions retain
+600 seconds. The host test ceiling increases from 2160 to **2820 seconds**:
+`2160 + 2 * (showcase 180 + protocol 120 + protected logs 30)`. The native workflow
+step reserves **55 minutes**, including the separate 180-second worker-image phase
+and the inherited 300-second external aggregate allowance; its whole job stays
+75 minutes. Owned namespace deletion retains its separate 180-second allowance within
+that external allowance. The allowance is not guaranteed worst-case startup, collection
+or cleanup coverage. These are ceilings, not expected durations: every phase maximum
+cannot be consumed in a single passing run. Actual combined-source hosted receipts must
+establish that the workload fits; source tests and arithmetic do not establish that proof.
+
+The pre-catalogue 2160-second envelope is the qualified pre-rq2 1800 seconds
+plus one 180-second rq2 allowance for each generation; first/warm was already in that
+baseline. The two rq2 phases therefore retain the earlier aggregate allowance for setup,
+cold replacement and reporting. Catalogue phases add their separate 660 seconds to this
+repaired baseline. These are ceilings, not expected durations or a performance guarantee.
 
 The standard-library generation runner launches fixed argument lists in the original
 order and emits bounded phase timing markers outside the receipt schema. A failure or
@@ -422,7 +512,8 @@ passing JSON receipt at no more than 16 KiB, except the workflow receipt's 32 Ki
 budget for the fixed success, failure, recovery and nested-retry matrix. The shared
 64 KiB container-log ceiling remains unchanged. It retains `setup.json`, `before-first.json`,
 `after-first.json`, `before-nodes.json`, `before-core.json`, `before-workflows.json`, `after-nodes.json`, `after-core.json`,
-`after-workflows.json`, `before-rq2.json`, `after-rq2.json`, producer Pod/image identities, Chainsaw's
+`after-workflows.json`, `before-rq2.json`, `after-rq2.json`, `before-showcase.json`,
+`after-showcase.json`, `before-protocol.json`, `after-protocol.json`, producer Pod/image identities, Chainsaw's
 XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
 in the public Actions job log. Receipts are transported from the modules' existing stdout; they are
 not inferred from Job status. The cold receipt's predecessor digest must match the retained first
@@ -443,7 +534,7 @@ This controls workflow ordering within each fresh Ray generation, not host cache
 The standard acceptance profile still grants each Ray Pod 750m physical CPU and one
 logical Ray CPU; it does not reproduce the more constrained local profile or establish
 a startup latency guarantee. The separate 180-second first-pair budget and authoritative
-2160-second outer deadline bound these cases.
+2820-second outer deadline bound these cases.
 
 For the head-placement hypothesis, the fixed `constrained-ray` diagnostic profile
 requests zero logical CPUs and a 350m physical CPU limit on the head, plus one logical
@@ -472,7 +563,7 @@ display ceiling. Three retry cases add finite retry success, exhausted retries, 
 that deterministically settle after two failures. Success uses a two-leaf chain and
 checks result 42, final preview/progress and exact invocation count. Each owns one
 zero-CPU counter actor, uses quarter-CPU leaves and observes counter removal.
-Together the twelve cases cover fourteen durable attempts. Existing case inputs and resource
+Together the twelve cases cover sixteen durable attempts. Existing case inputs and resource
 limits remain unchanged. All cases use authenticated HTTP polling and
 attempt-pinned workflow reads, and compare those publications with authenticated Admin graph JSON.
 Temporary database-backed Admin sessions and the HTML checker's disposable user are deleted and
@@ -482,6 +573,24 @@ no-redirect transport with an explicit 1 MiB HTML response ceiling; ordinary API
 graph routes, terminal controls, diagnostic presentation and retained storage. Server-side
 fingerprints verify that viewing these surfaces preserves stored diagnostics and task history;
 neither raw diagnostics nor their fingerprints enter receipts.
+
+The separate reservation-failure phase runs exactly one additional HTTP-enqueued task
+per generation with `item_count=1`, `work_seconds=0.01`, `failure_stage=reserve_inventory`
+and `failure_item=0`. It requires the fixed durable failure and exactly one failed
+attempt. Its graph has 16 nodes and 21 edges: 15 successful nodes and failed map `0.5`.
+The five descendants that were never submitted must be absent, including from retained
+detail pages. Every one of the 16 indexed node-detail reads must match the pinned
+publication. The aggregation, validation-map, failed-projector and failed-map previews
+have fixed availability/value expectations. Authenticated API and Admin graphs agree;
+real Admin HTML and Chromium rendering retain the original failure presentation, while
+diagnostic and task-history fingerprints remain unchanged. Temporary Admin users and
+sessions are removed before success; namespace teardown owns the task/history rows.
+
+The bounded `application_showcase_failure` receipt is at most 8 KiB and must pass in
+both cold-Ray generations. Missing facts, a different attempt, fabricated descendants,
+partial indexed details, timeout or cleanup failure fail the stage. This is the fixed
+catalogue failure showcase, not a proof of all workflows or arbitrary external effects.
+It does not change the original twelve-case matrix or borrow its 600-second budget.
 The Core assertion also opens the actual task's Admin Dashboard link in Chromium,
 before and after cold Ray replacement. A loopback GET-only proxy forwards the
 `/ray/` base path to the fixed Ray Dashboard service. The observer requires the
@@ -520,12 +629,13 @@ This provides scoped rendering and redaction evidence for the fixed fixture, not
 coverage of arbitrary workflows. Receipts retain `complete_workflow_gate: false`;
 release acceptance requires a combined source-matched review with the applicable upgrade
 and other qualification stages.
-Before failure cleanup, the runner also retains at most 100 RayCluster, Pod and Event records
-per resource, capped at 64 KiB per file. These include status and event messages, never resource
-specs or Secrets. It captures current and previous logs from at most eight Ray, web, manager or assertion Pods,
-at most 32 KiB per log, before teardown. Failed core receipts retain request count, last HTTP status
-and validated API progress without response bodies or exception text. Hosted failures retain the
-last 200 operator log lines, capped at 64 KiB.
+Before failure cleanup, the runner retains at most 100 projected RayCluster, Pod
+and Event records per resource, capped at 64 KiB per file. Only fixed states,
+reasons, counts and bounded container exit/restart fields survive; free-text
+messages, resource specs and raw current/previous Pod logs are omitted. Parsed
+HTTP attribution, generation phase and rq2 diagnostics use finite vocabularies.
+No raw assertion stdout/stderr log is copied into the evidence artifact.
+
 
 The [affected-scenario policy](../../docs/deployment/local-kuberay-gate.md) determines which product
 assertions a change needs. This stage needs actual exact-source Linux execution after the full Linux
@@ -641,8 +751,8 @@ removal allows at most five seconds per mode; database cleanup uses a command
 capped at ten seconds and preserves the final 25 seconds for original manager
 restoration. Cleanup can start earlier after a failure, and restoration may use
 unused time from earlier cleanup steps. Every step remains inside the original
-180-second deadline. It does not consume or extend Chainsaw's unchanged 2160-second
-window. The hosted step is 44 minutes: 2160 seconds for Chainsaw, 180 for
+180-second deadline. It runs separately from Chainsaw's 2820-second catalogue window.
+The hosted step is 55 minutes: 2820 seconds for Chainsaw, 180 for
 worker images and the previous 300-second aggregate allowance for command
 startup, receipt collection and namespace cleanup. Those operations retain
 their existing individual timeouts; the allowance is not a promise that every

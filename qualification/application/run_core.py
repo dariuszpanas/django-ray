@@ -253,7 +253,10 @@ def main(argv: list[str] | None = None) -> int:
             api.task_id, profile="project", manager_prefix=args.manager_prefix
         )
         receipt["failed_stage"] = "remote_runtime_env"
-        probe_id = verify_runtime_probe(request, token=read_token(args.token_file), timeout=180)
+        from qualification.application.protected_runtime import Capture
+
+        protected = Capture(request)
+        probe_id = verify_runtime_probe(protected, token=read_token(args.token_file), timeout=180)
         receipt["failed_stage"] = "probe_execution_ownership"
         probe_owner = verify_durable_task(
             probe_id, profile="thin", manager_prefix=args.manager_prefix
@@ -267,12 +270,14 @@ def main(argv: list[str] | None = None) -> int:
         from qualification.application.runtime_env_refusal import empty_evidence, verify_refusals
 
         receipt["runtime_env_refusals"] = empty_evidence()
-        verify_refusals(
-            request,
+        refusal_ids = verify_refusals(
+            protected,
             token=read_token(args.token_file),
             manager_prefix=args.manager_prefix,
             evidence=receipt["runtime_env_refusals"],
         )
+        receipt["failed_stage"] = "protected_runtime_surfaces"
+        receipt["protected_runtime"] = protected.finish([probe_owner["execution_id"], *refusal_ids])
         receipt["failed_stage"] = "ordinary_result_presentation"
         from qualification.application.result_presentation import observe_result_presentation
 

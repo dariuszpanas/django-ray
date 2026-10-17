@@ -11,11 +11,15 @@ import sys
 import time
 from pathlib import Path
 
+from qualification.application.budgets import (
+    EXISTING_SECONDS,
+    FIRST_SECONDS,
+    PROTOCOL_SECONDS,
+    RQ2_SECONDS,
+    SHOWCASE_SECONDS,
+)
 from qualification.application.http_context import OUTER_DEADLINE_ENV
 
-FIRST_SECONDS = 180
-EXISTING_SECONDS = 600
-RQ2_SECONDS = 180
 TERMINATE_SECONDS = 2
 KILL_WAIT_SECONDS = 2
 
@@ -60,6 +64,25 @@ def generation_commands(generation: str, base_url: str, token_file: Path) -> tup
                 "run_rq2",
                 ["--generation", generation, "--receipt", f"/receipts/{generation}-rq2.json"],
             ),
+        ),
+        *(
+            (
+                phase,
+                command(
+                    module,
+                    [
+                        *api,
+                        "--generation",
+                        generation,
+                        "--receipt",
+                        f"/receipts/{generation}-{phase}.json",
+                    ],
+                ),
+            )
+            for phase, module in (
+                ("showcase", "run_showcase_failure"),
+                ("protocol", "run_protocol"),
+            )
         ),
     )
 
@@ -110,10 +133,23 @@ def _marker(phase: str, status: str, **fields: object) -> None:
 
 
 def run_phases(commands: tuple) -> int:
+    if tuple(name for name, _ in commands) != (
+        "first",
+        "nodes",
+        "core",
+        "workflows",
+        "rq2",
+        "showcase",
+        "protocol",
+    ):
+        _marker("generation", "failed", reason="incomplete_command_set")
+        return 1
     for phase, selected, seconds in (
         ("first", commands[:1], FIRST_SECONDS),
         ("existing", commands[1:4], EXISTING_SECONDS),
-        ("rq2", commands[4:], RQ2_SECONDS),
+        ("rq2", commands[4:5], RQ2_SECONDS),
+        ("showcase", commands[5:6], SHOWCASE_SECONDS),
+        ("protocol", commands[6:7], PROTOCOL_SECONDS),
     ):
         started = time.monotonic()
         deadline = started + seconds
@@ -123,6 +159,11 @@ def run_phases(commands: tuple) -> int:
             try:
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(argv, seconds)
+                if phase in {"showcase", "protocol"}:
+                    # New phase caps include the owned TERM/KILL reserve.
+                    remaining -= TERMINATE_SECONDS + KILL_WAIT_SECONDS
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, seconds)
                 code = run_command(argv, remaining)
             except subprocess.TimeoutExpired:
                 _marker(phase, "failed", command=name, reason="timeout")
