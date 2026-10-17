@@ -1,5 +1,33 @@
 # Installed-wheel runtime qualification
 
+## Public contributor path
+
+The real-Ray source assertions in `tests/unit/test_distributed.py` run in the
+public [Linux CI workflow](../../.github/workflows/ci.yml). For an independently
+admitted Linux environment, use the `local-ray` stage documented in the
+[finite Linux test plan](../../docs/testing/linux-test-plan.md):
+
+```bash
+uv run python scripts/linux_test_plan.py run --stage local-ray \
+  --output-dir "$EVIDENCE_ROOT/local-ray"
+```
+
+Use a clean candidate, the prepared locked environment, a new output directory
+and the guide's enforced resource limits. This starts local Ray and is not a
+Windows or shared-infrastructure shortcut. Retain the stage's exact collection,
+phase outcomes, source/dependency identity, timing and cleanup evidence. It is
+source-checkout proof; it does not produce an installed-wheel fanout receipt or
+establish the complete deployed application gate.
+
+## Optional historical installed-wheel adapter contract
+
+`fanout.yaml` preserves a downstream adapter contract. This repository ships
+the Python scenario and its receipt validation, but no executor or registration
+service for `external-evidence-v1`. No such service is required to contribute or
+run the public CI selection. The remaining instructions apply only when a
+separately reviewed adapter is used to obtain this additional installed-wheel
+evidence. Its results must not be inferred from the source test pass above.
+
 `fanout.yaml` runs the real-Ray cases in `tests/unit/test_distributed.py` against the exact installed
 wheel. It covers ordinary fanout, repeated remote reuse, strict context delivery, pre-invocation
 protocol/callable rejection, and propagation into the outer completion. Additional real-Ray cases
@@ -12,7 +40,7 @@ particular, these tests do not deploy managers, restart a remote cluster, prove 
 or measure end-to-end task throughput. The original Docker and Kubernetes result-fold runbooks and
 their schema-v1 evidence remain unchanged and replayable.
 
-## Exact candidate and bounded execution
+### Exact candidate and bounded execution
 
 Use the same reviewed image procedure as the [Kubernetes result-fold qualification](../kubernetes/README.md):
 build `qualification/docker/Dockerfile` from one exact Git archive, retain that archive at
@@ -42,7 +70,7 @@ existing process-group cleanup path. The separate cleanup budget is 180 seconds.
 ceilings, not a measured completion-time promise. Run this workload only on admitted Linux capacity;
 resource-free contract tests can run on a development host without starting Ray.
 
-## Evidence and refusal behavior
+### Evidence and refusal behavior
 
 The pytest observer retains the exact collected identities and every setup, call and teardown
 outcome and duration. The selection must contain each baseline assertion family, stay within the

@@ -1,15 +1,35 @@
 # Ray Job completion latency qualification
 
-Register `qualification/latency/jobs.yaml` from the exact candidate archive and run
-`python -m qualification.latency.scenario` on the existing capacity-one Linux
-`external-evidence-v1` Kubernetes Job lane. Use the reviewed offline image procedure
-in [the Kubernetes qualification](../kubernetes/README.md). Retain the complete
-archive at `/workspace` and bind its candidate to the verified image digest.
+The public [Job Latency Qualification workflow](../../.github/workflows/latency-qualification.yml)
+runs `python -m qualification.latency.scenario` through
+[`compose.yaml`](compose.yaml) on a disposable hosted Linux runner after the
+exact-source Linux CI checkpoint. A maintainer can request it for a branch or
+tag resolving to the candidate:
+
+```bash
+gh workflow run latency-qualification.yml --ref "$CANDIDATE_REF"
+```
+
+Inspect the completed run's candidate source and image identity, all five cases,
+owned cleanup and `job-latency-qualification` artifact before accepting it.
+Dispatch is not proof. The Compose service uses two CPUs, 7 GiB RAM without swap,
+1,024 PIDs, 512 MiB shared memory and 3 GiB temporary space, with no network.
+Build admission is separate; the workflow enforces its disposable-runner
+prerequisites and the 420-second command ceiling. No external registration
+service is required.
+
+`jobs.yaml` remains an optional historical downstream adapter definition for
+the `external-evidence-v1` Kubernetes lane. This repository does not implement
+that registration service or runner. Only when using a separately reviewed
+adapter, follow the [historical image contract](../kubernetes/README.md#optional-historical-adapter-contract),
+retain the exact candidate archive at `/workspace` and bind it to the verified
+image digest. The Kubernetes profile and external cleanup allowance below
+describe that adapter contract, not the public Compose resource limits.
 
 The scenario installs that candidate wheel offline, checks its package tree against
 the archive, and starts one fresh local Ray runtime with its Jobs dashboard. It uses
-two logical Ray CPUs, no GPUs and a 128-MiB object store. The existing admitted target
-limits remain 3.5 CPUs, 7.5 GiB RAM and 7 GiB scratch; do not resize the pool. Runtime
+two logical Ray CPUs, no GPUs and a 128-MiB object store. The historical Kubernetes
+adapter limits remain 3.5 CPUs, 7.5 GiB RAM and 7 GiB scratch. Runtime
 allocation and OS limits are different measurements. The driver has a 300-second
 deadline after the 60-second offline install, within the 420-second workload budget;
 external cleanup has a separate 180-second ceiling. Managers run serially at
@@ -56,8 +76,9 @@ one submission per task, successful manager shutdown, inactive leases, terminal 
 and removal of the owned fixture. Missing, partial, skipped, oversized or failed
 observations produce failing JUnit. Evidence is create-only: `junit.xml`, the external
 `command.log`, and `execution-manifest.json`, each at most 1 MiB. The installed tree is
-checked again after execution. The external runner separately proves namespace/Pod
-removal, allocation release and preservation of the existing platform.
+checked again after execution. The hosted workflow separately verifies removal
+of its Compose containers. A downstream Kubernetes adapter must separately prove
+namespace/Pod removal, allocation release and preservation of its platform.
 
 This is the affected Ray Job manager/polling proof. The fresh isolated Ray runtime is
 the explicit cold-Ray decision; the workload does not restart shared KubeRay Pods.

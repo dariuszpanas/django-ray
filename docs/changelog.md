@@ -70,6 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Document public Linux CI, finite test stages and hosted qualification
+  entrypoints in the Docker, Kubernetes, latency, results and runtime guides.
+  Separate source tests from installed-package evidence and optional historical
+  adapter contracts; exact archive examples disable newline conversion.
 - **Stored-reference compatibility change:** New Ray Job request references use
   the `rq2ref:v1:` discriminator within the existing 500-byte limit. Current
   readers and authorized cleanup preserve canonical historical references;

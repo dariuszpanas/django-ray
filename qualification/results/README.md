@@ -1,5 +1,34 @@
 # Installed-wheel historical result reads
 
+## Public contributor path
+
+The public [CI workflow](../../.github/workflows/ci.yml) runs the source tests in
+`tests/unit/test_inert_result_reads.py`. In a prepared locked Linux development
+environment, the focused source check is:
+
+```bash
+uv run pytest tests/unit/test_inert_result_reads.py \
+  --junitxml="$RESULT_READS_EVIDENCE/junit.xml"
+```
+
+Use an owned, new evidence directory and retain the exact clean source and
+dependency identity with the test outcomes. These tests use local SQLite and
+start no Ray runtime, manager or external service. For bounded stage receipts
+and taxonomy/coverage accounting, use the applicable `hermetic` and
+`sqlite-django` stages in the [finite Linux test plan](../../docs/testing/linux-test-plan.md).
+JUnit from the focused command is source-checkout evidence, not the installed
+package/digest and cleanup manifest described below. Historical database upgrade
+and released-data restore checks remain separate requirements.
+
+## Optional historical installed-wheel adapter contract
+
+`reads.yaml` retains a downstream adapter definition, not a Kubernetes manifest
+or a public runner. This repository does not implement the
+`external-evidence-v1` registration service. The instructions below apply only
+to a separately reviewed adapter; no registration or pool is required for the
+public contributor commands. Keep the Python assertions and exact installed
+receipt contract when replaying this additional evidence.
+
 `reads.yaml` runs `python -m qualification.results.scenario` through the existing
 `external-evidence-v1` Linux command lane. Build and register the exact candidate with the
 [existing wheel/image procedure](../kubernetes/README.md), registering

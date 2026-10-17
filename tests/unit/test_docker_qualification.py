@@ -129,9 +129,10 @@ def test_image_keeps_dependencies_separate_and_preserves_absolute_venv_path() ->
     assert "COPY --from=builder /opt/qualification/.venv /opt/qualification/.venv" in dockerfile
     assert "USER 65532:65532" in dockerfile
     assert "DJANGO_RAY_QUALIFICATION_HOLD_SECONDS=10" in dockerfile
-    assert "git archive <full-commit>" in readme
+    assert "git -c core.autocrlf=false archive --format=tar <full-commit>" in readme
+    assert "git -c core.autocrlf=false archive --format=tar --output=$Archive $Commit" in readme
     assert "core.autocrlf=true" in readme
-    assert "not\nfrom an ordinary working-tree directory" in readme
+    assert "not from an\nordinary working-tree directory" in readme
     assert "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" in readme
     assert readme.count("if ($LASTEXITCODE -ne 0)") == 5
     assert "[IO.Path]::GetDirectoryName($Path) -ine $ResolvedTemporaryRoot" in readme
@@ -141,7 +142,7 @@ def test_image_keeps_dependencies_separate_and_preserves_absolute_venv_path() ->
     assert "--tag $SourceTag --iidfile $IidFile $Context" in readme
     assert "^sha256:[0-9a-f]{64}$" in readme
     assert "if ($InspectedImageId -cne $ImageId)" in readme
-    assert "Use exact control-plane --image $ImageId" in readme
+    assert "Use the exact image ID with the reviewed adapter: $ImageId" in readme
     assert "do not synthesize a repository\ndigest from the unique source tag" in readme
     assert "512 MiB writable `/tmp` and 1 GiB `/dev/shm`" in readme
 

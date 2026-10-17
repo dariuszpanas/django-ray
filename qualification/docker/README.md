@@ -1,4 +1,44 @@
-# Source-owned Docker qualification
+# Result-fold qualification
+
+## Public contributor path
+
+The result-fold assertion is part of the supported Linux CI selection:
+
+`tests/unit/test_result_fold.py::test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup`
+
+Use the public [CI workflow](../../.github/workflows/ci.yml) for the supported
+Python matrix. For a separately admitted Linux environment, the
+[finite Linux stages](../../docs/testing/linux-test-plan.md) expose the same
+source tests with bounded execution and exact outcome receipts:
+
+```bash
+uv run python scripts/linux_test_plan.py catalogue
+uv run python scripts/linux_test_plan.py run --stage local-ray \
+  --output-dir "$EVIDENCE_ROOT/local-ray"
+```
+
+Prepare the locked environment and tools described in that guide, use a clean
+candidate checkout and a new external output directory, and enforce the declared
+CPU, memory, PID and scratch limits before running the stage. It starts isolated
+local Ray; never run it on Windows or unadmitted shared infrastructure. Retain
+the source, dependency, collected-test and outcome identities in `receipt.json`
+and its bounded logs and compressed artifacts. A single stage is not the full
+CI matrix or deployed application gate.
+
+These source tests do not produce the installed-wheel receipt described below.
+When installed execution is an affected requirement, retain separately reviewed
+artifact evidence; do not relabel source-checkout results as installed proof.
+No adapter registration, external pool or repeated control-plane comparison is
+a contributor prerequisite.
+
+## Optional historical adapter contract
+
+`runbook.yaml` retains an earlier downstream adapter interface for replaying
+installed-wheel evidence. This repository supplies the scenario, image recipe
+and receipt validators, but no registration service, pool manager or executor for
+that YAML schema. It is not a Docker Compose file. The instructions in this
+section apply only to a separately reviewed adapter that implements the contract;
+the public contributor path above does not depend on one.
 
 This directory owns the shared bounded scenario and its Docker operational definition for an
 external validation control plane. The companion
@@ -13,16 +53,20 @@ runtime-environment delivery, ordered folding of out-of-order inputs, direct `Ob
 actor termination, and final `ray.shutdown()`. This definition does not copy those assertions into
 another workflow engine and does not replace or weaken any existing django-ray gate.
 
-## Exact candidate build
+### Exact candidate build for an adapter
 
-The image must be built from a temporary directory extracted from `git archive <full-commit>`, not
-from an ordinary working-tree directory. This is a correctness boundary on Windows: with
-`core.autocrlf=true`, working-tree files may contain CRLF while both Git objects and the control
-plane's materialized archive contain LF. Building from the working tree would therefore bake a
-wheel whose package-tree digest cannot match the exact archived source later mounted at
-`/workspace`.
+Build the image from a temporary directory extracted with
+`git -c core.autocrlf=false archive --format=tar <full-commit>`, not from an
+ordinary working-tree directory. On Windows, `core.autocrlf=true` can affect
+both working-tree files and archive bytes. A default local archive is therefore
+not proof of matching the Linux source archive. Disable that conversion for
+each archive command and retain the resulting source identity so the built
+wheel and source later mounted at `/workspace` agree. The command-local `-c`
+option leaves Git configuration unchanged.
 
-One PowerShell-safe outline is:
+The following historical PowerShell outline builds an image only. Building also
+needs admitted resources; it does not authorize local Ray execution or prove an
+adapter's lifecycle and cleanup:
 
 ```powershell
 $Commit = git rev-parse --verify 'HEAD^{commit}'
@@ -57,7 +101,7 @@ foreach ($Path in @($Context, $Archive, $IidFile)) {
 
 try {
   New-Item -ItemType Directory -Path $Context -ErrorAction Stop | Out-Null
-  git archive --format=tar --output=$Archive $Commit
+  git -c core.autocrlf=false archive --format=tar --output=$Archive $Commit
   if ($LASTEXITCODE -ne 0) {
     throw "Git could not archive the candidate commit"
   }
@@ -87,7 +131,7 @@ try {
     throw "The built and inspected image IDs differ"
   }
   "Built unique source tag $SourceTag"
-  "Use exact control-plane --image $ImageId"
+  "Use the exact image ID with the reviewed adapter: $ImageId"
 }
 finally {
   if (Test-Path -LiteralPath $IidFile) {
@@ -108,7 +152,7 @@ reuse any of those paths. Every native command is checked before continuing, and
 `docker build --iidfile` must exactly match a fresh inspection of the unique tag in the same named
 Docker context. The `finally` block removes only those GUID-specific temporary paths after the raw
 image ID has been captured and validated. Pass that raw
-`sha256:<64-hex>` ID directly to the control-plane `--image` option; do not synthesize a repository
+`sha256:<64-hex>` ID to the reviewed adapter's image input; do not synthesize a repository
 digest from the unique source tag. The final image carries the dependency environment and exactly one
 locally built wheel. It does not preinstall django-ray as the tested package. The virtual
 environment is created at `/opt/qualification/.venv` in the builder and copied to that same absolute
@@ -121,7 +165,7 @@ install --offline --no-index --no-deps` into `/tmp/django-ray-qualification/targ
 pre-existing target, a pre-imported `django_ray`, an unexpected distribution or import location, a
 version mismatch, or any difference between the installed and archived `src/django_ray` trees.
 
-## Runtime profile and evidence
+### Adapter runtime profile and evidence
 
 The schema-v1 runbook requires the `docker`, `linux`, `python`, and `ray` capabilities; a 420-second
 execution timeout; an always-run 180-second cleanup timeout; and exactly the `junit`, `log`, and
@@ -151,8 +195,9 @@ image default `DJANGO_RAY_QUALIFICATION_HOLD_SECONDS=10` creates a short post-su
 window; the module default is zero when the environment variable is absent, keeping resource-free
 unit tests instant. Values outside zero through 30 seconds fail closed.
 
-One counted comparison pairs this exact application run with the unchanged django-ray local-Ray
-gate on the same frozen source commit, wheel/image digest, and dependency tuple. Three consecutive
-pairs count only after the final control-plane candidate is frozen; a failed or interrupted half
-resets the sequence. This definition provisions no Docker, Kubernetes, database, or cloud resources
-itself. The external adapter owns container lifecycle, evidence collection, and exact cleanup.
+The earlier three-pair comparison was an adapter qualification policy, not a
+django-ray contributor or release requirement. Current acceptance follows the
+[affected-gate matrix](../../docs/deployment/local-kuberay-gate.md) and exact-source
+evidence for the selected assertions. This definition provisions no Docker,
+Kubernetes, database or cloud resources itself. Any adapter using it owns
+container lifecycle, evidence collection and exact cleanup.
