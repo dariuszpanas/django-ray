@@ -53,6 +53,36 @@ def test_policy_preserves_every_existing_trigger_and_native_cell():
     assert policy["profiles"]["integration"]["mode"] == "full"
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "chainsaw",
+        "core",
+        "generation",
+        "result_presentation",
+        "runtime_env_refusal",
+        "profile",
+        "api_runner",
+        "workflow_runner",
+    ],
+)
+def test_reviewed_application_tests_have_exact_advisory_ownership(name):
+    path = f"tests/unit/test_application_{name}.py"
+    assert (ROOT / path).is_file()
+    policy = tomllib.loads((ROOT / ".yaga/test-planning-shadow.toml").read_text())
+    assert [rule["id"] for rule in policy["rules"] if path in rule["when-any"]] == ["application"]
+    assert all(
+        not pattern.startswith("tests/unit/test_application_") or "*" not in pattern
+        for rule in policy["rules"]
+        for pattern in rule["when-any"]
+    )
+    assert policy["unknown-paths"] == "full"
+    assert "uv.lock" in policy["full-on"]
+    assert policy["profiles"]["release"]["mode"] == "full"
+    baseline = (ROOT / "scripts/qualification_policy.json").read_bytes()
+    assert shadow.baseline_selection(baseline, (path,)) == []
+
+
 def test_pr_route_never_calls_qualification_workflows():
     pilot = yaml.load(
         (ROOT / ".github/workflows/test-planning-shadow.yml").read_text(), Loader=yaml.BaseLoader

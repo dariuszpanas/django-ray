@@ -1150,6 +1150,20 @@ versioned `scripts/qualification_policy.json` retains the prior path scopes.
 Changing the gate or policy selects every qualification. There is no expensive
 qualification job on an unaffected documentation-only change.
 
+Keep shared-helper and new runtime-module ownership explicit in the required
+selector and advisory `.yaga/test-planning-shadow.toml`. An isolated Docker
+scenario change selects native, latency and cancellation; the lease authority
+also selects its application, native, cancellation and monitoring consumers.
+The advisory application rule names eight reviewed test files individually,
+documented in the [shadow pilot guide](testing/test-planning-shadow.md). Do not
+generalize those entries to a wildcard: unknown files and changes combined with
+full triggers such as `uv.lock` must retain the full catalog. Add a regression
+for each ownership adjustment and preserve all native variants. Run
+`uv run pytest tests/unit/test_qualification_gate.py tests/unit/test_test_planning_shadow.py -q --no-cov`
+and validate actual planner behavior with the pinned YAGA implementation.
+Advisory ownership changes do not activate selective execution or replace any
+required workflow condition, full gate, or separate qualification obligation.
+
 Every selected reusable workflow must succeed. Missing, cancelled, skipped or
 failed selected jobs fail the aggregate. A skipped job passes only when selection
 explicitly marks it not applicable; the job summary records that distinction.

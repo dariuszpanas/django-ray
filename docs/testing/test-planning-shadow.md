@@ -32,6 +32,24 @@ Native qualification is one workflow call with all four serial matrix cells.
 The PR route never calls qualification workflows: their existing per-PR
 concurrency groups would otherwise cancel authoritative jobs.
 
+### Reviewed application-test ownership
+
+The advisory application rule names eight reviewed files individually under
+`tests/unit/`: `test_application_chainsaw.py`, `test_application_core.py`,
+`test_application_generation.py`, `test_application_result_presentation.py`,
+`test_application_runtime_env_refusal.py`, `test_application_profile.py`,
+`test_application_api_runner.py`, and `test_application_workflow_runner.py`.
+An isolated change to one of these files proposes application qualification.
+There is no application-test wildcard: new or otherwise unknown paths still
+force the complete catalog, as does a change combined with `uv.lock` or another
+full trigger. This ownership does not change the required selector or activate
+selective execution. A smaller proposed plan is not measured feedback savings.
+
+The shared `qualification/docker/scenario.py` helper is consumed by native,
+latency, and cancellation qualification. Both the required selector and the
+advisory policy select all three for an isolated helper change. This additive
+dependency correction does not relax any existing trigger or native variant.
+
 ## Full same-source observation
 
 After this workflow is registered on the default branch, manually dispatch

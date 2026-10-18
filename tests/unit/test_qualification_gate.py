@@ -82,6 +82,26 @@ def test_applicability_is_explicit():
 
 
 @pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("qualification/docker/scenario.py", {"native", "latency", "cancellation"}),
+        (
+            "src/django_ray/lease_policy.py",
+            {"application", "native", "cancellation", "monitoring"},
+        ),
+        (
+            "src/django_ray/management/commands/django_ray_lease_policy.py",
+            {"application", "native"},
+        ),
+    ],
+)
+def test_shared_dependency_selects_every_affected_qualification(path, expected):
+    root = Path(__file__).resolve().parents[2]
+    policy = json.loads((root / "scripts/qualification_policy.json").read_text())
+    assert {entry["id"] for entry in select(policy, {path})} == expected
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "runner/leasing.py",
