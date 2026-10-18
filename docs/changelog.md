@@ -14,6 +14,13 @@ frozen-source qualification and a separate publication decision.
 
 ### Added
 
+- Add an advisory YAGA test-planning pilot that compares proposed selections
+  with the existing five-workflow qualification policy. An explicit manual run
+  can exercise all eight workload cells through the existing workflows.
+  Selective execution remains disabled, required checks remain unchanged, and
+  this catalogue does not replace the separate transaction, data-upgrade,
+  installed-artifact or deployment obligations. See the
+  [pilot contract](testing/test-planning-shadow.md).
 - Add a blocking Python 3.15 preparation job that builds distributions, compiles
   source, and runs selected tests against an installed wheel without Ray. Full
   runtime support remains Python 3.12–3.14 until upstream Ray wheels and complete
