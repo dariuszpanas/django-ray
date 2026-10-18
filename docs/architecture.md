@@ -607,7 +607,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0027_workflow_reporting_diagnostics` before starting upgraded workers:
+`0028_worker_lease_policy` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray

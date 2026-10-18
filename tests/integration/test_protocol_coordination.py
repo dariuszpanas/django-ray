@@ -1321,7 +1321,13 @@ def test_sqlite_close_takes_the_write_fence_before_reading_legacy_state() -> Non
         if not query["sql"].upper().startswith(("BEGIN", "COMMIT", "SAVEPOINT", "RELEASE"))
     ]
     assert statements
-    assert statements[0].startswith('UPDATE "django_ray_taskexecutionprotocolpolicy"')
+    assert statements[0].startswith('UPDATE "django_ray_taskworkerleasepolicy"')
+    protocol_lock = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith('UPDATE "django_ray_taskexecutionprotocolpolicy"')
+    )
+    assert protocol_lock > 0
     legacy_reads = [
         index
         for index, statement in enumerate(statements)

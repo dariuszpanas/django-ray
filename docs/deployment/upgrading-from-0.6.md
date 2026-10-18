@@ -108,10 +108,10 @@ observed blocker.
 
 ## Migration and execution boundary
 
-The current candidate adds no Django migration after
-`0027_workflow_reporting_diagnostics`, already present in 0.6.0. Verify that
-inventory again when the release source is frozen and run the normal migration
-command against the restored candidate database.
+Migration `0028_worker_lease_policy` adds one database-scoped common lease policy,
+seeded explicitly to 60 seconds. It preserves existing task and lease rows and does
+not infer the old deployment's configured duration. Retain migration 0027 and run
+the normal migration command against the restored candidate database.
 
 Use a coordinated stopped-writer upgrade. Stop producers, schedules and cleanup
 processes; drain old work with the 0.6.0 managers and explicitly reconcile any
@@ -121,12 +121,20 @@ remain outside this Beta contract. The candidate does not activate the dormant
 target-compatibility protocol or make old execution carriers safe to replay.
 Current production execution remains protocol 1.
 
-Before restarting managers, verify one common `WORKER_LEASE_SECONDS` across
-all workers and operational processes sharing the lease table. Queue names and
-backend aliases do not isolate lease expiry; each heartbeat interval must be
-below the common duration. See [configuration](../configuration.md). This
-release documents the existing requirement; automatic cross-process mismatch
-protection remains open in [#624](https://github.com/dariuszpanas/django-ray/issues/624).
+Before migration, stop and drain all old workers, purgers and operational callers.
+Reconcile stale active lease rows under the old deployment's agreed policy before
+switching code, particularly when it used a duration other than 60 seconds. Expiry
+alone does not prove that a process or remote side effect has stopped.
+
+Before restarting managers, verify one common `WORKER_LEASE_SECONDS` across all
+processes sharing the lease table and compare it with `django_ray_lease_policy`.
+Custom deployments must explicitly change the newly seeded authority while the
+cohort is stopped. The revision-checked command refuses every active lease,
+including stale rows, and running/cancelling work; it never retires them for you.
+Update every process's settings before restart. Queue names and backend aliases
+do not isolate lease expiry, and each heartbeat interval must remain below the
+common duration. See the [policy command](../reference/cli.md#django_ray_lease_policy).
+Old binaries do not honor the new guard: mixed old/new writers remain unsupported.
 
 Before any migration or deletion, back up the database and every referenced
 input, result, workflow and RuntimeEnv artifact. Keep encryption keys separately
@@ -151,9 +159,11 @@ Resume cleanup with the revised scheduler contract after those checks.
 | Persistent monitoring data has been opened by Prometheus 3 | The former Prometheus 2.48 image cannot read that data. Use a compatible independently retained backup and the upstream rollback procedure; changing the container tag alone is insufficient. |
 | An uncertain task may have produced an external effect | Neither package rollback nor database restoration proves that retry is safe. Reconcile the effect before explicit retry. |
 
-There is currently no new migration to reverse at this boundary. Retain migration
-0027 during old-code read checks; do not import migration reversal instructions
-from an earlier release without checking the final candidate inventory.
+Keep migration 0028 applied during old-code read-only checks; the old reader may
+ignore its additive table. Reversing 0028 removes the policy authority and refuses
+active leases or running/cancelling work. That database check is not proof that
+old processes or remote effects stopped, and does not waive the artifact, key,
+request-carrier or monitoring rollback boundaries above. Retain migration 0027.
 
 ## Candidate qualification checklist
 

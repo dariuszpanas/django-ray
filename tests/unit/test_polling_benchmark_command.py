@@ -938,6 +938,7 @@ def test_benchmark_worker_fails_closed_before_claim_after_lease_loss(monkeypatch
     command._stop_workers(group, max_interval=0.05)
 
 
+@pytest.mark.django_db
 def test_start_workers_reports_constructor_and_thread_start_failures(monkeypatch) -> None:
     command = Command()
 
@@ -1047,6 +1048,7 @@ def test_worker_startup_barrier_and_abort_errors_are_contained(monkeypatch) -> N
     command._stop_workers(exception_group, max_interval=0.05)
 
 
+@pytest.mark.django_db
 def test_partial_thread_start_failure_joins_started_threads(monkeypatch) -> None:
     command = Command()
     joined: list[str] = []

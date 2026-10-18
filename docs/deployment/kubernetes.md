@@ -194,9 +194,11 @@ coordinates, rows or database error messages. Human output uses the same status
 and reason. A failed command also writes a fixed error to stderr. Reasons are
 `live_lease`, `no_live_lease`, `ambiguous_lease`, `invalid_coordinates`,
 `invalid_database`, `invalid_settings`, `transaction_active` or
-`database_unavailable`.
+`database_unavailable`, or a fixed `lease_policy_*` unavailable/mismatch reason.
 
-The read uses one observation time and at most two constant database values.
+The read uses one observation time, at most two lease constants and two bounded
+authority snapshots (three SELECT queries). Missing, mismatched or changed
+authority produces exit 2; it never initializes policy or reports zero capacity.
 Active leases must have no stop time, must have started, and must have a heartbeat
 between that observation and the inclusive `WORKER_LEASE_SECONDS` cutoff.
 Future timestamps fail closed. Inactive history does not hide a current lease.

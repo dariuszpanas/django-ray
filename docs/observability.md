@@ -107,6 +107,13 @@ admission preserves the application result and attempts a summary with
 `LIMIT_EXCEEDED` detail availability, without presenting a partial graph as complete.
 Other publication failures also leave the application outcome authoritative.
 
+Worker-capacity observations require the database-scoped common lease policy.
+`protocol_compatible_worker_available` is `null` when that authority is unavailable
+or mismatched at query evaluation; `false` means a valid policy with no compatible
+heartbeat-live worker. Admin preserves the unknown state. Metrics publish
+`django_ray_worker_lease_policy_available 0` and omit worker-lease health samples
+when authority cannot be observed consistently, rather than inventing zero counts.
+
 `AVAILABLE` and `TRUNCATED` summaries may reference revisions committed by the atomic
 storage writer. Summary-only states carry no manifest or detail pointer; callers must
 not interpret unavailable or omitted detail as an empty completed graph. Historical

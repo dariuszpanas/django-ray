@@ -40,6 +40,7 @@ def test_model_string_representations() -> None:
     assert str(lease) == "Worker worker-1... on host (inactive)"
 
 
+@pytest.mark.django_db
 def test_release_lease_propagates_database_update_failure(monkeypatch) -> None:
     def fail_filter(*args, **kwargs):
         raise RuntimeError("database unavailable")

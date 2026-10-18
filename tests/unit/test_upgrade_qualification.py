@@ -409,3 +409,180 @@ def test_retired_carriers_are_refused_in_a_fresh_process_before_setup():
         "django_setup": False,
     }
     assert not result.stderr
+
+
+@pytest.fixture
+def crash_policy_fixture(settings):
+    from django.utils import timezone
+
+    from django_ray.models import RayTaskExecution, TaskAttempt, TaskWorkerLease
+
+    settings.DJANGO_RAY = {
+        **settings.DJANGO_RAY,
+        "WORKER_LEASE_SECONDS": 6,
+        "WORKER_HEARTBEAT_SECONDS": 2,
+    }
+    task = RayTaskExecution.objects.create(
+        task_id="retained-native-history",
+        callable_path="fixture.task",
+        state="SUCCEEDED",
+        attempt_number=3,
+        execution_generation=5,
+        runtime_env_json="private-retained-envelope",
+        runtime_env_hash="a" * 64,
+        result_data='{"value":42}',
+    )
+    TaskAttempt.objects.create(execution=task, attempt_number=3, state="SUCCEEDED")
+    lease = TaskWorkerLease.objects.create(
+        worker_id="retained-old-worker",
+        hostname="fixture",
+        pid=123,
+        queue_name="default",
+        started_at=timezone.now(),
+        last_heartbeat_at=timezone.now(),
+        is_active=False,
+        stopped_at=timezone.now(),
+    )
+    return task, lease
+
+
+@pytest.mark.django_db(transaction=True)
+def test_native_crash_policy_roundtrip_uses_cas_and_preserves_retained_records(
+    crash_policy_fixture,
+):
+    from django_ray.lease_policy import LeasePolicy, read_lease_policy
+    from qualification.upgrade import native_probe
+
+    history = native_probe.snapshot()
+    before = native_probe.transition_crash_lease_policy()
+    assert read_lease_policy() == LeasePolicy(6, 2)
+    after = native_probe.transition_crash_lease_policy(restore=True)
+    assert read_lease_policy(matching=False) == LeasePolicy(60, 3)
+    for report, expected in ((before, (60, 1, 6, 2)), (after, (6, 2, 60, 3))):
+        assert (
+            tuple(
+                report[name]
+                for name in ("expected_seconds", "expected_revision", "lease_seconds", "revision")
+            )
+            == expected
+        )
+        assert report["history_preserved"] and report["leases_preserved"]
+        assert report["active_leases"] == report["nonterminal"] == 0
+        assert "private-retained-envelope" not in json.dumps(report)
+    assert native_probe.snapshot() == history
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("restore", [False, True])
+def test_native_crash_policy_refuses_active_stale_lease_without_retiring_it(
+    crash_policy_fixture, restore
+):
+    from datetime import timedelta
+
+    from django.core.management import CommandError
+    from django.utils import timezone
+
+    from django_ray.lease_policy import read_lease_policy
+    from django_ray.models import TaskWorkerLease
+    from qualification.upgrade import native_probe
+
+    _, lease = crash_policy_fixture
+    if restore:
+        native_probe.transition_crash_lease_policy()
+    lease.is_active = True
+    lease.stopped_at = None
+    lease.last_heartbeat_at = timezone.now() - timedelta(days=1)
+    lease.save()
+    before_policy = read_lease_policy(matching=False)
+    before_lease = TaskWorkerLease.objects.values().get(pk=lease.pk)
+    before_history = native_probe.snapshot()
+    with pytest.raises(CommandError, match="lease_policy_active_leases"):
+        native_probe.transition_crash_lease_policy(restore=restore)
+    assert TaskWorkerLease.objects.values().get(pk=lease.pk) == before_lease
+    assert read_lease_policy(matching=False) == before_policy
+    assert native_probe.snapshot() == before_history
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("state", ["QUEUED", "RUNNING", "CANCELLING"])
+def test_native_crash_policy_requires_drained_tasks_before_transition(crash_policy_fixture, state):
+    from django_ray.lease_policy import LeasePolicy, read_lease_policy
+    from qualification.upgrade import native_probe
+
+    task, _ = crash_policy_fixture
+    task.state = state
+    task.save()
+    before = native_probe.snapshot()
+    with pytest.raises(AssertionError):
+        native_probe.transition_crash_lease_policy()
+    assert read_lease_policy(matching=False) == LeasePolicy(60, 1)
+    assert native_probe.snapshot() == before
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("fails", [False, True])
+def test_native_candidate_crash_brackets_work_with_policy_transitions(
+    crash_policy_fixture, settings, monkeypatch, tmp_path, fails
+):
+    import django_ray
+    from django_ray.lease_policy import LeasePolicy, read_lease_policy
+    from qualification.upgrade import native_probe
+
+    settings.ROOT, settings.RUNNER, settings.CRASH_MANAGER = tmp_path, "ray_core", True
+    receipt_path = tmp_path / "receipt.json"
+    (tmp_path / "history.json").write_text(json.dumps(native_probe.snapshot()))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["probe", "candidate-run", str(Path(django_ray.__file__).resolve()), str(receipt_path)],
+    )
+    monkeypatch.setattr(native_probe, "read_history", lambda *_args: 4)
+
+    def work(_root, *, check_completion_encoding):
+        assert check_completion_encoding
+        assert read_lease_policy() == LeasePolicy(6, 2)
+        if fails:
+            raise RuntimeError("manager exit was not confirmed")
+        return {"active_leases": 0, "nonterminal": 0}
+
+    monkeypatch.setattr(native_probe, "run_work", work)
+    if fails:
+        with pytest.raises(RuntimeError, match="manager exit was not confirmed"):
+            native_probe.main()
+        assert read_lease_policy() == LeasePolicy(6, 2)
+        assert not receipt_path.exists()
+    else:
+        native_probe.main()
+        assert read_lease_policy(matching=False) == LeasePolicy(60, 3)
+        observed = json.loads(receipt_path.read_text())["observations"]["lease_policy"]
+        assert observed["before_crash"]["revision"] == 2
+        assert observed["after_drain"]["revision"] == 3
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("baseline", ["0.5.0", "0.6.0"])
+def test_native_baseline_never_requires_candidate_lease_policy_command(
+    settings, monkeypatch, tmp_path, baseline
+):
+    import django_ray
+    from qualification.upgrade import native_probe
+
+    monkeypatch.setattr(django_ray, "__version__", baseline)
+    monkeypatch.setattr(contract, "BASELINE_VERSION", baseline)
+    settings.ROOT, settings.RUNNER, settings.CRASH_MANAGER = tmp_path, "ray_core", True
+    receipt_path = tmp_path / "baseline.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["probe", "baseline-run", str(Path(django_ray.__file__).resolve()), str(receipt_path)],
+    )
+    monkeypatch.setattr(native_probe, "read_history", lambda *_args: 4)
+    monkeypatch.setattr(native_probe, "run_work", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        native_probe,
+        "transition_crash_lease_policy",
+        Mock(side_effect=AssertionError("released version has no lease policy command")),
+    )
+    native_probe.main()
+    assert json.loads(receipt_path.read_text())["version"] == baseline
+    assert "lease_policy" not in json.loads(receipt_path.read_text())["observations"]

@@ -69,10 +69,13 @@ the query and accepts only valid policy-controlled legacy protocol-`1` capacity 
 valid explicit lease range containing the row protocol. It ignores informational lease
 queue text; true does not prove queue capacity, free concurrency, Ray/Python
 compatibility, Ray readiness, or cluster identity. Global bearer authentication still
-runs before any of these execution queries.
+runs before any of these execution queries. `protocol_compatible_worker_available`
+is `null` when valid matching database lease authority is unavailable; this is
+distinct from an observed absence of compatible workers.
 
-False is fail-closed: it can mean no matching heartbeat-live lease, an invalid
-policy/token relationship, or any malformed lease advertisement. It must not be
+Under matching lease authority, false is fail-closed: it can mean no matching
+heartbeat-live lease, an invalid execution-protocol policy/token relationship,
+or any malformed lease advertisement. It must not be
 interpreted as proof that the queue is empty or that adding an arbitrary worker is safe.
 
 ### Bounded task-status example

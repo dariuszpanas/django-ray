@@ -1364,6 +1364,34 @@ class TaskWorkerLease(models.Model):
         return f"Worker {worker_id[:8]}... on {self.hostname} ({status})"
 
 
+class TaskWorkerLeasePolicy(models.Model):
+    """One explicit lease duration for every process sharing this database."""
+
+    singleton_key = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    schema_version = models.PositiveSmallIntegerField(default=1, editable=False)
+    lease_seconds = models.PositiveIntegerField(default=60, editable=False)
+    revision = models.PositiveBigIntegerField(default=1, editable=False)
+    updated_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(singleton_key=1), name="ray_lease_policy_singleton"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(schema_version=1), name="ray_lease_policy_schema"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(lease_seconds__gte=1, lease_seconds__lte=86400),
+                name="ray_lease_policy_seconds",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(revision__gte=1, revision__lte=(1 << 63) - 1),
+                name="ray_lease_policy_revision",
+            ),
+        ]
+
+
 class TaskExecutionProtocolPolicy(models.Model):
     """Singleton rollout policy for the durable execution protocol.
 

@@ -423,6 +423,9 @@ Duration of worker lease for distributed coordination. Workers must renew their 
 `WORKER_HEARTBEAT_SECONDS` must be lower than this value.
 All processes sharing the lease table must use the same duration, including workers on different
 queues or backend aliases. See the [shared lease policy](../configuration.md#reliability).
+The database authority is seeded to 60 seconds by migration 0028. Changing this setting
+alone does not update that authority: configure both during a stopped cohort using
+[`django_ray_lease_policy`](cli.md#django_ray_lease_policy).
 
 ```python
 "WORKER_LEASE_SECONDS": 120

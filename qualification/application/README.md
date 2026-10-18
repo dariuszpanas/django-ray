@@ -176,6 +176,19 @@ Ordinary sample settings remain unchanged. The core task assertions do not certi
 dependency-download behavior, workflow recovery, or a complete release upgrade.
 Workflow evidence requires the separate workflow receipts below.
 
+Each core observer first checks the database-owned 60-second lease authority.
+A real worker registration creates one inert owned control lease; the control
+must be healthy. A cluster-mode worker configured for a conflicting six-second
+lease must refuse at startup before lease creation, runtime initialization or
+claiming. Fail-fast instrumentation observes those later entry points without
+allowing work to start. Readiness and operator status must report the mismatch,
+and compatible-worker availability must be `null`. Existing peers retain their
+identity and active state while normal heartbeats may advance; the authority
+remains unchanged and only the exact control is removed. Eleven fixed boolean
+facts, a 32-lease inventory cap, a 20-second Linux alarm and finite database
+timeouts bound this negative probe. It does not replace the normal matched-policy
+worker workload or authorize a policy transition under live managers.
+
 Each core observer also commits exactly two malformed RuntimeEnv fixtures atomically:
 one changed ciphertext and one unavailable key. The existing manager must claim both and
 reject them before dispatch, with the expected fixed failure category, attempt 1 and

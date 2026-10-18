@@ -105,6 +105,56 @@ def read_history(root, history_file="history.json"):
     return len(ids)
 
 
+def transition_crash_lease_policy(*, restore=False):
+    """Use the operator command only between stopped candidate fixture cohorts."""
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    from django_ray.models import RayTaskExecution, TaskWorkerLease
+
+    # This database belongs only to the finite native fixture. No old/current
+    # manager can overlap either call, and the command independently refuses
+    # active leases (including stale ones) and RUNNING/CANCELLING tasks.
+    assert not RayTaskExecution.objects.exclude(state__in=TERMINAL).exists()
+    history = snapshot()
+    leases = list(TaskWorkerLease.objects.order_by("pk").values())
+    output = StringIO()
+    expected_seconds, seconds, expected_revision = (6, 60, 2) if restore else (60, 6, 1)
+    call_command(
+        "django_ray_lease_policy",
+        set_seconds=seconds,
+        expected_seconds=expected_seconds,
+        expected_revision=expected_revision,
+        all_lease_users_stopped=True,
+        stdout=output,
+        stderr=StringIO(),
+    )
+    assert len(output.getvalue().encode()) <= 1024
+    report = json.loads(output.getvalue())
+    assert report == {
+        "schema_version": 1,
+        "scope": "worker_lease_policy",
+        "status": "mismatch" if restore else "matched",
+        "configured_seconds": 6,
+        "lease_seconds": seconds,
+        "revision": expected_revision + 1,
+    }
+    assert snapshot() == history, "lease policy transition changed history"
+    assert list(TaskWorkerLease.objects.order_by("pk").values()) == leases
+    assert not TaskWorkerLease.objects.filter(is_active=True).exists()
+    return {
+        "expected_seconds": expected_seconds,
+        "expected_revision": expected_revision,
+        "lease_seconds": seconds,
+        "revision": report["revision"],
+        "history_preserved": True,
+        "leases_preserved": True,
+        "active_leases": 0,
+        "nonterminal": 0,
+    }
+
+
 def run_work(root, *, check_completion_encoding=False):
     import ray
     from django.conf import settings
@@ -481,6 +531,12 @@ def main():
             ).count()
             == 1
         )
+        assert (
+            MigrationRecorder.Migration.objects.filter(
+                app="django_ray", name="0028_worker_lease_policy"
+            ).count()
+            == 1
+        )
         observations["post_write_tasks_read"] = read_history(root, "candidate-history.json")
         assert observations["post_write_tasks_read"] == 9
         observations["database_read_only"] = True
@@ -490,7 +546,17 @@ def main():
     if phase != "baseline-run":
         observations["historical_tasks"] = read_history(root)
     if phase.endswith("-run"):
+        if phase == "candidate-run" and settings.CRASH_MANAGER:
+            observations["lease_policy"] = {
+                "before_crash": transition_crash_lease_policy(),
+            }
         observations.update(run_work(root, check_completion_encoding=phase == "candidate-run"))
+        if phase == "candidate-run" and settings.CRASH_MANAGER:
+            # run_work has proved manager/Ray exit and a fully settled cohort.
+            # Restore the default for subsequent fresh candidate processes.
+            observations["lease_policy"]["after_drain"] = transition_crash_lease_policy(
+                restore=True
+            )
         if phase == "baseline-run":
             (root / "history.json").write_text(json.dumps(snapshot()))
             observations["historical_tasks"] = read_history(root)

@@ -5,10 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from django.db import OperationalError, ProgrammingError, connection
 from prometheus_client.parser import text_string_to_metric_families
 
-from django_ray.metrics import render_prometheus_metrics
-from django_ray.models import RayTaskExecution, TaskAttempt, TaskState, TaskWorkerLease
+from django_ray.metrics import _collect_lease_health, render_prometheus_metrics
+from django_ray.models import (
+    RayTaskExecution,
+    TaskAttempt,
+    TaskState,
+    TaskWorkerLease,
+    TaskWorkerLeasePolicy,
+)
 
 
 def _samples(metrics: str) -> dict[str, float]:
@@ -241,3 +248,48 @@ def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
 def test_metrics_scrape_uses_bounded_aggregate_queries(db, django_assert_num_queries):
     with django_assert_num_queries(8):
         render_prometheus_metrics(queue_names=["default"])
+
+
+@pytest.mark.parametrize("policy", ["matched", "missing", "mismatched"])
+@pytest.mark.parametrize("has_lease", [False, True])
+def test_lease_health_checks_authority_in_its_single_aggregate_snapshot(
+    db, django_assert_num_queries, policy, has_lease
+):
+    now = datetime(2026, 7, 19, 12, tzinfo=UTC)
+    if has_lease:
+        TaskWorkerLease.objects.create(
+            worker_id="metrics-policy-worker",
+            hostname="fixture",
+            pid=1,
+            last_heartbeat_at=now,
+        )
+    if policy == "missing":
+        TaskWorkerLeasePolicy.objects.all().delete()
+    elif policy == "mismatched":
+        TaskWorkerLeasePolicy.objects.update(lease_seconds=90)
+
+    with django_assert_num_queries(1) as captured:
+        counts = _collect_lease_health(observed_at=now)
+    statement = captured.captured_queries[0]["sql"].upper()
+    assert statement.startswith("SELECT")
+    assert "DJANGO_RAY_TASKWORKERLEASEPOLICY" in statement
+    assert "COUNT(" in statement and "CASE WHEN EXISTS(" in statement
+    if policy == "matched":
+        assert counts == {"healthy": int(has_lease), "stale": 0, "inactive": 0}
+    else:
+        assert counts is None
+
+
+@pytest.mark.parametrize("error", [OperationalError, ProgrammingError])
+def test_unreadable_lease_authority_omits_counts_without_exposing_database_error(db, error):
+    def reject_authority(execute, sql, params, many, context):
+        if "django_ray_taskworkerleasepolicy" in sql.lower():
+            raise error("private-policy-table-detail")
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(reject_authority):
+        rendered = render_prometheus_metrics(queue_names=["default"])
+
+    assert "django_ray_worker_lease_policy_available 0" in rendered
+    assert not any(line.startswith("django_ray_worker_leases{") for line in rendered.splitlines())
+    assert "private-policy-table-detail" not in rendered

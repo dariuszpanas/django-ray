@@ -5026,6 +5026,8 @@ class TestTaskWorkerLeaseAdmin:
         messages: list[str] = []
 
         class _CascadingDeletion:
+            db = "default"
+
             def filter(self, **_filters):
                 return self
 

@@ -329,6 +329,15 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                 lease_seconds = config.get("WORKER_LEASE_SECONDS")
                 if type(lease_seconds) is not int or not 1 <= lease_seconds <= 86400:
                     raise ProbeUnavailableError("configuration_invalid")
+                from django_ray.lease_policy import LeasePolicyError, read_lease_policy
+
+                try:
+                    lease_policy = read_lease_policy(using=using, matching=False)
+                except LeasePolicyError as error:
+                    raise ProbeUnavailableError(error.reason) from None
+                budget.returned(lease_policy, 1)
+                if lease_policy.seconds != lease_seconds:
+                    raise ProbeUnavailableError("lease_policy_mismatch")
                 observed = datetime.now(UTC)
                 cutoff = observed - timedelta(seconds=lease_seconds)
                 fresh = Q(
@@ -376,6 +385,8 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                     observation(
                         "blocker" if lease_counts["malformed"] else "observed",
                         "lease_shape_invalid" if lease_counts["malformed"] else "observed",
+                        lease_policy_seconds=lease_policy.seconds,
+                        lease_policy_revision=lease_policy.revision,
                         **lease_counts,
                     ),
                 )

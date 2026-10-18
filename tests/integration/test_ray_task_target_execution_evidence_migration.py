@@ -45,7 +45,7 @@ from django_ray.target.execution_evidence import (
 
 MIGRATE_FROM = [("django_ray", "0025_ray_worker_target_capabilities")]
 MIGRATE_TO = [("django_ray", "0026_ray_task_target_execution_evidence")]
-LATEST = [("django_ray", "0027_workflow_reporting_diagnostics")]
+LATEST = [("django_ray", "0028_worker_lease_policy")]
 
 _DIGEST_A = f"sha256:{'a' * 64}"
 _DIGEST_B = f"sha256:{'b' * 64}"
@@ -773,6 +773,11 @@ def test_postgresql_raw_evidence_and_outcome_fences_match_orm_contract() -> None
 
 @pytest.mark.django_db(transaction=True)
 def test_migration_is_additive_and_reverse_refuses_retained_evidence() -> None:
+    # Exercise the current admission command before moving to a historical
+    # schema that predates its common lease authority. The closed policy is
+    # retained by 0025/0026; this test continues to isolate their evidence fence.
+    policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+    close_legacy_worker_admission(expected_revision=policy.revision, legacy_producers_retired=True)
     executor = MigrationExecutor(connection)
     executor.migrate(MIGRATE_FROM)
     try:
@@ -836,23 +841,38 @@ def _attempt_sqlite_reverse(reverse_started: Event) -> str:
             MigrationExecutor(thread_connection).migrate(MIGRATE_FROM)
         except OperationalError:
             return "writer-locked"
-        except RuntimeError:
+        except RuntimeError as error:
+            assert str(error) == (
+                "django-ray target execution evidence rollback requires both tables to be empty"
+            )
             return "history-refused"
         raise AssertionError("rollback unexpectedly removed target execution evidence")
     finally:
         _close_owned_thread_connection()
 
 
+def _prepare_writer_race_boundary() -> None:
+    # Close admission while the current command's policy authority exists,
+    # then isolate 0026 before active fixture rows could trigger 0028's guard.
+    policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
+    if policy.legacy_worker_admission_enabled:
+        close_legacy_worker_admission(
+            expected_revision=policy.revision, legacy_producers_retired=True
+        )
+    MigrationExecutor(connection).migrate(MIGRATE_TO)
+
+
 @pytest.mark.django_db(transaction=True)
 def test_sqlite_evidence_writer_cannot_race_partial_schema_reverse() -> None:
     if connection.vendor != "sqlite":
         pytest.skip("requires the default SQLite test database")
-    lineage = _create_lineage(suffix="sqlite-writer-fence")
-    values = {**_raw_evidence_values(lineage), "target_execution_evidence_id": 2001}
     writer_inserted = Event()
     release_writer = Event()
     reverse_started = Event()
     try:
+        _prepare_writer_race_boundary()
+        lineage = _create_lineage(suffix="sqlite-writer-fence")
+        values = {**_raw_evidence_values(lineage), "target_execution_evidence_id": 2001}
         with ThreadPoolExecutor(max_workers=2) as pool:
             writer = pool.submit(
                 _hold_evidence_writer,
@@ -891,7 +911,10 @@ def _attempt_postgresql_reverse(reverse_started: Event, backend_pid: list[int]) 
         reverse_started.set()
         try:
             MigrationExecutor(thread_connection).migrate(MIGRATE_FROM)
-        except RuntimeError:
+        except RuntimeError as error:
+            assert str(error) == (
+                "django-ray target execution evidence rollback requires both tables to be empty"
+            )
             return "history-refused"
         raise AssertionError("rollback unexpectedly removed target execution evidence")
     finally:
@@ -918,13 +941,14 @@ def _wait_for_postgresql_lock(backend_pid: int) -> None:
 def test_postgresql_evidence_writer_serializes_before_reverse_guard() -> None:
     if connection.vendor != "postgresql":
         pytest.skip("requires tests.postgres_settings and a PostgreSQL test database")
-    lineage = _create_lineage(suffix="postgres-writer-fence")
-    values = {**_raw_evidence_values(lineage), "target_execution_evidence_id": 2001}
     writer_inserted = Event()
     release_writer = Event()
     reverse_started = Event()
     backend_pid: list[int] = []
     try:
+        _prepare_writer_race_boundary()
+        lineage = _create_lineage(suffix="postgres-writer-fence")
+        values = {**_raw_evidence_values(lineage), "target_execution_evidence_id": 2001}
         with ThreadPoolExecutor(max_workers=2) as pool:
             writer = pool.submit(
                 _hold_evidence_writer,

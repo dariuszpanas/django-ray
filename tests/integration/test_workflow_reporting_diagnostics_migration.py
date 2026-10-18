@@ -49,4 +49,4 @@ def test_reporting_diagnostics_migration_preserves_history_and_old_inserts():
         execution.refresh_from_db()
         assert execution.progress_data == '{"schema_version":2}'
     finally:
-        MigrationExecutor(connection).migrate(new)
+        MigrationExecutor(connection).migrate([("django_ray", "0028_worker_lease_policy")])

@@ -267,6 +267,10 @@ def annotate_execution_protocol_availability(
     recognized shape. Package versions and informational worker queues do not
     participate in this compatibility decision.
     """
+    from django.db.models import BooleanField, Case, When
+
+    from django_ray.lease_policy import policy_rows
+
     observed = _utc_datetime(observed_at or datetime.now(UTC))
     cutoff = observed - get_lease_duration()
     using = queryset.db
@@ -303,7 +307,17 @@ def annotate_execution_protocol_availability(
         .filter(_lease_shapes_valid=True, _policy_valid=True)
         .filter(explicit_capacity | legacy_capacity)
     )
-    return queryset.annotate(**{field_name: Exists(live_capacity)})
+    # Evaluate the policy in the same statement, including for a QuerySet built
+    # before an operator transition. Unknown authority is not zero capacity.
+    return queryset.annotate(
+        **{
+            field_name: Case(
+                When(Exists(policy_rows(using=using)), then=Exists(live_capacity)),
+                default=Value(None),
+                output_field=BooleanField(),
+            )
+        }
+    )
 
 
 def _load_policy(*, using: str) -> ProtocolPolicyStatus:
@@ -951,6 +965,8 @@ def build_protocol_status(
     observed_at: datetime | None = None,
 ) -> ProtocolStatusReport:
     """Build one consistent bounded read-only protocol report."""
+    from django_ray.lease_policy import LeasePolicyError, read_lease_policy
+
     try:
         connection = connections[using]
         if connection.vendor not in _SUPPORTED_DATABASE_VENDORS:
@@ -962,16 +978,18 @@ def build_protocol_status(
                 "protocol status must own its outermost read-only database transaction"
             )
         observed = _utc_datetime(observed_at or datetime.now(UTC))
-        cutoff = observed - get_lease_duration()
         with transaction.atomic(using=using, durable=True):
             if connection.vendor == "postgresql":
                 with connection.cursor() as cursor:
                     cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            policy = read_lease_policy(using=using)
             return _build_protocol_status_observation(
                 using=using,
                 observed=observed,
-                cutoff=cutoff,
+                cutoff=observed - policy.duration,
             )
+    except LeasePolicyError as error:
+        raise ProtocolStatusError(error.reason) from None
     except ProtocolStatusError:
         raise
     except ConnectionDoesNotExist:

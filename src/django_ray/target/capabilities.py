@@ -579,6 +579,9 @@ def advertise_ray_worker_target_capability(
         vendor = _database_vendor(using=using)
         _require_outermost_transaction(using=using)
         with transaction.atomic(using=using, durable=True):
+            from django_ray.lease_policy import lock_lease_policy
+
+            lock_lease_policy(using=using)
             lease = _require_advertising_lease(
                 _locked_exact_lease(identity, using=using, vendor=vendor),
                 now=now,
@@ -742,6 +745,9 @@ def withdraw_ray_worker_target_capability(
         vendor = _database_vendor(using=using)
         _require_outermost_transaction(using=using)
         with transaction.atomic(using=using, durable=True):
+            from django_ray.lease_policy import lock_lease_policy
+
+            lock_lease_policy(using=using)
             lease = _locked_exact_lease(identity, using=using, vendor=vendor)
             if lease is None:
                 return False
@@ -793,6 +799,9 @@ def withdraw_all_ray_worker_target_capabilities(
         vendor = _database_vendor(using=using)
         _require_outermost_transaction(using=using)
         with transaction.atomic(using=using, durable=True):
+            from django_ray.lease_policy import lock_lease_policy
+
+            lock_lease_policy(using=using)
             lease = _locked_exact_lease(identity, using=using, vendor=vendor)
             if lease is None:
                 return 0

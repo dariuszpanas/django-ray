@@ -123,6 +123,7 @@ def test_jobs_cleanup_preserves_healthy_core_lease_on_another_queue(
     environment, monkeypatch, settings, generation
 ):
     from django_ray.conf.settings import get_settings, validate_settings
+    from django_ray.lease_policy import LeasePolicyError
     from django_ray.models import TaskWorkerLease
     from django_ray.runner import leasing
 
@@ -162,12 +163,12 @@ def test_jobs_cleanup_preserves_healthy_core_lease_on_another_queue(
     assert list(rows.values()) == before
 
     # The old overlay could expire Core between its ordinary 15-second beats.
-    # Distinct queues do not isolate leases from the caller's expiry horizon.
+    # The common database authority now refuses that mismatched cleanup before
+    # any queue's leases are changed.
     settings.DJANGO_RAY = {**jobs["DJANGO_RAY"], "WORKER_LEASE_SECONDS": 6}
-    assert leasing.cleanup_expired_leases() == 1
-    expected = [dict(row) for row in before]
-    expected[0].update(is_active=False, stopped_at=now)
-    assert list(rows.values()) == expected
+    with pytest.raises(LeasePolicyError, match="lease_policy_mismatch"):
+        leasing.cleanup_expired_leases()
+    assert list(rows.values()) == before
 
 
 def test_negative_setup_sentinel_precedes_even_a_failed_base_import(tmp_path, monkeypatch):

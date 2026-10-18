@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from django.db import DatabaseError
 from django.db.models import (
     Case,
     Count,
@@ -271,22 +272,36 @@ def _collect_failures() -> tuple[int, int, int]:
     )
 
 
-def _collect_lease_health(*, observed_at: datetime) -> dict[str, int]:
+def _collect_lease_health(*, observed_at: datetime) -> dict[str, int] | None:
+    from django_ray.lease_policy import LeasePolicyError, policy_rows
     from django_ray.models import TaskWorkerLease
 
     cutoff = observed_at - get_lease_duration()
-    counts = TaskWorkerLease.objects.aggregate(
-        healthy=Count(
-            "pk",
-            filter=Q(is_active=True, last_heartbeat_at__gte=cutoff),
-        ),
-        stale=Count(
-            "pk",
-            filter=Q(is_active=True, last_heartbeat_at__lt=cutoff),
-        ),
-        inactive=Count("pk", filter=Q(is_active=False)),
-    )
-    return {status: int(counts[status] or 0) for status in ("healthy", "stale", "inactive")}
+    authority = Exists(policy_rows())
+    # Authority and health counts share one statement snapshot, including when
+    # the lease table is empty. A missing/mismatched policy yields NULL rather
+    # than a false zero, without adding before/after queries to every scrape.
+    filters = {
+        "healthy": Q(is_active=True, last_heartbeat_at__gte=cutoff),
+        "stale": Q(is_active=True, last_heartbeat_at__lt=cutoff),
+        "inactive": Q(is_active=False),
+    }
+    try:
+        counts = TaskWorkerLease.objects.aggregate(
+            **{
+                name: Case(
+                    When(authority, then=Count("pk", filter=condition)),
+                    default=Value(None),
+                    output_field=IntegerField(),
+                )
+                for name, condition in filters.items()
+            }
+        )
+    except DatabaseError:
+        raise LeasePolicyError("lease_policy_unavailable") from None
+    if any(value is None for value in counts.values()):
+        return None
+    return {status: int(count) for status, count in counts.items()}
 
 
 def render_prometheus_metrics(
@@ -345,7 +360,12 @@ def render_prometheus_metrics(
     queue_wait, claim_latency, retries = _collect_timings_and_retries()
     execution_duration = _collect_execution_duration()
     failures, timeouts, expirations = _collect_failures()
-    leases = _collect_lease_health(observed_at=now)
+    from django_ray.lease_policy import LeasePolicyError
+
+    try:
+        leases = _collect_lease_health(observed_at=now)
+    except LeasePolicyError:
+        leases = None
 
     lines: list[str] = []
     _metric(
@@ -450,8 +470,16 @@ def render_prometheus_metrics(
         name="django_ray_worker_leases",
         help_text="Worker leases by fixed health classification",
         values=[
-            ({"status": status}, leases[status]) for status in ("healthy", "stale", "inactive")
+            ({"status": status}, leases[status])
+            for status in ("healthy", "stale", "inactive")
+            if leases is not None
         ],
+    )
+    _metric(
+        lines,
+        name="django_ray_worker_lease_policy_available",
+        help_text="Whether matching common lease authority was observed consistently",
+        value=int(leases is not None),
     )
     return "\n".join(lines) + "\n"
 

@@ -1,5 +1,46 @@
 # CLI Reference
 
+## django_ray_lease_policy
+
+Inspect the common lease duration without creating or modifying policy:
+
+```bash
+python manage.py django_ray_lease_policy --database default
+```
+
+Migration 0028 seeds 60 seconds with revision 1. JSON contains `schema_version` (1),
+`scope` (`worker_lease_policy`), `status` (`matched` or `mismatch`),
+`configured_seconds`, `lease_seconds` and `revision`. A read-only mismatch or
+unavailable observation exits 2 with a fixed diagnostic. It is not zero capacity.
+
+To change a policy, stop and drain all processes sharing the lease table, including
+old workers, purgers and operational callers. Reconcile remote effects and active
+lease state under the old agreed policy. Then use the observed revision and value:
+
+```bash
+python manage.py django_ray_lease_policy --database default \
+  --set-seconds 120 --expected-seconds 60 --expected-revision 1 \
+  --all-lease-users-stopped
+```
+
+The stopped-cohort flag is an operator assertion; the database cannot discover
+old processes or prove that remote work stopped. The command also requires no
+active leases (including stale ones) and no running/cancelling executions. It
+never retires a lease or rewrites work. A stale expected value/revision refuses.
+Lock contention is bounded and returns a fixed failure; there are no retries.
+The shared policy lock follows existing worker ownership transactions, including
+their already-fenced cancellation and storage operations. It does not move those
+effects or widen their transaction scope. PostgreSQL shared locks permit peer
+workers; an exclusive policy transition refuses contention immediately.
+An explicit successful update exits 0 even when this process still has the old
+setting; its JSON reports that mismatch. Change every process's configuration
+before restart, keeping each heartbeat interval below the common duration.
+
+Readers never bootstrap or repair missing policy. Old binaries do not honor these
+guards, so mixed old/new writers remain unsupported. See the
+[coordinated upgrade procedure](../deployment/upgrading-from-0.6.md#migration-and-execution-boundary).
+
+
 ## django_ray_doctor
 
 Collect bounded read-only configuration and database observations on Linux:
@@ -14,6 +55,10 @@ remote readiness and inventory sections remain unavailable. See the
 cleanup, exit codes and the standalone entry point that also bounds startup.
 
 ## django_ray_worker
+
+Before startup, the configured lease duration must match the database authority.
+See [`django_ray_lease_policy`](#django_ray_lease_policy); startup refuses mismatches
+before connecting to Ray or claiming work.
 
 The main worker command that processes tasks from the queue.
 
