@@ -55,8 +55,8 @@ jobs:
           ADAPTER_SHA: ${{ github.workflow_sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_commit }}
           FULL_SHADOW: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
-          # Immutable phase-three implementation; publish this commit before enabling.
-          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@a5f38fba8c809606ef1cbfbc9303e8bc1b0c2715
+          # Reviewed phase-three implementation retained on YAGA main.
+          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@e359bd13d26516231585f7dba4d8f509d1d66989
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$ADAPTER_SHA"
