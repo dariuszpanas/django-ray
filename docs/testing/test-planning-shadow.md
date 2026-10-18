@@ -112,6 +112,117 @@ and baseline comparison; it excludes registry creation, environment/dependency
 setup and artifact upload. Complete reasons remain in the proposed plan.
 Runtime metrics are explicitly unobserved until real execution supplies evidence.
 
+## Offline normalization of acquired receipts
+
+`scripts.test_planning_results.normalize_results` converts authenticated,
+source-matched qualification observations into YAGA `test-results-version: 1`.
+It performs no network calls, Git inspection, test execution, workflow dispatch,
+or writes. Existing required CI and the advisory workflow are unchanged; no
+workflow installs or calls this normalizer yet. The existing YAGA workflow pin
+is unchanged.
+
+The API has two independent inputs:
+
+- `ExpectedRun` contains the recomputed plan digest, exact policy-byte SHA-256,
+  executor registry SHA-256, execution commit/tree, run ID/attempt, and selected
+  `Cell(suite, variant, binding)` tuple. Derive these from trusted execution
+  context and a validated handoff. Do not copy claims from result receipts.
+- `VerifiedRun` contains the independently authenticated source/run/attempt,
+  supported contract profile, `VerifiedJob` records, and `VerifiedFile` records.
+  A job record contains the cell, unique numeric job ID, actual execution attempt,
+  outcome and successful step names. The actual attempt must match `ExpectedRun`
+  and `VerifiedRun`; a successful row copied into a later attempt is insufficient.
+  A file record contains its artifact-relative POSIX path, byte
+  count and SHA-256 derived from the original authenticated archive.
+
+`VerifiedRun` is a Python caller contract, **not an authentication format**.
+Before constructing it, a trusted acquisition adapter must verify the repository,
+workflow path/event and immutable definitions, exact run and attempt, job-to-cell
+mapping and conclusions, source commit/tree, and each artifact's API identity,
+run/source association, size and SHA-256. Retain the original ZIP bytes, safely
+extract them into a private directory, and derive the per-file inventory from
+those bytes. Recheck current attempt identity; never select the greenest retry
+or assemble results across attempts. A copied artifact filename, successful exit
+code, caller-supplied constant, or green aggregate does not perform these checks.
+This module deliberately has no parser that promotes an arbitrary metadata JSON
+document into authenticated provenance.
+
+The profile is `django-ray-45180ea-receipts-v1`, reviewed against the qualification
+producers at `45180ea0e47aab600ed5b77312b636c7dfdb5282`. The profile identifies the
+reviewed receipt contract, not a substitute source identity. The trusted caller
+must establish that the executed source implements this exact contract. Unknown
+or changed contracts are unsupported until reviewed. Both application cold
+generations now require all 11 lease-policy and 20 runtime-environment-maintenance
+facts. Native candidate crash/recovery cohorts also require the public stopped-
+cohort lease-policy transitions before admission and after drain. Historical e4f
+pilot receipts do not satisfy this newer contract.
+
+The fixed mappings cover all five suites and eight cells:
+
+| Suite | Required retained acceptance and cleanup |
+| --- | --- |
+| Application | Standard acceptance resource profile, exact source/image ancestry and producer identities; all 16 ordered receipts; setup, generic nodes, API/Admin/browser and workflow assertions; both cold generations and their byte-hash linkage; lease-policy and runtime-environment-maintenance facts in both Core receipts; worker-image modes and protected-log cleanup; namespace removal and successful outer infrastructure cleanup step. |
+| Native | All selected `native`, `jobs`, `jobs-crash`, `core-loss` cells independently; exact candidate/released installed packages and archive digest; SQLite and PostgreSQL; every ordered phase, task/history/carrier observations, completion encoding, variant-specific crash/reconciliation/worker-mode and lease-policy-transition facts; fixture cleanup and successful outer cleanup step. |
+| Latency | Source and installed module identity; the complete source-owned five-case timestamp, query, manager, outage and duration validator; stopped managers/Ray, fixture removal and outer cleanup. |
+| Cancellation | Source and installed module identity; all 15 source-owned cancellation facts; stopped manager/children/PostgreSQL, fixture removal and outer cleanup. |
+| Monitoring | Source/image ancestry and exact live image mapping; Ray topology, HTTP/authentication, dashboard replacement/replay, rendered browser/query evidence, operator/resources/private surfaces; browser, namespace, registry and disposable-cluster cleanup. |
+
+The normalizer reuses the source-owned validators and checks additional retained
+fields that the original log envelope parser does not validate. It imports only
+the reviewed checkout's modules; it never imports or executes artifact contents.
+The receipts cannot reproduce discarded live state, namespace ownership, image
+layer observations or database history. Authenticated successful execution of the
+exact supported producer remains a necessary part of the evidence boundary.
+`complete_application_gate: false` and `complete_upgrade_gate: false` remain true
+scope limitations; normalization never establishes whole-repository acceptance.
+
+Every consumed file must match its independent byte count and SHA-256. Reads
+reject links, junctions, nonregular files, changed identities, duplicate JSON
+keys, nonfinite numbers and excessive nesting. Bounds are 512 inventory entries,
+1 MiB per file, 16 MiB of unique consumed bytes, 50,000 JSON values and depth 32.
+The extraction directory must remain private throughout normalization.
+
+For a passed job, missing custom evidence, wrong source, malformed assertions or
+unconfirmed cleanup raises `NormalizationError`, an operational input error.
+It does not fabricate a failed receipt or preserve passed status. Independently
+established `failed`, `pending`, `cancelled` and `blocked` jobs retain that outcome;
+the normalizer does not upgrade them by reading a leftover green receipt. Missing,
+duplicate, extra or ambiguously mapped jobs also fail. Each output cell includes
+an evidence SHA-256 binding its used-file hashes, exact job, source, run/attempt
+and contract profile.
+
+The local integration sequence is:
+
+```python
+from scripts.test_planning_results import normalize_results
+
+# expected and verified are constructed by the trusted adapter described above.
+document = normalize_results(artifact_root, expected=expected, provenance=verified)
+```
+
+Then parse the output with YAGA's results parser and evaluate it against the
+original validated plan and independently expected policy, registry, source,
+run and attempt. The evaluator owns complete selected-variant and prerequisite
+coverage; normalizing one native cell does not satisfy the other three. Serialize
+the resulting artifacts and record their exact digests in the separate
+[offline measurement report](test-planning-results.md). Timing/report generation
+does not validate receipts or authorize activation.
+
+Resource-free tests use bounded historical receipt projections and synthetic
+acquisition contexts. They cover all eight cells, corrupted acceptance and
+cleanup facts, source/attempt mismatch, invalid metadata, file substitution and
+parser budgets. Those test fixtures do not authenticate a new run or replace
+current exact-source hosted qualification.
+
+The retained release receipts keep their original `85da4256` source and actual
+execution attempts: seven native/latency/cancellation/monitoring cells in attempt 1
+and application in attempt 2 of run `39101458923`. Normalize and evaluate those
+separate selections independently. The release coordinator's reviewed identical-
+tree acceptance at `45180ea` does not permit this API to assemble them into a full
+green attempt-2 result. It also does not grant this new tooling source publication
+readiness. Required `Commit Messages`, `CI Gate`, and `Qualification Gate` remain
+authoritative; no publication is authorized by this tooling.
+
 ## Promotion remains disabled
 
 Start with at least 30 representative revisions across backend, assets,
@@ -124,8 +235,9 @@ Do not sum parallel durations as wall time or infer speedup from test counts.
 The owner must choose a useful measured feedback-time improvement before
 activation; no threshold is presumed. Promotion also requires no unexplained
 omissions or known missed regressions, tested invalid/missing/cancelled-result
-blocking, preserved matrices/cleanup and regression replay. Generic result
-receipts and controlled activation are a later YAGA phase. Full-profile rollback
+blocking, preserved matrices/cleanup and regression replay. The offline receipt
+normalizer is implemented separately; workflow adoption and controlled activation
+remain pending. Full-profile rollback
 and consolidated full qualification remain mandatory.
 
 Focused resource-free adapter tests cover fixed mappings, the PR/manual split,
