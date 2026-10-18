@@ -15,6 +15,13 @@ Selective execution and adoption remain disabled. Manual full-run publication
 observations are an initial measurement step, not the controlled independent-arm
 experiment required for an adoption decision.
 
+The first full hosted observation completed all eight qualification workloads,
+but its result observer and aggregate failed. Complete offline replay passed;
+the hosted failure's cause remains unconfirmed. Feedback timing and savings are
+unavailable. [The reporting investigation](https://github.com/dariuszpanas/django-ray/issues/644)
+is deferred until after 0.7.0; release evidence uses the existing standalone
+qualification workflows. Offline replay does not replace failed hosted publications.
+
 ## Retain one observation
 
 `scripts.test_planning_experiment.build_observation(identities, measurements)` is a
@@ -30,14 +37,14 @@ This schema validates recorded measurements; it does not authenticate evidence o
 re-evaluate test obligations. First normalize receipts and evaluate them with YAGA,
 then retain those exact artifacts with the observation.
 
-### Evaluate with the reviewed implementation
+### Evaluate with the released implementation
 
-Released `yaga-cli==0.2.0` does not contain `test evaluate`. Use the reviewed
-phase-4B source in an isolated tool environment. Tool provisioning may require a
-download, but evaluation itself reads only the supplied local artifacts:
+Released `yaga-cli==0.3.0` provides `test evaluate` in an isolated tool environment.
+Tool provisioning may require a download, but evaluation itself reads only the
+supplied local artifacts:
 
 ```bash
-uvx --from "yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f" \
+uvx --from yaga-cli==0.3.0 \
   yaga test evaluate --plan plan.json --results results.json \
   --policy-sha256 "$EXPECTED_POLICY_SHA256" \
   --bindings-sha256 "$EXPECTED_MANIFEST_SHA256" \
@@ -222,6 +229,6 @@ Run the new unit files together with the existing shadow adapter tests in an
 environment with pytest and the repository's ordinary test dependencies. These
 tests use synthetic receipts and timestamps and start no Ray, Docker, or Kubernetes
 resources. Consumer normalization does not add YAGA to package runtime dependencies;
-offline evaluator integration uses the reviewed phase-4B revision above. Feedback
+offline evaluator integration uses the released version above. Feedback
 tests exercise missing publications, exclusions, retry failures, identical aliases,
 identity mismatch, signed lead and bounded output without running qualifications.

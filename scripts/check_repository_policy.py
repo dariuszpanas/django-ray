@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-YAGA = ("uvx", "--from", "yaga-cli==0.2.0", "--with", "typos==1.50.2", "yaga")
+YAGA = ("uvx", "--from", "yaga-cli==0.3.0", "--with", "typos==1.50.2", "yaga")
 
 
 def git_output(*arguments: str) -> str:

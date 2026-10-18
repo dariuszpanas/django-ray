@@ -56,8 +56,8 @@ jobs:
           ADAPTER_SHA: ${{ github.workflow_sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_commit }}
           FULL_SHADOW: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
-          # Reviewed result-evaluation implementation retained on YAGA main.
-          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+          # Released planning and result-evaluation tools in an isolated environment.
+          YAGA_SOURCE: yaga-cli==0.3.0
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
@@ -82,7 +82,7 @@ jobs:
         name: Prepare advisory result plans without changing execution
         working-directory: adapter
         env:
-          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+          YAGA_SOURCE: yaga-cli==0.3.0
         run: |
           uv run --isolated --no-project --python 3.12 --with "$YAGA_SOURCE" \
             python -m scripts.test_planning_pilot \
@@ -156,7 +156,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           GROUP: ${{ matrix.group }}
-          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+          YAGA_SOURCE: yaga-cli==0.3.0
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$ADAPTER_SHA"
@@ -229,7 +229,7 @@ jobs:
           BASE_SHA: ${{ inputs.base_commit }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+          YAGA_SOURCE: yaga-cli==0.3.0
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$ADAPTER_SHA"

@@ -10,6 +10,11 @@ Its full plan does not cover all repository qualification: Transaction Qualifica
 Upgrade Data Qualification, release-candidate artifact checks, and applicable local
 deployment gates remain independent obligations with their existing triggers.
 
+The first full hosted observation passed its workload cells but failed in advisory
+reporting. Its feedback and savings remain unavailable; see the
+[current limitation](test-planning-results.md) and deferred
+[investigation](https://github.com/dariuszpanas/django-ray/issues/644).
+
 ## Pull request comparison
 
 `Shadow Plan Comparison` collects the complete explicit three-dot base-to-head
@@ -99,10 +104,9 @@ for the distinction between advisory lead and unmeasured selective execution sav
 
 ## Local comparison and evidence
 
-The workflow pins an immutable YAGA implementation commit in an isolated uv
-environment; project dependencies and `uv.lock` are unchanged. That source commit
-must be published before the consumer workflow can install it. Run the module
-with that same dependency available, from the reviewed adapter checkout:
+The workflow pins released `yaga-cli==0.3.0` in an isolated uv environment;
+project dependencies and `uv.lock` are unchanged. Run the module with that same
+dependency available, from the reviewed adapter checkout:
 
 ```bash
 python -m scripts.test_planning_shadow plan \
@@ -145,7 +149,7 @@ feedback report records actual manual-run publication observations.
 source-matched qualification observations into YAGA `test-results-version: 1`.
 It performs no network calls, Git inspection, test execution, workflow dispatch,
 or writes. The manual advisory observer acquires evidence and calls this API,
-then uses the pinned phase-4B YAGA evaluator. Required CI and the PR comparison
+then uses the pinned released YAGA evaluator. Required CI and the PR comparison
 route retain their authority and execution policy.
 
 The API has two independent inputs:
