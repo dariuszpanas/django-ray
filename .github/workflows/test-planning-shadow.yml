@@ -32,6 +32,7 @@ jobs:
       policy_sha256: ${{ steps.plan.outputs.policy_sha256 }}
       bindings_sha256: ${{ steps.plan.outputs.bindings_sha256 }}
       plan_digest: ${{ steps.plan.outputs.plan_digest }}
+      evaluation_matrix: ${{ steps.pilot.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,10 +56,12 @@ jobs:
           ADAPTER_SHA: ${{ github.workflow_sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_commit }}
           FULL_SHADOW: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
-          # Reviewed phase-three implementation retained on YAGA main.
-          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@e359bd13d26516231585f7dba4d8f509d1d66989
+          # Reviewed result-evaluation implementation retained on YAGA main.
+          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          if [ "$FULL_SHADOW" = true ]; then test "$RUN_ATTEMPT" = 1; fi
           test "$(git rev-parse HEAD)" = "$ADAPTER_SHA"
           test -z "$(git status --porcelain)"
           test "$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse HEAD)" = "$SOURCE_SHA"
@@ -75,6 +78,17 @@ jobs:
             --execution-commit "$SOURCE_SHA" --execution-tree "$source_tree" \
             --adapter-commit "$ADAPTER_SHA" --adapter-tree "$adapter_tree" \
             --output "$RUNNER_TEMP/test-planning-shadow" "${options[@]}"
+      - id: pilot
+        name: Prepare advisory result plans without changing execution
+        working-directory: adapter
+        env:
+          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+        run: |
+          uv run --isolated --no-project --python 3.12 --with "$YAGA_SOURCE" \
+            python -m scripts.test_planning_pilot \
+            --directory "$RUNNER_TEMP/test-planning-shadow" \
+            --policy .yaga/test-planning-shadow.toml \
+            --baseline-policy scripts/qualification_policy.json
       - name: Retain bounded comparison and immutable manifest
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -107,18 +121,83 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && needs.planning.outputs.full_shadow == 'true'
     uses: ./.github/workflows/monitoring-qualification.yml
 
+  evaluation:
+    name: Shadow Result Evaluation (${{ matrix.group }})
+    needs: planning
+    if: github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && needs.planning.outputs.full_shadow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 265
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.planning.outputs.evaluation_matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: adapter
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - name: Authenticate receipts and evaluate selected obligations
+        working-directory: adapter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+          ADAPTER_SHA: ${{ github.workflow_sha }}
+          BASE_SHA: ${{ inputs.base_commit }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          GROUP: ${{ matrix.group }}
+          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$ADAPTER_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          source_tree="$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse 'HEAD^{tree}')"
+          adapter_tree="$(git rev-parse 'HEAD^{tree}')"
+          uv run --isolated --no-project --python 3.12 --with "$YAGA_SOURCE" \
+            python -m scripts.test_planning_observer \
+            --repo "$GITHUB_WORKSPACE/candidate" --policy .yaga/test-planning-shadow.toml \
+            --baseline-policy scripts/qualification_policy.json --range "$BASE_SHA...$SOURCE_SHA" \
+            --execution-commit "$SOURCE_SHA" --execution-tree "$source_tree" \
+            --adapter-commit "$ADAPTER_SHA" --adapter-tree "$adapter_tree" \
+            --directory "$RUNNER_TEMP/observer-plans" --output "$RUNNER_TEMP/observer-output" \
+            --scratch "$RUNNER_TEMP/observer-receipts" --group "$GROUP" \
+            --run-id "$RUN_ID" --attempt "$RUN_ATTEMPT"
+      - name: Publish validated advisory feedback
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-planning-evaluation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}
+          path: ${{ runner.temp }}/observer-output/
+          retention-days: 30
+          if-no-files-found: error
+
   shadow-aggregate:
     name: Shadow Experiment Aggregate
     if: always()
-    needs: [planning, application, native, latency, cancellation, monitoring]
+    needs: [planning, application, native, latency, cancellation, monitoring, evaluation]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
+          fetch-depth: 0
           persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
@@ -136,10 +215,43 @@ jobs:
           source_tree="$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse 'HEAD^{tree}')"
           options=()
           if [ "$FULL_SHADOW" = true ]; then options+=(--full-shadow); fi
-          python -m scripts.test_planning_shadow verify \
+          python -m scripts.test_planning_publications verify \
             --execution-commit "$SOURCE_SHA" --execution-tree "$source_tree" "${options[@]}" \
             > "$RUNNER_TEMP/test-planning-shadow-aggregate.json"
           cat "$RUNNER_TEMP/test-planning-shadow-aggregate.json"
+      - name: Measure authenticated advisory publication times
+        if: always() && github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && needs.planning.result == 'success'
+        working-directory: adapter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+          ADAPTER_SHA: ${{ github.workflow_sha }}
+          BASE_SHA: ${{ inputs.base_commit }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$ADAPTER_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse HEAD)" = "$SOURCE_SHA"
+          source_tree="$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse 'HEAD^{tree}')"
+          adapter_tree="$(git rev-parse 'HEAD^{tree}')"
+          uv run --isolated --no-project --python 3.12 --with "$YAGA_SOURCE" \
+            python -m scripts.test_planning_publications collect \
+            --repo "$GITHUB_WORKSPACE/candidate" --policy .yaga/test-planning-shadow.toml \
+            --baseline-policy scripts/qualification_policy.json --range "$BASE_SHA...$SOURCE_SHA" \
+            --execution-commit "$SOURCE_SHA" --execution-tree "$source_tree" \
+            --adapter-commit "$ADAPTER_SHA" --adapter-tree "$adapter_tree" \
+            --directory "$RUNNER_TEMP/feedback-plans" --output "$RUNNER_TEMP/feedback-output" \
+            --run-id "$RUN_ID" --attempt "$RUN_ATTEMPT"
+      - name: Retain measured advisory feedback
+        if: always() && github.event_name == 'workflow_dispatch' && github.run_attempt == 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-planning-feedback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/feedback-output/
+          retention-days: 30
+          if-no-files-found: error
       - name: Retain aggregate observation
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

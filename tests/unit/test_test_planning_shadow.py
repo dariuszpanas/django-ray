@@ -91,7 +91,7 @@ def test_pr_route_never_calls_qualification_workflows():
     assert pilot["permissions"] == {"contents": "read", "actions": "read", "checks": "read"}
     jobs = pilot["jobs"]
     assert jobs["shadow-aggregate"]["if"] == "always()"
-    assert set(jobs["shadow-aggregate"]["needs"]) == {"planning", *shadow.JOBS}
+    assert set(jobs["shadow-aggregate"]["needs"]) == {"planning", "evaluation", *shadow.JOBS}
     for name in shadow.JOBS:
         job = jobs[name]
         assert job["needs"] == "planning"

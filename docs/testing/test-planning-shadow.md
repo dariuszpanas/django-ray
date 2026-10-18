@@ -74,11 +74,28 @@ The always-running `Shadow Experiment Aggregate` rejects missing, failed,
 cancelled, or skipped full-shadow jobs and mismatched commit/tree identities.
 On PRs it instead requires all five execution jobs to remain skipped.
 
-The aggregate records workflow completion, not authenticated per-cell receipts.
-Retain the original workflow artifacts for exact image/source identities,
-every native recipe, acceptance assertions and cleanup. A green aggregate or
-eight counted cells cannot replace those records. Cancellation preventing the
-aggregate from running never establishes completion.
+Manual runs also observe the current selector, proposed selection and full catalog
+independently as their selected jobs finish. Each `Shadow Result Evaluation`
+observer authenticates actual execution attempts and original artifact digests,
+validates custom acceptance and cleanup, and evaluates normalized results before
+publishing its advisory evidence. Identical selections share one publication.
+All qualification jobs keep running; these observers neither reduce the full job
+graph nor cancel required CI.
+
+Observers start after planning and poll only their selected jobs every 60 seconds,
+with a 260-minute polling deadline. At most three observer runners cover the four serial
+native cells and their existing deadlines. Manual attempt 1 is the only supported
+execution: a rerun fails closed; start a fresh dispatch when a new observation is
+needed. This prevents provider-carried successful job rows from becoming a new
+attempt's execution proof.
+
+The aggregate retains authenticated publication times and a separate feedback
+report after the full oracle completes. Original workflow artifacts still supply
+exact image/source identities, every native recipe, acceptance and cleanup. A
+green job graph or eight counted cells cannot replace them. Cancellation preventing
+the aggregate from running never establishes completion. See the
+[publication measurement contract](test-planning-results.md#shared-full-run-publication-feedback)
+for the distinction between advisory lead and unmeasured selective execution savings.
 
 ## Local comparison and evidence
 
@@ -105,21 +122,31 @@ Full mode adds `full-plan.json` and `full-handoff.json`. Duplicate JSON keys and
 oversized input/output fail. Successful workflow outputs contain only fixed keys
 and validated identities; omissions retain evidence but publish no success output.
 
+Pilot planning also retains `pilot.json`, `pilot-current-policy.toml`, and
+`pilot-{current,proposed,full}-plan.json`. The current plan uses a generated policy
+that selects exactly the existing required selector's obligations; its hash remains
+distinct from the proposed/full policy. Each deduplicated evaluation group publishes
+`test-planning-evaluation-RUN-ATTEMPT-GROUP`. Final authenticated publication
+metadata and the feedback report are retained as `test-planning-feedback-RUN-ATTEMPT`.
+These are advisory artifacts and cannot satisfy the required qualification gate.
+PRs generate these plans but do not acquire qualification receipts or start observers.
+
 The versioned comparison records adapter/source identities, both policy hashes,
 binding identity, plan digest, selected cells, baseline omissions/additions and
 `planning_seconds`. This timing includes Git collection, planning, handoff validation
 and baseline comparison; it excludes registry creation, environment/dependency
 setup and artifact upload. Complete reasons remain in the proposed plan.
-Runtime metrics are explicitly unobserved until real execution supplies evidence.
+Runtime metrics remain unobserved in the comparison document; the separate
+feedback report records actual manual-run publication observations.
 
 ## Offline normalization of acquired receipts
 
 `scripts.test_planning_results.normalize_results` converts authenticated,
 source-matched qualification observations into YAGA `test-results-version: 1`.
 It performs no network calls, Git inspection, test execution, workflow dispatch,
-or writes. Existing required CI and the advisory workflow are unchanged; no
-workflow installs or calls this normalizer yet. The existing YAGA workflow pin
-is unchanged.
+or writes. The manual advisory observer acquires evidence and calls this API,
+then uses the pinned phase-4B YAGA evaluator. Required CI and the PR comparison
+route retain their authority and execution policy.
 
 The API has two independent inputs:
 
@@ -235,9 +262,9 @@ Do not sum parallel durations as wall time or infer speedup from test counts.
 The owner must choose a useful measured feedback-time improvement before
 activation; no threshold is presumed. Promotion also requires no unexplained
 omissions or known missed regressions, tested invalid/missing/cancelled-result
-blocking, preserved matrices/cleanup and regression replay. The offline receipt
-normalizer is implemented separately; workflow adoption and controlled activation
-remain pending. Full-profile rollback
+blocking, preserved matrices/cleanup and regression replay. The manual shared
+full-run observer measures publication lead; independent selected-versus-current
+execution experiments and controlled activation remain pending. Full-profile rollback
 and consolidated full qualification remain mandatory.
 
 Focused resource-free adapter tests cover fixed mappings, the PR/manual split,
