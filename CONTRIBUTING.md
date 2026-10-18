@@ -327,6 +327,10 @@ Commit spelling through YAGA is qualified separately under issue #521.
 
 ## Conditional qualification merge gate
 
+Test planning shadow checks are advisory and never replace required CI.
+The [pilot guide](docs/testing/test-planning-shadow.md) describes comparison-only
+PR jobs and separately dispatched full observations before any selective activation.
+
 `Qualification Gate` is the single required aggregate for path-selected application,
 native upgrade (all four recipes), latency, cancellation and monitoring qualification. Keep `CI Gate` and
 `Commit Messages` required independently; qualification waits for Linux CI and

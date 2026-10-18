@@ -1,5 +1,9 @@
 # Contributing
 
+The [test planning shadow pilot](testing/test-planning-shadow.md) compares
+qualification selection while preserving all existing required CI checks.
+Test planning shadow checks are advisory and never replace required CI.
+
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
 changes. Its passing current-source result is required when the enqueue-only gate row applies,

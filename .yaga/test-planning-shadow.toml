@@ -1,0 +1,216 @@
+# Advisory shadow policy; existing required CI selection remains authoritative.
+# Source snapshot: django-ray 0894832fabe8ab216c186c470548a15339b71e8e.
+# The five rules preserve every trigger from scripts/qualification_policy.json.
+# Full-on and unknown-path fallbacks deliberately make selection a conservative
+# superset of that snapshot, not a promise of parity or a validated migration.
+#
+# This catalog covers ONLY the five existing long qualification workflows.
+# Ordinary repository CI, backend tests, package checks, and other qualification
+# workflows remain independently required. "Full" means this catalog's complete
+# five-suite inventory; it does not establish complete repository qualification.
+# Bindings identify existing fixed workflows; commands and secrets live outside
+# this policy. First adoption must compare plans in shadow mode.
+
+test-policy-version = 1
+unknown-paths = "full"
+full-on = [
+  ".yaga/**",
+  ".github/workflows/**",
+  ".github/test-suite-taxonomy.json",
+  "scripts/qualification_gate.py",
+  "scripts/qualification_policy.json",
+  "scripts/wait_for_ci_checkpoint.py",
+  "pyproject.toml",
+  "uv.lock",
+  ".python-version",
+  "Makefile",
+  "mk/**",
+  "Dockerfile",
+  ".dockerignore",
+  "docker-entrypoint.sh",
+  "docker-compose.yml",
+]
+# These exclusions apply only to this long-qualification catalog. They never
+# suppress the repository's mandatory documentation, policy, or ordinary CI.
+no-impact = ["docs/**", "README.md", "LICENSE"]
+
+[[suites]]
+id = "qualification.application"
+binding = "application-qualification"
+tags = ["backend", "application", "kubernetes", "chainsaw", "long"]
+requires = ["linux", "docker", "kind", "helm", "chainsaw"]
+# Preserve the existing acceptance intent, standard resource profile, exact image
+# and source identity, complete application receipts, and owned cleanup contract.
+# Diagnostic runs cannot satisfy this suite's acceptance result.
+
+[[suites]]
+id = "qualification.native"
+binding = "upgrade-native-qualification"
+tags = ["backend", "upgrade", "docker", "long"]
+variants = ["native", "jobs", "jobs-crash", "core-loss"]
+requires = ["linux", "docker"]
+# The fixed workflow binding runs the existing full matrix ONCE. Its adapter
+# produces four cell receipts; these variants must not dispatch four full matrices.
+# Preserve max-parallel=1, baseline archive identity checks, per-cell evidence,
+# and verified removal of the owned Compose resources.
+
+[[suites]]
+id = "qualification.latency"
+binding = "latency-qualification"
+tags = ["backend", "performance", "docker", "long"]
+requires = ["linux", "docker"]
+
+[[suites]]
+id = "qualification.cancellation"
+binding = "cancellation-qualification"
+tags = ["backend", "runtime", "docker", "long"]
+requires = ["linux", "docker"]
+# Preserve actual cancelled-driver exit observations, source/image identity,
+# bounded receipts, and the existing owned-container cleanup verification.
+
+[[suites]]
+id = "qualification.monitoring"
+binding = "monitoring-qualification"
+tags = ["infrastructure", "monitoring", "kubernetes", "long"]
+requires = ["linux", "docker", "kind", "helm"]
+# Preserve monitoring assertion receipts and infrastructure-cleanup.json.
+# Missing infrastructure or failed cleanup is incomplete/failed qualification.
+
+[profiles.development]
+mode = "selective"
+always = []
+
+[profiles.integration]
+mode = "full"
+
+[profiles.release]
+mode = "full"
+
+[[rules]]
+id = "application"
+when-any = [
+  ".github/workflows/qualification-gate.yml",
+  "scripts/qualification_gate.py",
+  "scripts/qualification_policy.json",
+  "tests/unit/test_qualification_gate.py",
+  "scripts/wait_for_ci_checkpoint.py",
+  ".github/workflows/application-qualification.yml",
+  "qualification/application/**",
+  "testproject/**",
+  "src/django_ray/**",
+  "Dockerfile",
+  "docker-entrypoint.sh",
+  "pyproject.toml",
+  "uv.lock",
+]
+select = ["qualification.application"]
+
+[[rules]]
+id = "native"
+when-any = [
+  ".github/workflows/qualification-gate.yml",
+  "scripts/qualification_gate.py",
+  "scripts/qualification_policy.json",
+  "tests/unit/test_qualification_gate.py",
+  "scripts/wait_for_ci_checkpoint.py",
+  ".github/workflows/upgrade-native-qualification.yml",
+  "qualification/upgrade/**",
+  "qualification/transactions/Dockerfile",
+  "qualification/transactions/probe.py",
+  "qualification/docker/scenario.py",
+  "src/django_ray/migrations/**",
+  "src/django_ray/backends.py",
+  "src/django_ray/input_storage.py",
+  "src/django_ray/result_storage.py",
+  "pyproject.toml",
+  "uv.lock",
+]
+select = ["qualification.native"]
+
+[[rules]]
+id = "latency"
+when-any = [
+  ".github/workflows/qualification-gate.yml",
+  "scripts/qualification_gate.py",
+  "scripts/qualification_policy.json",
+  "tests/unit/test_qualification_gate.py",
+  "scripts/wait_for_ci_checkpoint.py",
+  ".github/workflows/latency-qualification.yml",
+  "qualification/latency/**",
+  "qualification/transactions/Dockerfile",
+  "tests/unit/test_latency_cost.py",
+  "tests/unit/test_latency_phases.py",
+  "tests/unit/test_latency_qualification.py",
+]
+select = ["qualification.latency"]
+
+[[rules]]
+id = "cancellation"
+when-any = [
+  ".github/workflows/qualification-gate.yml",
+  ".github/workflows/cancellation-qualification.yml",
+  "scripts/qualification_gate.py",
+  "scripts/qualification_policy.json",
+  "scripts/wait_for_ci_checkpoint.py",
+  "tests/unit/test_qualification_gate.py",
+  "tests/unit/test_cancellation_qualification.py",
+  "tests/integration/test_live_failure_injection.py",
+  "qualification/cancellation/**",
+  "qualification/transactions/Dockerfile",
+  "qualification/transactions/probe.py",
+  "qualification/upgrade/scenario.py",
+  "qualification/docker/scenario.py",
+  "src/django_ray/runner/**",
+  "src/django_ray/management/commands/django_ray_worker.py",
+  "src/django_ray/conf/**",
+  "src/django_ray/backends.py",
+  "src/django_ray/lifecycle.py",
+  "src/django_ray/models.py",
+  "src/django_ray/execution_codec.py",
+  "src/django_ray/execution_protocol.py",
+  "src/django_ray/ray_job_protocol.py",
+  "src/django_ray/ray_job_request_storage.py",
+  "src/django_ray/input_storage.py",
+  "src/django_ray/result_storage.py",
+  "src/django_ray/runtime/entrypoint.py",
+  "src/django_ray/runtime/context.py",
+  "src/django_ray/runtime/runtime_env.py",
+  "src/django_ray/runtime/runtime_env_encryption.py",
+  "src/django_ray/runtime/serialization.py",
+  "src/django_ray/runtime/import_utils.py",
+  "pyproject.toml",
+  "uv.lock",
+]
+select = ["qualification.cancellation"]
+
+[[rules]]
+id = "monitoring"
+when-any = [
+  ".github/workflows/qualification-gate.yml",
+  "scripts/qualification_gate.py",
+  "scripts/qualification_policy.json",
+  "tests/unit/test_qualification_gate.py",
+  "scripts/wait_for_ci_checkpoint.py",
+  ".github/workflows/monitoring-qualification.yml",
+  "qualification/monitoring/**",
+  "qualification/platform_auth.py",
+  "scripts/local_kuberay_auth.py",
+  "tests/unit/test_monitoring_auth_orchestration.py",
+  "tests/unit/test_platform_auth.py",
+  "tests/unit/test_monitoring_qualification.py",
+  "src/django_ray/metrics.py",
+  "testproject/api.py",
+  "testproject/api_boundary.py",
+  "testproject/route_policy.py",
+  "testproject/settings.py",
+  "testproject/urls.py",
+  "k8s/base/monitoring.yaml",
+  "k8s/base/django-web.yaml",
+  "k8s/base/configmap.yaml",
+  "k8s/overlays/kuberay-kind/**",
+  "Dockerfile",
+  "docker-entrypoint.sh",
+  "pyproject.toml",
+  "uv.lock",
+]
+select = ["qualification.monitoring"]

@@ -1,0 +1,150 @@
+name: Test Planning Shadow
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      base_commit:
+        description: Exact base commit for comparison against this run's source
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+concurrency:
+  group: test-planning-shadow-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  planning:
+    name: Shadow Plan Comparison
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      full_shadow: ${{ steps.plan.outputs.full_shadow }}
+      execution_commit: ${{ steps.plan.outputs.execution_commit }}
+      execution_tree: ${{ steps.plan.outputs.execution_tree }}
+      policy_sha256: ${{ steps.plan.outputs.policy_sha256 }}
+      bindings_sha256: ${{ steps.plan.outputs.bindings_sha256 }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: adapter
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - id: plan
+        name: Compare complete changes without changing required job selection
+        working-directory: adapter
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          ADAPTER_SHA: ${{ github.workflow_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_commit }}
+          FULL_SHADOW: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+          # Immutable phase-three implementation; publish this commit before enabling.
+          YAGA_SOURCE: yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@a5f38fba8c809606ef1cbfbc9303e8bc1b0c2715
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$ADAPTER_SHA"
+          test -z "$(git status --porcelain)"
+          test "$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git -C "$GITHUB_WORKSPACE/candidate" status --porcelain)"
+          source_tree="$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse 'HEAD^{tree}')"
+          adapter_tree="$(git rev-parse 'HEAD^{tree}')"
+          options=()
+          if [ "$FULL_SHADOW" = true ]; then options+=(--full-shadow); fi
+          uv run --isolated --no-project --python 3.12 --with "$YAGA_SOURCE" \
+            python -m scripts.test_planning_shadow plan \
+            --repo "$GITHUB_WORKSPACE/candidate" --policy .yaga/test-planning-shadow.toml \
+            --baseline-policy scripts/qualification_policy.json \
+            --range "$BASE_SHA...$SOURCE_SHA" \
+            --execution-commit "$SOURCE_SHA" --execution-tree "$source_tree" \
+            --adapter-commit "$ADAPTER_SHA" --adapter-tree "$adapter_tree" \
+            --output "$RUNNER_TEMP/test-planning-shadow" "${options[@]}"
+      - name: Retain bounded comparison and immutable manifest
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-planning-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-planning-shadow/
+          retention-days: 30
+          if-no-files-found: error
+
+  # These calls deliberately never run on pull_request: their existing per-PR
+  # concurrency groups would cancel the authoritative Qualification Gate jobs.
+  application:
+    needs: planning
+    if: github.event_name == 'workflow_dispatch' && needs.planning.outputs.full_shadow == 'true'
+    uses: ./.github/workflows/application-qualification.yml
+  native:
+    needs: planning
+    if: github.event_name == 'workflow_dispatch' && needs.planning.outputs.full_shadow == 'true'
+    uses: ./.github/workflows/upgrade-native-qualification.yml
+  latency:
+    needs: planning
+    if: github.event_name == 'workflow_dispatch' && needs.planning.outputs.full_shadow == 'true'
+    uses: ./.github/workflows/latency-qualification.yml
+  cancellation:
+    needs: planning
+    if: github.event_name == 'workflow_dispatch' && needs.planning.outputs.full_shadow == 'true'
+    uses: ./.github/workflows/cancellation-qualification.yml
+  monitoring:
+    needs: planning
+    if: github.event_name == 'workflow_dispatch' && needs.planning.outputs.full_shadow == 'true'
+    uses: ./.github/workflows/monitoring-qualification.yml
+
+  shadow-aggregate:
+    name: Shadow Experiment Aggregate
+    if: always()
+    needs: [planning, application, native, latency, cancellation, monitoring]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: adapter
+          persist-credentials: false
+      - name: Require complete planning and the fixed full-shadow job graph
+        working-directory: adapter
+        env:
+          SHADOW_NEEDS: ${{ toJSON(needs) }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FULL_SHADOW: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          test "$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse HEAD)" = "$SOURCE_SHA"
+          source_tree="$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse 'HEAD^{tree}')"
+          options=()
+          if [ "$FULL_SHADOW" = true ]; then options+=(--full-shadow); fi
+          python -m scripts.test_planning_shadow verify \
+            --execution-commit "$SOURCE_SHA" --execution-tree "$source_tree" "${options[@]}" \
+            > "$RUNNER_TEMP/test-planning-shadow-aggregate.json"
+          cat "$RUNNER_TEMP/test-planning-shadow-aggregate.json"
+      - name: Retain aggregate observation
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-planning-shadow-aggregate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-planning-shadow-aggregate.json
+          retention-days: 30
+          if-no-files-found: error
