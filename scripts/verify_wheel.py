@@ -105,6 +105,9 @@ EXPECTED_FILES = {
     "django_ray/migrations/0028_worker_lease_policy.py",
     "django_ray/lease_policy.py",
     "django_ray/management/commands/django_ray_lease_policy.py",
+    "django_ray/management/commands/django_ray_runtime_env.py",
+    "django_ray/management/runtime_env_cursor.py",
+    "django_ray/management/runtime_env_maintenance.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_purge_inputs.py",
     "django_ray/management/purge_cursor.py",
@@ -247,6 +250,19 @@ def _verify_doctor() -> None:
     )
     if spec is None or spec.loader is None:
         raise RuntimeError("Installed doctor verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.verify()
+
+
+def _verify_runtime_env_maintenance() -> None:
+    """Use the installed package in a separate bounded Linux fixture."""
+    spec = importlib.util.spec_from_file_location(
+        "verify_runtime_env_maintenance_wheel",
+        Path(__file__).with_name("verify_runtime_env_maintenance_wheel.py"),
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Installed RuntimeEnv maintenance verifier is unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.verify()
@@ -600,6 +616,7 @@ def verify_installed_wheel(expected_version: str) -> None:
         "django_ray_worker",
         "django_ray_worker_ready",
         "django_ray_lease_policy",
+        "django_ray_runtime_env",
     }
     missing_commands = expected_commands - get_commands().keys()
     if missing_commands:
@@ -657,6 +674,7 @@ def verify_installed_wheel(expected_version: str) -> None:
         raise RuntimeError("django_ray_protocol_status did not emit its versioned JSON schema")
 
     _verify_doctor()
+    _verify_runtime_env_maintenance()
     _verify_registered_payload_purge()
     _verify_rq2_reference_discriminator()
 

@@ -112,7 +112,7 @@ before enabling protected work.
 | `RAY_STATE_API_TIMEOUT_SECONDS` | `int` | `5` | Timeout for optional Ray state and log queries |
 | `RUNTIME_ENV_PROFILES` | `dict` | `{}` | Named, validated Ray RuntimeEnv definitions |
 | `DEFAULT_RUNTIME_ENV_PROFILE` | `str \| None` | `None` | Profile used when a backend does not select one |
-| `RUNTIME_ENV_STORAGE_MODE` | `str` | `"plaintext"` | Format for new snapshots: `"plaintext"` or `"encrypted"`; readers always support both |
+| `RUNTIME_ENV_STORAGE_MODE` | `str` | `"plaintext"` | `"plaintext"` and `"encrypted"` select new writes and dual-read both formats; `"required"` writes encrypted and refuses plaintext execution/retry |
 | `RUNTIME_ENV_ENCRYPTION_KEYS` | `dict[str, str]` | `{}` | Dedicated key IDs mapped to canonical unpadded base64url AES-256 keys |
 | `RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` | `str \| None` | `None` | Dedicated key ID or reserved `"django-secret"` ID used for new encrypted snapshots |
 | `RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK` | `bool` | `False` | Explicitly allow HKDF-derived keys from `SECRET_KEY` and `SECRET_KEY_FALLBACKS` |

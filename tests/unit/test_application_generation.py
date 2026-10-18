@@ -338,8 +338,10 @@ def test_owned_group_stop_kills_ready_descendant_that_ignores_term(tmp_path):
 
 
 def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
+    from qualification.application.lease_policy import FACTS as LEASE_FACTS
     from qualification.application.result_presentation import EVIDENCE as RESULT_EVIDENCE
     from qualification.application.run_chainsaw import parse_receipts
+    from qualification.application.runtime_env_maintenance import FACTS as MAINTENANCE_FACTS
     from qualification.application.runtime_env_refusal import CASES, FACTS
 
     monkeypatch.setattr(runner, "run_command", Mock(return_value=0))
@@ -351,7 +353,11 @@ def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
             "layer": "application_core",
             "status": "passed",
             "complete_application_gate": False,
+            "lease_policy": dict.fromkeys(LEASE_FACTS, True),
             "runtime_env_refusals": {case: dict.fromkeys(FACTS, True) for case in CASES},
+            "runtime_env_maintenance": {
+                case: dict.fromkeys(facts, True) for case, facts in MAINTENANCE_FACTS.items()
+            },
             "ordinary_results": dict(RESULT_EVIDENCE),
             "protected_runtime": {
                 "api_clear": True,

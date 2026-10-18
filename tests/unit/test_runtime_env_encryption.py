@@ -634,6 +634,7 @@ def test_unknown_envelope_key_fails_without_disclosing_the_id() -> None:
         lambda envelope: envelope.update({"nonce": "AA"}),
         lambda envelope: envelope.update({"nonce": envelope["nonce"] + "="}),
         lambda envelope: envelope.update({"ciphertext": "AA"}),
+        lambda envelope: envelope.update({"ciphertext": "A"}),
         lambda envelope: envelope.update({"ciphertext": "***"}),
     ],
 )

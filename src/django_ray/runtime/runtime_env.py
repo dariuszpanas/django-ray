@@ -387,6 +387,18 @@ def runtime_env_for_execution(
         )
 
     encrypted = is_runtime_env_encryption_envelope_candidate(spec)
+    if config is None:
+        from django_ray.conf.settings import get_settings
+
+        config = get_settings()
+    try:
+        encryption = validate_runtime_env_encryption_settings(config)
+    except RuntimeEnvEncryptionError as error:
+        raise RuntimeEnvSnapshotError(str(error)) from None
+    if encryption.mode == "required" and not encrypted:
+        raise RuntimeEnvSnapshotError(
+            "django-ray: Persisted RuntimeEnv plaintext is forbidden by required encryption"
+        )
     plaintext_serialized = serialized
     if encrypted:
         task_id = getattr(task_execution, "task_id", None)
@@ -395,13 +407,8 @@ def runtime_env_for_execution(
                 f"django-ray: Persisted RuntimeEnv snapshot{task_label} "
                 "has malformed encryption identity"
             )
-        if config is None:
-            from django_ray.conf.settings import get_settings
-
-            config = get_settings()
         encryption_error: str | None = None
         try:
-            encryption = validate_runtime_env_encryption_settings(config)
             plaintext_serialized = unprotect_runtime_env_snapshot(
                 serialized,
                 task_id=task_id,

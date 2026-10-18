@@ -57,6 +57,8 @@ STAGES = {
     "probe_execution_ownership",
     "dashboard_proxy",
     "runtime_env_refusal",
+    "runtime_env_maintenance",
+    "lease_policy",
     "protected_runtime_surfaces",
     "ordinary_result_presentation",
     "collector-pressure",
@@ -88,6 +90,8 @@ RECEIPT_FIELDS = {
         "executions",
         "dashboard",
         "runtime_env_refusals",
+        "runtime_env_maintenance",
+        "lease_policy",
         "protected_runtime",
         "ordinary_results",
     },
@@ -283,6 +287,27 @@ def lines(raw: bytes) -> list[dict]:
                 }
             if "http_failure" in value:
                 item["http_failure"] = http(value["http_failure"])
+            if "runtime_env_maintenance" in value:
+                from qualification.application.runtime_env_maintenance import FACTS
+
+                original = value["runtime_env_maintenance"]
+                if isinstance(original, dict):
+                    item["runtime_env_maintenance"] = {
+                        case: {
+                            name: isinstance(original.get(case), dict)
+                            and original[case].get(name) is True
+                            for name in names
+                        }
+                        for case, names in FACTS.items()
+                    }
+            if "lease_policy" in value:
+                from qualification.application.lease_policy import FACTS as LEASE_FACTS
+
+                original = value["lease_policy"]
+                if isinstance(original, dict):
+                    item["lease_policy"] = {
+                        name: original.get(name) is True for name in LEASE_FACTS
+                    }
             if value["layer"] == "application_rq2":
                 from qualification.application.run_rq2 import Diagnostics
 

@@ -91,7 +91,7 @@ DJANGO_RAY["WORKFLOW_PLAN_TRUST_IDENTITY"] = {
 # The recovery bundle puts django_ray at its root. There is no src/ PYTHONPATH
 # and no pip installer or implicit package-index egress in this profile.
 DJANGO_RAY.update(
-    RUNTIME_ENV_STORAGE_MODE="encrypted",
+    RUNTIME_ENV_STORAGE_MODE="required",
     RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY="qualification",
     RUNTIME_ENV_ENCRYPTION_KEYS={
         "qualification": os.environ.get("DJANGO_RAY_QUALIFICATION_ENCRYPTION_KEY", "")

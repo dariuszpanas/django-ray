@@ -154,6 +154,7 @@ test-postgres:
 		tests/integration/test_postgresql_coordination.py \
 		tests/integration/test_doctor_postgresql.py \
 		tests/integration/test_lease_policy_postgresql.py \
+		tests/integration/test_runtime_env_maintenance_postgresql.py \
 		tests/integration/test_sample_admission.py \
 		tests/integration/test_transactional_enqueue.py \
 		tests/integration/test_postgresql_workflow_progress_storage.py \

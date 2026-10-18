@@ -10517,7 +10517,9 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "K8S_PROMETHEUS_URL=http://prometheus.localhost:30080" not in guide
     assert "Each emitted line is at most 72 characters" in guide
     assert "key_part_001" in guide
-    assert "RuntimeEnv snapshot storage, encryption settings or dependencies" in guide
+    assert (
+        "RuntimeEnv snapshot storage or maintenance, encryption settings or dependencies" in guide
+    )
     assert "Ray Job request encoding, request-reference storage" in guide
     assert "11 running workload pods with 3.3 CPU and 5,056 MiB requested" in normalized
     assert "four task-manager Deployments" in normalized
@@ -10530,6 +10532,12 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
         line for line in guide.splitlines() if line.startswith("| RuntimeEnv snapshot storage")
     )
     assert "| Required | `required` |" in encryption_row
+    assert (
+        "bounded plaintext rewrite and old-key rewrap with identity preservation" in encryption_row
+    )
+    assert "current-key worker execution, plaintext execution/retry refusal" in encryption_row
+    assert "owned cleanup before and after cold replacement" in encryption_row
+    assert "current-table checks do not qualify backup key retirement" in encryption_row
 
 
 def test_make_gate_requires_explicit_context_namespace_and_ray_decision() -> None:

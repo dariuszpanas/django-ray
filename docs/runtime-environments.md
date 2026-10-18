@@ -189,7 +189,7 @@ if Django settings change after enqueue.
 
 New writes pass through one storage boundary. The compatibility default stores canonical
 plaintext JSON. Deployments may instead opt into an authenticated AES-256-GCM envelope;
-readers always accept both supported plaintext and encrypted rows, independently of the
+the `plaintext` and `encrypted` modes accept both supported plaintext and encrypted rows, independently of the
 current write mode. Before Sync, Ray Core, or Ray Job execution, django-ray decrypts when
 needed, canonicalizes the mapping, and verifies its matching plaintext SHA-256 hash.
 Manual and automatic retries repeat that verification while holding the task lifecycle
@@ -302,19 +302,79 @@ the configuration and key ordering below does not authorize mixed-version execut
 Switching the same dual-read release back to `plaintext` changes only future writes.
 Existing encrypted rows still require their keys. Downgrading to a binary that does
 not understand encrypted envelopes is unsafe while any encrypted row remains: it
-cannot be made safe merely by retaining the key. This delivery has no historical
-rewrite or rewrap command.
+cannot be made safe merely by retaining the key. The bounded
+[`django_ray_runtime_env` command](reference/cli.md#django_ray_runtime_env) verifies
+identified retained rows, encrypts plaintext and rewraps old-key envelopes without
+changing their captured plaintext hash, profile, task identity or attempt history.
 
 For a dedicated-key rotation, distribute the new key to every reader first, then make
 it active. Generate a new key ID for every new key: the binding from a dedicated key
 ID to its bytes is immutable, and replacing material under an existing ID makes
 historical envelopes that name it unrecoverable. Keep every retired key until an
 independent inventory proves no queued, running, retryable, or retained row still
-names it. The stable `django-secret` ID is the documented exception because readers
+depends on it **and every restorable backup has a documented key/archive policy**.
+An empty current table is not permission to destroy backup keys. The stable
+`django-secret` ID is the documented exception because readers
 try the current derived key and retained fallback candidates. Add the old `SECRET_KEY`
 to `SECRET_KEY_FALLBACKS` before rotating it and retain it for the full RuntimeEnv row
 lifetime. Removing a required dedicated key or Django fallback makes the affected
 snapshots unrecoverable.
+
+### Maintain retained snapshots and require encryption
+
+Stop producers and schedules, drain or explicitly reconcile old work, and stop old
+managers and purgers before the coordinated rollout. Verify independent database,
+artifact and key backups. Install the compatible release everywhere and distribute
+all retained decryption keys before selecting a new active key. Keep old dedicated
+key IDs bound to their original bytes.
+
+Inspect and rewrite one finite page at a time:
+
+```bash
+python manage.py django_ray_runtime_env --mode dry-run --format json
+python manage.py django_ray_runtime_env --mode rewrite --confirm --format json
+python manage.py django_ray_runtime_env --mode rewrite --confirm --format json --cursor=TOKEN
+python manage.py django_ray_runtime_env --mode check --format json
+```
+
+Each mode starts its own cursor chain. Follow `next_cursor` with the same mode,
+database and key policy, retaining every report. Use `--cursor=TOKEN`; a valid
+token can begin with `-`. After the chain finishes, start a fresh check to revisit
+concurrent changes and rows inserted after its high-water mark. `dry-run` and
+`check` never write. Both authenticate supported encrypted rows, validate captured
+plaintext and report pending conversion or rewrap. They do not load RuntimeEnv
+artifacts or import task callables. `rewrite` requires an active encryption key,
+an `encrypted` or `required` write policy, and explicit `--confirm`.
+
+Only the storage envelope changes. The command compares the original envelope,
+captured identity, attempt/generation, state, owner and cancellation fields before
+each update. Changed or deleted rows remain untouched. A concurrent retry or
+completion can make a row incomplete; no attempt is consumed by maintenance.
+Missing captured identity, malformed data, unavailable keys, authentication/hash
+failures and oversized rows remain unchanged with fixed diagnostics. Historical
+`{}` rows without captured identity are never reconstructed from current defaults.
+
+For `django-secret` rotation, verification tests the current derived key separately
+from retained fallback keys, because all such envelopes share one key ID. Old-key
+rows are rewrapped even when that ID is unchanged. A failed or interrupted commit
+is uncertain: preserve its report and repeat from the returned boundary. Re-reading
+an already committed current-key envelope is idempotent. Retain the old ring until
+current rows and backup obligations have both been resolved.
+
+After successful complete current-table checks, explicitly set
+`RUNTIME_ENV_STORAGE_MODE="required"` across the stopped cohort and validate a
+canary before resuming producers. New snapshots are encrypted; identified plaintext
+is rejected by the common execution and manual/automatic retry validation paths
+before submission or retry history changes. Existing encrypted rows continue to
+require their original keys until rewrapped. The default remains `plaintext`.
+Returning to `encrypted` permits plaintext reads again; returning to `plaintext`
+also changes future writes. Neither transition decrypts retained envelopes.
+
+The maintenance report covers the selected live table only. It always reports
+backup obligations as unverified and never authorizes key retirement. Keep old keys
+in an appropriately protected archive for all restorable backups, or independently
+restore/rewrite/verify and replace those backups under an explicit retention policy.
+Loss of a required key is not recoverable from the public plaintext hash.
 
 ### Understand the threat boundary
 
@@ -327,11 +387,13 @@ not:
   compromise, or a database writer that deletes/corrupts rows to cause denial of
   service;
 - provide write-integrity against a database writer: because readers deliberately
-  accept both formats during this compatibility release, that actor can replace the
+  accept both formats in `plaintext` and `encrypted` modes, that actor can replace the
   complete envelope with canonical plaintext and recompute the public hash. Encrypted
   writes therefore protect confidentiality at rest, but do not authenticate row
   provenance, protect execution integrity from that actor, or enforce that every stored
-  row remains encrypted;
+  row remains encrypted. Explicit `required` mode refuses that plaintext substitution,
+  but does not give database writers application-execution authority or protect against
+  deleted rows, unavailable keys or compromise of the process/key store;
 - hide the profile or unkeyed `runtime_env_hash`, which reveals equality and permits
   guessing low-entropy environment definitions;
 - encrypt task arguments, results, progress, workflow input, external input storage,

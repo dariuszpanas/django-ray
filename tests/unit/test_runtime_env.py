@@ -299,6 +299,39 @@ def test_plaintext_snapshot_remains_readable_while_encrypted_writes_are_enabled(
     assert loaded == resolved
 
 
+def test_required_mode_encrypts_new_snapshots_and_refuses_retained_plaintext() -> None:
+    config = _encryption_config(mode="required")
+    resolved = normalize_runtime_env({"env_vars": {"TOKEN": "required-private-value"}})
+    encrypted = runtime_env_for_storage(resolved, task_id="required-task", config=config)
+    execution = SimpleNamespace(
+        pk=17,
+        task_id="required-task",
+        runtime_env_profile=resolved.profile,
+        runtime_env_json=encrypted.serialized,
+        runtime_env_hash=resolved.digest,
+    )
+    assert "required-private-value" not in encrypted.serialized
+    assert runtime_env_for_execution(execution, config=config) == resolved
+    execution.runtime_env_json = resolved.serialized
+    with pytest.raises(RuntimeEnvSnapshotError, match="plaintext is forbidden") as error:
+        runtime_env_for_execution(execution, config=config)
+    assert "required-private-value" not in str(error.value)
+
+
+def test_required_mode_requires_valid_active_key_even_for_plaintext_reads() -> None:
+    config = {**_encryption_config(mode="required"), "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": None}
+    resolved = normalize_runtime_env({})
+    execution = SimpleNamespace(
+        pk=18,
+        task_id="required-task",
+        runtime_env_profile=None,
+        runtime_env_json=resolved.serialized,
+        runtime_env_hash=resolved.digest,
+    )
+    with pytest.raises(RuntimeEnvSnapshotError, match="ACTIVE_KEY is required"):
+        runtime_env_for_execution(execution, config=config)
+
+
 @pytest.mark.parametrize(
     "custom_plugin_field",
     ["format", "version", "algorithm", "key_id", "nonce", "ciphertext"],
