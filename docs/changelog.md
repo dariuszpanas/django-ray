@@ -7,10 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-10-17
-
-This is the candidate preparation date. The release remains unpublished pending
-frozen-source qualification and a separate publication decision.
+## [0.7.0] - 2026-10-18
 
 ### Added
 
@@ -119,6 +116,8 @@ frozen-source qualification and a separate publication decision.
 
 ### Changed
 
+- Update the package README with the Beta upgrade, shared lease policy, RuntimeEnv
+  maintenance and doctor boundaries; clarify configured worker-mode selection.
 - Pin isolated repository checks, the commit Action and advisory planning/evaluation
   to released YAGA 0.3.0. Package runtime dependencies and required gates are unchanged.
 - Align the disabled Compiled Graph pilot's django-ray source pin with the

@@ -45,7 +45,7 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
 - **Coroutine tasks**: Await Django async task functions consistently in every mode
 - **Automatic retries**: Failed tasks are retried with exponential backoff
 - **Admin visibility**: Monitor and manage tasks through Django admin
-- **Graceful shutdown**: Workers handle signals properly for clean shutdown
+- **Worker lifecycle controls**: Signal handling and database-backed lease coordination
 - **Django-durable workflows on Ray Core**: Chain, group, and dynamically fan out
   low-overhead internal steps behind one durable Django task; this is unrelated to the
   former, removed `ray.workflow` package
@@ -70,6 +70,30 @@ task stats, project links, and smoke-task trigger:
 Python 3.15 has a preparatory compatibility check without Ray Core. Full runtime
 support remains blocked by upstream Ray wheels; use Python 3.12–3.14 for installation
 and execution. See the [Python 3.15 policy](https://django-ray.readthedocs.io/en/latest/compatibility/#python-315-preparation).
+
+## Upgrading to 0.7.0
+
+django-ray 0.7.0 remains **Beta**. Follow the
+[coordinated 0.6 to 0.7 upgrade guide](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.6/)
+before upgrading an existing deployment. Stop producers and cleanup, drain or reconcile
+old work, and stop every old manager before migration. Back up the database, referenced
+artifacts, and retained encryption keys, and verify an independent restore. Mixed-version
+rolling execution is unsupported.
+
+Migration 0028 seeds one shared worker lease authority at **60 seconds**. Deployments with
+a custom duration must reconcile the authority and every process's `WORKER_LEASE_SECONDS`
+while stopped, before restarting; use the revision-checked
+[`django_ray_lease_policy` command](https://django-ray.readthedocs.io/en/latest/reference/cli/#django_ray_lease_policy).
+Once 0.7.0 writes new `rq2ref:v1:` request references, rollback to 0.6.0 requires a matching
+pre-upgrade database and artifact restore; reconcile later writes and external effects.
+
+The release also adds bounded RuntimeEnv rewrite/rewrap and opt-in required encryption.
+The default remains `plaintext`. Follow the
+[retained-snapshot maintenance procedure](https://django-ray.readthedocs.io/en/latest/runtime-environments/#maintain-retained-snapshots-and-require-encryption)
+before selecting `RUNTIME_ENV_STORAGE_MODE="required"`, which refuses plaintext execution
+and retry. Current-table verification never authorizes destroying keys needed by backups.
+Review the [changelog](https://django-ray.readthedocs.io/en/latest/changelog/) for finite purge
+continuation, monitoring upgrade boundaries, and the remaining Beta limitations.
 
 ## Installation
 
@@ -179,7 +203,14 @@ walkthrough and its before-production checklist.
 | **sync** | `--sync` | Direct execution, no Ray (testing) |
 | **local** | `--local` | Local Ray cluster, tasks via `@ray.remote` |
 | **cluster** | `--cluster=<addr>` | Bounded low-latency work through Ray Client |
-| **ray-job** | *(default)* | Ray Job Submission API (process isolation) |
+| **ray-job** | No mode flag; `RUNNER="ray_job"` | Ray Job Submission API (process isolation) |
+
+Without a mode flag, the worker uses `DJANGO_RAY["RUNNER"]`, whose package default is
+`"ray_job"`. The quick-start configuration above selects `"ray_core"` with address `"auto"`,
+so its unqualified worker starts local Ray. Ray Job mode requires a retrievable
+`INPUT_STORAGE_BACKEND`, including its filesystem root or object-store namespace:
+new rq2 submissions always externalize the canonical execution request. See
+[durable input storage](https://django-ray.readthedocs.io/en/latest/reference/input-storage/).
 
 Cluster mode is tied to the task manager's Ray Client connection. If that connection
 is lost beyond Ray's reconnect grace period, Ray terminates its in-flight workload;
@@ -194,6 +225,7 @@ connection. See Ray's
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `RAY_ADDRESS` | `None` | Must be set at runtime; use `"auto"` locally or `"ray://host:port"` for a cluster |
+| `RUNNER` | `"ray_job"` | Worker mode when no explicit mode flag is supplied; `"ray_core"` uses the configured Ray address |
 | `DEFAULT_CONCURRENCY` | `10` | Max concurrent tasks per worker |
 | `MAX_TASK_ATTEMPTS` | `3` | Max retry attempts |
 | `RETRY_BACKOFF_SECONDS` | `60` | Base backoff for retries |
@@ -217,6 +249,12 @@ See [Durable Input Storage](https://django-ray.readthedocs.io/en/latest/referenc
 arguments, storage backends, rollout, and retention.
 See [Defining Tasks](https://django-ray.readthedocs.io/en/latest/tasks/#coroutine-tasks) for async task and ORM safety
 guidance.
+
+For bounded read-only Linux diagnosis, use
+[`django_ray_doctor`](https://django-ray.readthedocs.io/en/latest/reference/doctor/).
+Its report cannot yet confirm remote readiness, capacity, or artifact availability;
+exit status **2** means incomplete evidence, even when available observations are clear.
+It does not authorize cleanup, replay, or other maintenance.
 
 ## Development Setup
 
@@ -318,7 +356,8 @@ PostgreSQL and migration ordering.
 
 ### Queue Configuration
 
-The unqualified commands below select Ray Job mode. Configure a retrievable
+With the bundled testproject's default settings, the commands below select Ray Job mode.
+Configure a retrievable
 `INPUT_STORAGE_BACKEND` (including its filesystem root or object-store namespace) before
 starting them; new rq2 submissions always externalize the canonical execution request.
 For source-checkout development without shared request storage, add `--local` or use

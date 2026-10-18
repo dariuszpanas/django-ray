@@ -1,6 +1,6 @@
 # Ray ecosystem support
 
-The django-ray 0.7.0 candidate requires `ray[default]>=2.58.0`, retaining the
+django-ray 0.7.0 requires `ray[default]>=2.58.0`, retaining the
 0.6.0 dependency and ecosystem boundaries. That base dependency supports
 django-ray's Ray Core, Ray Client, Ray Jobs, Dashboard, and State API paths. It does
 not turn every optional Ray library into a tested django-ray integration.
