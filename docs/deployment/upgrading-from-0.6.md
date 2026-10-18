@@ -1,9 +1,9 @@
 # Upgrade from 0.6 to 0.7
 
-This is the preparation guide for **0.6.0 → 0.7.0 Beta**. The candidate is still
-under development. A version bump, passing unit tests or a selected qualification
-receipt does not establish release acceptance. Keep the final source, artifact
-and deployed evidence together before publishing or upgrading.
+This guide covers the coordinated **0.6.0 → 0.7.0 Beta** upgrade. A version bump,
+passing unit tests or a selected qualification receipt does not establish release
+acceptance. Keep the final source, artifact and deployed evidence together before
+publishing or upgrading.
 
 The [0.5 to 0.6 guide](upgrading-from-0.5.md) remains the historical guide for
 that boundary. django-ray remains Beta; this release does not change the
@@ -278,7 +278,7 @@ showcase, protocol and protected-log observations. The resource footprint
 stays unchanged. The native step permits 55 minutes, including the separate
 180-second worker phase and inherited 300-second external aggregate allowance.
 That allowance does not guarantee capacity for every operation's maximum
-timeout. This design still needs actual combined timing evidence.
+timeout. Review actual combined timing evidence for the selected source.
 Preserve finite deadlines, cleanup reserves and owned capacity, and
 inspect actual integrated receipts before acceptance. Preparation does not
 authorize a release workflow dispatch, tag or publication; follow the
