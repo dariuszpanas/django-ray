@@ -27,6 +27,20 @@ REQUIRED_CHECK_JOBS = {
 }
 REQUIRED_CHECK_NAMES = {"Commit Messages", "CI Gate", "Qualification Gate"}
 EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
+    **{
+        ("test-planning-shadow.yml", job): (
+            "Test planning shadow checks are advisory and never replace required CI"
+        )
+        for job in (
+            "planning",
+            "application",
+            "native",
+            "latency",
+            "cancellation",
+            "monitoring",
+            "shadow-aggregate",
+        )
+    },
     ("native-shutdown-investigation.yml", "investigate"): (
         "Native shutdown sampling is diagnostic and does not replace CI Gate"
     ),
