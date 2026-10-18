@@ -81,7 +81,6 @@ from django_ray.runner.leasing import (
     WorkerLeaseIdentity,
     generate_worker_id,
     get_heartbeat_interval,
-    get_lease_duration,
     is_worker_id_primary_key_collision,
 )
 from django_ray.runner.polling import AdaptivePollingPolicy
@@ -793,6 +792,8 @@ class Command(BaseCommand):
 
         from django.utils import timezone
 
+        from django_ray.lease_policy import LeasePolicyError
+
         self.lease_queue_name = queue
         if self.lease_identity is not None:
             if not self._recreate_lease():
@@ -811,6 +812,9 @@ class Command(BaseCommand):
             )
             try:
                 with transaction.atomic():
+                    from django_ray.lease_policy import lock_lease_policy
+
+                    lock_lease_policy()
                     lease = TaskWorkerLease.objects.create(
                         **identity.database_filters(),
                         queue_name=queue,
@@ -838,6 +842,8 @@ class Command(BaseCommand):
                         state__in=(TaskState.RUNNING, TaskState.CANCELLING),
                     ).exists():
                         raise _WorkerIdReservedByTaskError
+            except LeasePolicyError as error:
+                raise CommandError(error.reason) from None
             except _WorkerIdReservedByTaskError:
                 if attempt + 1 < _WORKER_ID_ALLOCATION_ATTEMPTS:
                     self._set_worker_id(generate_worker_id())
@@ -3257,6 +3263,14 @@ class Command(BaseCommand):
             self._request_shutdown_for_lease_loss("worker lease was never acquired")
             return None
 
+        from django_ray.lease_policy import LeasePolicyError, lock_lease_policy
+
+        try:
+            policy = lock_lease_policy()
+        except LeasePolicyError as error:
+            self._request_shutdown_for_lease_loss(error.reason)
+            raise
+
         lease_worker_ids = sorted(
             worker_id
             for worker_id in {identity.worker_id, source_worker_id}
@@ -3282,7 +3296,7 @@ class Command(BaseCommand):
         # Freshness must therefore be measured only after every ordered lease
         # lock (or SQLite's write fence) is held.
         validation_time = datetime.now(UTC)
-        cutoff = validation_time - get_lease_duration()
+        cutoff = validation_time - policy.duration
         lease_filters = {
             **identity.database_filters(),
             "is_active": True,
@@ -3371,13 +3385,24 @@ class Command(BaseCommand):
             self._request_shutdown_for_lease_loss("worker lease was never acquired")
             return None
 
-        cutoff = datetime.now(UTC) - get_lease_duration()
+        from django.db.models import Exists
+
+        from django_ray.lease_policy import LeasePolicyError, policy_rows, read_lease_policy
+
+        try:
+            policy = read_lease_policy()
+        except LeasePolicyError as error:
+            self._request_shutdown_for_lease_loss(error.reason)
+            return None
+        cutoff = datetime.now(UTC) - policy.duration
         lease = (
             TaskWorkerLease.objects.filter(
                 **identity.database_filters(),
                 is_active=True,
                 last_heartbeat_at__gte=cutoff,
             )
+            .alias(_lease_policy_valid=Exists(policy_rows(revision=policy.revision)))
+            .filter(_lease_policy_valid=True)
             .only(
                 "capability_schema_version",
                 "legacy_admission_token",

@@ -1201,9 +1201,12 @@ class Command(BaseCommand):
         lease_identities: list[WorkerLeaseIdentity | None],
     ) -> None:
         """Delete only lease rows acquired by this benchmark phase."""
-        for identity in lease_identities:
-            if identity is not None:
-                TaskWorkerLease.objects.filter(**identity.database_filters()).delete()
+        from django_ray.lease_policy import lease_policy_guard
+
+        with lease_policy_guard():
+            for identity in lease_identities:
+                if identity is not None:
+                    TaskWorkerLease.objects.filter(**identity.database_filters()).delete()
 
     @staticmethod
     def _create_execution(*, task_id: str, queue_name: str) -> RayTaskExecution:

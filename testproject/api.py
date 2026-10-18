@@ -409,7 +409,7 @@ class TaskStatusSchema(Schema):
     created_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
     managed_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
     executor_django_ray_version: Annotated[str | None, Field(max_length=128)]
-    protocol_compatible_worker_available: bool
+    protocol_compatible_worker_available: bool | None
     queue_capacity_attested: Literal[False]
     enqueued_at: datetime
     started_at: datetime | None
@@ -489,7 +489,7 @@ class TaskExecutionSchema(Schema):
     created_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
     managed_with_django_ray_version: Annotated[str | None, Field(max_length=128)]
     executor_django_ray_version: Annotated[str | None, Field(max_length=128)]
-    protocol_compatible_worker_available: bool
+    protocol_compatible_worker_available: bool | None
     queue_capacity_attested: Literal[False]
     workflow_run_id: UUID | None
     created_at: datetime
@@ -1410,14 +1410,13 @@ def _bounded_execution_list_rows(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Load one bounded page without transferring oversized diagnostics."""
-    guarded = _guarded_execution_diagnostics(
-        _guarded_execution_provenance(
-            annotate_execution_protocol_availability(queryset),
+    guarded = annotate_execution_protocol_availability(
+        _guarded_execution_diagnostics(
+            _guarded_execution_provenance(queryset, annotation_prefix="list"),
             annotation_prefix="list",
+            max_bytes=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
+            surface="list",
         ),
-        annotation_prefix="list",
-        max_bytes=_EXECUTION_LIST_DIAGNOSTIC_MAX_BYTES,
-        surface="list",
     )
     return list(
         guarded.order_by("-created_at", "-pk").values(*_EXECUTION_LIST_VALUE_FIELDS)[: limit + 1]
@@ -1729,14 +1728,15 @@ def _bounded_execution_list_response(
 
 def _bounded_execution_detail_row(execution_id: int) -> dict[str, Any]:
     """Read one exact execution through a single guarded values projection."""
-    guarded = _guarded_execution_diagnostics(
-        _guarded_execution_provenance(
-            annotate_execution_protocol_availability(RayTaskExecution.objects.all()),
+    guarded = annotate_execution_protocol_availability(
+        _guarded_execution_diagnostics(
+            _guarded_execution_provenance(
+                RayTaskExecution.objects.all(), annotation_prefix="detail"
+            ),
             annotation_prefix="detail",
+            max_bytes=_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES,
+            surface="detail",
         ),
-        annotation_prefix="detail",
-        max_bytes=_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES,
-        surface="detail",
     ).annotate(
         _detail_has_result_reference=Case(
             When(

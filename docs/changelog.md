@@ -14,6 +14,14 @@ frozen-source qualification and a separate publication decision.
 
 ### Added
 
+- Add database-scoped common worker lease authority in migration 0028. Mismatched
+  workers and operational callers fail closed before lease mutation, while
+  read-only status distinguishes unavailable authority from absent capacity.
+  The new `django_ray_lease_policy` command changes the default 60-second authority
+  only with revision-checked intent and a stopped, drained cohort.
+  Native crash rehearsals use this public transition before their six-second
+  recovery scenario and restore the authority after shutdown, preserving
+  retained task, attempt, workflow and lease history.
 - Add an advisory YAGA test-planning pilot that compares proposed selections
   with the existing five-workflow qualification policy. An explicit manual run
   can exercise all eight workload cells through the existing workflows.

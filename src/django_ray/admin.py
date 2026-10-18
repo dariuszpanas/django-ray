@@ -16,7 +16,6 @@ from django.contrib.admin import helpers
 from django.contrib.auth import get_permission_codename
 from django.core import signing
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import connection, transaction
 from django.db.models import (
     BooleanField,
     Case,
@@ -2634,9 +2633,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
         summary.update(
             execution_protocol_version=execution.execution_protocol_version,
             **provenance,
-            protocol_compatible_worker_available=bool(
-                execution.protocol_compatible_worker_available
-            ),
+            protocol_compatible_worker_available=execution.protocol_compatible_worker_available,
             queue_capacity_attested=False,
         )
         if summary.get("error_message") is not None:
@@ -3846,9 +3843,14 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
         return f"{minimum}-{maximum}"
 
     @admin.display(boolean=True, description="Active")
-    def is_active_display_list(self, obj: TaskWorkerLease) -> bool:
+    def is_active_display_list(self, obj: TaskWorkerLease) -> bool | None:
         """Display active status as boolean icon in list view."""
-        return bool(obj.is_active) and not self._is_heartbeat_expired(obj)
+        from django_ray.lease_policy import LeasePolicyError
+
+        try:
+            return bool(obj.is_active) and not self._is_heartbeat_expired(obj)
+        except LeasePolicyError:
+            return None
 
     @staticmethod
     def _is_heartbeat_expired(obj: TaskWorkerLease) -> bool:
@@ -3876,10 +3878,26 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
         permissions=["manage_worker_leases"],
     )
     def mark_inactive(self, request: HttpRequest, queryset: QuerySet) -> None:
+        """Refuse unavailable authority without presenting a successful action."""
+        from django_ray.lease_policy import LeasePolicyError
+
+        try:
+            self._mark_inactive_under_policy(request, queryset)
+        except LeasePolicyError:
+            self.message_user(
+                request, "Worker lease policy unavailable; no leases changed.", level=messages.ERROR
+            )
+
+    def _mark_inactive_under_policy(self, request: HttpRequest, queryset: QuerySet) -> None:
         """Mark selected worker leases as inactive."""
+        from django.db import connections
+
+        from django_ray.lease_policy import lease_policy_guard
+
         active = queryset.filter(is_active=True)
-        with transaction.atomic():
-            if connection.features.has_select_for_update:
+        using = queryset.db
+        with lease_policy_guard(using=using):
+            if connections[using].features.has_select_for_update:
                 # Match recovery's global lease lock order so an Admin bulk
                 # action cannot deadlock with a worker adopting the same rows.
                 worker_ids = list(
@@ -3887,12 +3905,16 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
                     .order_by("worker_id")
                     .values_list("worker_id", flat=True)
                 )
-                count = TaskWorkerLease.objects.filter(
-                    worker_id__in=worker_ids,
-                    is_active=True,
-                ).update(
-                    is_active=False,
-                    stopped_at=timezone.now(),
+                count = (
+                    TaskWorkerLease.objects.using(using)
+                    .filter(
+                        worker_id__in=worker_ids,
+                        is_active=True,
+                    )
+                    .update(
+                        is_active=False,
+                        stopped_at=timezone.now(),
+                    )
                 )
             else:
                 # SQLite's write transaction is already database-wide.
@@ -3917,10 +3939,26 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
         permissions=["manage_worker_leases"],
     )
     def delete_inactive(self, request: HttpRequest, queryset: QuerySet) -> None:
+        """Refuse unavailable authority without deleting retained lease history."""
+        from django_ray.lease_policy import LeasePolicyError
+
+        try:
+            self._delete_inactive_under_policy(request, queryset)
+        except LeasePolicyError:
+            self.message_user(
+                request, "Worker lease policy unavailable; no leases deleted.", level=messages.ERROR
+            )
+
+    def _delete_inactive_under_policy(self, request: HttpRequest, queryset: QuerySet) -> None:
         """Delete inactive worker leases from selected."""
+        from django.db import connections
+
+        from django_ray.lease_policy import lease_policy_guard
+
         inactive = queryset.filter(is_active=False)
-        with transaction.atomic():
-            if connection.features.has_select_for_update:
+        using = queryset.db
+        with lease_policy_guard(using=using):
+            if connections[using].features.has_select_for_update:
                 # Recovery can lock one inactive source plus the current
                 # worker lease. Lock every deletion target in the same global
                 # order before issuing the bulk delete.
@@ -3929,10 +3967,14 @@ class TaskWorkerLeaseAdmin(DjangoRayModelAdmin):
                     .order_by("worker_id")
                     .values_list("worker_id", flat=True)
                 )
-                _total_deleted, deleted_by_model = TaskWorkerLease.objects.filter(
-                    worker_id__in=worker_ids,
-                    is_active=False,
-                ).delete()
+                _total_deleted, deleted_by_model = (
+                    TaskWorkerLease.objects.using(using)
+                    .filter(
+                        worker_id__in=worker_ids,
+                        is_active=False,
+                    )
+                    .delete()
+                )
             else:
                 # SQLite's write transaction is already database-wide.
                 _total_deleted, deleted_by_model = inactive.delete()

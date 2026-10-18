@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Literal
 
 from django.core.exceptions import ImproperlyConfigured
@@ -13,6 +12,7 @@ from django.utils import timezone
 from django.utils.connection import ConnectionDoesNotExist
 
 from django_ray.conf.settings import get_settings, validate_settings
+from django_ray.lease_policy import LeasePolicyError, lease_policy_observation
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +56,8 @@ def check_worker_lease_readiness(
     """Observe exactly one active, fresh lease matching the supplied coordinates.
 
     One captured time defines freshness, including the lease-duration boundary.
-    At most two constant values cross the database boundary. No lease is updated.
+    At most two lease constants and two authority snapshots cross the database
+    boundary. No lease or policy is updated.
     An explicit worker ID narrows the selection; otherwise duplicate live leases
     at the same queue and hostname are ambiguous. No Ray connection is attempted.
     """
@@ -74,7 +75,6 @@ def check_worker_lease_readiness(
     try:
         config = get_settings()
         validate_settings(config)
-        duration = timedelta(seconds=config["WORKER_LEASE_SECONDS"])
     except (ImproperlyConfigured, TypeError, ValueError):
         return WorkerLeaseReadiness("error", "invalid_settings")
 
@@ -83,21 +83,24 @@ def check_worker_lease_readiness(
     try:
         if connection.in_atomic_block or not connection.get_autocommit():
             return WorkerLeaseReadiness("error", "transaction_active")
-        observed_at = timezone.now()
-        leases = TaskWorkerLease.objects.using(using).filter(
-            queue_name=queue,
-            hostname=hostname,
-            is_active=True,
-            stopped_at__isnull=True,
-            last_heartbeat_at__gte=observed_at - duration,
-            last_heartbeat_at__lte=observed_at,
-            started_at__lte=observed_at,
-        )
-        if worker_id is not None:
-            leases = leases.filter(worker_id=worker_id)
-        matches = list(
-            leases.order_by().values_list(Value(1, output_field=IntegerField()), flat=True)[:2]
-        )
+        with lease_policy_observation(using=using) as policy:
+            observed_at = timezone.now()
+            leases = TaskWorkerLease.objects.using(using).filter(
+                queue_name=queue,
+                hostname=hostname,
+                is_active=True,
+                stopped_at__isnull=True,
+                last_heartbeat_at__gte=observed_at - policy.duration,
+                last_heartbeat_at__lte=observed_at,
+                started_at__lte=observed_at,
+            )
+            if worker_id is not None:
+                leases = leases.filter(worker_id=worker_id)
+            matches = list(
+                leases.order_by().values_list(Value(1, output_field=IntegerField()), flat=True)[:2]
+            )
+    except LeasePolicyError as error:
+        return WorkerLeaseReadiness("error", error.reason)
     except DatabaseError:
         return WorkerLeaseReadiness("error", "database_unavailable")
     if not matches:

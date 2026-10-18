@@ -1100,7 +1100,13 @@ def test_sqlite_lock_order_is_exact_lease_then_target_then_capability() -> None:
         for index, statement in enumerate(statements)
         if statement.startswith('UPDATE "django_ray_rayworkertargetcapability"')
     ]
-    assert lease_lock == begin + 1
+    policy_lock = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith('UPDATE "django_ray_taskworkerleasepolicy"')
+    )
+    assert policy_lock == begin + 1
+    assert policy_lock < lease_lock
     assert lease_lock < target_lock < capability_locks[0] < capability_locks[1]
     assert '"worker_id" = "django_ray_taskworkerlease"."worker_id"' in statements[lease_lock]
     lease.refresh_from_db()

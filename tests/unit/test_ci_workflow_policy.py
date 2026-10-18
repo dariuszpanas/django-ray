@@ -844,6 +844,7 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     )
 
     assert makefile_paths == set(postgresql_lane["selection"]["paths"])
+    assert "tests/integration/test_lease_policy_postgresql.py" in makefile_paths
     assert "tests/integration/test_execution_protocol_schema_migration.py" in makefile_paths
     assert "tests/integration/test_protocol_coordination.py" in makefile_paths
     assert "tests/integration/test_ray_target_route_migration.py" in makefile_paths

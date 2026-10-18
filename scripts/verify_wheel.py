@@ -102,6 +102,9 @@ EXPECTED_FILES = {
     "django_ray/migrations/0025_ray_worker_target_capabilities.py",
     "django_ray/migrations/0026_ray_task_target_execution_evidence.py",
     "django_ray/migrations/0027_workflow_reporting_diagnostics.py",
+    "django_ray/migrations/0028_worker_lease_policy.py",
+    "django_ray/lease_policy.py",
+    "django_ray/management/commands/django_ray_lease_policy.py",
     "django_ray/management/commands/django_ray_worker.py",
     "django_ray/management/commands/django_ray_purge_inputs.py",
     "django_ray/management/purge_cursor.py",
@@ -115,7 +118,7 @@ EXPECTED_FILES = {
 }
 EXPECTED_MIGRATION_LEAF = (
     "django_ray",
-    "0027_workflow_reporting_diagnostics",
+    "0028_worker_lease_policy",
 )
 
 
@@ -596,6 +599,7 @@ def verify_installed_wheel(expected_version: str) -> None:
         "django_ray_protocol_status",
         "django_ray_worker",
         "django_ray_worker_ready",
+        "django_ray_lease_policy",
     }
     missing_commands = expected_commands - get_commands().keys()
     if missing_commands:
@@ -615,6 +619,26 @@ def verify_installed_wheel(expected_version: str) -> None:
     applied = MigrationRecorder(connection).applied_migrations()
     if EXPECTED_MIGRATION_LEAF not in applied:
         raise RuntimeError(f"installed migration leaf was not applied: {EXPECTED_MIGRATION_LEAF!r}")
+
+    from django_ray.models import TaskWorkerLeasePolicy
+
+    retained_policy = list(TaskWorkerLeasePolicy.objects.values())
+    lease_policy_output = io.StringIO()
+    call_command("django_ray_lease_policy", stdout=lease_policy_output)
+    lease_policy_report = json.loads(lease_policy_output.getvalue())
+    if (
+        lease_policy_report
+        != {
+            "schema_version": 1,
+            "scope": "worker_lease_policy",
+            "status": "matched",
+            "configured_seconds": 60,
+            "lease_seconds": 60,
+            "revision": 1,
+        }
+        or list(TaskWorkerLeasePolicy.objects.values()) != retained_policy
+    ):
+        raise RuntimeError("installed lease policy status or read-only preservation failed")
 
     protocol_status_output = io.StringIO()
     call_command(

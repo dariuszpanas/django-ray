@@ -900,16 +900,12 @@ class TestWorkerLeaseCollisionSafety:
             nonlocal current_time, update_count
             update_count += 1
             if update_count == 1:
-                current_time = early + timedelta(seconds=3)
+                current_time = early + timedelta(seconds=61)
             return original_update(queryset, **kwargs)
 
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.datetime",
             ControlledDateTime,
-        )
-        monkeypatch.setattr(
-            "django_ray.management.commands.django_ray_worker.get_lease_duration",
-            lambda: timedelta(seconds=2),
         )
         monkeypatch.setattr(QuerySet, "update", advance_clock_before_first_write)
 

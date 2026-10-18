@@ -231,6 +231,15 @@ and workflow preservation. It does not qualify Core manager loss or reconcile an
 unknown external side effect. Only candidate crash phases shorten the lease to six
 seconds, retaining two-second heartbeats. The default recipes remain unchanged.
 
+Before either candidate crash recipe starts work, the stopped, drained fixture
+uses `django_ray_lease_policy` to change the seeded database authority from
+60 seconds/revision 1 to 6 seconds/revision 2. After the manager and Ray children
+exit and the fixture has no active leases or nonterminal work, the same public
+command restores 60 seconds/revision 3. Both revision-checked transitions must
+preserve task, attempt, workflow and lease history. Their receipt facts are
+required; active or stale-active leases refuse the transition without cleanup
+or a force override. Released phases never invoke the candidate-only command.
+
 The separate opt-in `core-loss.yaml` recipe kills the candidate Core manager and
 retires all old local Ray child processes. A fresh Ray instance and replacement
 manager must preserve the task identity as `LOST` without automatic replay under

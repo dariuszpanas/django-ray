@@ -106,7 +106,9 @@ def test_inactive_history_does_not_hide_the_current_worker() -> None:
     assert _observe().status == "ready"
 
 
-def test_observation_uses_one_time_and_one_bounded_read(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_observation_uses_one_time_and_bounded_authority_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _lease()
     calls = []
 
@@ -118,8 +120,10 @@ def test_observation_uses_one_time_and_one_bounded_read(monkeypatch: pytest.Monk
     with CaptureQueriesContext(connection) as queries:
         assert _observe().status == "ready"
     assert calls == [True]
-    assert len(queries) == 1
-    statement = queries[0]["sql"]
+    assert len(queries) == 3
+    assert all(query["sql"].startswith("SELECT") for query in queries)
+    assert all("LIMIT 1" in queries[index]["sql"] for index in (0, 2))
+    statement = queries[1]["sql"]
     assert statement.startswith("SELECT 1")
     assert "LIMIT 2" in statement
     assert TaskWorkerLease.objects.get().is_active

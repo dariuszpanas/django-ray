@@ -250,9 +250,14 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
     from django.apps import apps
     from django.utils import timezone
 
-    from django_ray.models import LegacyWorkerAdmissionToken, TaskExecutionProtocolPolicy
+    from django_ray.models import (
+        LegacyWorkerAdmissionToken,
+        TaskExecutionProtocolPolicy,
+        TaskWorkerLeasePolicy,
+    )
 
     with django_db_blocker.unblock():
+        TaskWorkerLeasePolicy.objects.get_or_create(singleton_key=1)
         if apps.is_installed("testproject"):
             SampleAdmissionBudget = apps.get_model("testproject", "SampleAdmissionBudget")
             SampleAdmissionBudget.objects.get_or_create(

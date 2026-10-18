@@ -185,9 +185,18 @@ single worker loop. It does not change at-least-once execution or retry eligibil
 that worker/task-monitor heartbeats are shorter than their lease/stuck-task windows.
 
 All processes sharing the worker lease table must use the same `WORKER_LEASE_SECONDS`.
-Lease cleanup applies the caller's expiry duration across that table; queue names and task backend
-aliases do not isolate it. A shorter duration in one worker can expire another healthy worker
-between its heartbeats. Each worker's heartbeat interval must fit within the common duration.
+Migration 0028 seeds an explicit database authority of **60 seconds**. Workers, cleanup,
+takeover and Admin mutations refuse a mismatched or unavailable policy before changing ownership.
+Queue names and task backend aliases do not isolate expiry. Each worker's heartbeat interval
+must fit within the common duration. Readers never initialize or repair the policy.
+
+Inspect it with `python manage.py django_ray_lease_policy`. A custom duration requires an
+explicit revision-checked update during a stopped, drained cohort; see the
+[command reference](reference/cli.md#django_ray_lease_policy) and
+[upgrade procedure](deployment/upgrading-from-0.6.md#migration-and-execution-boundary).
+Readiness reports a fixed error on mismatch. Capacity annotations use `null` for unavailable
+authority, and metrics omit lease-health counts while publishing
+`django_ray_worker_lease_policy_available 0`; neither means zero healthy workers.
 
 `django-ray` uses worker lease heartbeats to track worker liveness and task monitor
 heartbeats to show that a worker is still actively reconciling in-flight work. For

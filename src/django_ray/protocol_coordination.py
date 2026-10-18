@@ -310,6 +310,9 @@ def close_legacy_worker_admission(
     vendor = _database_vendor(using=using)
     _require_outermost_transaction(using=using)
     with transaction.atomic(using=using, durable=True):
+        from django_ray.lease_policy import lock_lease_policy
+
+        lock_lease_policy(using=using)
         initially_locked_legacy_worker_count = 0
         if vendor == "postgresql":
             _postgresql_lock_transition(using=using)
@@ -441,6 +444,9 @@ def reopen_legacy_worker_admission(
     vendor = _database_vendor(using=using)
     _require_outermost_transaction(using=using)
     with transaction.atomic(using=using, durable=True):
+        from django_ray.lease_policy import lock_lease_policy
+
+        lock_lease_policy(using=using)
         if vendor == "postgresql":
             _postgresql_lock_transition(using=using)
             if not _postgresql_legacy_admission_is_open(using=using):

@@ -385,7 +385,7 @@ def _build_read_only_status(observed_at: datetime) -> ProtocolStatusReport:
     with CaptureQueriesContext(connection) as captured:
         report = build_protocol_status(using="default", observed_at=observed_at)
     assert _database_snapshot() == before
-    assert len(_assert_read_only(captured.captured_queries)) == 14
+    assert len(_assert_read_only(captured.captured_queries)) == 15
     return report
 
 
@@ -655,7 +655,7 @@ def test_protocol_status_groups_are_ordered_and_exactly_truncated() -> None:
     _close_legacy_admission()
     with CaptureQueriesContext(connection) as empty_queries:
         build_protocol_status(using="default", observed_at=observed_at)
-    assert len(_assert_read_only(empty_queries.captured_queries)) == 14
+    assert len(_assert_read_only(empty_queries.captured_queries)) == 15
 
     leases: list[TaskWorkerLease] = []
     executions: list[RayTaskExecution] = []
@@ -692,8 +692,8 @@ def test_protocol_status_groups_are_ordered_and_exactly_truncated() -> None:
         report = build_protocol_status(using="default", observed_at=observed_at)
 
     assert _database_snapshot() == before
-    assert len(_assert_read_only(captured.captured_queries)) == 14
-    assert len(_assert_read_only(empty_queries.captured_queries)) == 14
+    assert len(_assert_read_only(captured.captured_queries)) == 15
+    assert len(_assert_read_only(empty_queries.captured_queries)) == 15
     bounded_group_queries = [
         query["sql"].upper()
         for query in captured.captured_queries
@@ -866,12 +866,12 @@ def test_protocol_status_bounds_oversized_sqlite_queue_before_materialization() 
         )
 
     data_queries = _assert_read_only(captured.captured_queries)
-    assert len(data_queries) == 14
+    assert len(data_queries) == 15
     bounded_queue_queries = [
         query["sql"].upper()
         for query in data_queries
         if "DJANGO_RAY_RAYTASKEXECUTION" in query["sql"].upper()
-        and "CASE WHEN" in query["sql"].upper()
+        and "_BOUNDED_QUEUE_NAME" in query["sql"].upper()
     ]
     assert bounded_queue_queries
     assert all("LENGTH(" in query for query in bounded_queue_queries)

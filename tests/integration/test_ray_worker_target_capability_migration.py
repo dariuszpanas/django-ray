@@ -46,7 +46,7 @@ from django_ray.target.attestation import (
 
 MIGRATE_FROM = [("django_ray", "0024_ray_target_routes")]
 MIGRATE_TO = [("django_ray", "0025_ray_worker_target_capabilities")]
-LATEST = [("django_ray", "0027_workflow_reporting_diagnostics")]
+LATEST = [("django_ray", "0028_worker_lease_policy")]
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGERS = {
@@ -1091,7 +1091,10 @@ def _attempt_sqlite_reverse_with_zero_busy_timeout(reverse_started: Event) -> st
             MigrationExecutor(thread_connection).migrate(MIGRATE_FROM)
         except OperationalError:
             return "writer-locked"
-        except RuntimeError:
+        except RuntimeError as error:
+            assert str(error) == (
+                "django-ray Ray worker target capability rollback requires the table to be empty"
+            )
             return "history-refused"
         raise AssertionError("rollback unexpectedly removed worker target capabilities")
     finally:
@@ -1103,39 +1106,49 @@ def test_sqlite_active_capability_writer_cannot_partially_reverse_schema() -> No
     if connection.vendor != "sqlite":
         pytest.skip("requires the default SQLite test database")
 
-    lease = _create_lease(worker_id="capacity-concurrent-writer")
-    target, _policy, _attestation = _create_target_history(target_key="capacity-concurrent-writer")
-    writer_inserted = Event()
     release_writer = Event()
-    reverse_started = Event()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        writer = pool.submit(
-            _create_held_capability,
-            lease_id=lease.pk,
-            target_id=target.pk,
-            writer_inserted=writer_inserted,
-            release_writer=release_writer,
+    try:
+        # Exercise 0025 directly, before active fixtures could trigger the
+        # independent latest-schema 0028 rollback refusal.
+        MigrationExecutor(connection).migrate(MIGRATE_TO)
+        lease = _create_lease(worker_id="capacity-concurrent-writer")
+        target, _policy, _attestation = _create_target_history(
+            target_key="capacity-concurrent-writer"
         )
-        assert writer_inserted.wait(timeout=20)
-        reverse = pool.submit(
-            _attempt_sqlite_reverse_with_zero_busy_timeout,
-            reverse_started,
-        )
-        assert reverse_started.wait(timeout=20)
-        outcome = reverse.result(timeout=20)
-        release_writer.set()
-        writer.result(timeout=20)
+        writer_inserted = Event()
+        reverse_started = Event()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            writer = pool.submit(
+                _create_held_capability,
+                lease_id=lease.pk,
+                target_id=target.pk,
+                writer_inserted=writer_inserted,
+                release_writer=release_writer,
+            )
+            assert writer_inserted.wait(timeout=20)
+            reverse = pool.submit(
+                _attempt_sqlite_reverse_with_zero_busy_timeout,
+                reverse_started,
+            )
+            assert reverse_started.wait(timeout=20)
+            outcome = reverse.result(timeout=20)
+            release_writer.set()
+            writer.result(timeout=20)
 
-    assert outcome in {"writer-locked", "history-refused"}
-    assert RayWorkerTargetCapability._meta.db_table in connection.introspection.table_names()
-    assert (
-        RayWorkerTargetCapability.objects.filter(
-            lease_id=lease.pk,
-            target_id=target.pk,
-        ).count()
-        == 1
-    )
-    assert _SQLITE_TRIGGERS <= _database_trigger_names()
+        assert outcome in {"writer-locked", "history-refused"}
+        assert RayWorkerTargetCapability._meta.db_table in connection.introspection.table_names()
+        assert (
+            RayWorkerTargetCapability.objects.filter(
+                lease_id=lease.pk,
+                target_id=target.pk,
+            ).count()
+            == 1
+        )
+        assert _SQLITE_TRIGGERS <= _database_trigger_names()
+    finally:
+        release_writer.set()
+        MigrationExecutor(connection).migrate(LATEST)
+        _clear_capability_tables()
 
 
 def _postgresql_backend_pid() -> int:
@@ -1172,7 +1185,10 @@ def _attempt_postgresql_reverse(
         reverse_started.set()
         try:
             MigrationExecutor(thread_connection).migrate(MIGRATE_FROM)
-        except RuntimeError:
+        except RuntimeError as error:
+            assert str(error) == (
+                "django-ray Ray worker target capability rollback requires the table to be empty"
+            )
             return "history-refused"
         raise AssertionError("rollback unexpectedly removed worker target capabilities")
     finally:
@@ -1185,13 +1201,18 @@ def test_postgresql_capability_writer_serializes_before_reverse_guard() -> None:
     if connection.vendor != "postgresql":
         pytest.skip("requires tests.postgres_settings and a PostgreSQL test database")
 
-    lease = _create_lease(worker_id="capacity-concurrent-writer")
-    target, _policy, _attestation = _create_target_history(target_key="capacity-concurrent-writer")
     writer_inserted = Event()
     release_writer = Event()
     reverse_started = Event()
     backend_pid: list[int] = []
     try:
+        # Isolate 0025's writer/reverse fence before creating active leases;
+        # latest-schema rollback must instead refuse them at migration 0028.
+        MigrationExecutor(connection).migrate(MIGRATE_TO)
+        lease = _create_lease(worker_id="capacity-concurrent-writer")
+        target, _policy, _attestation = _create_target_history(
+            target_key="capacity-concurrent-writer"
+        )
         with ThreadPoolExecutor(max_workers=2) as pool:
             writer = pool.submit(
                 _create_held_capability,

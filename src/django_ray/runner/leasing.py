@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from django_ray.conf.settings import get_settings
+from django_ray.lease_policy import lease_policy_guard, lease_policy_observation
 
 if TYPE_CHECKING:
     from django_ray.models import TaskWorkerLease
@@ -74,7 +75,7 @@ def is_worker_id_primary_key_collision(error: Exception) -> bool:
 
 
 def get_lease_duration() -> timedelta:
-    """Get the worker lease duration."""
+    """Get configured duration; freshness consumers must verify database authority."""
     settings = get_settings()
     seconds = settings.get("WORKER_LEASE_SECONDS", 60)
     return timedelta(seconds=seconds)
@@ -101,12 +102,19 @@ def is_lease_expired(lease: TaskWorkerLease) -> bool:
         return True
 
     now = datetime.now(UTC)
-    duration = get_lease_duration()
-    last_heartbeat: datetime = lease.last_heartbeat_at  # type: ignore[assignment]
-    return (now - last_heartbeat) > duration
+    with lease_policy_observation(using=lease._state.db or "default") as policy:
+        last_heartbeat: datetime = lease.last_heartbeat_at  # type: ignore[assignment]
+        expired = (now - last_heartbeat) > policy.duration
+    return expired
 
 
 def mark_expired_leases_inactive() -> int:
+    """Retire stale peers only under the matching database policy."""
+    with lease_policy_guard() as policy:
+        return _mark_expired_leases_inactive(policy.duration)
+
+
+def _mark_expired_leases_inactive(duration: timedelta) -> int:
     """Mark expired worker leases as inactive.
 
     This should be called periodically by workers or a management command
@@ -120,7 +128,6 @@ def mark_expired_leases_inactive() -> int:
     from django_ray.models import TaskWorkerLease
 
     now = datetime.now(UTC)
-    duration = get_lease_duration()
     cutoff = now - duration
 
     stale_filters = {
@@ -176,14 +183,13 @@ def get_active_worker_count() -> int:
     """
     from django_ray.models import TaskWorkerLease
 
-    now = datetime.now(UTC)
-    duration = get_lease_duration()
-    cutoff = now - duration
-
-    return TaskWorkerLease.objects.filter(
-        is_active=True,
-        last_heartbeat_at__gte=cutoff,
-    ).count()
+    with lease_policy_observation() as policy:
+        cutoff = datetime.now(UTC) - policy.duration
+        count = TaskWorkerLease.objects.filter(
+            is_active=True,
+            last_heartbeat_at__gte=cutoff,
+        ).count()
+    return count
 
 
 def get_active_workers() -> list[TaskWorkerLease]:
@@ -194,19 +200,24 @@ def get_active_workers() -> list[TaskWorkerLease]:
     """
     from django_ray.models import TaskWorkerLease
 
-    now = datetime.now(UTC)
-    duration = get_lease_duration()
-    cutoff = now - duration
-
-    return list(
-        TaskWorkerLease.objects.filter(
-            is_active=True,
-            last_heartbeat_at__gte=cutoff,
+    with lease_policy_observation() as policy:
+        cutoff = datetime.now(UTC) - policy.duration
+        workers = list(
+            TaskWorkerLease.objects.filter(
+                is_active=True,
+                last_heartbeat_at__gte=cutoff,
+            )
         )
-    )
+    return workers
 
 
 def release_lease(identity: WorkerLeaseIdentity) -> bool:
+    """Withdraw exact ownership under the current matching authority."""
+    with lease_policy_guard():
+        return _release_lease(identity)
+
+
+def _release_lease(identity: WorkerLeaseIdentity) -> bool:
     """Release a worker lease (called during graceful shutdown).
 
     Marks the lease as inactive rather than deleting it.

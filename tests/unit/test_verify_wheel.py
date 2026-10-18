@@ -85,9 +85,10 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/migrations/0025_ray_worker_target_capabilities.py" in EXPECTED_FILES
     assert "django_ray/migrations/0026_ray_task_target_execution_evidence.py" in EXPECTED_FILES
     assert "django_ray/migrations/0027_workflow_reporting_diagnostics.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0028_worker_lease_policy.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0027_workflow_reporting_diagnostics",
+        "0028_worker_lease_policy",
     )
 
 

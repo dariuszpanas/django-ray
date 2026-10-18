@@ -1623,7 +1623,6 @@ def test_postgresql_lease_freshness_is_measured_after_waiting_for_lock(
             return current_time if tz is not None else current_time.replace(tzinfo=None)
 
     monkeypatch.setattr(worker_module, "datetime", ControlledDateTime)
-    monkeypatch.setattr(worker_module, "get_lease_duration", lambda: timedelta(seconds=2))
     lease_locked = Event()
     release_lease = Event()
     recovery_started = Event()
@@ -1669,7 +1668,9 @@ def test_postgresql_lease_freshness_is_measured_after_waiting_for_lock(
         assert recovery_started.wait(timeout=10)
         try:
             _wait_for_postgresql_lock(recovery_backend_pid[0])
-            current_time = early + timedelta(seconds=3)
+            # Keep the real seeded 60-second common authority. Only the clock
+            # advances after the waiter is observed at the lease-row lock.
+            current_time = early + timedelta(seconds=61)
         finally:
             release_lease.set()
         holder.result(timeout=20)
