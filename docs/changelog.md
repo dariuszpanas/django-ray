@@ -135,6 +135,13 @@ frozen-source qualification and a separate publication decision.
 
 ### Fixed
 
+- Select latency qualification when its shared Docker scenario helper changes,
+  alongside the existing native and cancellation consumers. The advisory YAGA
+  policy retains that dependency and adds exact ownership for eight reviewed
+  application-test files; unknown paths and full triggers still select the
+  complete catalog, and selective execution remains disabled. Explicit new
+  lease-policy module and command triggers cover their affected qualification
+  consumers without relying on another file changing alongside them.
 - Keep strict Ray Job request-refusal diagnostics from importing application
   settings through configurable redaction. Fixed refusal output and exit 78 are
   preserved; ordinary execution retains configured redaction
