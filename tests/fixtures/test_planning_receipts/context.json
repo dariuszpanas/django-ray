@@ -1,0 +1,185 @@
+{
+  "fixture_version": 2,
+  "contract_profile": "django-ray-45180ea-receipts-v1",
+  "execution_commit": "85da4256b04112454228d301f2c81a959876bff4",
+  "execution_tree": "ed59ad1e05fad81ecdf660abc5a71e34ce30d9c2",
+  "run_id": "39101458923",
+  "policy_sha256": "4357f7a563c9e79632247d9979405edc0f6e37a5d7c651a28480704067cd9309",
+  "bindings_sha256": "1e6d3aca7580f273101162345a57460d6583e56d443ea9ed509611d9b808461a",
+  "observations": [
+    {
+      "attempt": 1,
+      "plan_digest": "87091b3b09f41a50de22b0ccadeea69b29f09b3d1101842fae25b446f3e025ec",
+      "selected": [
+        {
+          "suite": "qualification.native",
+          "variant": "core-loss",
+          "binding": "upgrade-native-qualification"
+        },
+        {
+          "suite": "qualification.native",
+          "variant": "jobs",
+          "binding": "upgrade-native-qualification"
+        },
+        {
+          "suite": "qualification.native",
+          "variant": "jobs-crash",
+          "binding": "upgrade-native-qualification"
+        },
+        {
+          "suite": "qualification.native",
+          "variant": "native",
+          "binding": "upgrade-native-qualification"
+        },
+        {
+          "suite": "qualification.latency",
+          "variant": "default",
+          "binding": "latency-qualification"
+        },
+        {
+          "suite": "qualification.cancellation",
+          "variant": "default",
+          "binding": "cancellation-qualification"
+        },
+        {
+          "suite": "qualification.monitoring",
+          "variant": "default",
+          "binding": "monitoring-qualification"
+        }
+      ],
+      "producers": [
+        {
+          "cell": {
+            "suite": "qualification.native",
+            "variant": "core-loss",
+            "binding": "upgrade-native-qualification"
+          },
+          "job_id": 117598433321,
+          "actual_attempt": 1,
+          "artifact_id": 12127183988,
+          "artifact_name": "upgrade-native-qualification-core-loss",
+          "artifact_zip_sha256": "73bd23932af01fdcf78c2d522c40eef4ab9ae1e7aaeed374d9f9bae7b9653679"
+        },
+        {
+          "cell": {
+            "suite": "qualification.native",
+            "variant": "jobs",
+            "binding": "upgrade-native-qualification"
+          },
+          "job_id": 117598433239,
+          "actual_attempt": 1,
+          "artifact_id": 12127725204,
+          "artifact_name": "upgrade-native-qualification-jobs",
+          "artifact_zip_sha256": "9f7ab976b11c4db2852938d178b7c3d001dac7a838f4d5c536804dbd7aff0d35"
+        },
+        {
+          "cell": {
+            "suite": "qualification.native",
+            "variant": "jobs-crash",
+            "binding": "upgrade-native-qualification"
+          },
+          "job_id": 117598433353,
+          "actual_attempt": 1,
+          "artifact_id": 12127366967,
+          "artifact_name": "upgrade-native-qualification-jobs-crash",
+          "artifact_zip_sha256": "713d58f1567c0273691022f8f7d2dfc07d31582102a8a4adbbbeb1818f789690"
+        },
+        {
+          "cell": {
+            "suite": "qualification.native",
+            "variant": "native",
+            "binding": "upgrade-native-qualification"
+          },
+          "job_id": 117598433264,
+          "actual_attempt": 1,
+          "artifact_id": 12126823166,
+          "artifact_name": "upgrade-native-qualification-native",
+          "artifact_zip_sha256": "9fe70556ab187f585e05d6f03a40937ebcbbcc7fd79d11e5f58eb099530eac95"
+        },
+        {
+          "cell": {
+            "suite": "qualification.latency",
+            "variant": "default",
+            "binding": "latency-qualification"
+          },
+          "job_id": 117598433170,
+          "actual_attempt": 1,
+          "artifact_id": 12126773544,
+          "artifact_name": "job-latency-qualification",
+          "artifact_zip_sha256": "6e374632f12524b3e6ed8303aa1a80c5f9067083cdfa3276f8a7bcd7078339d8"
+        },
+        {
+          "cell": {
+            "suite": "qualification.cancellation",
+            "variant": "default",
+            "binding": "cancellation-qualification"
+          },
+          "job_id": 117598433148,
+          "actual_attempt": 1,
+          "artifact_id": 12126818199,
+          "artifact_name": "cancellation-qualification",
+          "artifact_zip_sha256": "ef0b37e7837e73368488b801549cf8c7902c02f2f65d8ac717e75142aeb17768"
+        },
+        {
+          "cell": {
+            "suite": "qualification.monitoring",
+            "variant": "default",
+            "binding": "monitoring-qualification"
+          },
+          "job_id": 117598433184,
+          "actual_attempt": 1,
+          "artifact_id": 12126682960,
+          "artifact_name": "monitoring-qualification-39101458923",
+          "artifact_zip_sha256": "764ca5669997fa4958375e98ecd2036dd13e0cdd20e1ab75151bde6a36a500b0"
+        }
+      ],
+      "acquisition_sha256": "d42849f88cde6b47d335a3773fd588e3a7957f6f022abde5f0bcbaa92fbae9eb",
+      "parent_conclusion": "failure"
+    },
+    {
+      "attempt": 2,
+      "plan_digest": "13fc2df3f28f4e950badd74376dcd182dd69f78d625d7ad3408e436fa64a2409",
+      "selected": [
+        {
+          "suite": "qualification.application",
+          "variant": "default",
+          "binding": "application-qualification"
+        }
+      ],
+      "producers": [
+        {
+          "cell": {
+            "suite": "qualification.application",
+            "variant": "default",
+            "binding": "application-qualification"
+          },
+          "job_id": 117605088203,
+          "actual_attempt": 2,
+          "artifact_id": 12128143480,
+          "artifact_name": "application-core-39101458923",
+          "artifact_zip_sha256": "f8a61f6fc5fad939d2ca88b3fbd38dfa3c01dde8bf7dde2cba90667146a45439"
+        }
+      ],
+      "acquisition_sha256": "7b1ad85052a9d781faeeebad651f8a67948aac20121ce34cf897dfd62e93a1f4",
+      "parent_conclusion": "success"
+    }
+  ],
+  "history": {
+    "failed_application": {
+      "attempt": 1,
+      "job_id": 117598433254,
+      "outcome": "failed",
+      "artifact_zip_sha256": "a6bb6ab63c15ed688b3f048c55bd142425c8b1839418b6fd35ea224f5ec0892d",
+      "review_sha256": "1222c75331f2fccc4700ba73abc31cc11f9a81052944121d2975cf75f5cb056c",
+      "cause": "undetermined; protected-log inventory invalid; later snapshot had an unready container"
+    },
+    "aggregate": {
+      "attempt": 2,
+      "job_id": 117611680301,
+      "outcome": "passed"
+    },
+    "retry_is_fix": false,
+    "copied_success_rows_are_execution": false,
+    "cross_attempt_yaga_assembly_supported": false
+  }
+}

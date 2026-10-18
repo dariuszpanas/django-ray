@@ -33,3 +33,8 @@ caf = "caf"
 extend-glob = ["workflow-progress-reads-postgresql17-windows-2026-07-21.md"]
 [type.sql-benchmark.extend-identifiers]
 SELECTs = "SELECTs"
+
+# Historical Ray submission IDs are immutable receipt data, not prose.
+[type.qualification-receipt-fixtures]
+extend-glob = ["files.json"]
+extend-ignore-re = ["raysubmit_django_ray_rq2_[0-9a-f]{64}"]
