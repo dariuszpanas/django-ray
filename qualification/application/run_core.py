@@ -160,10 +160,6 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
 
 def verify_runtime_probe(request: ApplicationHttp, *, token: str, timeout: float) -> str:
     """The existing sample task must observe the decrypted canary on Ray."""
-    from importlib.metadata import version
-
-    from django_ray.models import RayTaskExecution
-
     headers = {"Authorization": f"Bearer {token}"}
     status, body = request(
         "/api/cluster/runtime-env/probe?profile=thin&package=django-ray",
@@ -179,8 +175,23 @@ def verify_runtime_probe(request: ApplicationHttp, *, token: str, timeout: float
         or UUID(identity).version != 4
     ):
         raise ValueError("RuntimeEnv probe returned no canonical task identity")
-    deadline = time.monotonic() + timeout
+    observe_runtime_probe(
+        request, task_id=identity, token=token, deadline=time.monotonic() + timeout
+    )
+    return identity
+
+
+def observe_runtime_probe(request, *, task_id: str, token: str, deadline: float) -> None:
+    """Observe an already captured probe without enqueueing or retrying work."""
+    from importlib.metadata import version
+
+    from django_ray.models import RayTaskExecution
+
+    identity = task_id
+    headers = {"Authorization": f"Bearer {token}"}
     while True:
+        if time.monotonic() >= deadline:
+            raise ValueError("RuntimeEnv probe did not succeed within its deadline")
         status, body = request(
             f"/api/tasks/{identity}",
             method="GET",
@@ -194,6 +205,8 @@ def verify_runtime_probe(request: ApplicationHttp, *, token: str, timeout: float
         if status != 200:
             raise ValueError("RuntimeEnv probe polling failed")
         state = validate_task_status_payload(json.loads(body), task_id=identity)
+        if time.monotonic() >= deadline:
+            raise ValueError("RuntimeEnv probe did not succeed within its deadline")
         if state == "SUCCEEDED":
             break
         if state in TASK_FAILURE_STATES or time.monotonic() >= deadline:
@@ -212,7 +225,32 @@ def verify_runtime_probe(request: ApplicationHttp, *, token: str, timeout: float
         or result.get("package_version") != version("django-ray")
     ):
         raise ValueError("Remote RuntimeEnv did not prove the decrypted canary and package")
-    return identity
+
+
+def maintenance_refusal_ids(current: list[int], receipt_path: Path) -> list[int]:
+    """The second generation accepts only the first receipt's exact negative IDs."""
+    if receipt_path.name != "after-core.json":
+        return current
+    from qualification.application.protected_runtime import validate
+    from qualification.application.runtime_env_maintenance import validate_evidence
+
+    with receipt_path.with_name("before-core.json").open("rb") as stream:
+        raw = stream.read(16 * 1024 + 1)
+    if len(raw) > 16 * 1024:
+        raise ValueError("Prior RuntimeEnv fixture receipt exceeds its bound")
+    previous = json.loads(raw)
+    if (
+        previous.get("layer") != "application_core"
+        or previous.get("status") != "passed"
+        or type(previous.get("schema_version")) is not int
+        or previous["schema_version"] != 1
+        or previous.get("complete_application_gate") is not False
+        or previous.get("failed_stage") is not None
+    ):
+        raise ValueError("Prior RuntimeEnv fixture receipt did not pass")
+    validate(previous.get("protected_runtime"))
+    validate_evidence(previous.get("runtime_env_maintenance"))
+    return [*previous["protected_runtime"]["row_ids"][1:], *current]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -266,6 +304,16 @@ def main(argv: list[str] | None = None) -> int:
         from qualification.application.dashboard_browser import observe_dashboard
 
         receipt["dashboard"] = observe_dashboard(request, api.task_id)
+        receipt["failed_stage"] = "lease_policy"
+        from qualification.application.lease_policy import empty_evidence as empty_lease_evidence
+        from qualification.application.lease_policy import verify_lease_policy
+
+        receipt["lease_policy"] = empty_lease_evidence()
+        verify_lease_policy(
+            task_id=api.task_id,
+            manager_prefix=args.manager_prefix,
+            evidence=receipt["lease_policy"],
+        )
         receipt["failed_stage"] = "runtime_env_refusal"
         from qualification.application.runtime_env_refusal import empty_evidence, verify_refusals
 
@@ -275,6 +323,20 @@ def main(argv: list[str] | None = None) -> int:
             token=read_token(args.token_file),
             manager_prefix=args.manager_prefix,
             evidence=receipt["runtime_env_refusals"],
+        )
+        receipt["failed_stage"] = "runtime_env_maintenance"
+        from qualification.application.runtime_env_maintenance import (
+            empty_evidence as empty_maintenance_evidence,
+        )
+        from qualification.application.runtime_env_maintenance import verify_maintenance
+
+        receipt["runtime_env_maintenance"] = empty_maintenance_evidence()
+        verify_maintenance(
+            protected,
+            token=read_token(args.token_file),
+            manager_prefix=args.manager_prefix,
+            refusal_ids=maintenance_refusal_ids(refusal_ids, args.receipt),
+            evidence=receipt["runtime_env_maintenance"],
         )
         receipt["failed_stage"] = "protected_runtime_surfaces"
         receipt["protected_runtime"] = protected.finish([probe_owner["execution_id"], *refusal_ids])

@@ -392,6 +392,81 @@ oldest failure cannot starve newer eligible work when the batch is small. The co
 records only a bounded, message-redacted `cleanup_error` diagnostic on the retained run
 or pending manifest and exits nonzero after finishing the pass.
 
+## django_ray_runtime_env
+
+Verify or explicitly rewrite one bounded range of retained RuntimeEnv snapshots:
+
+```bash
+python manage.py django_ray_runtime_env --mode dry-run --format json
+python manage.py django_ray_runtime_env --mode rewrite --confirm --format json
+python manage.py django_ray_runtime_env --mode rewrite --confirm --format json --cursor=TOKEN
+python manage.py django_ray_runtime_env --mode check --format json
+```
+
+| Option | Default | Maximum or contract |
+|---|---|---|
+| `--database` | `default` | Plain SQLite file or PostgreSQL Django database alias; custom backends and unsupported connection options fail closed |
+| `--mode` | `dry-run` | Every mode requires a valid selected active key; `dry-run` and `check` authenticate/inspect without writes; `rewrite` converts plaintext and rewraps old keys |
+| `--confirm` | Off | Required only for `rewrite`; configuration must select encrypted/required writes and an active key |
+| `--format` | `human` | `human` or versioned `json` |
+| `--cursor=TOKEN` | Fresh pass | Same mode, database/table and key policy; changing `SECRET_KEY` invalidates tokens |
+| `--max-rows` | 100 | 1–1,000 candidate rows; one additional numeric PK detects continuation |
+| `--max-bytes` | 65,536 | 1–1,048,576 bytes per stored or replacement snapshot; identity fields have separate fixed limits |
+| `--max-total-bytes` | 1,048,576 | 1–8,388,608 bytes of hydrated row text and generated replacement envelopes |
+| `--max-seconds` | 10 | 0.1–60 seconds of cooperative elapsed budget |
+| `--max-details` | 20 | 0–100 numeric PK/outcome details; omitted details are counted |
+
+JSON schema `django-ray.runtime-env-maintenance`, version 1, reports fixed outcome
+counters, `processed`, `processed_bytes`, bounded `details`, `details_omitted`,
+`after`, `high_water`, `has_more`, `next_cursor`, `budget_exhausted`, `stop_code`,
+`cleanup_confirmed`, `range_complete`, `limits`, `sql_statements` and `exit_code`.
+It always sets `current_table_only=true`, `fresh_pass_required=true`,
+`backup_obligations="not_verified"` and `key_retirement_authorized=false`.
+No plaintext, ciphertext, task/profile/hash value, key ID/material or raw provider
+error is printed. Command-owned SQL uses raw independent driver cursors, so enabling
+Django `DEBUG` does not retain snapshot or compare-and-set parameters in Django's
+query log. Administrators must still protect database/server-side query logging.
+
+Outcomes distinguish `current_key`, `plaintext`, `old_key`, `rewritten`, `rewrapped`,
+`missing_identity`, `invalid_snapshot`, `unavailable_key`, `row_too_large`, `changed`,
+`missing`, `encryption_failed`, `commit_uncertain`, `database_unavailable` and
+`interrupted`. A malformed row does not stop later rows in the finite page.
+`range_complete` says only that traversal reached this pass's high-water mark;
+it is not a consistent database snapshot or a clean-policy result.
+
+- Exit **0**: the selected range completed and all observed rows are authenticated
+  under the active key, either already or after confirmed maintenance.
+- Exit **1**: an observed invalid/unsupported snapshot, missing identity/key,
+  oversized row or encryption failure needs attention. Such rows remain unchanged.
+- Exit **2**: continuation, budget exhaustion, pending dry-run/check work,
+  concurrent changes, database failure, uncertain commit, interruption or unconfirmed
+  cleanup leaves incomplete evidence. Observed row blockers take precedence and
+  may return 1 while the report also retains continuation.
+
+Keep all page reports: the last page does not erase earlier failures. A cursor is
+an encrypted scan boundary, not mutation authority. The command binds PostgreSQL
+schema/table identity and effective connection defaults, and SQLite file identity;
+a restore, namespace change or key-policy change requires a fresh pass. Start a
+fresh check after completing a cursor chain to revisit changes and later inserts.
+An uncertain commit never advances past its affected row. Repeating from that
+boundary authenticates any already committed replacement without rewriting it again.
+
+Only `runtime_env_json` is updated under an exact compare-and-set. Task identity,
+profile, plaintext hash, attempt/generation, state, owner, cancellation and history
+are preserved. Oversized or corrupt SQLite identity fields are bounded before
+Python hydration; SQLite's unenforced character declarations are not trusted.
+Only one bounded snapshot is hydrated at a time. Registered inputs, results,
+RuntimeEnv archives and restorable backups are not scanned or deleted.
+
+The elapsed budget is **cooperative, not a hard wall-clock deadline**. Owned
+PostgreSQL connections use a 3-second connect timeout, 1-second statement timeout
+and 250-millisecond lock timeout. SQLite uses a 250-millisecond busy timeout and a
+deadline-aware query progress callback. Trusted settings import, driver/DNS/OS
+behavior, cryptography and final cleanup are outside a hard total-time guarantee.
+The command closes only its own connection and does not change caller callbacks,
+transactions or settings. See the [rotation and required-mode rollout](../runtime-environments.md#maintain-retained-snapshots-and-require-encryption)
+before changing policy or removing keys.
+
 ## django_ray_audit_workflow_progress
 
 Run a read-only, whole-run integrity check for one exact workflow identity:

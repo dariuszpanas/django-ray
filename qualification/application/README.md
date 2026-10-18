@@ -167,7 +167,9 @@ The task environment preserves the validated Ray Client target in the separate
 with its native GCS target after applying RuntimeEnv; the settings overlay validates the separate
 Client target for application configuration while leaving the supervisor's process environment
 unchanged. Core workers retain the same explicit Client configuration. Database and encryption
-settings remain inherited from the disposable Pod's configuration and Secret.
+keys remain inherited from the disposable Pod's configuration and Secret. This owned overlay
+requires encrypted snapshots with `RUNTIME_ENV_STORAGE_MODE="required"`; the package default
+remains unchanged.
 The fixture declares a retry environment revision derived only from its validated Ray address,
 fixed profile labels and non-secret storage probe. Credentials are excluded. The recovery endpoint
 requires this identity for the explicit environment variables; the locked archive retains its
@@ -207,6 +209,29 @@ The core receipt retains only four booleans per fixed case; a second-case timeou
 the first case's observations but fails the stage. Missing, partial or unexpected negative
 case evidence cannot pass collection. Task identities, snapshot hashes, ciphertext,
 envelopes, keys and raw exceptions from these assertions never enter their receipts.
+
+The separate `runtime_env_maintenance` observer then exercises the public maintenance
+command in each generation. It bounds inventory to 800 rows and 8 MiB, each snapshot
+to 64 KiB, and each rewrite/check pass to eight 100-row pages within one shared
+60-second observation deadline. It creates two captured probes in an unconsumed
+owned queue: one plaintext snapshot and one encrypted under a temporary old key.
+Only the maintenance command receives that old key. Rewrite must preserve every
+other concrete field and all unrelated rows; a complete check must authenticate
+both replacements under the current key. Expected malformed fixture rows remain
+visible and unchanged, including the exact prior-generation identities from the
+validated receipt. No later successful page can erase an earlier unexpected outcome.
+
+After verification, both probes enter the ordinary queue and the existing manager
+must execute the original canary with the installed package. A third plaintext
+probe must fail before dispatch under required mode, and its API retry must return
+409 without changing its execution or attempt. Only these three known terminal
+owned rows are removed. Twenty fixed boolean assertions require bounded scans,
+identity and unrelated-row preservation, real execution, refusal, protected HTTP
+output and successful cleanup. Missing or partial evidence fails collection.
+The existing three-row protected-log and process observer keeps its original
+scope; these new probes do not extend that proof to arbitrary process surfaces.
+Namespace cleanup remains mandatory, and no resource allocation or outer phase
+deadline increases. This current-table fixture does not qualify backup key retirement.
 
 This provides deployed assertions for manager refusal, absence of retained submission/result
 identity and retry preservation; it does not independently observe every possible external

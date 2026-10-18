@@ -73,7 +73,7 @@ def test_offline_profile_reuses_locked_archive_without_mutating_base(environment
     assert config["TASKS"] == base.TASKS
     assert config["INSTALLED_APPS"] == base.INSTALLED_APPS
     assert config["MIDDLEWARE"] == base.MIDDLEWARE
-    assert config["DJANGO_RAY"]["RUNTIME_ENV_STORAGE_MODE"] == "encrypted"
+    assert config["DJANGO_RAY"]["RUNTIME_ENV_STORAGE_MODE"] == "required"
     assert config["DJANGO_RAY"]["RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY"] == "qualification"
     assert config["DJANGO_RAY"]["RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK"] is False
 

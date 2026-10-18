@@ -123,6 +123,7 @@ TEXT_VALUES = frozenset(
         "sync",
         "plaintext",
         "encrypted",
+        "required",
         "none",
         "digest",
         "filesystem",

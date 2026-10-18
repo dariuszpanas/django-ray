@@ -23,6 +23,26 @@ TASK_ID = "25200000-0000-4000-8000-000000000002"
 MARKER = "django-ray-runtime-env-encryption-canary-v1-7c4e2a91"
 
 
+@pytest.fixture(autouse=True)
+def maintenance_observer(monkeypatch):
+    from qualification.application import lease_policy, runtime_env_maintenance
+
+    def verify(*args, evidence, **kwargs):
+        evidence.update(
+            {
+                case: dict.fromkeys(facts, True)
+                for case, facts in runtime_env_maintenance.FACTS.items()
+            }
+        )
+
+    monkeypatch.setattr(runtime_env_maintenance, "verify_maintenance", verify)
+    monkeypatch.setattr(
+        lease_policy,
+        "verify_lease_policy",
+        lambda **kwargs: kwargs["evidence"].update(dict.fromkeys(lease_policy.FACTS, True)),
+    )
+
+
 @pytest.fixture
 def durable(monkeypatch):
     config = {
@@ -320,6 +340,10 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
         assert not path.exists()
     else:
         assert receipt["status"] == "passed"
+        from qualification.application import lease_policy, runtime_env_maintenance
+
+        lease_policy.validate_evidence(receipt["lease_policy"])
+        runtime_env_maintenance.validate_evidence(receipt["runtime_env_maintenance"])
         runtime_env_refusal.validate_evidence(receipt["runtime_env_refusals"])
         assert (
             json.loads(path.read_bytes())["runtime_env_refusals"] == receipt["runtime_env_refusals"]
@@ -382,3 +406,54 @@ def test_core_requires_result_presentation_before_writing_a_passing_receipt(
         assert "ordinary_results" not in receipt
     else:
         result_presentation.validate_evidence(receipt["ordinary_results"])
+
+
+@pytest.mark.parametrize("stage", ["lease_policy", "runtime_env_maintenance"])
+def test_operational_observer_failure_stops_core_and_retains_only_fixed_facts(
+    tmp_path, monkeypatch, capsys, stage
+):
+    from qualification.application import (
+        dashboard_browser,
+        lease_policy,
+        runtime_env_maintenance,
+        runtime_env_refusal,
+    )
+    from qualification.application.api import ApiEvidence
+    from qualification.application.safe_diagnostics import lines
+
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setattr("django.setup", lambda: None)
+    monkeypatch.setattr(run_core, "read_token", lambda _path: "fixed-token")
+    monkeypatch.setattr(
+        run_core, "verify_application_api", lambda *_a, **_k: ApiEvidence(task_id=TASK_ID)
+    )
+    monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {"execution_id": 1})
+    monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *_a, **_k: TASK_ID)
+    monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *_a: {})
+    monkeypatch.setattr(runtime_env_refusal, "verify_refusals", lambda *_a, **_k: [2, 3])
+
+    def fail(*args, evidence, **kwargs):
+        if stage == "lease_policy":
+            assert kwargs["task_id"] == TASK_ID
+            evidence["authority_matched"] = True
+        else:
+            assert kwargs["refusal_ids"] == [2, 3]
+            evidence["scan"]["bounded_inventory"] = True
+        raise ValueError("private operational error must be discarded")
+
+    module, function = (
+        (lease_policy, "verify_lease_policy")
+        if stage == "lease_policy"
+        else (runtime_env_maintenance, "verify_maintenance")
+    )
+    monkeypatch.setattr(module, function, fail)
+    path = tmp_path / "core.json"
+    assert run_core.main(["--token-file", "unused", "--receipt", str(path)]) == 1
+    output = capsys.readouterr().out
+    assert "private operational error" not in output
+    assert not path.exists()
+    receipt = json.loads(output)
+    assert receipt["failed_stage"] == stage
+    assert lines(output.encode())[0]["failed_stage"] == stage
+    with pytest.raises(ValueError):
+        module.validate_evidence(receipt[stage])

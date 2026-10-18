@@ -28,7 +28,7 @@ RUNTIME_ENV_ENVELOPE_VERSION = 1
 RUNTIME_ENV_ENVELOPE_ALGORITHM = "AES-256-GCM"
 DJANGO_SECRET_KEY_ID = "django-secret"
 
-_STORAGE_MODES = frozenset({"plaintext", "encrypted"})
+_STORAGE_MODES = frozenset({"plaintext", "encrypted", "required"})
 _KEY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 _TASK_ID = re.compile(r"^[\x21-\x7e]{1,255}$")
@@ -171,7 +171,7 @@ def validate_runtime_env_encryption_settings(
     mode = config.get("RUNTIME_ENV_STORAGE_MODE", "plaintext")
     if not isinstance(mode, str) or mode not in _STORAGE_MODES:
         raise RuntimeEnvEncryptionError(
-            "django-ray: RUNTIME_ENV_STORAGE_MODE must be 'plaintext' or 'encrypted'"
+            "django-ray: RUNTIME_ENV_STORAGE_MODE must be 'plaintext', 'encrypted', or 'required'"
         )
 
     raw_keys = config.get("RUNTIME_ENV_ENCRYPTION_KEYS", {})
@@ -238,10 +238,10 @@ def validate_runtime_env_encryption_settings(
             "django-ray: RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY does not resolve to a "
             "configured RuntimeEnv encryption key"
         )
-    if mode == "encrypted" and active_key_id is None:
+    if mode in {"encrypted", "required"} and active_key_id is None:
         raise RuntimeEnvEncryptionError(
             "django-ray: RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY is required when "
-            "RUNTIME_ENV_STORAGE_MODE is 'encrypted'"
+            "RUNTIME_ENV_STORAGE_MODE is 'encrypted' or 'required'"
         )
 
     return RuntimeEnvEncryptionConfig(

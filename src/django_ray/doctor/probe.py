@@ -66,7 +66,7 @@ def configuration(settings: object) -> dict:
     values = {}
     for key, name, choices in (
         ("RUNNER", "runner", {"ray_core", "ray_job"}),
-        ("RUNTIME_ENV_STORAGE_MODE", "storage_mode", {"plaintext", "encrypted"}),
+        ("RUNTIME_ENV_STORAGE_MODE", "storage_mode", {"plaintext", "encrypted", "required"}),
         ("INPUT_STORAGE_BACKEND", "input_backend", {None, "filesystem", "s3", "gcs"}),
         ("RESULT_STORAGE_BACKEND", "result_backend", {"digest", "filesystem", "s3", "gcs"}),
     ):

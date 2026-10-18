@@ -150,10 +150,16 @@ def parse_receipts(
             if expected_profile is not None and value["qualification_profile"] != expected_profile:
                 raise ValueError("First-workflow receipt belongs to another resource profile")
         elif value["layer"] == "application_core":
+            from qualification.application.lease_policy import validate_evidence as validate_lease
             from qualification.application.protected_runtime import validate as validate_protected
+            from qualification.application.runtime_env_maintenance import (
+                validate_evidence as validate_maintenance,
+            )
             from qualification.application.runtime_env_refusal import validate_evidence
 
             validate_evidence(value.get("runtime_env_refusals"))
+            validate_lease(value.get("lease_policy"))
+            validate_maintenance(value.get("runtime_env_maintenance"))
             validate_result_evidence(value.get("ordinary_results"))
             validate_protected(value.get("protected_runtime"))
         elif value["layer"] == "application_rq2":

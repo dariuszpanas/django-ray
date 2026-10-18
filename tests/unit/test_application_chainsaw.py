@@ -6,14 +6,20 @@ import subprocess
 import pytest
 
 from qualification.application import run_chainsaw as runner
+from qualification.application.lease_policy import FACTS as LEASE_FACTS
 from qualification.application.result_presentation import EVIDENCE as RESULT_EVIDENCE
+from qualification.application.runtime_env_maintenance import FACTS as MAINTENANCE_FACTS
 from qualification.application.runtime_env_refusal import CASES, FACTS
 
 
 def receipt(layer="application_setup", **changes):
     defaults = {}
     if layer == "application_core":
+        defaults["lease_policy"] = dict.fromkeys(LEASE_FACTS, True)
         defaults["runtime_env_refusals"] = {case: dict.fromkeys(FACTS, True) for case in CASES}
+        defaults["runtime_env_maintenance"] = {
+            case: dict.fromkeys(facts, True) for case, facts in MAINTENANCE_FACTS.items()
+        }
         defaults["ordinary_results"] = dict(RESULT_EVIDENCE)
         defaults["protected_runtime"] = {
             "api_clear": True,
@@ -43,6 +49,36 @@ def test_core_receipt_requires_both_exact_negative_runtime_env_cases(failure):
         value["runtime_env_refusals"][CASES[1]][FACTS[0]] = 1 if failure == "non-boolean" else False
     with pytest.raises(ValueError):
         runner.parse_receipts(json.dumps(value).encode(), ("after-core",))
+
+
+@pytest.mark.parametrize("failure", ["missing", "false", "extra", "non-boolean"])
+@pytest.mark.parametrize("generation", ["before", "after"])
+def test_core_receipt_requires_complete_maintenance_in_both_generations(failure, generation):
+    value = json.loads(receipt("application_core"))
+    if failure == "missing":
+        del value["runtime_env_maintenance"]
+    elif failure == "extra":
+        value["runtime_env_maintenance"]["untrusted"] = "private-value"
+    else:
+        value["runtime_env_maintenance"]["plaintext_refusal"]["manager_refused"] = (
+            1 if failure == "non-boolean" else False
+        )
+    with pytest.raises(ValueError, match="maintenance evidence"):
+        runner.parse_receipts(json.dumps(value).encode(), (f"{generation}-core",))
+
+
+@pytest.mark.parametrize("failure", ["missing", "false", "extra", "non-boolean"])
+@pytest.mark.parametrize("generation", ["before", "after"])
+def test_core_receipt_requires_complete_lease_policy_in_both_generations(failure, generation):
+    value = json.loads(receipt("application_core"))
+    if failure == "missing":
+        del value["lease_policy"]
+    elif failure == "extra":
+        value["lease_policy"]["untrusted"] = "private-value"
+    else:
+        value["lease_policy"]["startup_refused"] = 1 if failure == "non-boolean" else False
+    with pytest.raises(ValueError, match="Lease policy"):
+        runner.parse_receipts(json.dumps(value).encode(), (f"{generation}-core",))
 
 
 @pytest.mark.parametrize(

@@ -22,6 +22,14 @@ frozen-source qualification and a separate publication decision.
   Native crash rehearsals use this public transition before their six-second
   recovery scenario and restore the authority after shutdown, preserving
   retained task, attempt, workflow and lease history.
+- Add bounded `django_ray_runtime_env` dry-run/check and explicit rewrite/rewrap
+  maintenance for identified retained RuntimeEnv snapshots. Preserve captured
+  identity and attempt history with envelope-only compare-and-set updates;
+  retain malformed, missing-key and uncertain rows with fixed diagnostics.
+  Current-table verification never authorizes retirement of backup keys.
+- Add opt-in `RUNTIME_ENV_STORAGE_MODE="required"`: encrypt new snapshots and
+  refuse plaintext execution and manual/automatic retry before submission or
+  history mutation. Existing modes remain dual-read and the default is unchanged.
 - Add an advisory YAGA test-planning pilot that compares proposed selections
   with the existing five-workflow qualification policy. An explicit manual run
   can exercise all eight workload cells through the existing workflows.

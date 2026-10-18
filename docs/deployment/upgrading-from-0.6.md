@@ -108,6 +108,18 @@ observed blocker.
 
 ## Migration and execution boundary
 
+The candidate also adds bounded retained RuntimeEnv maintenance and opt-in
+`RUNTIME_ENV_STORAGE_MODE="required"`. Existing `plaintext` and `encrypted` modes
+keep their dual-read behavior. Required mode encrypts new snapshots and refuses
+plaintext execution and retry; it must be an explicit coordinated policy change.
+Use [`django_ray_runtime_env`](../reference/cli.md#django_ray_runtime_env) dry-run,
+rewrite and complete check passes with the retained decryption ring before
+enabling it. Preserve immutable task/profile/hash and attempt identity; malformed,
+unidentified, missing-key or concurrently changed rows require explicit attention.
+Current-table verification never authorizes removing keys needed by backups.
+Review the [key rotation and rollback procedure](../runtime-environments.md#maintain-retained-snapshots-and-require-encryption)
+and exercise encrypted execution plus plaintext refusal before resuming submissions.
+
 Migration `0028_worker_lease_policy` adds one database-scoped common lease policy,
 seeded explicitly to 60 seconds. It preserves existing task and lease rows and does
 not infer the old deployment's configured duration. Retain migration 0027 and run

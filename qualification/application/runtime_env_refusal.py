@@ -93,7 +93,9 @@ def create_fixtures() -> tuple[Fixture, ...]:
     return tuple(fixtures)
 
 
-def inspect_failure(fixture: Fixture, *, manager_prefix: str) -> bytes | None:
+def inspect_failure(
+    fixture: Fixture, *, manager_prefix: str, historical_owner: bool = False
+) -> bytes | None:
     """Return an internal full-row snapshot only after exact refusal invariants."""
     from datetime import timedelta
     from importlib.metadata import version
@@ -116,9 +118,7 @@ def inspect_failure(fixture: Fixture, *, manager_prefix: str) -> bytes | None:
         or row.runtime_env_profile != "thin"
         or row.runtime_env_json != fixture.serialized
         or row.runtime_env_hash != fixture.digest
-        or row.error_message
-        != f"django-ray: Persisted RuntimeEnv snapshot for task {row.pk}: "
-        + ERRORS[CASES.index(fixture.case)]
+        or row.error_message != expected_error(fixture)
         or not row.started_at
         or not row.finished_at
         or not row.created_at <= row.started_at <= row.finished_at
@@ -143,14 +143,19 @@ def inspect_failure(fixture: Fixture, *, manager_prefix: str) -> bytes | None:
     now = timezone.now()
     current_version = version("django-ray")
     if (
-        not worker.is_active
-        or not worker.hostname.startswith(manager_prefix)
+        not worker.hostname.startswith(manager_prefix)
         or worker.django_ray_version != current_version
         or row.managed_with_django_ray_version != current_version
         or not worker.started_at <= row.started_at <= row.finished_at <= now
-        or not now - timedelta(seconds=get_settings()["WORKER_LEASE_SECONDS"])
-        <= worker.last_heartbeat_at
-        <= now
+        or (
+            not historical_owner
+            and (
+                not worker.is_active
+                or not now - timedelta(seconds=get_settings()["WORKER_LEASE_SECONDS"])
+                <= worker.last_heartbeat_at
+                <= now
+            )
+        )
     ):
         raise ValueError("RuntimeEnv refusal has no current live manager owner")
     attempts = list(row.attempts.order_by("attempt_number", "pk")[:2])
@@ -185,6 +190,15 @@ def inspect_failure(fixture: Fixture, *, manager_prefix: str) -> bytes | None:
     if len(snapshot) > MAX_SNAPSHOT_BYTES:
         raise ValueError("RuntimeEnv refusal snapshot exceeded its internal budget")
     return snapshot
+
+
+def expected_error(fixture: Fixture) -> str:
+    if fixture.case == "required_plaintext":
+        return "django-ray: Persisted RuntimeEnv plaintext is forbidden by required encryption"
+    return (
+        f"django-ray: Persisted RuntimeEnv snapshot for task {fixture.pk}: "
+        + ERRORS[CASES.index(fixture.case)]
+    )
 
 
 def verify_refusals(request, *, token: str, manager_prefix: str, evidence: dict) -> list[int]:
