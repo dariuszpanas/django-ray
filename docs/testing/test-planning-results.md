@@ -1,7 +1,8 @@
 # Advisory result measurements
 
-Phase 4B adds an offline receipt normalizer and a separate measurement-record format.
-They do not dispatch jobs, change required checks, or activate selective execution.
+The receipt normalizer and measurement/report builders are resource-free APIs.
+The manual shadow workflow uses them to observe one complete qualification run;
+it does not change required checks or activate selective execution.
 The [shadow guide](test-planning-shadow.md) describes normalization. YAGA's installed
 `test evaluate` checks the normalized cells against a trusted plan and independent
 policy, manifest, source, run, and aggregate-attempt identities.
@@ -10,7 +11,9 @@ The normalizer now supports the reviewed receipt contract at
 `45180ea0e47aab600ed5b77312b636c7dfdb5282`. Required `Commit Messages`, `CI Gate`,
 and `Qualification Gate` remain authoritative. This separate tooling change does
 not inherit that accepted candidate's publication readiness or authorize a release.
-Workflow adoption, measurement experiments and selective execution remain disabled.
+Selective execution and adoption remain disabled. Manual full-run publication
+observations are an initial measurement step, not the controlled independent-arm
+experiment required for an adoption decision.
 
 ## Retain one observation
 
@@ -30,9 +33,8 @@ then retain those exact artifacts with the observation.
 ### Evaluate with the reviewed implementation
 
 Released `yaga-cli==0.2.0` does not contain `test evaluate`. Use the reviewed
-phase-4B source in an isolated tool environment; the existing comparison workflow
-keeps its phase-3 pin. Tool provisioning may require a download, but evaluation
-itself reads only the supplied local artifacts:
+phase-4B source in an isolated tool environment. Tool provisioning may require a
+download, but evaluation itself reads only the supplied local artifacts:
 
 ```bash
 uvx --from "yaga-cli @ git+https://github.com/dariuszpanas/yaga.git@3ad2ef919d83d82b917e5d7a6f4ab161970e959f" \
@@ -130,13 +132,89 @@ or missing cell's resource cost is unknown, or an attempt is still pending or bl
 Partial attempt durations remain visible without implying a complete total.
 The count is not billing evidence.
 
-The format deliberately emits no savings estimate. A shorter selected catalog or
-sum of excluded historical job times is not a measurement. Phase 4C must compare
-same-source current and proposed execution with a compatible full failure oracle,
+The observation format deliberately emits no savings estimate. A shorter catalog
+or sum of excluded historical job times is not a measurement. Independent experiments
+must compare same-source current and proposed execution with a full failure oracle,
 balanced arm order, fixed environments/cache policy, interference controls, and a
 declared resource budget. Required jobs remain running. The owner chooses adoption
 criteria after discovery and before activation; incomplete and slow observations
 must remain in the cohort.
+
+## Shared full-run publication feedback
+
+The manual shadow workflow always executes all five qualification workflows and
+all eight cells. Separate observers wait for the cells in the current required
+selector, the proposed selection, and the full catalog. They authenticate actual
+job attempts and original artifacts, normalize acceptance and cleanup receipts,
+and evaluate each selection before publishing its result. Existing required CI
+continues independently. This integration may propose the full catalog while
+the current selector is empty: full-versus-proposed lead is then zero, and a
+current-versus-proposed benefit comparison is unavailable.
+
+An observer cannot embed its eventual upload completion time in the artifact it
+is uploading. Its frozen observation therefore uses `feedback_at: null`. After
+upload, the final collector authenticates the artifact ID, original ZIP SHA-256
+and successful `Publish validated advisory feedback` step. That step's
+`completed_at` is the conservative confirmed-publication boundary. Artifact
+`created_at` remains provenance only: creation can precede upload and finalization.
+Polling, acquisition, validation, evaluation and upload delays are included;
+job completion times and sums of job durations are not substitutes. Identical
+selections share one evaluation/publication, with each arm's own plan and
+observation retained inside that artifact. Empty identical selections also share
+one publication; neither case receives a fabricated speedup.
+
+`scripts.test_planning_feedback.build_feedback_report(expected, publications)`
+produces a separate `test-feedback-version: 1` report.
+`encode_feedback_report(report)` emits canonical UTF-8 JSON bounded to 4 MiB
+including its newline. Observation-v1 remains frozen with `comparison: null`.
+Both functions are pure; acquisition callers establish authenticity and YAGA
+evaluation first. A hash in a JSON object is not verification of either step.
+
+The closed `expected` context contains exact `execution_commit`, `execution_tree`,
+`adapter_source`, `run_id`, `attempt`, `bindings_sha256`, and `arms`. Each of the
+three arms (`current`, `proposed`, `full`) contains independently verified
+`policy_sha256`, `plan_digest`, and `selected: [{suite, variant}]`. The full arm
+must contain all eight cells. Any native selection contains all four variants.
+Proposed and full plans share the reviewed policy; the current selector's generated
+policy has its own identity. All arms retain the same actual source, run, attempt,
+execution manifest and shared-cell evidence.
+
+Each `publications` entry is either null for unavailable evidence, or the closed
+record `{observation, observation_sha256, publication_id, published_at,
+publication_time_source, publication_sha256}`. The observation hash covers its exact canonical bytes,
+including the newline. The publication hash covers the original provider ZIP.
+`published_at` is the authenticated UTC upload-step completion timestamp, with
+`publication_time_source: successful-upload-step-completion`. Both fields are null
+when the boundary is unknown. Runner estimates and artifact creation timestamps
+cannot substitute for this confirmed boundary.
+Identical selections must name the same publication ID, timestamp and ZIP digest.
+Cross-source or cross-attempt assembly, missing native variants, changed shared-cell
+evidence and inconsistent policies fail with `FeedbackError`.
+
+The report retains signed publication differences for current versus proposed,
+full versus proposed, and full versus current. Positive seconds mean the selected
+arm published earlier; negative seconds mean it published later. A validated lead
+requires passing selected cells and a complete passing full oracle. Failed or
+incomplete full cells block that claim. Excluded failures are listed for each
+selection, including failed retries whose final outcome was passed. Retained pending,
+blocked or cancelled retries make the oracle incomplete even after a passing retry.
+Unavailable publications and timestamps remain null with explicit reasons. Comparing an empty
+selection with a nonempty one also leaves the validated lead unavailable. Any
+measured raw difference remains visible even when the oracle or comparator blocks
+a validated result.
+
+This shared execution measures earlier **advisory publication**, including its
+observer overhead. It cannot establish selective-only runtime, runner-minute
+savings, earlier merge readiness or independent-arm causality; those report fields
+remain null. Required checks still govern merging, and all full-run resources were
+consumed. The retained `runtime-costs.json` separately records observed qualification
+and observer runner seconds, including observers' idle polling overhead. This is
+additional runner usage that can incur charges; it is not billing evidence or saved
+compute. Aggregate duration stays unknown while that job is still running.
+Record a zero or negative result without choosing a different base after
+seeing the outcome. Choose any later representative same-source revision and its
+comparison base in advance. The owner chooses the benefit threshold after discovery
+and before held-out confirmation or activation.
 
 ## Resource-free validation
 
@@ -144,5 +222,6 @@ Run the new unit files together with the existing shadow adapter tests in an
 environment with pytest and the repository's ordinary test dependencies. These
 tests use synthetic receipts and timestamps and start no Ray, Docker, or Kubernetes
 resources. Consumer normalization does not add YAGA to package runtime dependencies;
-offline evaluator integration uses the reviewed phase-4B revision above.
-No workflow or YAGA pin is changed by this implementation.
+offline evaluator integration uses the reviewed phase-4B revision above. Feedback
+tests exercise missing publications, exclusions, retry failures, identical aliases,
+identity mismatch, signed lead and bounded output without running qualifications.

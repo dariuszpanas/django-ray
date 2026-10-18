@@ -38,6 +38,7 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
             "latency",
             "cancellation",
             "monitoring",
+            "evaluation",
             "shadow-aggregate",
         )
     },
