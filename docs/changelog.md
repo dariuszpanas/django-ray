@@ -37,6 +37,11 @@ frozen-source qualification and a separate publication decision.
   this catalogue does not replace the separate transaction, data-upgrade,
   installed-artifact or deployment obligations. See the
   [pilot contract](testing/test-planning-shadow.md).
+- Normalize authenticated qualification receipts and evaluate advisory plans with
+  YAGA. Retain source-bound publication timing and explicit unavailable comparisons;
+  these observations do not establish selective execution savings or release approval.
+  The first hosted observer failed after all workload cells passed; its feedback
+  remains unavailable pending [investigation](https://github.com/dariuszpanas/django-ray/issues/644).
 - Add a blocking Python 3.15 preparation job that builds distributions, compiles
   source, and runs selected tests against an installed wheel without Ray. Full
   runtime support remains Python 3.12–3.14 until upstream Ray wheels and complete
@@ -114,6 +119,8 @@ frozen-source qualification and a separate publication decision.
 
 ### Changed
 
+- Pin isolated repository checks, the commit Action and advisory planning/evaluation
+  to released YAGA 0.3.0. Package runtime dependencies and required gates are unchanged.
 - Align the disabled Compiled Graph pilot's django-ray source pin with the
   0.7.0 candidate. Its historical runtime profile remains unchanged; this does
   not enable Compiled Graph or promote its prior cleanup evidence.
