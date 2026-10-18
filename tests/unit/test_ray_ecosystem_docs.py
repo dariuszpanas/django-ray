@@ -13,7 +13,7 @@ GUIDE = DOCS / "ray-ecosystem.md"
 
 MATRIX_HEADERS = (
     "Component",
-    "Install and django-ray 0.6.0 status",
+    "Install and django-ray support boundary",
 )
 EXPECTED_MATRIX = {
     "Ray Core": ("ray[default]", "First-class django-ray execution path"),

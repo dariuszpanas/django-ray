@@ -406,7 +406,11 @@ to use protocol `1` and upgraded task managers to stop and reconcile before exac
 0.4.0 code started. Reversing `0020` and then `0019` was a separate stopped-writer
 maintenance operation that lost protocol, provenance, capability, policy, token,
 and fencing data. These historical preconditions are not a rollback recipe for
-0.6.0; use the [current independent backup/restore procedure](deployment/upgrading-from-0.5.md#rollback-decisions).
+0.6.0 or 0.7.0. Use the [0.6 to 0.7 independent backup/restore
+procedure](deployment/upgrading-from-0.6.md#rollback-decisions) for the current
+candidate, including restoration of matching artifacts after new rq2 references
+have been written. The [0.5 to 0.6 procedure](deployment/upgrading-from-0.5.md#rollback-decisions)
+remains the historical guide for that boundary.
 
 ## Useful Queries
 

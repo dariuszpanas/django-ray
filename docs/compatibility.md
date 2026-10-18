@@ -130,8 +130,8 @@ Compiled Graph retains its separate exact-tuple capability policy.
 Django 6.0.8 is the django-ray security floor. Django 6.0.0 through 6.0.7 are not
 supported; newer compatible releases are exercised by the latest-dependency lane.
 
-Ray 2.58.0 remains the security and runtime baseline for django-ray 0.6.0,
-unchanged from 0.5.0. Ray 2.57 added
+Ray 2.58.0 remains the security and runtime baseline for the django-ray 0.7.0
+candidate, unchanged from 0.5.0 and 0.6.0. Ray 2.57 added
 [Dashboard log-path validation](https://github.com/ray-project/ray/pull/64701),
 which is absent from 2.56.0 and 2.56.1. Ray 2.58 additionally fixes
 [nested Parquet/Lance pickle handling](https://github.com/ray-project/ray/pull/64881)
@@ -140,11 +140,12 @@ The latter fixes concern optional application-owned Data and Serve workloads; th
 bundled Data recipe reads JSON, not Lance or nested pickle data. These extend the
 earlier fixes behind django-ray 0.4's Ray 2.56.0 floor.
 
-Upgrade the task managers, Ray head, and Ray workers together before installing
-django-ray 0.6.0; do not use a mixed Ray minor-version cluster as a rolling-upgrade
-shortcut. The Ray upgrade does not activate Compiled Graph, task-event migration,
-Sandbox, or a new execution protocol. Existing cancellation, ownership and durable
-completion fences remain necessary.
+Keep the task managers, Ray head, and Ray workers on one compatible tuple when
+installing django-ray 0.7.0; follow the [coordinated Beta upgrade
+procedure](deployment/upgrading-from-0.6.md). Do not use a mixed Ray minor-version
+cluster as a rolling-upgrade shortcut. The Ray upgrade does not activate Compiled
+Graph, task-event migration, Sandbox, or a new execution protocol. Existing
+cancellation, ownership and durable completion fences remain necessary.
 
 The package dependency range is a resolver boundary, not permission to mix remote
 runtime tuples. A target-attested task-manager cohort must match the configured Ray
