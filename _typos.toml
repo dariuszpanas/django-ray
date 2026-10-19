@@ -2,6 +2,9 @@
 [files]
 extend-exclude = ["*.png", "*.ico"]
 
+[default.extend-words]
+certifi = "certifi"
+
 # PowerShell case-insensitive inequality operator in the published recipe.
 [type.powershell-example]
 extend-glob = ["README.md", "test_docker_qualification.py"]

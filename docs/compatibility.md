@@ -326,12 +326,21 @@ dependency is no longer supportable. A published dependency security fix is such
 support boundary: the repository lock protects its own reproducible environment, while
 the declared lower bound controls what a downstream fresh install may resolve.
 
-The runtime security floors also require `multidict>=6.9.1`, `urllib3>=2.8.0`,
-and `virtualenv>=21.7.13`. These dependencies arrive through Ray's mandatory
+The runtime security floors also require `certifi>=2026.10.19`, `multidict>=6.9.1`,
+`opentelemetry-api>=1.45.1`, `urllib3>=2.8.0`, and `virtualenv>=21.14.9`.
+These dependencies arrive through Ray's mandatory
 extras; explicit package requirements protect fresh downstream installs as well
 as the committed lock. Updating an unrelated dependency does not necessarily
 refresh these transitive packages. Current advisory checks can therefore fail
 on an unchanged source commit even when its Python tests continue to pass.
+
+The committed OpenTelemetry packages move together to the compatible 1.45.1/0.66b1
+release family. Rebuild images and recreate affected virtual environments after
+upgrading: patched virtualenv applies to newly generated launchers and does not
+retroactively repair launchers in existing environments. See the
+[certifi advisory](https://github.com/pypa/advisory-database/blob/main/vulns/certifi/PYSEC-2026-4320.yaml),
+[OpenTelemetry advisory](https://github.com/open-telemetry/opentelemetry-python/security/advisories/GHSA-xcq7-p3pf-p88h),
+and [virtualenv advisory](https://github.com/pypa/virtualenv/security/advisories/GHSA-c978-59m8-c77v).
 
 ## Platforms
 

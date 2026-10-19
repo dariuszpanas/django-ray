@@ -531,10 +531,12 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     assert '"pyasn1==0.6.4"' in minimum_install["run"]
     assert '"ray[default]==2.58.0"' in minimum_install["run"]
     assert '"django==6.0.8"' in minimum_install["run"]
+    assert '"certifi==2026.10.19"' in minimum_install["run"]
     assert '"multidict==6.9.1"' in minimum_install["run"]
+    assert '"opentelemetry-api==1.45.1"' in minimum_install["run"]
     assert '"sqlparse==0.6.0"' in minimum_install["run"]
     assert '"urllib3==2.8.0"' in minimum_install["run"]
-    assert '"virtualenv==21.7.13"' in minimum_install["run"]
+    assert '"virtualenv==21.14.9"' in minimum_install["run"]
     assert '"pip-audit==2.10.1"' in minimum_install["run"]
     assert audit_job["name"] == (
         "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
