@@ -111,9 +111,11 @@ def _metadata(
     *,
     ray_requirement: str = "ray[default]>=2.58.0",
     transitive_requirements: tuple[str, ...] = (
+        "certifi>=2026.10.19",
         "multidict>=6.9.1",
+        "opentelemetry-api>=1.45.1",
         "urllib3>=2.8.0",
-        "virtualenv>=21.7.13",
+        "virtualenv>=21.14.9",
     ),
 ) -> bytes:
     return (
@@ -132,14 +134,18 @@ def _write_distributions(
     wheel_requirement: str = "ray[default]>=2.58.0",
     sdist_requirement: str = "ray[default]>=2.58.0",
     wheel_transitives: tuple[str, ...] = (
+        "certifi>=2026.10.19",
         "multidict>=6.9.1",
+        "opentelemetry-api>=1.45.1",
         "urllib3>=2.8.0",
-        "virtualenv>=21.7.13",
+        "virtualenv>=21.14.9",
     ),
     sdist_transitives: tuple[str, ...] = (
+        "certifi>=2026.10.19",
         "multidict>=6.9.1",
+        "opentelemetry-api>=1.45.1",
         "urllib3>=2.8.0",
-        "virtualenv>=21.7.13",
+        "virtualenv>=21.14.9",
     ),
 ) -> None:
     wheel = dist_dir / "django_ray-0.4.0-py3-none-any.whl"
@@ -187,16 +193,24 @@ def test_distribution_archives_reject_a_pre_floor_ray_requirement(
 @pytest.mark.parametrize(
     ("name", "floor", "old_floor"),
     [
+        ("certifi", "2026.10.19", "2026.6.17"),
         ("multidict", "6.9.1", "6.9.0"),
+        ("opentelemetry-api", "1.45.1", "1.45.0"),
         ("urllib3", "2.8.0", "2.7.0"),
-        ("virtualenv", "21.7.13", "21.7.12"),
+        ("virtualenv", "21.14.9", "21.14.8"),
     ],
 )
 @pytest.mark.parametrize("defect", ["missing", "old", "optional", "duplicate"])
 def test_distribution_archives_reject_vulnerable_transitive_requirements(
     tmp_path: Path, artifact: str, name: str, floor: str, old_floor: str, defect: str
 ) -> None:
-    requirements = ["multidict>=6.9.1", "urllib3>=2.8.0", "virtualenv>=21.7.13"]
+    requirements = [
+        "certifi>=2026.10.19",
+        "multidict>=6.9.1",
+        "opentelemetry-api>=1.45.1",
+        "urllib3>=2.8.0",
+        "virtualenv>=21.14.9",
+    ]
     requirements.remove(f"{name}>={floor}")
     if defect == "old":
         requirements.append(f"{name}>={old_floor}")

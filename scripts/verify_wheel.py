@@ -19,9 +19,11 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 TRANSITIVE_SECURITY_FLOORS = {
+    "certifi": "2026.10.19",
     "multidict": "6.9.1",
+    "opentelemetry-api": "1.45.1",
     "urllib3": "2.8.0",
-    "virtualenv": "21.7.13",
+    "virtualenv": "21.14.9",
 }
 
 EXPECTED_TARGET_MODULE_FILES = {

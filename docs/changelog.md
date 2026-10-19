@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Require patched `certifi>=2026.10.19`, `opentelemetry-api>=1.45.1`, and
+  `virtualenv>=21.14.9` in published dependency metadata and the contributor lock.
+  Keep the locked OpenTelemetry family coordinated at 1.45.1/0.66b1 and validate
+  these floors in the minimum-dependency lane, built distributions, and installed
+  wheel. Existing virtualenv launchers require environment recreation to receive
+  the fix; upgrading virtualenv alone does not regenerate them.
+
 ## [0.7.0] - 2026-10-18
 
 ### Added
