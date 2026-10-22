@@ -602,8 +602,188 @@ def test_github_transport_bounds_process_output_and_suppresses_stderr(monkeypatc
 
     monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
     monkeypatch.setattr(subprocess, "Popen", Process)
-    with pytest.raises(acquisition.AcquisitionError, match="github-request-failed"):
+    with pytest.raises(acquisition.AcquisitionError, match="github-response-byte-budget"):
         acquisition.Github().get(acquisition.PREFIX, 10)
     command, kwargs = calls[0]
     assert command[1:6] == ["api", "--hostname", "github.com", "--method", "GET"]
     assert kwargs["stderr"] is subprocess.DEVNULL and kwargs["shell"] is False
+
+
+@pytest.mark.parametrize("default_client", [False, True])
+def test_diagnostics_observe_both_client_paths_without_changing_acquisition(
+    tmp_path, monkeypatch, default_client
+):
+    github = GithubFixture()
+    diagnostics = acquisition.AcquisitionDiagnostics()
+    options = {} if default_client else {"github": github}
+    monkeypatch.setattr(acquisition, "Github", lambda: github)
+    result = acquisition.acquire_receipts(
+        expected(), tmp_path / "observed", diagnostics=diagnostics, **options
+    )
+    report = diagnostics.snapshot()
+    assert result.provenance.jobs[0].outcome == "passed"
+    assert report == {
+        "request_count": len(github.calls),
+        "response_count": len(github.calls),
+        "response_bytes": sum(
+            len(raw if isinstance(raw, bytes) else canonical(raw))
+            for raw in (github.replies[endpoint] for endpoint in github.calls)
+        ),
+        "counters_saturated": False,
+        "last_route_kind": "run",
+        "last_object_id": RUN,
+        "last_response_bytes": len(canonical(github.run)),
+        "last_response_sha256": hashlib.sha256(canonical(github.run)).hexdigest(),
+    }
+    assert len(canonical(report)) < 4096
+    report["request_count"] = "private payload"
+    assert diagnostics.snapshot()["request_count"] == len(github.calls)
+
+
+def test_diagnostics_preserve_pending_and_terminal_failures_without_retry(tmp_path):
+    github = GithubFixture()
+    github.jobs[0]["status"] = "in_progress"
+    diagnostics = acquisition.AcquisitionDiagnostics()
+    destination = tmp_path / "pending"
+    with pytest.raises(acquisition.AcquisitionPending):
+        acquisition.acquire_receipts(
+            expected(), destination, github=github, diagnostics=diagnostics
+        )
+    assert not destination.exists()
+    assert github.calls == [github.jobs_route]
+    assert diagnostics.snapshot()["last_route_kind"] == "run-jobs"
+    assert diagnostics.snapshot()["response_count"] == 1
+    error = acquisition.AcquisitionError("github-request-timeout")
+
+    def failure():
+        raise error
+
+    github.replies[github.jobs_route] = failure
+    with pytest.raises(acquisition.AcquisitionError) as caught:
+        acquisition.acquire_receipts(
+            expected(), destination, github=github, diagnostics=diagnostics
+        )
+    assert caught.value is error
+    assert not destination.exists()
+    assert github.calls == [github.jobs_route] * 2
+    report = diagnostics.snapshot()
+    assert report["request_count"] == 2 and report["response_count"] == 1
+    assert report["last_response_bytes"] is report["last_response_sha256"] is None
+
+
+@pytest.mark.parametrize(
+    "suffix,kind,object_id",
+    [
+        ("", "repository", None),
+        ("/git/commits/" + SOURCE, "commit", None),
+        ("/actions/workflows/test-planning-shadow.yml", "workflow", None),
+        ("/actions/runs/1234", "run", "1234"),
+        ("/actions/runs/1234/attempts/1", "run-attempt", "1234"),
+        ("/actions/runs/1234/attempts/1/jobs?per_page=100&page=1", "run-jobs", "1234"),
+        ("/actions/runs/1234/artifacts?per_page=100&page=1", "run-artifacts", "1234"),
+        ("/actions/jobs/1234", "job", "1234"),
+        ("/actions/jobs/1234/logs", "job-log", "1234"),
+        ("/actions/artifacts/1234", "artifact", "1234"),
+        ("/actions/artifacts/1234/zip", "artifact-archive", "1234"),
+        ("/actions/jobs/9007199254740992", "job", None),
+        ("/actions/jobs/0", "unsupported", None),
+        ("/actions/jobs/1234/logs?token=private", "unsupported", None),
+        ("/actions/jobs/" + "1" * 1000, "unsupported", None),
+    ],
+)
+def test_diagnostic_routes_expose_only_fixed_kinds_and_portable_ids(suffix, kind, object_id):
+    diagnostics = acquisition.AcquisitionDiagnostics()
+    diagnostics.request(acquisition.PREFIX + suffix)
+    report = diagnostics.snapshot()
+    assert report["last_route_kind"] == kind
+    assert report["last_object_id"] == object_id
+    encoded = canonical(report)
+    assert len(encoded) < 4096
+    assert b"private" not in encoded and acquisition.PREFIX.encode() not in encoded
+
+
+@pytest.mark.parametrize("payload,maximum", [(b"private" * 2, 10), (b"private", True)])
+def test_diagnostics_do_not_fingerprint_responses_outside_the_response_boundary(payload, maximum):
+    diagnostics = acquisition.AcquisitionDiagnostics()
+    diagnostics.request(acquisition.PREFIX)
+    diagnostics.response(payload, maximum)
+    report = diagnostics.snapshot()
+    assert report["request_count"] == 1
+    assert report["response_count"] == report["response_bytes"] == 0
+    assert report["last_response_bytes"] is report["last_response_sha256"] is None
+    assert b"private" not in canonical(report)
+
+
+def test_diagnostics_do_not_weaken_acquisition_response_limits(tmp_path):
+    class OversizedClient:
+        def get(self, endpoint, maximum):
+            return b"x" * (maximum + 1)
+
+    diagnostics = acquisition.AcquisitionDiagnostics()
+    with pytest.raises(acquisition.AcquisitionError, match="^api-response-budget$"):
+        acquisition.acquire_receipts(
+            expected(), tmp_path / "oversized", github=OversizedClient(), diagnostics=diagnostics
+        )
+    assert not (tmp_path / "oversized").exists()
+    report = diagnostics.snapshot()
+    assert report["request_count"] == 1 and report["response_count"] == 0
+    assert report["last_response_bytes"] is report["last_response_sha256"] is None
+
+
+def test_diagnostic_counters_saturate_without_wrapping_or_changing_the_last_response():
+    diagnostics = acquisition.AcquisitionDiagnostics()
+    maximum = 2**53 - 1
+    diagnostics._request_count = diagnostics._response_count = diagnostics._response_bytes = maximum
+    diagnostics.request(acquisition.PREFIX)
+    diagnostics.response(b"{}", 2)
+    report = diagnostics.snapshot()
+    assert (
+        report["request_count"] == report["response_count"] == report["response_bytes"] == maximum
+    )
+    assert report["counters_saturated"] is True
+    assert report["last_response_bytes"] == 2
+    assert len(canonical(report)) < 4096
+
+
+@pytest.mark.parametrize(
+    "error,code",
+    [
+        (acquisition.AcquisitionError("github-request-timeout"), "github-request-timeout"),
+        (acquisition.AcquisitionPending("selected-job-incomplete"), "selected-job-incomplete"),
+        (ValueError("github-request-timeout"), "acquisition-failed"),
+        (acquisition.AcquisitionError("private token\n\x1b[31m"), "acquisition-failed"),
+        (acquisition.AcquisitionError("private" * 10000), "acquisition-failed"),
+        (acquisition.AcquisitionError({"private": "token"}), "acquisition-failed"),
+        (acquisition.AcquisitionError("github-request-timeout", "private"), "acquisition-failed"),
+    ],
+)
+def test_diagnostic_codes_never_copy_unknown_exception_payloads(error, code):
+    assert acquisition.diagnostic_code(error) == code
+
+
+def test_diagnostic_codes_never_render_exceptions():
+    class HostileError(acquisition.AcquisitionError):
+        def __str__(self):
+            raise AssertionError("Exception rendering must not run")
+
+    assert acquisition.diagnostic_code(HostileError("private")) == "acquisition-failed"
+
+
+def test_github_json_preserves_transport_failure_categories(monkeypatch):
+    error = acquisition.AcquisitionError("github-request-timeout")
+
+    def fail(*_args):
+        raise error
+
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(acquisition.Github, "get", fail)
+    with pytest.raises(acquisition.AcquisitionError) as caught:
+        acquisition.Github().json(acquisition.PREFIX)
+    assert caught.value is error
+
+
+def test_github_json_still_rejects_invalid_json_with_fixed_category(monkeypatch):
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(acquisition.Github, "get", lambda *_args: b"private invalid JSON")
+    with pytest.raises(acquisition.AcquisitionError, match="^invalid-github-json$"):
+        acquisition.Github().json(acquisition.PREFIX)

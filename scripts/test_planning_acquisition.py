@@ -89,6 +89,105 @@ class AcquisitionPending(AcquisitionError):  # noqa: N818 - pending observer con
     """Selected jobs or uploads are not ready; no output directory was created."""
 
 
+DIAGNOSTIC_CODES = frozenset(
+    """
+    acquisition-io-failed acquisition-report-byte-budget acquisition-request-budget
+    all-receipt-byte-budget ambiguous-artifact-name api-response-budget
+    archive-total-byte-budget artifact-archive-digest-mismatch
+    artifact-changed-during-acquisition artifact-log-outside-upload-window
+    artifact-outside-upload-window artifact-upload-log-binding-missing
+    conflicting-zip-topology copied-job-from-prior-attempt duplicate-api-identity
+    duplicate-selected-cell duplicate-selected-job duplicate-zip-path
+    github-cli-unavailable github-request-failed github-request-timeout
+    github-request-unavailable github-response-byte-budget incomplete-api-inventory
+    inconsistent-run-timestamps invalid-acquisition-data invalid-api-inventory
+    invalid-api-timestamp invalid-artifact-digest-or-size invalid-artifact-identity
+    invalid-artifact-zip invalid-expanded-receipt-size invalid-expected-run
+    invalid-extracted-file-limit invalid-github-json invalid-github-object
+    invalid-job-conclusion invalid-job-log invalid-job-status
+    invalid-job-step-time-window invalid-job-steps invalid-job-time-window
+    invalid-plan-identity invalid-response-limit invalid-run-creation-time
+    invalid-run-identity invalid-selected-cell invalid-selected-cells
+    invalid-shadow-run-status invalid-source-identity invalid-zip-directory
+    invalid-zip-directory-count invalid-zip-directory-record job-changed-during-acquisition
+    job-log-byte-budget linked-output-directory missing-artifact-receipts
+    missing-artifact-source missing-passed-job-start missing-required-job-step
+    missing-source-workflow-lineage missing-upload-step output-directory-not-fresh
+    receipt-byte-budget receipt-total-byte-budget required-job-step-not-successful
+    run-timestamps-changed-during-acquisition selected-artifact-not-published
+    selected-job-incomplete selected-job-not-created shadow-observation-deadline
+    fresh-shadow-run-required unsafe-zip-component unsafe-zip-member unsafe-zip-path
+    unsupported-github-route wrong-artifact-source wrong-commit-tree wrong-job-detail
+    wrong-job-lineage wrong-repository wrong-shadow-repository wrong-shadow-run
+    wrong-shadow-source wrong-source-workflow-lineage wrong-workflow zip-byte-budget
+    zip-directory-budget zip-directory-record-budget zip-expansion-budget
+    """.split()
+)
+
+
+def diagnostic_code(error: BaseException) -> str:
+    """Return only a reviewed fixed category, never exception rendering or payloads."""
+    if isinstance(error, AcquisitionError) and len(error.args) == 1:
+        code = error.args[0]
+        if type(code) is str and len(code) <= 128 and code in DIAGNOSTIC_CODES:
+            return code
+    return "acquisition-failed"
+
+
+class AcquisitionDiagnostics:
+    """Bounded progress only; no API bodies, logs, endpoints or exception text."""
+
+    def __init__(self) -> None:
+        self._request_count = 0
+        self._response_count = 0
+        self._response_bytes = 0
+        self._counters_saturated = False
+        self._last_route_kind: str | None = None
+        self._last_object_id: str | None = None
+        self._last_response_bytes: int | None = None
+        self._last_response_sha256: str | None = None
+
+    def _count(self, field: str, amount: int) -> None:
+        total = getattr(self, field) + amount
+        maximum = 2**53 - 1
+        if total > maximum:
+            self._counters_saturated = True
+        setattr(self, field, min(total, maximum))
+
+    def request(self, endpoint: str) -> None:
+        self._count("_request_count", 1)
+        self._last_route_kind, self._last_object_id = _diagnostic_route(endpoint)
+        self._last_response_bytes = self._last_response_sha256 = None
+
+    def response(self, raw: bytes, maximum: int) -> None:
+        # A malformed injected response remains the caller's validation failure;
+        # diagnostics must neither retain it nor change acceptance behavior.
+        if (
+            type(raw) is not bytes
+            or type(maximum) is not int
+            or not 0 < maximum <= MAX_ZIP
+            or len(raw) > maximum
+        ):
+            return
+        self._count("_response_count", 1)
+        self._count("_response_bytes", len(raw))
+        self._last_response_bytes = len(raw)
+        self._last_response_sha256 = hashlib.sha256(raw).hexdigest()
+
+    def snapshot(self) -> dict:
+        """Return a detached, resource-free report bounded below 4 KiB."""
+        return {
+            "request_count": self._request_count,
+            "response_count": self._response_count,
+            "response_bytes": self._response_bytes,
+            "counters_saturated": self._counters_saturated,
+            "last_route_kind": self._last_route_kind,
+            "last_object_id": self._last_object_id,
+            "last_response_bytes": self._last_response_bytes,
+            "last_response_sha256": self._last_response_sha256,
+        }
+
+
 def require(condition: bool, code: str) -> None:
     if not condition:
         raise AcquisitionError(code)
@@ -125,6 +224,29 @@ def _endpoint(value: str) -> bool:
         )
         is not None
     )
+
+
+def _diagnostic_route(endpoint: str) -> tuple[str, str | None]:
+    if type(endpoint) is not str or len(endpoint) > 256 or not _endpoint(endpoint):
+        return "unsupported", None
+    route = endpoint.removeprefix(PREFIX)
+    if not route:
+        return "repository", None
+    if route.startswith("/git/commits/"):
+        return "commit", None
+    if route.startswith("/actions/workflows/"):
+        return "workflow", None
+    parts = route.split("/")
+    object_id = parts[3] if _integer(int(parts[3])) else None
+    if parts[2] == "runs":
+        if len(parts) == 7:
+            return "run-jobs", object_id
+        if len(parts) == 6:
+            return "run-attempt", object_id
+        return ("run-artifacts" if len(parts) == 5 else "run"), object_id
+    if parts[2] == "jobs":
+        return ("job-log" if len(parts) == 5 else "job"), object_id
+    return ("artifact-archive" if len(parts) == 5 else "artifact"), object_id
 
 
 class Github:
@@ -167,8 +289,13 @@ class Github:
                     if len(output) + len(chunk) > maximum:
                         raise AcquisitionError("github-response-byte-budget")
                     output.extend(chunk)
-            except Exception:
-                failures.append(True)
+            except Exception as error:
+                failures.append(
+                    "github-response-byte-budget"
+                    if type(error) is AcquisitionError
+                    and error.args == ("github-response-byte-budget",)
+                    else "github-request-failed"
+                )
                 process.kill()
 
         reader = threading.Thread(target=consume, daemon=True)
@@ -176,7 +303,9 @@ class Github:
         try:
             reader.join(timeout=max(0, min(30, self.deadline - time.monotonic())))
             require(not reader.is_alive(), "github-request-timeout")
-            require(not failures and process.wait(timeout=5) == 0, "github-request-failed")
+            if failures:
+                raise AcquisitionError(failures[0])
+            require(process.wait(timeout=5) == 0, "github-request-failed")
             return bytes(output)
         except subprocess.TimeoutExpired:
             raise AcquisitionError("github-request-timeout") from None
@@ -189,8 +318,9 @@ class Github:
 
     def json(self, endpoint: str) -> dict:
         """Read one bounded object on the same fixed GitHub GET route boundary."""
+        raw = self.get(endpoint, MAX_JSON)
         try:
-            value = _json(self.get(endpoint, MAX_JSON))
+            value = _json(raw)
         except NormalizationError:
             raise AcquisitionError("invalid-github-json") from None
         require(type(value) is dict, "invalid-github-object")
@@ -603,7 +733,11 @@ def _no_links(path: Path) -> None:
 
 
 def _acquire_receipts(
-    expected: ExpectedRun, destination: Path, *, github: Github | None = None
+    expected: ExpectedRun,
+    destination: Path,
+    *,
+    github: Github | None = None,
+    diagnostics: AcquisitionDiagnostics | None = None,
 ) -> Acquisition:
     """Acquire one explicit selected-cell observation, without polling or running tests."""
     require(isinstance(expected, ExpectedRun), "invalid-expected-run")
@@ -637,8 +771,16 @@ def _acquire_receipts(
     client = github if github is not None else Github()
     snapshots = {}
 
+    def request(endpoint: str, maximum: int) -> bytes:
+        if diagnostics is not None:
+            diagnostics.request(endpoint)
+        raw = client.get(endpoint, maximum)
+        if diagnostics is not None:
+            diagnostics.response(raw, maximum)
+        return raw
+
     def read(endpoint: str, label: str) -> dict:
-        raw = client.get(endpoint, MAX_JSON)
+        raw = request(endpoint, MAX_JSON)
         require(type(raw) is bytes and len(raw) <= MAX_JSON, "api-response-budget")
         try:
             value = _json(raw)
@@ -747,12 +889,12 @@ def _acquire_receipts(
         log_sha256 = None
         if artifact is not None:
             require(upload is not None, "missing-upload-step")
-            logs = client.get(f"{PREFIX}/actions/jobs/{job['id']}/logs", MAX_LOG)
+            logs = request(f"{PREFIX}/actions/jobs/{job['id']}/logs", MAX_LOG)
             require(type(logs) is bytes and len(logs) <= MAX_LOG, "job-log-byte-budget")
             validate_upload_log(logs, artifact, upload)
             (destination / "logs" / f"{job['id']}.log").write_bytes(logs)
             log_sha256 = hashlib.sha256(logs).hexdigest()
-            raw = client.get(f"{PREFIX}/actions/artifacts/{artifact['id']}/zip", MAX_ZIP)
+            raw = request(f"{PREFIX}/actions/artifacts/{artifact['id']}/zip", MAX_ZIP)
             require(
                 type(raw) is bytes
                 and len(raw) == artifact["size_in_bytes"]
@@ -866,11 +1008,15 @@ def _acquire_receipts(
 
 
 def acquire_receipts(
-    expected: ExpectedRun, destination: Path, *, github: Github | None = None
+    expected: ExpectedRun,
+    destination: Path,
+    *,
+    github: Github | None = None,
+    diagnostics: AcquisitionDiagnostics | None = None,
 ) -> Acquisition:
     """Bound malformed remote data to fixed errors, including first-attempt-only use."""
     try:
-        return _acquire_receipts(expected, destination, github=github)
+        return _acquire_receipts(expected, destination, github=github, diagnostics=diagnostics)
     except AcquisitionError:
         raise
     except (NormalizationError, KeyError, TypeError, AttributeError, IndexError, ValueError):
