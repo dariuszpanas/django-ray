@@ -20,7 +20,8 @@ but its result observer and aggregate failed. Complete offline replay passed;
 the hosted failure's cause remains unconfirmed. Feedback timing and savings are
 unavailable. [The reporting investigation](https://github.com/dariuszpanas/django-ray/issues/644)
 now has bounded observer diagnostics and offline failure-path coverage. The original
-failure remains unexplained and a fresh hosted confirmation remains outstanding.
+failure remains unexplained. The observer-only confirmation below verifies the
+repaired adapter against retained evidence without repeating workloads.
 Release evidence uses the existing standalone qualification workflows. Offline
 replay does not replace failed hosted publications.
 
@@ -65,6 +66,46 @@ through an offline acquisition transport, then invoke the real normalizer and YA
 evaluator. Keep original bytes immutable and inject faults only into replay inputs.
 Such replay validates adapter behavior against historical evidence; it does not
 recreate the original live failure or qualify another source revision.
+
+### Confirm the observer without running qualifications
+
+`Test Planning Observer Confirmation` is a separate manual diagnostic workflow
+for the retained attempt 1 of run `39141298183`. It uses one Ubuntu runner with
+a ten-minute job deadline, Python 3.12, and released `yaga-cli==0.3.0`. Its token
+has only contents/actions read permissions. There is no matrix, service, cache,
+qualification call, workload execution, polling, or retry. Ordinary PR checks
+still protect changes to this workflow and its wrapper.
+
+The fixed historical planning artifact is authenticated by its original ID,
+ZIP digest, upload lineage, and expected plan, policy, binding and source
+identities. The current observer reads these inert documents; it never executes
+historical source. One bounded acquisition reads the eight existing workload
+receipts, then evaluates the full selection and its proposed alias. Missing,
+expired, pending, changed or invalid evidence fails immediately. The existing
+240-second acquisition deadline, 100-request ceiling, 30-second request timeout,
+and response/archive limits remain in force.
+
+A controlled timeout canary checks the production diagnostic renderer using
+cached evidence only. It must produce a nonzero diagnostic canary outcome, the specific
+safe timeout code and a diagnostic document no larger than 8 KiB, with no passing
+publication. The output is retained under a distinct
+`observer-diagnostic-confirmation-<run>-<attempt>` artifact name. It records the
+current observer commit/tree and diagnostic run separately from the historical
+workload source/run/attempt. This canary exercises acquisition and the production
+diagnostic renderer through the wrapper; it does not invoke the production
+observer CLI. Scratch data is not uploaded.
+
+This confirms current observer behavior against historical evidence on hosted
+Linux. It does not identify the original failure, repair the historical failed
+publication, qualify current application code, or measure selective execution
+savings. YAGA 0.3.0 is the released evaluator used for the repaired observer;
+the original failed run used an earlier pinned YAGA source. A retained offline
+replay does not silently replace failed live acquisition.
+
+Do not use the ordinary `Test Planning Shadow` manual dispatch for this check:
+it schedules all five qualification families. Rerunning the original job would
+use the original code and a later attempt, which the production observer rejects.
+The diagnostic wrapper leaves those production guards unchanged.
 
 ## Retain one observation
 

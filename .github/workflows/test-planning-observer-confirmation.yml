@@ -1,0 +1,53 @@
+name: Test Planning Observer Confirmation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: test-planning-observer-confirmation
+  cancel-in-progress: false
+
+jobs:
+  confirmation:
+    name: Historical Observer Diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - name: Confirm observer against original evidence without workloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OBSERVER_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$OBSERVER_SHA" = "$WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$OBSERVER_SHA"
+          test -z "$(git status --porcelain)"
+          observer_tree="$(git rev-parse 'HEAD^{tree}')"
+          uv run --isolated --no-project --python 3.12 --with yaga-cli==0.3.0 \
+            python -m scripts.test_planning_confirmation \
+            --repo . --observer-commit "$OBSERVER_SHA" --observer-tree "$observer_tree" \
+            --run-id "$RUN_ID" --attempt "$RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/observer-confirmation" \
+            --scratch "$RUNNER_TEMP/observer-confirmation-scratch"
+      - name: Retain diagnostic confirmation independently of shadow publications
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: observer-diagnostic-confirmation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/observer-confirmation/
+          retention-days: 30
+          if-no-files-found: error

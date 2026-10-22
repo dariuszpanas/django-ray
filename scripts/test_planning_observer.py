@@ -238,6 +238,39 @@ def make_observation(pilot, arm, expected, results, evaluation, raw_evaluation, 
     return experiment.build_observation(identities, measurements)
 
 
+def evaluate_acquired(plan_document, expected, acquired, *, diagnostics):
+    """Evaluate authenticated receipts without polling or publishing an envelope."""
+    progress = diagnostics
+    progress.enter("evaluator-loading", progress.arm)
+    plan_decoder = importlib.import_module("yaga.test_planning.diagnostics")
+    evaluator = importlib.import_module("yaga.test_planning.evaluation")
+    result_parser = importlib.import_module("yaga.test_planning.results")
+    progress.enter("plan-validation", progress.arm)
+    planned = plan_decoder.parse_plan_document(plan_document)
+    progress.enter("normalization", progress.arm)
+    document = normalization.normalize_results(
+        acquired.root, expected=expected, provenance=acquired.provenance
+    )
+    results = result_parser.parse_results_document(document)
+    progress.enter("evaluation", progress.arm)
+    evaluated = evaluator.evaluate_results(
+        planned,
+        results,
+        expected_policy_sha256=expected.policy_sha256,
+        expected_bindings_sha256=expected.bindings_sha256,
+        expected_execution_commit=expected.execution_commit,
+        expected_execution_tree=expected.execution_tree,
+        expected_run_id=expected.run_id,
+        expected_attempt=expected.attempt,
+    )
+    return (
+        document,
+        result_parser.encode_results(results),
+        evaluated,
+        evaluator.encode_evaluation(evaluated),
+    )
+
+
 def evaluate_group(
     directory: Path,
     output: Path,
@@ -282,10 +315,6 @@ def evaluate_group(
                 context, destination, diagnostics=progress.acquisition
             ),
         )
-    progress.enter("evaluator-loading")
-    plan_decoder = importlib.import_module("yaga.test_planning.diagnostics")
-    evaluator = importlib.import_module("yaga.test_planning.evaluation")
-    result_parser = importlib.import_module("yaga.test_planning.results")
     exit_code = 0
     for arm in aliases:
         progress.enter("plan-validation", arm)
@@ -295,24 +324,9 @@ def evaluate_group(
             policy_sha256=pilot["arms"][arm]["policy_sha256"],
         )
         plan_document = shadow.decode(shadow.read_bounded(directory / f"pilot-{arm}-plan.json"))
-        planned = plan_decoder.parse_plan_document(plan_document)
-        progress.enter("normalization", arm)
-        document = normalization.normalize_results(
-            acquired.root, expected=arm_expected, provenance=acquired.provenance
+        document, raw_results, evaluated, raw_evaluation = evaluate_acquired(
+            plan_document, arm_expected, acquired, diagnostics=progress
         )
-        results = result_parser.parse_results_document(document)
-        progress.enter("evaluation", arm)
-        evaluated = evaluator.evaluate_results(
-            planned,
-            results,
-            expected_policy_sha256=arm_expected.policy_sha256,
-            expected_bindings_sha256=arm_expected.bindings_sha256,
-            expected_execution_commit=arm_expected.execution_commit,
-            expected_execution_tree=arm_expected.execution_tree,
-            expected_run_id=arm_expected.run_id,
-            expected_attempt=arm_expected.attempt,
-        )
-        raw_evaluation = evaluator.encode_evaluation(evaluated)
         progress.enter("observation", arm)
         observation = make_observation(
             pilot,
@@ -325,7 +339,7 @@ def evaluate_group(
         )
         progress.enter("publication", arm)
         (output / f"{arm}-plan.json").write_bytes(shadow.encode(plan_document))
-        (output / f"{arm}-results.json").write_bytes(result_parser.encode_results(results))
+        (output / f"{arm}-results.json").write_bytes(raw_results)
         (output / f"{arm}-evaluation.json").write_bytes(raw_evaluation)
         (output / f"{arm}-observation.json").write_bytes(experiment.encode_observation(observation))
         exit_code = max(exit_code, evaluated.exit_code)
