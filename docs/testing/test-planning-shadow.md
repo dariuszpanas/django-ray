@@ -345,6 +345,75 @@ Before using this rule for a new revision, re-audit the dependency and ordinary-
 coverage boundary, then choose the smallest controlled comparison needed under the
 promotion requirements below.
 
+### Reusing the doctor candidate for new changes
+
+`scripts/test_planning_doctor_candidate.py` evaluates new explicit committed ranges
+offline. It keeps the frozen historical evaluator above intact. Its positive result
+means **path-eligible candidate, with dependency and coverage review required**;
+it cannot authorize a qualification skip. Selective CI remains disabled, and neither
+the live selector nor the advisory workflow consumes this report.
+
+The reusable rule requires at least one of these seven exact source paths:
+
+- `src/django_ray/doctor/__init__.py`
+- `src/django_ray/doctor/__main__.py`
+- `src/django_ray/doctor/contracts.py`
+- `src/django_ray/doctor/probe.py`
+- `src/django_ray/doctor/runner.py`
+- `src/django_ray/doctor/supervisor.py`
+- `src/django_ray/management/commands/django_ray_doctor.py`
+
+It permits only these accompanying paths: `docs/reference/doctor.md`,
+`scripts/verify_doctor_wheel.py`, `tests/integration/test_doctor_postgresql.py`,
+`tests/unit/test_doctor.py`, `tests/unit/test_doctor_supervision.py`, and
+`tests/unit/test_verify_doctor_wheel.py`. There is no directory-wide exemption for
+future doctor modules. Test or documentation changes alone do not qualify.
+
+The candidate removes application qualification only when the complete changed-path
+inventory stays within those exact paths and the existing selector chooses only
+application qualification. Any other path preserves the **entire existing
+selection**, including every native variant. This covers mixed changes to shared
+runtime, dependency locks, workflows, build configuration, test taxonomy, the shared
+wheel verifier, and unknown files, even when an individual companion path would not
+trigger qualification by itself. Renames crossing this boundary retain both old and
+new paths and therefore preserve the baseline.
+
+Using the installed YAGA 0.3.0 environment:
+
+```bash
+python -m scripts.test_planning_doctor_candidate \
+  --repo /path/to/django-ray \
+  --baseline-policy scripts/qualification_policy.json \
+  --base "$EXACT_BASE_COMMIT" \
+  --head "$EXACT_HEAD_COMMIT" \
+  --expected-tree "$INDEPENDENT_HEAD_TREE" \
+  --output /path/to/new-doctor-candidate-report.json
+```
+
+All identities must be full object IDs. The evaluator uses YAGA's bounded Git reader
+to collect the complete explicit `base..head` inventory and verifies the returned
+base, comparison, head, execution commit, and execution tree. It does not fetch,
+infer a PR merge base, read working-tree changes, execute changed code, or accept a
+caller-filtered path list at the CLI. Choose the intended comparison base explicitly;
+an arbitrary two-dot range is not automatically a PR comparison. Missing history,
+identity mismatches, invalid paths, and baseline-policy drift fail evaluation.
+Only the two reviewed LF/CRLF baseline encodings described above are accepted.
+Output is bounded and create-only; it never writes workflow outputs or a handoff.
+
+Replaying the reusable rule against the retained 31 revisions leaves all **50
+workflow selections and 77 qualification cells unchanged**. The only doctor revision,
+#621, includes shared build and coverage edits and is consequently ineligible. Its
+separate, reviewed historical exception remains 49 selections and 76 cells. Synthetic
+doctor-only ranges exercise future eligibility and mixed-change fallbacks; they do
+not establish a historical hit rate or successful execution of new doctor code.
+
+Path eligibility does not inspect code semantics, file modes, or dependency changes
+already present in the selected base. Before using any future omission, review that
+source's application consumers and dedicated ordinary-CI coverage. The retained
+Linux supervision, PostgreSQL, and installed-wheel evidence qualifies its original
+source tree only. Feedback-time savings and aggregate runner-minute savings remain
+unknown, and this offline step requires no new hosted qualification workloads.
+
 Historical comparison alone does not complete the runtime pilot. Retain full
 same-source observations and controlled selected replays, including excluded
 failures, setup/cleanup, cancellations, runner minutes and critical-path wall time.
