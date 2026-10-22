@@ -19,8 +19,52 @@ The first full hosted observation completed all eight qualification workloads,
 but its result observer and aggregate failed. Complete offline replay passed;
 the hosted failure's cause remains unconfirmed. Feedback timing and savings are
 unavailable. [The reporting investigation](https://github.com/dariuszpanas/django-ray/issues/644)
-is deferred until after 0.7.0; release evidence uses the existing standalone
-qualification workflows. Offline replay does not replace failed hosted publications.
+now has bounded observer diagnostics and offline failure-path coverage. The original
+failure remains unexplained and a fresh hosted confirmation remains outstanding.
+Release evidence uses the existing standalone qualification workflows. Offline
+replay does not replace failed hosted publications.
+
+## Diagnose an incomplete observer
+
+The observer retains `diagnostics.json` beside the existing `error.json` on a caught
+failure. The existing upload step includes both files even when the observer exits
+with status 1. The separate `test-shadow-diagnostics-version: 1` document is at most
+8 KiB including its final newline. It has `authority: diagnostic-only`,
+`activation: disabled`, and `status: incomplete`; it cannot satisfy a result,
+publication, or required check. Successful publication formats are unchanged.
+
+| Field | Meaning |
+| --- | --- |
+| `stage` | Fixed boundary: `context`, `planning`, `plan-validation`, `acquisition`, `evaluator-loading`, `normalization`, `evaluation`, `observation`, or `publication` |
+| `arm`, `group` | Fixed current/proposed/full identifiers; `arm` is null before an individual arm is processed |
+| `category`, `code` | Fixed failure classification; acquisition codes use an explicit allowlist, and unknown errors never publish their text |
+| `run_id`, `attempt`, `source` | Syntactically validated caller-supplied context, with invalid values replaced by null; these fields do not authenticate the caller |
+| `acquisition.request_count`, `response_count`, `response_bytes` | Attempted requests and complete bounded responses across all polls, including pending polls; counts saturate at the portable integer limit with `counters_saturated: true` |
+| `acquisition.last_route_kind`, `last_object_id` | Fixed route category and bounded numeric run/job/artifact identifier, never a raw URL |
+| `acquisition.last_response_bytes`, `last_response_sha256` | Last bounded transport response size and hash, reset before each request; a hash does not mean validation passed |
+
+For example, `stage: acquisition`, `code: github-request-timeout`, and
+`last_route_kind: job-log` distinguish a failed log request from receipt normalization
+or evaluation. `stage: publication`, `code: io-failed` identifies local output failure,
+not successful GitHub artifact upload. No raw exception message, response body, job
+log, local path, credential, or redirect URL enters the diagnostic document. Original
+workload evidence must still be retained and verified separately. An unwritable
+output directory may prevent retention; the observer still exits nonzero and prints
+only its fixed failure classification when failure occurs after directory creation.
+
+Pending jobs and uploads keep their existing bounded polling behavior. Terminal
+transport, identity, validation, and output failures are not retried. A failure in a
+later alias may leave an earlier arm's files, but the final `publication.json` marker
+is written only after all aliases complete. The collector still requires and
+re-evaluates the full bundle; a diagnostic file cannot replace any missing payload.
+
+Focused resource-free tests cover every observer stage, partial alias output,
+unwritable diagnostics, hostile labels, transport limits, and publication rejection.
+Retained-evidence replay can supply original API snapshots, upload logs and ZIPs
+through an offline acquisition transport, then invoke the real normalizer and YAGA
+evaluator. Keep original bytes immutable and inject faults only into replay inputs.
+Such replay validates adapter behavior against historical evidence; it does not
+recreate the original live failure or qualify another source revision.
 
 ## Retain one observation
 
@@ -146,6 +190,15 @@ balanced arm order, fixed environments/cache policy, interference controls, and 
 declared resource budget. Required jobs remain running. The owner chooses adoption
 criteria after discovery and before activation; incomplete and slow observations
 must remain in the cohort.
+
+The primary benefit target is shorter pipeline feedback time. Reduced aggregate
+runner usage is a separate benefit target: avoiding an unnecessary 30-minute job
+saves those runner minutes even when another parallel job still determines pipeline
+completion. Compare actual same-source current and proposed arms for both elapsed
+feedback time and total runner minutes, counting setup, retries, cleanup and observer
+overhead. Record runner classes and applicable billing multipliers separately when
+translating usage into private-repository quota or cost. A shared full-run observation
+has already consumed every workload's resources and cannot demonstrate those savings.
 
 ## Shared full-run publication feedback
 

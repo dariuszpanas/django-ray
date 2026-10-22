@@ -349,6 +349,55 @@ def test_authenticated_api_zip_roundtrip_uses_upload_completion_not_creation(bun
     assert costs["selective_execution_savings_seconds"] is costs["billing_seconds"] is None
 
 
+@pytest.mark.parametrize("diagnostic_status", ["passed", "incomplete"])
+def test_extra_diagnostics_are_retained_without_changing_publication_authority(
+    bundle, tmp_path, diagnostic_status
+):
+    bundle.files["diagnostics.json"] = shadow.encode(
+        {"status": diagnostic_status, "error": "Diagnostic information only"}
+    )
+    github, _, _, raw = publication_api(bundle)
+    output = tmp_path / "collected"
+    output.mkdir()
+
+    assert (
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+        == 0
+    )
+
+    result = json.loads((output / "feedback.json").read_bytes())
+    assert all(item is not None for item in result["publications"].values())
+    assert len(bundle.calls) == 3
+    assert (output / "archives/401.zip").read_bytes() == raw
+    assert not (output / "publications/full/diagnostics.json").exists()
+
+
+def test_diagnostic_success_cannot_replace_a_missing_required_publication(bundle, tmp_path):
+    bundle.files["diagnostics.json"] = bundle.files.pop("publication.json")
+    github, _, _, raw = publication_api(bundle)
+    output = tmp_path / "collected"
+    output.mkdir()
+
+    assert (
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+        == 1
+    )
+
+    result = json.loads((output / "feedback.json").read_bytes())
+    assert result["full_oracle"]["status"] == "unavailable"
+    assert set(result["publications"].values()) == {None}
+    assert all(
+        item["validated_publication_lead_seconds"] is None
+        for item in result["comparisons"].values()
+    )
+    assert bundle.calls == []
+    assert (output / "archives/401.zip").read_bytes() == raw
+
+
 @pytest.mark.parametrize(
     "damage",
     [

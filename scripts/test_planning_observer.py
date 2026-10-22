@@ -7,8 +7,9 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from scripts import test_planning_acquisition as acquisition
@@ -20,6 +21,105 @@ from scripts import test_planning_shadow as shadow
 POLL_SECONDS = 60
 MAX_POLLS = 260
 MAX_WAIT_SECONDS = 260 * 60
+MAX_DIAGNOSTIC_BYTES = 8192
+STAGES = frozenset(
+    {
+        "context",
+        "planning",
+        "plan-validation",
+        "acquisition",
+        "evaluator-loading",
+        "normalization",
+        "evaluation",
+        "observation",
+        "publication",
+    }
+)
+
+
+def _identity(value, pattern):
+    return value if type(value) is str and re.fullmatch(pattern, value) is not None else None
+
+
+@dataclass
+class ObserverDiagnostics:
+    """Small failure context; no remote text, credentials, paths or exception messages."""
+
+    stage: str = "context"
+    arm: str | None = None
+    acquisition: acquisition.AcquisitionDiagnostics = field(
+        default_factory=acquisition.AcquisitionDiagnostics
+    )
+
+    def enter(self, stage, arm=None):
+        if stage not in STAGES or (arm is not None and arm not in pilot_tools.ARMS):
+            raise ValueError("Invalid observer diagnostic stage")
+        self.stage, self.arm = stage, arm
+
+    def failure(self, args, error):
+        # Only fixed categories and explicitly allowlisted acquisition codes are
+        # publishable. Exception messages can contain tokens or remote payloads.
+        if isinstance(error, acquisition.AcquisitionError):
+            category, code = "acquisition", acquisition.diagnostic_code(error)
+        elif isinstance(error, normalization.NormalizationError):
+            category, code = "validation", "normalization-rejected"
+        elif isinstance(error, OSError):
+            category, code = "io", "io-failed"
+        elif isinstance(error, ImportError):
+            category, code = "dependency", "evaluator-unavailable"
+        elif isinstance(error, (ValueError, TypeError, KeyError, RecursionError)):
+            category, code = "validation", "invalid-data"
+        else:
+            category, code = "runtime", self.stage + "-failed"
+        return {
+            "test-shadow-diagnostics-version": 1,
+            "authority": "diagnostic-only",
+            "activation": "disabled",
+            "status": "incomplete",
+            "stage": self.stage,
+            "arm": self.arm,
+            "category": category,
+            "code": code,
+            "group": args.group if args.group in pilot_tools.ARMS else None,
+            "run_id": _identity(args.run_id, r"[1-9][0-9]{0,15}"),
+            "attempt": args.attempt
+            if type(args.attempt) is int and 0 < args.attempt <= 2**31 - 1
+            else None,
+            "source": {
+                name: _identity(getattr(args, name), r"[0-9a-f]{40}")
+                for name in ("execution_commit", "execution_tree", "adapter_commit", "adapter_tree")
+            },
+            "acquisition": self.acquisition.snapshot(),
+        }
+
+
+def retain_failure(args, diagnostics, error):
+    """Best-effort bounded diagnostics never turn an observation failure into success."""
+    report = diagnostics.failure(args, error)
+    raw = shadow.encode(report)
+    if len(raw) > MAX_DIAGNOSTIC_BYTES:
+        raise ValueError("Observer diagnostics exceed their fixed byte limit")
+    envelope = {
+        "test-shadow-publication-version": 1,
+        "activation": "disabled",
+        "status": "incomplete",
+        "group": report["group"],
+        "run_id": report["run_id"],
+        "attempt": report["attempt"],
+        "error": "Receipt acquisition, normalization or evaluation did not complete",
+    }
+    for name, data in (("diagnostics.json", raw), ("error.json", shadow.encode(envelope))):
+        try:
+            (args.output / name).write_bytes(data)
+        except OSError:
+            # A full/read-only output filesystem cannot retain its own failure.
+            # The fixed console category and nonzero exit must still survive.
+            pass
+    print(
+        "Advisory observation incomplete: "
+        f"stage={report['stage']} category={report['category']} code={report['code']}; "
+        "inspect diagnostics.json when available"
+    )
 
 
 def expected_run(pilot: dict, arm: str, run_id: str, attempt: int):
@@ -139,9 +239,18 @@ def make_observation(pilot, arm, expected, results, evaluation, raw_evaluation, 
 
 
 def evaluate_group(
-    directory: Path, output: Path, scratch: Path, group: str, run_id: str, attempt: int
+    directory: Path,
+    output: Path,
+    scratch: Path,
+    group: str,
+    run_id: str,
+    attempt: int,
+    *,
+    diagnostics: ObserverDiagnostics | None = None,
 ):
     """Authenticate real receipts, then call YAGA's installed pure evaluator."""
+    progress = diagnostics or ObserverDiagnostics()
+    progress.enter("plan-validation")
     if type(attempt) is not int or attempt != 1:
         raise acquisition.AcquisitionError("fresh-shadow-run-required")
     pilot = shadow.decode(shadow.read_bounded(directory / "pilot.json"))
@@ -162,23 +271,37 @@ def evaluate_group(
         arm_cells = expected_run(pilot, arm, run_id, attempt).selected
         if len(arm_cells) != len(obligations) or set(arm_cells) != obligations:
             raise shadow.ShadowError("Shadow publication aliases have different obligations")
-    acquired = wait_for_receipts(expected, scratch)
-    diagnostics = importlib.import_module("yaga.test_planning.diagnostics")
+    progress.enter("acquisition")
+    if diagnostics is None:
+        acquired = wait_for_receipts(expected, scratch)
+    else:
+        acquired = wait_for_receipts(
+            expected,
+            scratch,
+            acquire=lambda context, destination: acquisition.acquire_receipts(
+                context, destination, diagnostics=progress.acquisition
+            ),
+        )
+    progress.enter("evaluator-loading")
+    plan_decoder = importlib.import_module("yaga.test_planning.diagnostics")
     evaluator = importlib.import_module("yaga.test_planning.evaluation")
     result_parser = importlib.import_module("yaga.test_planning.results")
     exit_code = 0
     for arm in aliases:
+        progress.enter("plan-validation", arm)
         arm_expected = replace(
             expected,
             plan_digest=pilot["arms"][arm]["plan_digest"],
             policy_sha256=pilot["arms"][arm]["policy_sha256"],
         )
         plan_document = shadow.decode(shadow.read_bounded(directory / f"pilot-{arm}-plan.json"))
-        planned = diagnostics.parse_plan_document(plan_document)
+        planned = plan_decoder.parse_plan_document(plan_document)
+        progress.enter("normalization", arm)
         document = normalization.normalize_results(
             acquired.root, expected=arm_expected, provenance=acquired.provenance
         )
         results = result_parser.parse_results_document(document)
+        progress.enter("evaluation", arm)
         evaluated = evaluator.evaluate_results(
             planned,
             results,
@@ -190,6 +313,7 @@ def evaluate_group(
             expected_attempt=arm_expected.attempt,
         )
         raw_evaluation = evaluator.encode_evaluation(evaluated)
+        progress.enter("observation", arm)
         observation = make_observation(
             pilot,
             arm,
@@ -199,11 +323,13 @@ def evaluate_group(
             raw_evaluation,
             acquired.evidence,
         )
+        progress.enter("publication", arm)
         (output / f"{arm}-plan.json").write_bytes(shadow.encode(plan_document))
         (output / f"{arm}-results.json").write_bytes(result_parser.encode_results(results))
         (output / f"{arm}-evaluation.json").write_bytes(raw_evaluation)
         (output / f"{arm}-observation.json").write_bytes(experiment.encode_observation(observation))
         exit_code = max(exit_code, evaluated.exit_code)
+    progress.enter("publication")
     (output / "acquisition.json").write_bytes(shadow.encode(acquired.evidence))
     (output / "publication.json").write_bytes(
         shadow.encode(
@@ -252,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attempt", required=True, type=int)
     args = parser.parse_args(argv)
     args.output.mkdir(parents=True, exist_ok=False)
+    diagnostics = ObserverDiagnostics()
     try:
         if (
             args.attempt != 1
@@ -260,25 +387,27 @@ def main(argv: list[str] | None = None) -> int:
             or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
         ):
             raise shadow.ShadowError("Fresh manual same-source shadow run required")
+        diagnostics.enter("planning")
         regenerate(args)
         return evaluate_group(
-            args.directory, args.output, args.scratch, args.group, args.run_id, args.attempt
+            args.directory,
+            args.output,
+            args.scratch,
+            args.group,
+            args.run_id,
+            args.attempt,
+            diagnostics=diagnostics,
         )
-    except (RuntimeError, ValueError, TypeError, KeyError, OSError, ImportError, RecursionError):
-        (args.output / "error.json").write_bytes(
-            shadow.encode(
-                {
-                    "test-shadow-publication-version": 1,
-                    "activation": "disabled",
-                    "status": "incomplete",
-                    "group": args.group,
-                    "run_id": args.run_id,
-                    "attempt": args.attempt,
-                    "error": "Receipt acquisition, normalization or evaluation did not complete",
-                }
-            )
-        )
-        print("Advisory observation incomplete; inspect original job and acquisition evidence")
+    except (
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        OSError,
+        ImportError,
+        RecursionError,
+    ) as error:
+        retain_failure(args, diagnostics, error)
         return 1
 
 

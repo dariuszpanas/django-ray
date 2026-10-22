@@ -477,7 +477,7 @@ def test_cli_retains_a_bounded_safe_error_for_failed_acquisition(tmp_path, monke
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.setattr(observer, "regenerate", lambda *_args: None)
 
-    def failure(*_args):
+    def failure(*_args, **_kwargs):
         raise acquisition.AcquisitionError("private remote payload must not be printed")
 
     monkeypatch.setattr(observer, "evaluate_group", failure)
@@ -486,3 +486,185 @@ def test_cli_retains_a_bounded_safe_error_for_failed_acquisition(tmp_path, monke
     assert b"private remote payload" not in raw
     assert "private remote payload" not in capsys.readouterr().out
     assert json.loads(raw)["status"] == "incomplete"
+
+
+def prepare_diagnostic_cli(tmp_path, monkeypatch):
+    """Keep CLI error handling real while supplying small resource-free results."""
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    pilot = pilot_document(empty=True)
+    expected = observer.expected_run(pilot, "proposed", RUN_ID, 1)
+    acquired = acquired_observation(tmp_path, expected)
+
+    def regenerate(args):
+        args.directory.mkdir()
+        (args.directory / "pilot.json").write_bytes(shadow.encode(pilot))
+        for arm in pilot["arms"]:
+            (args.directory / f"pilot-{arm}-plan.json").write_bytes(shadow.encode({"arm": arm}))
+
+    monkeypatch.setattr(observer, "regenerate", regenerate)
+    monkeypatch.setattr(observer, "wait_for_receipts", lambda *_args, **_kwargs: acquired)
+    fake_yaga(monkeypatch)
+    return main_args(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "stage,category,code",
+    [
+        ("planning", "validation", "invalid-data"),
+        ("plan-validation", "validation", "invalid-data"),
+        ("acquisition", "acquisition", "github-request-timeout"),
+        ("evaluator-loading", "dependency", "evaluator-unavailable"),
+        ("normalization", "validation", "normalization-rejected"),
+        ("evaluation", "runtime", "evaluation-failed"),
+        ("observation", "validation", "invalid-data"),
+        ("publication", "io", "io-failed"),
+    ],
+)
+def test_cli_identifies_each_failure_stage_without_publishing_remote_text(
+    tmp_path, monkeypatch, capsys, stage, category, code
+):
+    args = prepare_diagnostic_cli(tmp_path, monkeypatch)
+    private = "token=secret\n\x1b[31mremote body " + "X" * 10000
+
+    def fail(*_args, **_kwargs):
+        if stage == "acquisition":
+            raise acquisition.AcquisitionError("github-request-timeout")
+        if stage == "evaluator-loading":
+            raise ImportError(private)
+        if stage == "normalization":
+            raise normalization.NormalizationError(private)
+        if stage == "evaluation":
+            raise RuntimeError(private)
+        raise ValueError(private)
+
+    if stage == "planning":
+        monkeypatch.setattr(observer, "regenerate", fail)
+    elif stage == "plan-validation":
+        monkeypatch.setattr(observer.shadow, "read_bounded", fail)
+    elif stage == "acquisition":
+        monkeypatch.setattr(observer, "wait_for_receipts", fail)
+    elif stage == "evaluator-loading":
+        monkeypatch.setattr(observer.importlib, "import_module", fail)
+    elif stage == "normalization":
+        monkeypatch.setattr(normalization, "normalize_results", fail)
+    elif stage == "evaluation":
+        # Real YAGA InputError is a RuntimeError; keep its private message out.
+        original = observer.importlib.import_module
+        evaluator = original("yaga.test_planning.evaluation")
+        evaluator.evaluate_results = fail
+    elif stage == "observation":
+        monkeypatch.setattr(observer, "make_observation", fail)
+    else:
+        from pathlib import Path
+
+        original_write = Path.write_bytes
+
+        def write(path, data):
+            if path == tmp_path / "output/proposed-plan.json":
+                raise OSError(private)
+            return original_write(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", write)
+
+    assert observer.main(args) == 1
+    raw = (tmp_path / "output/diagnostics.json").read_bytes()
+    diagnostic = json.loads(raw)
+    assert (diagnostic["stage"], diagnostic["category"], diagnostic["code"]) == (
+        stage,
+        category,
+        code,
+    )
+    assert diagnostic["status"] == "incomplete"
+    assert diagnostic["authority"] == "diagnostic-only"
+    assert diagnostic["activation"] == "disabled"
+    assert diagnostic["run_id"] == RUN_ID
+    assert diagnostic["source"]["execution_commit"] == COMMIT
+    assert diagnostic["source"]["execution_tree"] == TREE
+    assert len(raw) <= observer.MAX_DIAGNOSTIC_BYTES
+    assert b"token=" not in raw and b"remote body" not in raw
+    assert "token=" not in capsys.readouterr().out
+    assert not (tmp_path / "output/publication.json").exists()
+
+
+def test_second_alias_failure_identifies_arm_and_cannot_publish_partial_success(
+    tmp_path, monkeypatch
+):
+    args = prepare_diagnostic_cli(tmp_path, monkeypatch)
+    original = observer.make_observation
+
+    def second(pilot, arm, *values):
+        if arm == "current":
+            raise ValueError("private second arm payload")
+        return original(pilot, arm, *values)
+
+    monkeypatch.setattr(observer, "make_observation", second)
+    assert observer.main(args) == 1
+    diagnostic = json.loads((tmp_path / "output/diagnostics.json").read_bytes())
+    assert diagnostic["stage"] == "observation" and diagnostic["arm"] == "current"
+    assert (tmp_path / "output/proposed-evaluation.json").is_file()
+    assert not (tmp_path / "output/publication.json").exists()
+
+
+def test_diagnostic_output_failure_preserves_nonzero_exit_and_safe_console(
+    tmp_path, monkeypatch, capsys
+):
+    from pathlib import Path
+
+    args = prepare_diagnostic_cli(tmp_path, monkeypatch)
+    original_write = Path.write_bytes
+
+    def write(path, data):
+        if path.parent == tmp_path / "output":
+            raise OSError("private filesystem details")
+        return original_write(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", write)
+    assert observer.main(args) == 1
+    console = capsys.readouterr().out
+    assert "stage=publication category=io code=io-failed" in console
+    assert "private filesystem" not in console
+    assert not (tmp_path / "output/publication.json").exists()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["secret\n" * 10000, "\x1b[31mprivate", "a" * 20000, "", None],
+    ids=["oversized-private", "terminal-control", "oversized-hex", "empty", "null"],
+)
+def test_diagnostic_identity_fields_never_echo_unbounded_or_malformed_input(value):
+    args = SimpleNamespace(
+        group=value,
+        run_id=value,
+        attempt=value,
+        execution_commit=value,
+        execution_tree=value,
+        adapter_commit=value,
+        adapter_tree=value,
+    )
+    report = observer.ObserverDiagnostics().failure(args, RuntimeError("secret"))
+    assert report["group"] is None and report["run_id"] is None and report["attempt"] is None
+    assert set(report["source"].values()) == {None}
+    raw = shadow.encode(report)
+    assert len(raw) < observer.MAX_DIAGNOSTIC_BYTES and b"secret" not in raw
+
+
+def test_pending_deadline_is_retained_as_acquisition_diagnostic(tmp_path, monkeypatch):
+    real_wait = observer.wait_for_receipts
+    args = prepare_diagnostic_cli(tmp_path, monkeypatch)
+    clock = FakeClock()
+    monkeypatch.setattr(observer, "MAX_POLLS", 2)
+
+    def pending(*_args, **_kwargs):
+        raise acquisition.AcquisitionPending("selected-job-incomplete")
+
+    monkeypatch.setattr(
+        observer,
+        "wait_for_receipts",
+        lambda expected, destination, **_kwargs: real_wait(
+            expected, destination, acquire=pending, clock=clock, sleep=clock.sleep
+        ),
+    )
+    assert observer.main(args) == 1
+    report = json.loads((tmp_path / "output/diagnostics.json").read_bytes())
+    assert report["stage"] == "acquisition" and report["code"] == "shadow-observation-deadline"
+    assert clock.sleeps == [60]
