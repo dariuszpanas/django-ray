@@ -321,7 +321,14 @@ observer overhead. It cannot establish selective-only runtime, runner-minute
 savings, earlier merge readiness or independent-arm causality; those report fields
 remain null. Required checks still govern merging, and all full-run resources were
 consumed. The retained `runtime-costs.json` separately records observed qualification
-and observer runner seconds, including observers' idle polling overhead. This is
+and observer runner seconds, including observers' idle polling overhead. Observer
+timing is independent of result publication: a failed, cancelled or timed-out job
+still consumed runner time when its exact run, attempt, source and terminal timing
+are authenticated and stable on reread. Per-group `runner_seconds` and the
+`known_observer_job_seconds` subtotal retain those observations even when publication
+fails. The complete `observer_job_seconds` total remains null if any expected group
+has unavailable timing; a partial subtotal never substitutes for that total.
+Qualification seconds still require a validated full observation. This is
 additional runner usage that can incur charges; it is not billing evidence or saved
 compute. Aggregate duration stays unknown while that job is still running.
 Record a zero or negative result without choosing a different base after
