@@ -609,6 +609,203 @@ def test_github_transport_bounds_process_output_and_suppresses_stderr(monkeypatc
     assert kwargs["stderr"] is subprocess.DEVNULL and kwargs["shell"] is False
 
 
+class PipeProcess:
+    """A CLI process whose buffered stdout is never connected to the terminal."""
+
+    def __init__(self, raw, returncode=0):
+        self.stdout = io.BytesIO(raw)
+        self.returncode = None
+        self.final_code = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -1
+
+    def wait(self, timeout):
+        if self.returncode is None:
+            self.returncode = self.final_code
+        return self.returncode
+
+
+CLI_HELP = b"USAGE\n  gh api <endpoint> [flags]\nFLAGS\n"
+ESCAPE_FLAG = b"      --allow-escape-sequences   Allow printing terminal escape sequences\n"
+RAW_LOG = b"2026-10-18T00:00:00Z \x1b[36;1mprivate log\x1b[0m\n"
+RAW_ZIP = b"PK\x03\x04\x00\xff\x1b\x00private archive"
+
+
+@pytest.mark.parametrize("supports_flag", [False, True])
+def test_raw_logs_use_one_cached_capability_probe_and_exact_private_bytes(
+    monkeypatch, capsys, supports_flag
+):
+    commands = []
+
+    def spawn(command, **kwargs):
+        commands.append((command, kwargs))
+        if command[1:] == ["api", "--help"]:
+            return PipeProcess(CLI_HELP + (ESCAPE_FLAG if supports_flag else b""))
+        endpoint = command[-1]
+        option = "--allow-escape-sequences" in command
+        if endpoint.endswith("/logs"):
+            # Model modern gh: a pipe alone does not allow ANSI-bearing text.
+            return PipeProcess(
+                RAW_LOG if option or not supports_flag else b"",
+                0 if option or not supports_flag else 1,
+            )
+        assert not option
+        return PipeProcess(RAW_ZIP if endpoint.endswith("/zip") else b"{}")
+
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(acquisition.subprocess, "Popen", spawn)
+    for name in ("GH_DEBUG", "GH_FORCE_TTY", "CLICOLOR_FORCE", "FORCE_COLOR"):
+        monkeypatch.setenv(name, "unsafe override")
+    monkeypatch.setenv("GH_PAGER", "untrusted pager")
+    monkeypatch.setenv("PAGER", "untrusted pager")
+    monkeypatch.setenv("GH_TOKEN", "PRIVATE_TOKEN_SENTINEL")
+    client = acquisition.Github()
+    assert client.get(acquisition.PREFIX, 10) == b"{}"
+    assert len(commands) == 1  # Metadata-only polls need no capability process.
+    for job in (1, 2):
+        assert client.get(acquisition.PREFIX + f"/actions/jobs/{job}/logs", 100) == RAW_LOG
+    assert client.get(acquisition.PREFIX + "/actions/artifacts/3/zip", 100) == RAW_ZIP
+    assert client.calls == 4 and len(commands) == 5
+    assert sum(command[1:] == ["api", "--help"] for command, _ in commands) == 1
+    for command, kwargs in commands:
+        assert kwargs["stdout"] is acquisition.subprocess.PIPE
+        assert kwargs["stderr"] is acquisition.subprocess.DEVNULL
+        assert kwargs["stdin"] is acquisition.subprocess.DEVNULL and kwargs["shell"] is False
+        assert all(
+            name not in kwargs["env"]
+            for name in ("GH_DEBUG", "GH_FORCE_TTY", "CLICOLOR_FORCE", "FORCE_COLOR")
+        )
+        assert kwargs["env"]["GH_PAGER"] == kwargs["env"]["PAGER"] == "cat"
+        assert kwargs["env"]["NO_COLOR"] == "1" and kwargs["env"]["CLICOLOR"] == "0"
+        assert kwargs["env"]["GH_TOKEN"] == "PRIVATE_TOKEN_SENTINEL"
+        assert "PRIVATE_TOKEN_SENTINEL" not in command
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("oversized", "github-cli-probe-byte-budget"),
+        ("nonzero", "github-cli-probe-failed"),
+        ("malformed", "github-cli-probe-failed"),
+        ("missing", "github-cli-probe-failed"),
+    ],
+)
+def test_cli_probe_failure_is_bounded_cached_and_never_dispatches_a_get(monkeypatch, fault, code):
+    commands = []
+
+    def spawn(command, **_kwargs):
+        commands.append(command)
+        assert command[1:] == ["api", "--help"]
+        if fault == "missing":
+            raise OSError("PRIVATE_EXCEPTION_SENTINEL")
+        raw = (
+            b"x" * 65537
+            if fault == "oversized"
+            else b"unexpected help"
+            if fault == "malformed"
+            else CLI_HELP
+        )
+        return PipeProcess(raw, 1 if fault == "nonzero" else 0)
+
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(acquisition.subprocess, "Popen", spawn)
+    client = acquisition.Github()
+    for _ in range(2):
+        with pytest.raises(acquisition.AcquisitionError, match="^" + code + "$"):
+            client.get(acquisition.PREFIX + "/actions/jobs/1/logs", 100)
+    assert client.calls == 0 and len(commands) == 1
+
+
+@pytest.mark.parametrize("remaining,expected_wait", [(2, 2), (240, 5)])
+def test_cli_probe_timeout_uses_remaining_shared_deadline(monkeypatch, remaining, expected_wait):
+    joins, commands = [], []
+
+    class StalledThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            joins.append(timeout)
+
+        def is_alive(self):
+            return True
+
+    def spawn(command, **_kwargs):
+        commands.append(command)
+        return PipeProcess(b"")
+
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(acquisition.subprocess, "Popen", spawn)
+    monkeypatch.setattr(acquisition.threading, "Thread", StalledThread)
+    monkeypatch.setattr(acquisition.time, "monotonic", lambda: 10)
+    client = acquisition.Github()
+    client.deadline = 10 + remaining
+    with pytest.raises(acquisition.AcquisitionError, match="^github-cli-probe-timeout$"):
+        client.get(acquisition.PREFIX + "/actions/jobs/1/logs", 100)
+    assert joins[0] == expected_wait and client.calls == 0 and len(commands) == 1
+
+
+@pytest.mark.parametrize("exhausted", ["requests", "deadline"])
+def test_exhausted_http_budget_does_not_start_a_capability_probe(monkeypatch, exhausted):
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(
+        acquisition.subprocess,
+        "Popen",
+        lambda *_a, **_kw: pytest.fail("process after budget exhausted"),
+    )
+    monkeypatch.setattr(acquisition.time, "monotonic", lambda: 10)
+    client = acquisition.Github()
+    if exhausted == "requests":
+        client.calls = 100
+    else:
+        client.deadline = 10
+    with pytest.raises(acquisition.AcquisitionError, match="^acquisition-request-budget$"):
+        client.get(acquisition.PREFIX + "/actions/jobs/1/logs", 100)
+
+
+def test_failed_raw_log_get_is_not_retried_or_reissued_without_the_flag(monkeypatch):
+    commands = []
+
+    def spawn(command, **_kwargs):
+        commands.append(command)
+        if command[1:] == ["api", "--help"]:
+            return PipeProcess(CLI_HELP + ESCAPE_FLAG)
+        assert "--allow-escape-sequences" in command
+        return PipeProcess(b"PRIVATE_RESPONSE_SENTINEL", 1)
+
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(acquisition.subprocess, "Popen", spawn)
+    client = acquisition.Github()
+    with pytest.raises(acquisition.AcquisitionError, match="^github-request-failed$"):
+        client.get(acquisition.PREFIX + "/actions/jobs/1/logs", 100)
+    assert client.calls == 1 and len(commands) == 2
+
+
+def test_help_mentions_do_not_enable_an_unadvertised_option(monkeypatch):
+    commands = []
+
+    def spawn(command, **_kwargs):
+        commands.append(command)
+        if command[1:] == ["api", "--help"]:
+            return PipeProcess(
+                CLI_HELP + b"Description mentions --allow-escape-sequences, without declaring it.\n"
+            )
+        return PipeProcess(RAW_LOG)
+
+    monkeypatch.setattr(acquisition.shutil, "which", lambda _: __file__)
+    monkeypatch.setattr(acquisition.subprocess, "Popen", spawn)
+    assert acquisition.Github().get(acquisition.PREFIX + "/actions/jobs/1/logs", 100) == RAW_LOG
+    assert "--allow-escape-sequences" not in commands[-1]
+
+
 @pytest.mark.parametrize("default_client", [False, True])
 def test_diagnostics_observe_both_client_paths_without_changing_acquisition(
     tmp_path, monkeypatch, default_client

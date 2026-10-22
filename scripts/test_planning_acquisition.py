@@ -98,7 +98,8 @@ DIAGNOSTIC_CODES = frozenset(
     artifact-outside-upload-window artifact-upload-log-binding-missing
     conflicting-zip-topology copied-job-from-prior-attempt duplicate-api-identity
     duplicate-selected-cell duplicate-selected-job duplicate-zip-path
-    github-cli-unavailable github-request-failed github-request-timeout
+    github-cli-unavailable github-cli-probe-failed github-cli-probe-timeout
+    github-cli-probe-byte-budget github-request-failed github-request-timeout
     github-request-unavailable github-response-byte-budget incomplete-api-inventory
     inconsistent-run-timestamps invalid-acquisition-data invalid-api-inventory
     invalid-api-timestamp invalid-artifact-digest-or-size invalid-artifact-identity
@@ -258,20 +259,68 @@ class Github:
         self.executable = str(Path(executable).resolve(strict=True))
         self.deadline = time.monotonic() + 240
         self.calls = 0
+        self._log_arguments: tuple[str, ...] | None = None
+        self._probe_error: str | None = None
 
     def get(self, endpoint: str, maximum: int) -> bytes:
         require(_endpoint(endpoint), "unsupported-github-route")
         require(type(maximum) is int and 0 < maximum <= MAX_ZIP, "invalid-response-limit")
+        require(self.calls < 100 and time.monotonic() < self.deadline, "acquisition-request-budget")
+        options = ()
+        if _diagnostic_route(endpoint)[0] == "job-log":
+            if self._probe_error is not None:
+                raise AcquisitionError(self._probe_error)
+            if self._log_arguments is None:
+                try:
+                    help_text = self._capture(["api", "--help"], 65536, 5, probe=True)
+                    require(
+                        re.search(rb"(?m)^USAGE\r?$", help_text) is not None
+                        and re.search(rb"(?m)^[ \t]+gh api <endpoint> \[flags\]\r?$", help_text)
+                        is not None,
+                        "github-cli-probe-failed",
+                    )
+                    self._log_arguments = (
+                        ("--allow-escape-sequences",)
+                        if re.search(
+                            rb"(?m)^[ \t]+--allow-escape-sequences(?:[ \t]+|\r?$)", help_text
+                        )
+                        is not None
+                        else ()
+                    )
+                except AcquisitionError as error:
+                    self._probe_error = diagnostic_code(error)
+                    raise
+            options = self._log_arguments
+        require(time.monotonic() < self.deadline, "acquisition-request-budget")
         self.calls += 1
-        require(
-            self.calls <= 100 and time.monotonic() < self.deadline, "acquisition-request-budget"
+        return self._capture(
+            ["api", "--hostname", "github.com", "--method", "GET", *options, endpoint], maximum, 30
         )
+
+    def _capture(
+        self, arguments: list[str], maximum: int, seconds: int, *, probe: bool = False
+    ) -> bytes:
+        """Keep CLI capability text and raw evidence inside bounded private pipes."""
+        failure_code = "github-cli-probe-failed" if probe else "github-request-failed"
+        timeout_code = "github-cli-probe-timeout" if probe else "github-request-timeout"
+        byte_code = "github-cli-probe-byte-budget" if probe else "github-response-byte-budget"
+        deadline = min(self.deadline, time.monotonic() + seconds)
+        require(time.monotonic() < deadline, timeout_code)
         environment = os.environ.copy()
-        environment.pop("GH_DEBUG", None)
-        environment.update(GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1")
+        for name in ("GH_DEBUG", "GH_FORCE_TTY", "CLICOLOR_FORCE", "FORCE_COLOR"):
+            environment.pop(name, None)
+        # gh recognizes "cat" as disabling its pager without spawning a process.
+        environment.update(
+            GH_PROMPT_DISABLED="1",
+            GH_NO_UPDATE_NOTIFIER="1",
+            GH_PAGER="cat",
+            PAGER="cat",
+            NO_COLOR="1",
+            CLICOLOR="0",
+        )
         try:
             process = subprocess.Popen(
-                [self.executable, "api", "--hostname", "github.com", "--method", "GET", endpoint],
+                [self.executable, *arguments],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -279,7 +328,9 @@ class Github:
                 shell=False,
             )
         except OSError:
-            raise AcquisitionError("github-request-unavailable") from None
+            raise AcquisitionError(
+                failure_code if probe else "github-request-unavailable"
+            ) from None
         output = bytearray()
         failures = []
 
@@ -287,28 +338,30 @@ class Github:
             try:
                 while chunk := process.stdout.read(65536):
                     if len(output) + len(chunk) > maximum:
-                        raise AcquisitionError("github-response-byte-budget")
+                        raise AcquisitionError(byte_code)
                     output.extend(chunk)
             except Exception as error:
                 failures.append(
-                    "github-response-byte-budget"
-                    if type(error) is AcquisitionError
-                    and error.args == ("github-response-byte-budget",)
-                    else "github-request-failed"
+                    byte_code
+                    if type(error) is AcquisitionError and error.args == (byte_code,)
+                    else failure_code
                 )
                 process.kill()
 
         reader = threading.Thread(target=consume, daemon=True)
         reader.start()
         try:
-            reader.join(timeout=max(0, min(30, self.deadline - time.monotonic())))
-            require(not reader.is_alive(), "github-request-timeout")
+            reader.join(timeout=max(0, deadline - time.monotonic()))
+            require(not reader.is_alive(), timeout_code)
             if failures:
                 raise AcquisitionError(failures[0])
-            require(process.wait(timeout=5) == 0, "github-request-failed")
+            require(
+                process.wait(timeout=max(0, min(5, deadline - time.monotonic()))) == 0, failure_code
+            )
+            require(time.monotonic() < deadline, timeout_code)
             return bytes(output)
         except subprocess.TimeoutExpired:
-            raise AcquisitionError("github-request-timeout") from None
+            raise AcquisitionError(timeout_code) from None
         finally:
             if process.poll() is None:
                 process.kill()
