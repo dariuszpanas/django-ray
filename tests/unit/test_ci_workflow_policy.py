@@ -230,7 +230,7 @@ def test_candidate_artifact_workflow_is_manual_read_only_and_never_publishes() -
     assert set(workflow["jobs"]) == {"build", "test", "candidate-gate"}
     for job in workflow["jobs"].values():
         assert job["runs-on"] == "ubuntu-latest"
-        assert 1 <= int(job["timeout-minutes"]) <= 35
+        assert 1 <= int(job["timeout-minutes"]) <= 51
         assert "environment" not in job and "permissions" not in job
         for step in job["steps"]:
             assert not any(name in str(step) for name in ("secrets.", "pypi-publish", "gh release"))
@@ -247,6 +247,48 @@ def test_candidate_artifact_workflow_is_manual_read_only_and_never_publishes() -
     assert "--testpypi-candidate" in commands
     assert commands.count("uv build") == 1
     assert "HEAD^{tree}" in commands and "sha256sum dist/*.whl dist/*.tar.gz" in commands
+
+
+def test_qualification_callers_preserve_workload_time_after_the_bounded_ci_wait() -> None:
+    from scripts.wait_for_ci_checkpoint import CHECKPOINT_SECONDS
+
+    # Caller job budgets must include the prerequisite and preserve their
+    # existing post-checkpoint allowance. Application additionally covers all
+    # its setup, native-workload and cleanup step ceilings without truncation.
+    minimum_workload_minutes = {
+        ("application-qualification.yml", "application-core"): 94,
+        ("upgrade-native-qualification.yml", "native"): 40,
+        ("latency-qualification.yml", "latency"): 25,
+        ("cancellation-qualification.yml", "cancellation"): 20,
+        ("monitoring-qualification.yml", "monitoring"): 65,
+        ("release-candidate-qualification.yml", "build"): 15,
+    }
+    callers = set()
+    for path in WORKFLOWS.glob("*.yml"):
+        for job_id, job in _jobs(path).items():
+            for step in job.get("steps", []):
+                if "scripts/wait_for_ci_checkpoint.py" not in step.get("run", ""):
+                    continue
+                identity = path.name, job_id
+                callers.add(identity)
+                wait_minutes = int(step["timeout-minutes"])
+                assert CHECKPOINT_SECONDS + 60 <= wait_minutes * 60
+                assert int(job["timeout-minutes"]) >= (
+                    wait_minutes + minimum_workload_minutes[identity]
+                )
+    assert callers == set(minimum_workload_minutes)
+
+
+def test_cancellation_evidence_is_required_only_after_its_rehearsal_starts() -> None:
+    job = _jobs(WORKFLOWS / "cancellation-qualification.yml")["cancellation"]
+    execution = next(step for step in job["steps"] if step.get("id") == "cancellation_rehearsal")
+    assert "280s" in execution["run"]
+    upload = job["steps"][-1]
+    assert upload["if"] == (
+        'always() && contains(fromJSON(\'["success", "failure", "cancelled"]\'), '
+        "steps.cancellation_rehearsal.outcome)"
+    )
+    assert upload["with"]["if-no-files-found"] == "error"
 
 
 def test_candidate_artifact_matrix_verifies_both_installs_and_their_actual_dependencies() -> None:

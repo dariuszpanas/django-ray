@@ -338,14 +338,20 @@ final identity revalidation is already in those command limits. Every command is
 clipped to the remaining observer time, and no command resets that deadline.
 Successful checkers emit only their existing fixed boolean facts. On failure,
 the host emits at most 512 bytes of fixed JSON identifying the observation phase
-and a `timeout`, `invalid` or `unavailable` category. The private checker returns
-the same bounded failure schema over stdout; the host propagates its child phase
+and a `timeout`, `invalid` or `unavailable` category. The private checker retains
+its version-1 failure schema over stdout; the version-2 host failure schema adds
+inventory attribution. The host propagates its child phase
 only after exact schema validation on a failed command. Unknown fields, duplicate
 keys, oversized output and arbitrary exception or subprocess text cannot enter
 these diagnostics. A child database or API timeout and a host command timeout remain
 distinct observations; elapsed time alone does not identify a cause. The larger
 status host allowance leaves child deadlines, command order and successful receipt
 schemas unchanged; it adds no retry or resource allocation.
+Inventory failures additionally identify a fixed source role and the rejected
+identity, lifecycle or readiness predicate. These fields never contain Pod names,
+images, labels, raw probe output or exception text. A running container that is
+not ready remains a failure; a recent manager heartbeat alone does not replace
+Kubernetes readiness or the required protected-log observation.
 The API/Admin log surface here means the shared django-web server log, not a
 separate rendered Admin-page assertion.
 
@@ -673,6 +679,10 @@ reasons, counts and bounded container exit/restart fields survive; free-text
 messages, resource specs and raw current/previous Pod logs are omitted. Parsed
 HTTP attribution, generation phase and rq2 diagnostics use finite vocabularies.
 No raw assertion stdout/stderr log is copied into the evidence artifact.
+Pod and event projections retain fixed workload roles and validated event timing
+so a readiness failure can be correlated with its source. Probe failure categories
+are conservative: unknown messages stay unknown, and a probe failure category alone
+does not establish CPU contention, database failure or a dependency regression.
 
 
 The [affected-scenario policy](../../docs/deployment/local-kuberay-gate.md) determines which product

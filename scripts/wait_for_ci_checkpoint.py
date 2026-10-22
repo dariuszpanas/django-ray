@@ -13,6 +13,11 @@ from typing import Any
 
 TRANSIENT_HTTP = frozenset({408, 429, 502, 503, 504})
 MAX_METADATA_RETRIES = 3
+# The supported suite can consume 20 minutes before package verification starts.
+# Reserve another 15 minutes for package work and scheduling; this remains a
+# finite allowance, not a bound on all CI jobs. Callers keep their separate
+# workload budgets after this prerequisite; no workload is retried.
+CHECKPOINT_SECONDS = 35 * 60
 DEADLINE_ERROR = "No passing exact-source CI attempt within the checkpoint deadline"
 
 
@@ -100,6 +105,35 @@ class Checkpoint:
     attempt: int
 
 
+@dataclass
+class Observation:
+    """Fixed diagnostic facts, never arbitrary workflow metadata or command output."""
+
+    phase: str = "discovery"
+    workflow_status: str = "unavailable"
+    workflow_conclusion: str = "unavailable"
+
+    def workflow(self, run: dict[str, Any] | None) -> None:
+        self.workflow_status = "unavailable"
+        self.workflow_conclusion = "unavailable"
+        if run is not None:
+            status, conclusion = run.get("status"), run.get("conclusion")
+            self.workflow_status = (
+                status
+                if status
+                in {"queued", "requested", "waiting", "pending", "in_progress", "completed"}
+                else "unknown"
+            )
+            self.workflow_conclusion = (
+                "pending"
+                if conclusion is None
+                else conclusion
+                if conclusion
+                in {"success", "failure", "cancelled", "timed_out", "skipped", "neutral", "stale"}
+                else "unknown"
+            )
+
+
 def latest_run(payload: dict[str, Any], sha: str) -> dict[str, Any] | None:
     rows = inventory(payload, "workflow_runs")
     for row in rows:
@@ -128,10 +162,19 @@ def latest_run(payload: dict[str, Any], sha: str) -> dict[str, Any] | None:
 
 
 def inspect_checkpoint(
-    api: Callable[[str], dict[str, Any]], repo: str, sha: str
+    api: Callable[[str], dict[str, Any]],
+    repo: str,
+    sha: str,
+    *,
+    observation: Observation | None = None,
 ) -> Checkpoint | None:
+    if observation is None:
+        observation = Observation()
+    observation.phase = "discovery"
+    observation.workflow(None)
     endpoint = f"repos/{repo}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100"
     run = latest_run(api(endpoint), sha)
+    observation.workflow(run)
     if run is None or run.get("status") != "completed":
         return None
     if run.get("conclusion") == "cancelled":
@@ -141,6 +184,7 @@ def inspect_checkpoint(
     if run.get("conclusion") != "success":
         raise CheckpointError("Current exact-source CI workflow did not pass")
     run_id, attempt = run["id"], run["run_attempt"]
+    observation.phase = "attempt_jobs"
     jobs = api(f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
     rows = inventory(jobs, "jobs")
     if any(
@@ -153,7 +197,9 @@ def inspect_checkpoint(
     if len(gates) != 1 or gates[0].get("conclusion") != "success":
         raise CheckpointError("Current CI attempt has no unique passing CI Gate")
     # Detect a new workflow or rerun appearing while the gate was inspected.
+    observation.phase = "confirmation"
     confirmed = latest_run(api(endpoint), sha)
+    observation.workflow(confirmed)
     if confirmed is None or any(
         confirmed.get(key) != run.get(key) for key in ("id", "run_attempt", "status", "conclusion")
     ):
@@ -166,7 +212,7 @@ def wait_for_checkpoint(
     repo: str,
     sha: str,
     *,
-    timeout: float = 1080,
+    timeout: float = CHECKPOINT_SECONDS,
     interval: float = 25,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -176,17 +222,39 @@ def wait_for_checkpoint(
         raise CheckpointError("Invalid repository identity")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise CheckpointError("Invalid source identity")
+    started = clock()
     if deadline is None:
-        deadline = clock() + timeout
+        deadline = started + timeout
     retries = 0
+    observation = Observation()
+
+    def expired() -> CheckpointError:
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "checkpoint": "ci_metadata",
+                    "reason": "deadline",
+                    "elapsed_seconds": round(max(0, clock() - started), 3),
+                    "deadline_seconds": round(max(0, deadline - started), 3),
+                    "last_phase": observation.phase,
+                    "workflow_status": observation.workflow_status,
+                    "workflow_conclusion": observation.workflow_conclusion,
+                    "metadata_retries": retries,
+                },
+                sort_keys=True,
+            )
+        )
+        return CheckpointError(DEADLINE_ERROR)
+
     while clock() < deadline:
         try:
-            run_id = inspect_checkpoint(api, repo, sha)
+            run_id = inspect_checkpoint(api, repo, sha, observation=observation)
         except MetadataReadError as error:
             if not error.retryable:
                 raise
             if clock() >= deadline:
-                raise CheckpointError(DEADLINE_ERROR) from None
+                raise expired() from None
             if retries == MAX_METADATA_RETRIES:
                 raise CheckpointError(
                     f"CI metadata retry limit exhausted ({error.category})"
@@ -206,16 +274,20 @@ def wait_for_checkpoint(
                 )
             )
             run_id = None
+        except CheckpointError as error:
+            if str(error) == DEADLINE_ERROR:
+                raise expired() from None
+            raise
         if run_id is not None and clock() < deadline:
             return run_id
         remaining = deadline - clock()
         if remaining > 0:
             sleep(min(interval, remaining))
-    raise CheckpointError(DEADLINE_ERROR)
+    raise expired()
 
 
 def main() -> int:
-    deadline = time.monotonic() + 1080
+    deadline = time.monotonic() + CHECKPOINT_SECONDS
 
     def api(endpoint: str) -> dict[str, Any]:
         return read_metadata(endpoint, timeout=deadline - time.monotonic())

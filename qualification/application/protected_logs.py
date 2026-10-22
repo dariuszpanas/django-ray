@@ -180,9 +180,11 @@ def observe(
         return result.stdout
 
     def inventory():
+        diagnostics.inventory(None, "inventory_read")
         items = json.loads(command(["get", "pods", "-o", "json"], maximum=128 * 1024, limit=2))[
             "items"
         ]
+        diagnostics.inventory(None, "inventory_bound")
         if not isinstance(items, list) or len(items) > 16:
             raise ValueError("Protected log Pod inventory exceeds its bound")
         found = {}
@@ -191,33 +193,51 @@ def observe(
             ("django-manager", "manager"),
             (f"assert-{generation}", "assertions"),
         ):
+            diagnostics.inventory(container, "pod_count")
             (pod,) = [
                 item for item in items if item["metadata"].get("labels", {}).get("app") == app
             ]
+            diagnostics.inventory(container, "container_spec_count")
             (spec,) = [item for item in pod["spec"]["containers"] if item["name"] == container]
+            diagnostics.inventory(container, "container_status_count")
             (state,) = [
                 item for item in pod["status"]["containerStatuses"] if item["name"] == container
             ]
-            if (
-                pod["metadata"].get("deletionTimestamp")
-                or spec["image"] != image
-                or state.get("imageID", "").rsplit("@", 1)[-1] != image.rsplit("@", 1)[-1]
-                or state["restartCount"] != 0
-            ):
+            diagnostics.inventory(container, "pod_deleting")
+            if pod["metadata"].get("deletionTimestamp"):
                 raise ValueError("Protected log source identity is not the current candidate")
+            diagnostics.inventory(container, "declared_image")
+            if spec["image"] != image:
+                raise ValueError("Protected log source identity is not the current candidate")
+            diagnostics.inventory(container, "observed_image")
+            if state.get("imageID", "").rsplit("@", 1)[-1] != image.rsplit("@", 1)[-1]:
+                raise ValueError("Protected log source identity is not the current candidate")
+            diagnostics.inventory(container, "container_restarted")
+            if type(state["restartCount"]) is not int or state["restartCount"] != 0:
+                raise ValueError("Protected log source identity is not the current candidate")
+            diagnostics.inventory(
+                container,
+                "generation_exit" if app.startswith("assert-") else "container_not_running",
+            )
             live = state["state"].get("running")
             done = state["state"].get("terminated")
             if app.startswith("assert-"):
                 if not done or done["exitCode"] != 0:
                     raise ValueError("Protected log generation did not finish successfully")
-            elif not live or not state.get("ready"):
-                raise ValueError("Protected log application source is not live and ready")
+            else:
+                if not live:
+                    raise ValueError("Protected log application source is not live and ready")
+                diagnostics.inventory(container, "container_not_ready")
+                if state.get("ready") is not True:
+                    raise ValueError("Protected log application source is not live and ready")
+            diagnostics.inventory(container, "source_coordinates")
             found[app] = (
                 pod["metadata"]["name"],
                 pod["metadata"]["uid"],
                 container,
                 live["startedAt"] if live else done["startedAt"],
             )
+        diagnostics.inventory(None, None)
         return found
 
     diagnostics.phase("inventory")
@@ -301,7 +321,13 @@ def observe(
     diagnostics.phase("private_compare")
     inspect({"protected_runtime": evidence, "logs": logs}, status_only=False)
     diagnostics.phase("final_inventory")
-    if inventory() != before or time.monotonic() > deadline:
+    after = inventory()
+    for app, original in before.items():
+        diagnostics.inventory(original[2], "source_changed")
+        if after[app] != original:
+            raise ValueError("Protected log source changed or exceeded its deadline")
+    diagnostics.inventory(None, "deadline")
+    if time.monotonic() > deadline:
         raise ValueError("Protected log source changed or exceeded its deadline")
     return {
         "schema_version": 1,

@@ -34,7 +34,7 @@ def test_outer_wall_clock_accounts_for_every_new_sequential_phase():
     assert budgets.GENERATION_ASSERT_SECONDS == 1305
     config = yaml.safe_load((ROOT / ".github/workflows/application-qualification.yml").read_text())
     job = config["jobs"]["application-core"]
-    assert job["timeout-minutes"] == 75
+    assert job["timeout-minutes"] == 130
     native = next(
         step
         for step in job["steps"]

@@ -18,7 +18,7 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Monitoring Qualification (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 85
+    timeout-minutes: 101
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Require the exact-source Linux CI checkpoint
-        timeout-minutes: 20
+        timeout-minutes: 36
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/wait_for_ci_checkpoint.py

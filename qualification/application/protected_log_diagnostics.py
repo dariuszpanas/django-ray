@@ -27,6 +27,26 @@ PHASES = {
     ),
 }
 TYPES = frozenset({"timeout", "invalid", "unavailable"})
+ROLES = frozenset({"web", "manager", "assertions"})
+INVENTORY_REASONS = frozenset(
+    {
+        "inventory_read",
+        "inventory_bound",
+        "pod_count",
+        "container_spec_count",
+        "container_status_count",
+        "pod_deleting",
+        "declared_image",
+        "observed_image",
+        "container_restarted",
+        "generation_exit",
+        "container_not_running",
+        "container_not_ready",
+        "source_coordinates",
+        "source_changed",
+        "deadline",
+    }
+)
 _STATE = ContextVar("protected_log_failure_phase", default=None)
 _ATTRIBUTE = "_protected_log_failure"
 
@@ -50,9 +70,16 @@ def failure_type(error: Exception) -> str:
     return "invalid" if isinstance(error, (ValueError, TypeError, KeyError)) else "unavailable"
 
 
-def _record(scope: str, phase: str, kind: str, child_phase: str | None = None) -> dict:
-    return {
-        "schema_version": 1,
+def _record(
+    scope: str,
+    phase: str,
+    kind: str,
+    child_phase: str | None = None,
+    role: str | None = None,
+    inventory_reason: str | None = None,
+) -> dict:
+    value = {
+        "schema_version": 2 if scope == "host" else 1,
         "layer": "application_protected_logs",
         "status": "failed",
         "failure_scope": scope,
@@ -60,6 +87,9 @@ def _record(scope: str, phase: str, kind: str, child_phase: str | None = None) -
         "failure_type": kind,
         "child_phase": child_phase,
     }
+    if scope == "host":
+        value.update(source_role=role, inventory_reason=inventory_reason)
+    return value
 
 
 def _valid(value: object, scope: str) -> bool:
@@ -67,7 +97,7 @@ def _valid(value: object, scope: str) -> bool:
         isinstance(value, dict)
         and set(value) == set(_record(scope, "unavailable", "unavailable"))
         and type(value["schema_version"]) is int
-        and value["schema_version"] == 1
+        and value["schema_version"] == (2 if scope == "host" else 1)
         and value["layer"] == "application_protected_logs"
         and value["status"] == "failed"
         and value["failure_scope"] == scope
@@ -81,6 +111,26 @@ def _valid(value: object, scope: str) -> bool:
                 scope == "host"
                 and type(value["child_phase"]) is str
                 and value["child_phase"] in PHASES["child"]
+            )
+        )
+        and (
+            scope != "host"
+            or (
+                (
+                    value["source_role"] is None
+                    or (type(value["source_role"]) is str and value["source_role"] in ROLES)
+                )
+                and (
+                    value["inventory_reason"] is None
+                    or (
+                        type(value["inventory_reason"]) is str
+                        and value["inventory_reason"] in INVENTORY_REASONS
+                    )
+                )
+                and (
+                    value["failure_phase"] in {"inventory", "final_inventory"}
+                    or (value["source_role"] is None and value["inventory_reason"] is None)
+                )
             )
         )
     )
@@ -122,13 +172,33 @@ def phase(name: str) -> None:
         if name not in PHASES[state["scope"]]:
             raise ValueError("Invalid protected log diagnostic phase")
         state["phase"] = name
+        state.update(role=None, inventory_reason=None)
+
+
+def inventory(role: str | None, reason: str | None) -> None:
+    """Attribute the next inventory predicate without retaining source values."""
+    state = _STATE.get()
+    if (
+        state is None
+        or state["scope"] != "host"
+        or state["phase"] not in {"inventory", "final_inventory"}
+        or (role is not None and role not in ROLES)
+        or (reason is not None and reason not in INVENTORY_REASONS)
+    ):
+        raise ValueError("Invalid protected log inventory diagnostic")
+    state.update(role=role, inventory_reason=reason)
 
 
 def tracked(scope: str):
     def decorate(function):
         @wraps(function)
         def run(*args, **kwargs):
-            state = {"scope": scope, "phase": "unavailable"}
+            state = {
+                "scope": scope,
+                "phase": "unavailable",
+                "role": None,
+                "inventory_reason": None,
+            }
             token = _STATE.set(state)
             try:
                 return function(*args, **kwargs)
@@ -139,6 +209,8 @@ def tracked(scope: str):
                     state["phase"],
                     child.kind if child else failure_type(error),
                     child.phase if child else None,
+                    state["role"],
+                    state["inventory_reason"],
                 )
                 raise
             finally:

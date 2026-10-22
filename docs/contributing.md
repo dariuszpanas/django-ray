@@ -17,7 +17,10 @@ inspect the latest `CI` workflow run for the exact source commit and its current
 attempt. They wait for
 an active replacement instead of treating a cancelled predecessor's aggregate
 check as authoritative. Completed failures remain blocking. The checkpoint logs
-the source commit, CI run and attempt; its wait deadline is 1080 seconds. Moving a PR
+the source commit, CI run and attempt; its wait deadline is 2100 seconds inside a
+36-minute step. The finite allowance covers the 20-minute CI test lanes with
+additional time for downstream package validation and scheduling. Caller job budgets
+retain their workload and cleanup allowance after the prerequisite. Moving a PR
 from draft to ready does not restart the broad CI matrix.
 
 Metadata reads have at most three retries across the entire checkpoint, only for
