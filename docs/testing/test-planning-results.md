@@ -16,12 +16,15 @@ observations are an initial measurement step, not the controlled independent-arm
 experiment required for an adoption decision.
 
 The first full hosted observation completed all eight qualification workloads,
-but its result observer and aggregate failed. Complete offline replay passed;
-the hosted failure's cause remains unconfirmed. Feedback timing and savings are
-unavailable. [The reporting investigation](https://github.com/dariuszpanas/django-ray/issues/644)
-now has bounded observer diagnostics and offline failure-path coverage. The original
-failure remains unexplained. The observer-only confirmation below verifies the
-repaired adapter against retained evidence without repeating workloads.
+but its result observer and aggregate failed. Complete offline replay passed.
+[The reporting investigation](https://github.com/dariuszpanas/django-ray/issues/644)
+isolated a later observer-only failure to the first job-log download and identified
+a CLI compatibility problem: GitHub CLI 2.102.0, included in both runner images,
+rejects text containing escape bytes even when stdout is piped. Both retained
+first logs contain those bytes. The original stderr was not retained, so this
+explains a reproducible failure mechanism without recovering the original error.
+Feedback timing and savings remain unavailable. The observer-only confirmation
+below checks the repaired adapter against retained evidence without repeating workloads.
 Release evidence uses the existing standalone qualification workflows. Offline
 replay does not replace failed hosted publications.
 
@@ -58,6 +61,15 @@ transport, identity, validation, and output failures are not retried. A failure 
 later alias may leave an earlier arm's files, but the final `publication.json` marker
 is written only after all aliases complete. The collector still requires and
 re-evaluates the full bundle; a diagnostic file cannot replace any missing payload.
+
+Job logs must reach the upload-lineage validator byte-for-byte. On the first log
+request, the transport probes `gh api --help` once with a five-second timeout and
+64 KiB output limit inside its shared acquisition deadline. If supported, it adds
+`--allow-escape-sequences` only to job-log GETs. Older clients keep their existing
+raw-byte behavior; a failed probe or request is not retried. Stdout remains a
+bounded private pipe, forced terminal/pager behavior is disabled, and raw logs are
+never printed. This permits inert log bytes to be checked without weakening
+artifact digests, upload lineage, source identity, or response limits.
 
 Focused resource-free tests cover every observer stage, partial alias output,
 unwritable diagnostics, hostile labels, transport limits, and publication rejection.
@@ -96,7 +108,7 @@ diagnostic renderer through the wrapper; it does not invoke the production
 observer CLI. Scratch data is not uploaded.
 
 This confirms current observer behavior against historical evidence on hosted
-Linux. It does not identify the original failure, repair the historical failed
+Linux. It does not recover the original stderr, repair the historical failed
 publication, qualify current application code, or measure selective execution
 savings. YAGA 0.3.0 is the released evaluator used for the repaired observer;
 the original failed run used an earlier pinned YAGA source. A retained offline
