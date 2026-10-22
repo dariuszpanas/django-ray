@@ -272,6 +272,79 @@ the current selection; narrowing a fallback toward the baseline alone does not e
 savings against that baseline. Keep full fallbacks until coverage and regression
 evidence support changing them.
 
+### First offline reduction: the isolated doctor command
+
+`scripts/test_planning_candidate.py` evaluates one reviewed historical exception
+against the existing selector. It is separate from the advisory policy and every
+workflow: its report cannot dispatch work, publish a result, or authorize a skip.
+Selective CI remains disabled.
+
+The retained cohort's [doctor change, PR #621](https://github.com/dariuszpanas/django-ray/pull/621),
+selected only application qualification because its seven doctor source paths
+matched the broad `src/django_ray/**` trigger. The application workload does not
+invoke the doctor package or its management command. Dedicated ordinary CI covers
+the doctor unit and Linux supervision cases, PostgreSQL observations, and the
+installed-wheel verifier. Those checks remain required.
+
+The candidate is deliberately bound to the reviewed complete revision and retained
+replay bytes. A path-only exemption would be too broad: the change also modifies
+`Makefile`, the test taxonomy, and the wheel verifier, which could remove the
+coverage supporting the exemption in a different revision. The exact reviewed
+base/head/tree and complete inventory bind those companion changes. Another
+revision, even with the same paths, needs a new coverage review. Mixed runtime,
+dependency, workflow, selector, or unknown-module changes receive no exemption.
+
+| Retained 31-revision comparison | Planned workflow dispatches | Planned qualification cells |
+|---|---:|---:|
+| Existing selector | 50 | 77 |
+| Reviewed doctor candidate | 49 | 76 |
+
+Only the doctor revision changes; the other 30 retain their baseline selections.
+The current advisory policy still plans 120 dispatches and preserves every baseline
+trigger. This candidate is an explicit baseline-relative counterfactual, not an
+improvement inferred from reducing the advisory policy's extra selections.
+
+Retained CI run `38199931202` provides the historical doctor evidence: nine real
+Linux supervision cases on each of Python 3.12, 3.13 and 3.14, five PostgreSQL doctor
+cases, and installed-wheel read-only preservation and cleanup. The event checkout
+and merged revision have the same source tree. These logs qualify that historical
+tree only; the separate current-source dependency audit does not upgrade them to
+new-source test results. No application or full qualification rerun is needed to
+evaluate this historical candidate.
+
+The retained application job took 2,708 seconds, including 765 seconds waiting for
+the CI checkpoint. This explains why removing an unnecessary qualification could
+matter for both feedback and runner usage. Those historical timestamps are context,
+not measured candidate savings or GitHub billing data.
+
+The evaluator retains separate identities for the historical replay adapter, the
+audited current consumer, the baseline policy and each historical source. Run it
+only against the reviewed retained 31-revision replay; altered or incomplete
+evidence and policy drift must fail, never produce an empty successful selection.
+The committed LF policy and retained Windows CRLF policy have separate exact byte
+hashes. Only those two reviewed encodings are accepted; arbitrary whitespace or
+mixed line-ending changes are rejected. The report distinguishes the supplied
+policy bytes, retained replay policy bytes, and committed-source policy identity.
+Using the same isolated YAGA 0.3.0 environment as the local comparison:
+
+```bash
+python -m scripts.test_planning_candidate \
+  --replay /path/to/retained/replay.json \
+  --baseline-policy scripts/qualification_policy.json \
+  --expected-replay-sha256 "$REVIEWED_REPLAY_SHA256" \
+  --expected-consumer-commit "$AUDITED_COMMIT" \
+  --expected-consumer-tree "$AUDITED_TREE" \
+  --output /path/to/new-candidate-report.json
+```
+
+The independently reviewed identities must match the frozen audit recorded in the
+module; these arguments cannot approve a different revision or consumer snapshot.
+Its report leaves feedback-time and aggregate runner-minute reductions unknown.
+One fewer planned workflow is neither a measured speedup nor a billing estimate.
+Before using this rule for a new revision, re-audit the dependency and ordinary-CI
+coverage boundary, then choose the smallest controlled comparison needed under the
+promotion requirements below.
+
 Historical comparison alone does not complete the runtime pilot. Retain full
 same-source observations and controlled selected replays, including excluded
 failures, setup/cleanup, cancellations, runner minutes and critical-path wall time.
