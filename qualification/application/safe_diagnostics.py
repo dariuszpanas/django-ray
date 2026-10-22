@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from datetime import UTC, datetime
 
 from qualification.application.http_context import HttpObserver, HttpSubstage
 from qualification.application.run_api import HttpFailureCode, HttpTransportFailure
@@ -47,6 +48,60 @@ STATES = {
     "pending",
     "terminating",
 }
+WORKLOAD_ROLES = frozenset(
+    {
+        "django-web",
+        "django-manager",
+        "postgres",
+        "ray-head",
+        "ray-worker",
+        "assert-before",
+        "assert-after",
+        "reporting-benchmark",
+    }
+)
+CONTAINER_ROLES = frozenset(
+    {"web", "manager", "postgres", "ray-head", "ray-worker", "assertions", "setup", "ray-tmp"}
+)
+
+
+def _timestamp(value):
+    """Keep only valid Kubernetes UTC timestamps, never arbitrary event text."""
+    if (
+        type(value) is not str
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z", value) is None
+    ):
+        return None
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _workload_role(value):
+    """Map owned fixed Pod-name prefixes to roles without emitting their names."""
+    if type(value) is str and len(value) <= 253:
+        for role in WORKLOAD_ROLES:
+            if re.fullmatch(re.escape(role) + r"(?:-[a-z0-9]+)*", value):
+                return role
+    return "unavailable"
+
+
+def _probe_failure(item):
+    """Classify canonical kubelet prefixes; never infer timeouts from free text."""
+    message = item.get("message")
+    if item.get("reason") != "Unhealthy" or type(message) is not str:
+        return "unavailable"
+    for probe in ("readiness", "liveness", "startup"):
+        if message.startswith(f"{probe.capitalize()} probe failed: "):
+            return f"{probe}_failed"
+        if message.startswith(
+            f"{probe.capitalize()} probe errored and resulted in unknown state: "
+        ):
+            return f"{probe}_errored"
+    return "unavailable"
+
 
 STAGES = {
     "configuration",
@@ -334,15 +389,31 @@ def resources(kind: str, items: list) -> list:
     if not isinstance(items, list):
         return []
     result = []
+    observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     for item in items[:100]:
         if not isinstance(item, dict):
             continue
         if kind == "events":
+            reference = item.get("involvedObject")
+            if not isinstance(reference, dict):
+                reference = {}
+            series = item.get("series")
+            if not isinstance(series, dict):
+                series = {}
             result.append(
                 {
+                    "role": _workload_role(reference.get("name"))
+                    if reference.get("kind") == "Pod"
+                    else "unavailable",
+                    "observed_at": observed_at,
                     "type": choice(item.get("type"), {"Normal", "Warning"}),
                     "reason": choice(item.get("reason"), EVENT_REASONS),
                     "count": number(item.get("count")),
+                    "probe_failure": _probe_failure(item),
+                    "first_timestamp": _timestamp(item.get("firstTimestamp")),
+                    "last_timestamp": _timestamp(item.get("lastTimestamp")),
+                    "event_time": _timestamp(item.get("eventTime")),
+                    "series_last_observed_time": _timestamp(series.get("lastObservedTime")),
                 }
             )
             continue
@@ -350,6 +421,23 @@ def resources(kind: str, items: list) -> list:
         if not isinstance(status, dict):
             status = {}
         entry = {"state": choice(status.get("phase", status.get("state")), STATES)}
+        if kind == "pods":
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            entry.update(role=_workload_role(metadata.get("name")), observed_at=observed_at)
+            conditions = status.get("conditions")
+            entry["conditions"] = [
+                {
+                    "type": condition["type"],
+                    "status": choice(condition.get("status"), {"True", "False", "Unknown"}),
+                    "last_transition_time": _timestamp(condition.get("lastTransitionTime")),
+                }
+                for condition in (conditions[:16] if isinstance(conditions, list) else [])
+                if isinstance(condition, dict)
+                and type(condition.get("type")) is str
+                and condition["type"] in {"Ready", "ContainersReady", "Initialized", "PodScheduled"}
+            ]
         containers = []
         statuses = []
         for field in ("containerStatuses", "initContainerStatuses"):
@@ -366,6 +454,7 @@ def resources(kind: str, items: list) -> list:
                 done = {}
             containers.append(
                 {
+                    "role": choice(container.get("name"), CONTAINER_ROLES),
                     "ready": container.get("ready") is True,
                     "restart_count": number(container.get("restartCount")),
                     "state": next(

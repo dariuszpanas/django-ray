@@ -29,7 +29,8 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Application Core (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # 36m CI prerequisite + 90m bounded setup/workload/cleanup + 4m overhead.
+    timeout-minutes: 130
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       VALIDATION_INTENT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'diagnostic' && 'diagnostic' || 'acceptance' }}
@@ -50,7 +51,7 @@ jobs:
 
       - name: Require the current source Linux CI checkpoint
         if: env.VALIDATION_INTENT == 'acceptance'
-        timeout-minutes: 20
+        timeout-minutes: 36
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/wait_for_ci_checkpoint.py

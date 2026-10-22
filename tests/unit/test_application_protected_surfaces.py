@@ -792,7 +792,11 @@ def test_malformed_status_lists_cannot_break_safe_diagnostics(invalid):
             }
         ],
     )
-    assert clean == [{"state": "unavailable", "containers": []}]
+    assert len(clean) == 1
+    assert clean[0].pop("observed_at").endswith("Z")
+    assert clean == [
+        {"state": "unavailable", "role": "unavailable", "conditions": [], "containers": []}
+    ]
 
 
 def test_added_catalogue_failure_diagnostics_keep_only_finite_fields():

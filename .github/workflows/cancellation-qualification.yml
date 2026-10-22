@@ -17,7 +17,7 @@ jobs:
   cancellation:
     name: Cancellation Qualification
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 56
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       COMPOSE_PROJECT_NAME: cancellation-qualification
@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
 
       - name: Require the current source Linux CI checkpoint
-        timeout-minutes: 20
+        timeout-minutes: 36
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/wait_for_ci_checkpoint.py
@@ -62,6 +62,7 @@ jobs:
           docker image inspect django-ray-cancellation-qualification:local --format '{{.Id}}' > "$RUNNER_TEMP/cancellation-image.txt"
 
       - name: Observe no-cancel completion and actual cancelled driver exit
+        id: cancellation_rehearsal
         timeout-minutes: 6
         run: |
           set -o pipefail
@@ -82,7 +83,9 @@ jobs:
           test -z "$(docker ps -aq --filter label=com.docker.compose.project=cancellation-qualification)"
 
       - name: Retain source and bounded cancellation receipts
-        if: always()
+        if: >-
+          always() && contains(fromJSON('["success", "failure", "cancelled"]'),
+          steps.cancellation_rehearsal.outcome)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cancellation-qualification

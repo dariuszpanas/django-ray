@@ -336,6 +336,13 @@ native upgrade (all four recipes), latency, cancellation and monitoring qualific
 `Commit Messages` required independently; qualification waits for Linux CI and
 must not become a prerequisite of `CI Gate`.
 
+The exact-source CI prerequisite has a 35-minute deadline inside a 36-minute
+workflow step. This allows time for the 20-minute test lanes, downstream package
+validation and scheduling overhead while keeping the wait finite. Qualification job budgets also
+include their work after that prerequisite; increasing the wait does not reduce
+the workload or cleanup allowance. A failed current CI attempt still refuses
+qualification immediately, and an older successful attempt cannot satisfy it.
+
 One PR workflow owns selection, the reusable qualification jobs and their final
 aggregate. It selects from the complete changed-file inventory, including both
 paths of renames, and refuses stale heads or more than 3,000 changed files. The

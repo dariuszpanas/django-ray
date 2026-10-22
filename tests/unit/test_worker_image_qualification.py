@@ -748,7 +748,7 @@ def test_hosted_step_accounts_for_catalogue_and_worker_phases_with_outer_allowan
     step = next(
         item for item in job["steps"] if item.get("name") == "Run the native application core test"
     )
-    assert job["timeout-minutes"] == 75
+    assert job["timeout-minutes"] == 130
     assert step["timeout-minutes"] * 60 - 2820 - probe.PHASE_SECONDS == 300
     assert probe.PHASE_SECONDS == 180
     assert probe.CLEANUP_SECONDS == 45

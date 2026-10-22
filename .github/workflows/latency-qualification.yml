@@ -16,7 +16,7 @@ concurrency:
 jobs:
   latency:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 61
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       COMPOSE_PROJECT_NAME: job-latency-qualification
@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Require exact-source Linux CI
-        timeout-minutes: 20
+        timeout-minutes: 36
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/wait_for_ci_checkpoint.py

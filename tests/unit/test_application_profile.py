@@ -262,7 +262,7 @@ def test_hosted_profile_rejection_precedes_build_and_reaches_the_runner():
     assert inputs["resource_profile"]["default"] == "standard"
     assert inputs["resource_profile"]["options"] == ["standard", "constrained-ray"]
     job = workflow["jobs"]["application-core"]
-    assert job["timeout-minutes"] == "75"
+    assert job["timeout-minutes"] == "130"
     native_step = next(
         step for step in job["steps"] if step.get("name") == "Run the native application core test"
     )

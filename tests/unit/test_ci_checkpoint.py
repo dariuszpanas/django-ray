@@ -117,6 +117,86 @@ def test_success_arriving_after_deadline_is_not_accepted():
         )
 
 
+def test_default_checkpoint_accepts_current_success_after_the_old_eighteen_minute_limit():
+    now = [0.0]
+    passing, reads = api_for([run(run_attempt=2)])
+
+    def api(endpoint):
+        if now[0] <= 1080:
+            return {
+                "total_count": 1,
+                "workflow_runs": [run(status="in_progress", conclusion=None, run_attempt=2)],
+            }
+        return passing(endpoint)
+
+    result = wait_for_checkpoint(
+        api,
+        REPO,
+        SHA,
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    assert result == checkpoint.Checkpoint(2, 2)
+    assert 1080 < now[0] < checkpoint.CHECKPOINT_SECONDS == 35 * 60
+    assert "/attempts/2/jobs?" in reads[1]
+
+
+@pytest.mark.parametrize(
+    "runs,status,conclusion",
+    [
+        ([], "unavailable", "unavailable"),
+        ([run(status="queued", conclusion=None)], "queued", "pending"),
+        ([run(status="in_progress", conclusion=None)], "in_progress", "pending"),
+        ([run(conclusion="cancelled")], "completed", "cancelled"),
+        ([run(status="private-status", conclusion="private-conclusion")], "unknown", "unknown"),
+    ],
+)
+def test_default_deadline_reports_only_fixed_pending_facts(runs, status, conclusion, capsys):
+    now = [0.0]
+    api, _ = api_for(runs)
+    with pytest.raises(CheckpointError, match="deadline"):
+        wait_for_checkpoint(
+            api,
+            REPO,
+            SHA,
+            clock=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+    assert now[0] == checkpoint.CHECKPOINT_SECONDS == 35 * 60
+    output = capsys.readouterr().out
+    assert "private" not in output
+    assert json.loads(output) == {
+        "status": "failed",
+        "checkpoint": "ci_metadata",
+        "reason": "deadline",
+        "elapsed_seconds": 2100,
+        "deadline_seconds": 2100,
+        "last_phase": "discovery",
+        "workflow_status": status,
+        "workflow_conclusion": conclusion,
+        "metadata_retries": 0,
+    }
+
+
+def test_confirmation_race_reports_current_pending_replacement_at_deadline(capsys):
+    now = [0.0]
+    api, _ = api_for([run()], confirmed=[run(3, status="queued", conclusion=None)])
+    with pytest.raises(CheckpointError, match="deadline"):
+        wait_for_checkpoint(
+            api,
+            REPO,
+            SHA,
+            timeout=7,
+            clock=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+    value = json.loads(capsys.readouterr().out)
+    assert value["last_phase"] == "confirmation"
+    assert value["workflow_status"] == "queued"
+    assert value["workflow_conclusion"] == "pending"
+    assert value["elapsed_seconds"] == value["deadline_seconds"] == 7
+
+
 @pytest.mark.parametrize("gates", [[], [{"name": "CI Gate", "conclusion": "success"}] * 2])
 def test_missing_or_duplicate_gate_cannot_prove_acceptance(gates):
     api, _ = api_for([run()])
@@ -385,6 +465,9 @@ def test_main_shares_one_deadline_and_caps_each_read_to_remaining_time(
 ):
     now = [0.0]
     calls = []
+    # Keep the transport simulation's final 20s + 20s + 5s sequence explicit;
+    # the production default and its old-boundary regression are tested above.
+    monkeypatch.setattr(checkpoint, "CHECKPOINT_SECONDS", 1080)
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("SOURCE_SHA", SHA)
     monkeypatch.setattr(checkpoint.time, "monotonic", lambda: now[0])
@@ -416,11 +499,17 @@ def test_main_shares_one_deadline_and_caps_each_read_to_remaining_time(
     assert calls[-1] == 5
     output = capsys.readouterr().out
     assert "deadline" in output and "retrying" not in output and CANARY not in output
+    value = json.loads(output.splitlines()[0])
+    assert value["last_phase"] == "confirmation"
+    assert value["workflow_status"] == "completed"
+    assert value["workflow_conclusion"] == "success"
+    assert value["elapsed_seconds"] == value["deadline_seconds"] == 1080
 
 
 def test_timeout_retry_cannot_extend_deadline_or_emit_captured_material(monkeypatch, capsys):
     now = [0.0]
     calls = []
+    monkeypatch.setattr(checkpoint, "CHECKPOINT_SECONDS", 1080)
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("SOURCE_SHA", SHA)
     monkeypatch.setattr(checkpoint.time, "monotonic", lambda: now[0])
