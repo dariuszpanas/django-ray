@@ -346,6 +346,7 @@ def test_authenticated_api_zip_roundtrip_uses_upload_completion_not_creation(bun
     costs = json.loads((output / "runtime-costs.json").read_bytes())
     assert costs["qualification_job_seconds"] == 960
     assert costs["observer_job_seconds"] == 600
+    assert costs["known_observer_job_seconds"] == 600
     assert costs["selective_execution_savings_seconds"] is costs["billing_seconds"] is None
 
 
@@ -396,6 +397,9 @@ def test_diagnostic_success_cannot_replace_a_missing_required_publication(bundle
     )
     assert bundle.calls == []
     assert (output / "archives/401.zip").read_bytes() == raw
+    costs = json.loads((output / "runtime-costs.json").read_bytes())
+    assert costs["observer_job_seconds"] == costs["known_observer_job_seconds"] == 600
+    assert costs["qualification_job_seconds"] is None
 
 
 @pytest.mark.parametrize(
@@ -453,6 +457,179 @@ def test_invalid_publication_is_retained_as_incomplete_without_feedback_success(
     assert all(
         item["validated_publication_lead_seconds"] is None
         for item in result["comparisons"].values()
+    )
+    costs = json.loads((output / "runtime-costs.json").read_bytes())
+    duration = None if damage in {"attempt", "changed-job", "missing-job"} else 600
+    assert costs["observer_job_seconds"] == costs["known_observer_job_seconds"] == duration
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out"])
+def test_authenticated_terminal_failure_duration_survives_a_missing_publication(
+    bundle, tmp_path, conclusion
+):
+    github, job, *_ = publication_api(bundle)
+    job["conclusion"] = conclusion
+    job["steps"] = []
+    output = tmp_path / "collected"
+    output.mkdir()
+    assert (
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+        == 1
+    )
+    costs = json.loads((output / "runtime-costs.json").read_bytes())
+    assert costs["observer_job_seconds"] == costs["known_observer_job_seconds"] == 600
+    assert costs["qualification_job_seconds"] is costs["billing_seconds"] is None
+    assert costs["selective_execution_savings_seconds"] is None
+    records = json.loads((output / "publication-acquisition.json").read_bytes())["groups"]
+    assert records[0]["job_id"] == job["id"]
+    assert records[0]["job_conclusion"] == conclusion and records[0]["runner_seconds"] == 600
+    assert records[0]["status"] == "incomplete"
+    assert github.calls.count(acquisition.PREFIX + "/actions/jobs/301") == 2
+    assert set(json.loads((output / "feedback.json").read_bytes())["publications"].values()) == {
+        None
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("run_id", 999),
+        ("run_attempt", 2),
+        ("head_sha", "f" * 40),
+        ("head_branch", "other"),
+        ("workflow_name", "other"),
+        ("name", "other"),
+        ("status", "in_progress"),
+        ("conclusion", "skipped"),
+        ("started_at", None),
+        ("completed_at", None),
+        ("started_at", "2026-10-18T09:59:59Z"),
+        ("completed_at", "2026-10-18T09:59:59Z"),
+        ("completed_at", "2026-11-18T10:00:01Z"),
+    ],
+)
+def test_untrusted_or_unfinished_job_timing_stays_unknown_without_inventing_zero(
+    bundle, tmp_path, field, value
+):
+    github, job, *_ = publication_api(bundle)
+    job[field] = value
+    output = tmp_path / "collected"
+    output.mkdir()
+    assert (
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+        == 1
+    )
+    costs = json.loads((output / "runtime-costs.json").read_bytes())
+    assert costs["observer_job_seconds"] is costs["known_observer_job_seconds"] is None
+    records = json.loads((output / "publication-acquisition.json").read_bytes())["groups"]
+    assert records[0]["runner_seconds"] is None
+    assert records[0]["status"] == "incomplete"
+
+
+def test_partial_observer_subtotal_does_not_turn_a_missing_group_into_zero(bundle, tmp_path):
+    bundle.pilot["groups"] = {"full": ["full", "proposed"], "current": ["current"]}
+    github, job, *_ = publication_api(bundle)
+    job["steps"] = []
+    output = tmp_path / "collected"
+    output.mkdir()
+    assert (
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+        == 1
+    )
+    costs = json.loads((output / "runtime-costs.json").read_bytes())
+    assert costs["observer_job_seconds"] is None
+    assert costs["known_observer_job_seconds"] == 600
+    records = json.loads((output / "publication-acquisition.json").read_bytes())["groups"]
+    assert [record["runner_seconds"] for record in records] == [600, None]
+
+
+def test_all_known_observer_groups_are_counted_once_despite_failed_publications(bundle, tmp_path):
+    bundle.pilot["groups"] = {"full": ["full", "proposed"], "current": ["current"]}
+    github, job, *_ = publication_api(bundle)
+    job["steps"] = []
+    second = {
+        **job,
+        "id": 302,
+        "name": "Shadow Result Evaluation (current)",
+        "conclusion": "failure",
+        "completed_at": "2026-10-18T10:00:11Z",
+    }
+    github.jobs.append(second)
+    github.replies[github.jobs_route]["total_count"] = 2
+    github.replies[acquisition.PREFIX + "/actions/jobs/302"] = second
+    output = tmp_path / "collected"
+    output.mkdir()
+    assert (
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+        == 1
+    )
+    costs = json.loads((output / "runtime-costs.json").read_bytes())
+    assert costs["observer_job_seconds"] == costs["known_observer_job_seconds"] == 611
+    records = json.loads((output / "publication-acquisition.json").read_bytes())["groups"]
+    assert [record["runner_seconds"] for record in records] == [600, 11]
+    assert all(record["status"] == "incomplete" for record in records)
+
+
+@pytest.mark.parametrize("failure", ["changed", "unavailable"])
+def test_failed_publication_still_requires_a_stable_final_job_read(bundle, tmp_path, failure):
+    github, job, *_ = publication_api(bundle)
+    job["steps"] = []
+    route = acquisition.PREFIX + "/actions/jobs/301"
+
+    def response():
+        if github.calls.count(route) == 1:
+            return job
+        if failure == "changed":
+            return {**job, "completed_at": "2026-10-18T10:11:00Z"}
+        raise acquisition.AcquisitionError("github-request-failed")
+
+    github.replies[route] = response
+    output = tmp_path / "collected"
+    output.mkdir()
+    assert (
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+        == 1
+    )
+    costs = json.loads((output / "runtime-costs.json").read_bytes())
+    assert costs["observer_job_seconds"] is costs["known_observer_job_seconds"] is None
+    assert github.calls.count(route) == 2
+
+
+def test_duplicate_job_inventory_cannot_double_count_observer_costs(bundle, tmp_path):
+    github, job, *_ = publication_api(bundle)
+    github.jobs.append({**job, "name": "Shadow Result Evaluation (current)"})
+    github.replies[github.jobs_route]["total_count"] = 2
+    output = tmp_path / "collected"
+    output.mkdir()
+    with pytest.raises(acquisition.AcquisitionError, match="duplicate-api-identity"):
+        publications.collect(
+            bundle.pilot, bundle.directory, output, run_id=RUN, attempt=1, github=github
+        )
+    assert not (output / "runtime-costs.json").exists()
+
+
+@pytest.mark.parametrize("end,seconds", [(START, 0), ("2026-11-18T10:00:00Z", 31 * 24 * 60 * 60)])
+def test_observer_duration_accepts_only_observed_zero_and_bounded_endpoint(bundle, end, seconds):
+    github, job, *_ = publication_api(bundle)
+    job["completed_at"] = end
+    assert (
+        publications.observer_job_seconds(
+            job,
+            group="full",
+            expected=observer.expected_run(bundle.pilot, "full", RUN, 1),
+            run=github.run,
+        )
+        == seconds
     )
 
 

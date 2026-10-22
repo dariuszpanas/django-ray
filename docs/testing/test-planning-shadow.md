@@ -11,9 +11,10 @@ Upgrade Data Qualification, release-candidate artifact checks, and applicable lo
 deployment gates remain independent obligations with their existing triggers.
 
 The first full hosted observation passed its workload cells but failed in advisory
-reporting. Its feedback and savings remain unavailable; see the
-[current limitation](test-planning-results.md) and deferred
-[investigation](https://github.com/dariuszpanas/django-ray/issues/644).
+reporting. The [observer investigation](https://github.com/dariuszpanas/django-ray/issues/644)
+is complete: an observer-only hosted confirmation validated the repair against retained
+receipts without repeating qualification workloads. The original publication remains
+failed; feedback and savings remain unavailable. See the [evidence limits](test-planning-results.md).
 
 ## Pull request comparison
 
@@ -256,15 +257,30 @@ authoritative; no publication is authorized by this tooling.
 
 ## Promotion remains disabled
 
-Start with at least 30 representative revisions across backend, assets,
-infrastructure, dependencies, tests/configuration and cross-component work.
+The retained [31-revision cohort](https://github.com/dariuszpanas/yaga/blob/main/docs/designs/experiments/django-ray-shadow-replay.md)
+covers backend, assets, infrastructure, dependencies, tests/configuration and mixed
+changes. Reuse its explicit base/head/tree inputs and existing replay runner before
+collecting new workloads. Current ownership rules produce 23 full, five partial and
+three empty selections, with zero baseline omissions: 120 proposed workflow dispatches
+versus 50 from the existing selector. These are planned workflow counts, not executed
+jobs or measured runner minutes. Ordinary repository CI is outside this catalog.
+
+The proposed policy deliberately preserves every baseline trigger. Enabling it now
+cannot remove qualifications selected by today's policy. Before an execution
+experiment, identify a concrete dependency or ownership change that can safely reduce
+the current selection; narrowing a fallback toward the baseline alone does not establish
+savings against that baseline. Keep full fallbacks until coverage and regression
+evidence support changing them.
+
 Historical comparison alone does not complete the runtime pilot. Retain full
 same-source observations and controlled selected replays, including excluded
 failures, setup/cleanup, cancellations, runner minutes and critical-path wall time.
 Do not sum parallel durations as wall time or infer speedup from test counts.
 
-The owner must choose a useful measured feedback-time improvement before
-activation; no threshold is presumed. Promotion also requires no unexplained
+The owner must choose a useful measured feedback-time improvement and an aggregate
+runner-usage budget before held-out confirmation or activation; no threshold is
+presumed. Count planning, setup, retries, cleanup and observer runners, including
+failed observations. Promotion also requires no unexplained
 omissions or known missed regressions, tested invalid/missing/cancelled-result
 blocking, preserved matrices/cleanup and regression replay. The manual shared
 full-run observer measures publication lead; independent selected-versus-current

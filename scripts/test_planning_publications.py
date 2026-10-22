@@ -18,6 +18,7 @@ from scripts import test_planning_shadow as shadow
 
 UPLOAD_STEP = "Publish validated advisory feedback"
 PUBLICATION_TIME_SOURCE = "successful-upload-step-completion"
+MAX_OBSERVER_JOB_SECONDS = 31 * 24 * 60 * 60
 require = acquisition.require
 
 
@@ -88,8 +89,8 @@ def feedback_expected(pilot, run_id, attempt):
     }
 
 
-def publication_job(job, *, group, expected, run):
-    """A failed evaluator may publish an authenticated failed full oracle."""
+def observer_job_seconds(job, *, group, expected, run):
+    """Terminal runner duration is independent of publication or upload success."""
     require(acquisition._integer(job.get("id")), "invalid-publication-job-identity")
     for key, wanted in {
         "name": f"Shadow Result Evaluation ({group})",
@@ -101,13 +102,27 @@ def publication_job(job, *, group, expected, run):
         "status": "completed",
     }.items():
         acquisition._same(job.get(key), wanted, "wrong-publication-job-lineage")
-    require(job.get("conclusion") in {"success", "failure"}, "incomplete-publication-job")
+    require(
+        job.get("conclusion") in {"success", "failure", "cancelled", "timed_out"},
+        "incomplete-observer-job",
+    )
     start = acquisition._timestamp(job.get("started_at"))
     end = acquisition._timestamp(job.get("completed_at"))
     require(
         acquisition._timestamp(run["run_started_at"]) <= start <= end,
         "invalid-publication-job-window",
     )
+    seconds = (end - start).total_seconds()
+    require(0 <= seconds <= MAX_OBSERVER_JOB_SECONDS, "observer-job-duration-budget")
+    return seconds
+
+
+def publication_job(job, *, group, expected, run):
+    """A failed evaluator may publish an authenticated failed full oracle."""
+    observer_job_seconds(job, group=group, expected=expected, run=run)
+    require(job.get("conclusion") in {"success", "failure"}, "incomplete-publication-job")
+    start = acquisition._timestamp(job["started_at"])
+    end = acquisition._timestamp(job["completed_at"])
     steps = job.get("steps")
     require(
         type(steps) is list and len(steps) <= 100 and all(type(step) is dict for step in steps),
@@ -222,9 +237,12 @@ def collect(pilot, directory, output, *, run_id, attempt, github=None):
     )
     publications = dict.fromkeys(pilot_tools.ARMS)
     records: list[dict] = []
+    observer_job_ids: set[int] = set()
     for group, arms in pilot["groups"].items():
-        record = {"group": group, "status": "incomplete"}
+        record = {"group": group, "status": "incomplete", "runner_seconds": None}
         records.append(record)
+        timing = None
+        candidate = None
         try:
             matches = [
                 job for job in jobs if job.get("name") == f"Shadow Result Evaluation ({group})"
@@ -232,14 +250,11 @@ def collect(pilot, directory, output, *, run_id, attempt, github=None):
             require(len(matches) == 1, "missing-or-duplicate-publication-job")
             job = read(f"{acquisition.PREFIX}/actions/jobs/{matches[0]['id']}", "job-" + group)
             acquisition._same(job.get("id"), matches[0]["id"], "wrong-publication-job-detail")
+            seconds = observer_job_seconds(job, group=group, expected=expected, run=run)
+            require(job["id"] not in observer_job_ids, "duplicate-observer-job")
+            observer_job_ids.add(job["id"])
+            timing = (job, seconds)
             upload = publication_job(job, group=group, expected=expected, run=run)
-            record.update(
-                job_id=job["id"],
-                runner_seconds=(
-                    acquisition._timestamp(job["completed_at"])
-                    - acquisition._timestamp(job["started_at"])
-                ).total_seconds(),
-            )
             name = f"test-planning-evaluation-{run_id}-1-{group}"
             matches = [artifact for artifact in artifacts if artifact.get("name") == name]
             require(len(matches) == 1, "missing-or-duplicate-publication-artifact")
@@ -295,11 +310,6 @@ def collect(pilot, directory, output, *, run_id, attempt, github=None):
                 "publication-job-outcome-differs",
             )
             acquisition._same(
-                read(f"{acquisition.PREFIX}/actions/jobs/{job['id']}", "job-" + group + "-after"),
-                job,
-                "publication-job-changed",
-            )
-            acquisition._same(
                 read(
                     f"{acquisition.PREFIX}/actions/artifacts/{artifact['id']}",
                     "artifact-" + group + "-after",
@@ -307,6 +317,43 @@ def collect(pilot, directory, output, *, run_id, attempt, github=None):
                 artifact,
                 "publication-artifact-changed",
             )
+            candidate = (observations, files, artifact, upload, digest, evaluation_exit)
+        except (
+            RuntimeError,
+            ValueError,
+            TypeError,
+            KeyError,
+            OSError,
+            ImportError,
+            RecursionError,
+        ):
+            record["error"] = "Publication missing, incomplete or not authenticated"
+        if timing is not None:
+            job, seconds = timing
+            try:
+                acquisition._same(
+                    read(
+                        f"{acquisition.PREFIX}/actions/jobs/{job['id']}", "job-" + group + "-after"
+                    ),
+                    job,
+                    "publication-job-changed",
+                )
+                record.update(
+                    job_id=job["id"], job_conclusion=job["conclusion"], runner_seconds=seconds
+                )
+            except (
+                RuntimeError,
+                ValueError,
+                TypeError,
+                KeyError,
+                OSError,
+                ImportError,
+                RecursionError,
+            ):
+                candidate = None
+                record["error"] = "Publication missing, incomplete or not authenticated"
+        if candidate is not None:
+            observations, files, artifact, upload, digest, evaluation_exit = candidate
             for arm, observation in observations.items():
                 publications[arm] = {
                     "observation": observation,
@@ -319,16 +366,6 @@ def collect(pilot, directory, output, *, run_id, attempt, github=None):
                     "publication_sha256": digest,
                 }
             record["status"] = "passed" if evaluation_exit == 0 else "failed"
-        except (
-            RuntimeError,
-            ValueError,
-            TypeError,
-            KeyError,
-            OSError,
-            ImportError,
-            RecursionError,
-        ):
-            record["error"] = "Publication missing, incomplete or not authenticated"
     acquisition.validate_run(read(route, "run-after"), expected)
     acquisition.validate_run(read(route + "/attempts/1", "attempt-after"), expected)
     report = feedback.build_feedback_report(feedback_expected(pilot, run_id, attempt), publications)
@@ -349,6 +386,9 @@ def collect(pilot, directory, output, *, run_id, attempt, github=None):
     )
     full = publications["full"]
     complete = all(record["status"] != "incomplete" for record in records)
+    known_seconds = [
+        record["runner_seconds"] for record in records if record["runner_seconds"] is not None
+    ]
     (output / "runtime-costs.json").write_bytes(
         shadow.encode(
             {
@@ -357,9 +397,10 @@ def collect(pilot, directory, output, *, run_id, attempt, github=None):
                 "qualification_job_seconds": full["observation"]["metrics"]["runner_job_seconds"]
                 if full
                 else None,
-                "observer_job_seconds": sum(record["runner_seconds"] for record in records)
-                if complete
+                "observer_job_seconds": sum(known_seconds)
+                if records and len(known_seconds) == len(records)
                 else None,
+                "known_observer_job_seconds": sum(known_seconds) if known_seconds else None,
                 "aggregate_job_seconds": None,
                 "billing_seconds": None,
                 "selective_execution_savings_seconds": None,
