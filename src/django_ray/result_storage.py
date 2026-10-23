@@ -8,6 +8,7 @@ import importlib
 import os
 import re
 import secrets
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -444,6 +445,65 @@ def _read_filesystem_payload(
     return _verified_payload(payload, metadata)
 
 
+def _filesystem_object_identity(value: os.stat_result) -> tuple[int, ...]:
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+
+def _verify_filesystem_delete(path: Path, metadata: _ResultReference) -> bool:
+    """Verify bounded chunks before unlink; this is not a conditional unlink."""
+    flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    handle = None
+    try:
+        handle = open(
+            path, "rb", buffering=0, opener=lambda name, mode: os.open(name, mode | flags)
+        )
+    except FileNotFoundError:
+        return False
+    except (OSError, OverflowError, RuntimeError, ValueError):
+        pass
+    if handle is None:
+        raise ResultStorageError("Failed to verify filesystem payload before deletion")
+
+    failed = False
+    integrity_failed = False
+    try:
+        with handle:
+            initial = os.fstat(handle.fileno())
+            if not stat.S_ISREG(initial.st_mode) or initial.st_size != metadata.size_bytes:
+                integrity_failed = True
+            else:
+                digest = hashlib.sha256()
+                remaining = metadata.size_bytes
+                while remaining:
+                    chunk = handle.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        integrity_failed = True
+                        break
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if handle.read(1) or digest.hexdigest() != metadata.digest:
+                    integrity_failed = True
+                final = os.fstat(handle.fileno())
+                if (
+                    _filesystem_object_identity(final) != _filesystem_object_identity(initial)
+                    or final.st_ctime_ns != initial.st_ctime_ns
+                ):
+                    integrity_failed = True
+        # Refuse an already observed replacement, but do not claim an atomic
+        # compare-and-unlink against arbitrary external filesystem mutations.
+        if not integrity_failed and _filesystem_object_identity(
+            path.stat(follow_symlinks=False)
+        ) != (_filesystem_object_identity(initial)):
+            integrity_failed = True
+    except (OSError, OverflowError, RuntimeError, ValueError):
+        failed = True
+    if failed:
+        raise ResultStorageError("Failed to verify filesystem payload before deletion")
+    if integrity_failed:
+        raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
+    return True
+
+
 def _hard_link_is_unsupported(error: OSError) -> bool:
     unsupported_errnos = {
         errno.EACCES,
@@ -606,6 +666,8 @@ class FilesystemResultStorage:
     def delete(self, *, reference: str) -> None:
         metadata = self._filesystem_reference(reference)
         full_path = self._path_for_reference(metadata)
+        if not _verify_filesystem_delete(full_path, metadata):
+            return
         delete_failed = False
         try:
             full_path.unlink(missing_ok=True)

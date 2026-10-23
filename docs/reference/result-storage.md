@@ -52,6 +52,21 @@ digest objects are verified and never overwritten. A stale `*.install-lock` dire
 means a writer died during installation; preserve the referenced object and audit
 evidence, confirm that no writer is active, then remove only that digest's stale lock.
 
+Filesystem cleanup verifies the existing object's declared byte count and SHA-256
+before unlinking it. This preserves shared bytes when a historical reference has
+an incorrect byte count and retains corrupt objects for investigation. Verification
+uses unbuffered reads of at most 64 KiB and consumes at most the declared bytes plus
+one; it does not decode or materialize the payload. An already absent object needs
+no deletion. An observed size, digest, file identity, or modification mismatch
+refuses cleanup; unreadable objects are also retained.
+
+Cleanup therefore requires read permission in addition to unlink permission, and
+performs a full hash read while the caller's cleanup locks are held. The byte
+budget is not a new wall-clock deadline. Final descriptor and path checks detect
+observed changes but are not an atomic conditional unlink. Keep the storage tree
+operator-controlled; arbitrary external mutation or replacement is outside this
+contract. These checks do not discover orphan objects or authorize result deletion.
+
 ## `s3`
 
 - Setting: `"RESULT_STORAGE_BACKEND": "s3"`

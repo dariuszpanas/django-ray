@@ -143,6 +143,7 @@ class TestFilesystemResultStorage:
 
         storage.delete(reference=reference)
         assert list(tmp_path.rglob("*.json")) == []
+        reference = storage.store(serialized_result="payload")
 
         monkeypatch.setattr(
             Path,

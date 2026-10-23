@@ -50,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   but refuse new hand-built legacy registry identities; do not rewrite or
   automatically reconcile references. Validate prepared input envelope bytes
   before registration so requests cannot acquire a second native input identity.
+- Verify filesystem payload size and digest in bounded chunks before cleanup.
+  Refuse historical mismatched references, corrupt or unreadable objects, and
+  observed file replacement without deleting their bytes. Already absent objects
+  remain successful no-ops; cleanup now requires read permission and a hash read.
 - Require Linux before the pinned Compiled Graph pilot's private timeout self-test
   launches a child, and remove its native Windows fallback. Preserve the host-side
   Windows containment used for Docker and Kubernetes commands.
