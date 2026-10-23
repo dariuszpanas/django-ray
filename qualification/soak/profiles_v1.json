@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "status": "proposed",
+  "workloads": {
+    "short": {
+      "weight": 4,
+      "owner": "qualification/application/api.py",
+      "assertion": "durable-result"
+    },
+    "long": {
+      "weight": 1,
+      "owner": "qualification/cancellation/probe.py",
+      "assertion": "bounded-progress"
+    },
+    "retry": {
+      "weight": 1,
+      "owner": "qualification/application/run_showcase_failure.py",
+      "assertion": "attempt-history"
+    },
+    "cancel": {
+      "weight": 1,
+      "owner": "qualification/cancellation/contract.py",
+      "assertion": "observed-remote-exit"
+    },
+    "expire": {
+      "weight": 1,
+      "owner": "tests/unit/test_reconciliation.py",
+      "assertion": "durable-expiry"
+    },
+    "workflow": {
+      "weight": 1,
+      "owner": "qualification/application/run_workflows.py",
+      "assertion": "terminal-workflow-integrity"
+    },
+    "runtime_env": {
+      "weight": 1,
+      "owner": "qualification/application/runtime_env_refusal.py",
+      "assertion": "snapshot-authentication"
+    }
+  },
+  "faults": {
+    "manager_loss": "qualification/latency/contract.py",
+    "lease_loss": "qualification/application/lease_policy.py",
+    "head_loss": "qualification/application/generic_nodes.py",
+    "worker_loss": "tests/integration/test_live_failure_injection.py",
+    "client_disconnect": "tests/integration/test_live_failure_injection.py",
+    "pod_eviction": "qualification/application/core.yaml",
+    "application_replacement": "qualification/http_recycle.md",
+    "postgresql_interruption": "qualification/transactions/contract.py",
+    "result_storage_interruption": "tests/unit/test_result_storage.py",
+    "cancellation_completion": "qualification/cancellation/contract.py",
+    "uncertain_completion": "tests/unit/test_reconciliation.py",
+    "queue_pressure": "tests/unit/test_worker_reconnect_poll_reconcile.py",
+    "storage_pressure": "qualification/application/workflow_pressure.py",
+    "runtime_env_malformed": "qualification/application/runtime_env_refusal.py",
+    "runtime_env_unavailable": "qualification/application/runtime_env_refusal.py"
+  },
+  "profiles": {
+    "development": {
+      "setup_timeout_seconds": 600,
+      "warmup_seconds": 300,
+      "concurrency": 4,
+      "submission_interval_seconds": 6,
+      "sample_interval_seconds": 15,
+      "fault_timeout_seconds": 10,
+      "recovery_timeout_seconds": 120,
+      "cleanup_timeout_seconds": 180,
+      "retention_interval_seconds": 60,
+      "input_retention_days": 0,
+      "workflow_detail_retention_days": 0,
+      "retention_batch_size": 100,
+      "reclaimable_bytes": 67108864,
+      "resources": {
+        "memory_bytes": {
+          "maximum": 12884901888,
+          "growth": 268435456
+        },
+        "database_bytes": {
+          "maximum": 536870912,
+          "growth": 67108864
+        },
+        "file_descriptors": {
+          "maximum": 4096,
+          "growth": 16
+        },
+        "node_disk_bytes": {
+          "maximum": 7516192768,
+          "growth": 67108864
+        },
+        "object_store_bytes": {
+          "maximum": 268435456,
+          "growth": 16777216
+        },
+        "runtime_env_bytes": {
+          "maximum": 536870912,
+          "growth": 33554432
+        },
+        "prometheus_series": {
+          "maximum": 10000,
+          "growth": 128
+        },
+        "active_tasks": {
+          "maximum": 4,
+          "growth": 0
+        },
+        "unhealthy_scrape_targets": {
+          "maximum": 3,
+          "growth": 0
+        }
+      },
+      "duration_seconds": 3600,
+      "stable_window_seconds": 600,
+      "task_count": 400,
+      "fault_repetitions": 1,
+      "report_max_bytes": 8388608,
+      "submission_window_seconds": 2400,
+      "settlement_seconds": 600,
+      "baseline_window_seconds": 120,
+      "admission_limits": {
+        "cpu_millicores": 3250,
+        "memory_bytes": 12884901888,
+        "pids": 1024,
+        "scratch_bytes": 7516192768,
+        "shared_memory_bytes": 536870912,
+        "ray_nodes": 2
+      },
+      "expected_http": {
+        "phase": "complete",
+        "status": 200,
+        "transport": "none",
+        "retry_policy": "none",
+        "configured_timeout_seconds": 10
+      },
+      "expected_terminal_states": {
+        "short": [
+          "SUCCEEDED"
+        ],
+        "long": [
+          "SUCCEEDED"
+        ],
+        "retry": [
+          "SUCCEEDED"
+        ],
+        "cancel": [
+          "CANCELLED"
+        ],
+        "expire": [
+          "EXPIRED"
+        ],
+        "workflow": [
+          "SUCCEEDED"
+        ],
+        "runtime_env": [
+          "SUCCEEDED"
+        ]
+      }
+    },
+    "release": {
+      "setup_timeout_seconds": 600,
+      "warmup_seconds": 300,
+      "concurrency": 4,
+      "submission_interval_seconds": 6,
+      "sample_interval_seconds": 15,
+      "fault_timeout_seconds": 10,
+      "recovery_timeout_seconds": 120,
+      "cleanup_timeout_seconds": 180,
+      "retention_interval_seconds": 60,
+      "input_retention_days": 0,
+      "workflow_detail_retention_days": 0,
+      "retention_batch_size": 100,
+      "reclaimable_bytes": 67108864,
+      "resources": {
+        "memory_bytes": {
+          "maximum": 12884901888,
+          "growth": 268435456
+        },
+        "database_bytes": {
+          "maximum": 536870912,
+          "growth": 67108864
+        },
+        "file_descriptors": {
+          "maximum": 4096,
+          "growth": 16
+        },
+        "node_disk_bytes": {
+          "maximum": 7516192768,
+          "growth": 67108864
+        },
+        "object_store_bytes": {
+          "maximum": 268435456,
+          "growth": 16777216
+        },
+        "runtime_env_bytes": {
+          "maximum": 536870912,
+          "growth": 33554432
+        },
+        "prometheus_series": {
+          "maximum": 10000,
+          "growth": 128
+        },
+        "active_tasks": {
+          "maximum": 4,
+          "growth": 0
+        },
+        "unhealthy_scrape_targets": {
+          "maximum": 3,
+          "growth": 0
+        }
+      },
+      "duration_seconds": 21600,
+      "stable_window_seconds": 1800,
+      "task_count": 3200,
+      "fault_repetitions": 6,
+      "report_max_bytes": 33554432,
+      "submission_window_seconds": 19200,
+      "settlement_seconds": 600,
+      "baseline_window_seconds": 120,
+      "admission_limits": {
+        "cpu_millicores": 3250,
+        "memory_bytes": 12884901888,
+        "pids": 1024,
+        "scratch_bytes": 7516192768,
+        "shared_memory_bytes": 536870912,
+        "ray_nodes": 2
+      },
+      "expected_http": {
+        "phase": "complete",
+        "status": 200,
+        "transport": "none",
+        "retry_policy": "none",
+        "configured_timeout_seconds": 10
+      },
+      "expected_terminal_states": {
+        "short": [
+          "SUCCEEDED"
+        ],
+        "long": [
+          "SUCCEEDED"
+        ],
+        "retry": [
+          "SUCCEEDED"
+        ],
+        "cancel": [
+          "CANCELLED"
+        ],
+        "expire": [
+          "EXPIRED"
+        ],
+        "workflow": [
+          "SUCCEEDED"
+        ],
+        "runtime_env": [
+          "SUCCEEDED"
+        ]
+      }
+    }
+  }
+}

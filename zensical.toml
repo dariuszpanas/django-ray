@@ -56,6 +56,7 @@ nav = [
     { "Contributing" = "contributing.md" },
     { "Test Suite Taxonomy" = "testing/test-suite-taxonomy.md" },
     { "Finite Linux Test Stages" = "testing/linux-test-plan.md" },
+    { "Proposed Soak Certification" = "testing/soak-certification.md" },
     { "Test Planning Shadow Pilot" = "testing/test-planning-shadow.md" },
     { "Test Planning Result Measurements" = "testing/test-planning-results.md" },
     { "Test Suite Baseline" = "investigations/test-suite-baseline-2026-07-22.md" },
