@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve unsuccessful doctor supervisor exits after a success receipt. With
+  confirmed cleanup, the affected probe reports `unavailable` / `probe_failed`
+  while retaining its other completed observations.
 - Require Linux before the workflow-progress preparation benchmark creates
   workspaces or starts workers. Remove its native Windows process fallback and
   macOS RSS conversion while preserving bounded Linux descendant cleanup and
