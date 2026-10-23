@@ -214,6 +214,34 @@ Every attachment/reactivation path must lock or register the payload before it l
 updates the execution row. Cleanup safety depends on that common lock order; rq2
 registration/attachment and its definite pre-submission release path follow it.
 
+Reusing a registered input or request verifies or restores its exact immutable
+bytes while holding the registry lock, even when the row remains `ACTIVE`.
+An external delete can succeed before its acknowledgement is lost or its database
+tombstone rolls back. Preparation before the lock therefore cannot establish
+continued availability. Verification failure refuses the new attachment and
+leaves the registry's last-use timestamp and state unchanged. Retained input
+backends and supported legacy URI spellings remain authorized by their existing
+namespace settings; revalidation does not rewrite stored references.
+
+This adds storage I/O to reused-payload registration. Both kinds first read the
+exact retained reference and require the producer's prepared bytes. A reported
+integrity failure or different bytes refuses attachment without a write. An
+unavailable read falls back to the backend's conditional immutable write and
+integrity checks.
+Missing objects are restored from the producer's prepared bytes. A readable
+legacy input URI remains reusable even when its canonical encoded spelling
+exceeds the writer's URI limit, but a missing object in that namespace cannot be
+recreated by that writer. Database locks remain held during that I/O, so backend
+latency can delay another producer or purger of the same payload. These operations
+have no new hard deadline; retain
+the configured provider limits and operational timeout monitoring.
+
+Some retained wrapped request URIs have percent-shaped key spellings that the
+strict request reader already accepts. Revalidation keeps that reader boundary:
+any changed spelling returned by recovery must identify the same digest and size
+in the exact backend, bucket, and prefix captured by the validated locator. The
+stored wrapped reference and encoded locator remain unchanged.
+
 ### Request-reference discriminator
 
 New Ray Job request references use `rq2ref:v1:` followed by the canonical

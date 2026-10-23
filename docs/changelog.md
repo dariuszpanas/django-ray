@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve unsuccessful doctor supervisor exits after a success receipt. With
   confirmed cleanup, the affected probe reports `unavailable` / `probe_failed`
   while retaining its other completed observations.
+- Revalidate reused task-input and Ray Job request objects under the registry
+  lock before attachment. A purge that deleted an object but lost its provider
+  acknowledgement or rolled back its database tombstone can no longer make a
+  waiting producer trust an `ACTIVE` row with missing bytes. Preserve retained
+  namespaces, supported legacy reference spellings, and the existing lock order.
+  Reused registrations verify exact bytes before attempting an immutable recovery
+  write, retaining readable legacy URIs even when the writer cannot encode them.
 - Require Linux before the workflow-progress preparation benchmark creates
   workspaces or starts workers. Remove its native Windows process fallback and
   macOS RSS conversion while preserving bounded Linux descendant cleanup and
