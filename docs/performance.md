@@ -9,6 +9,10 @@ django-ray has two layers with different costs:
 
 Most performance decisions come down to choosing the correct durability boundary.
 
+For source/archive/extracted-file attribution across bounded restarted sessions,
+see the [RuntimeEnv extraction experiment](benchmarks/runtime-env-growth.md).
+Its proposed limits are diagnostic admission controls, not production budgets.
+
 ## Choose an Execution Model
 
 | Workload | Prefer | Why |

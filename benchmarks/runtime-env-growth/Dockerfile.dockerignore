@@ -1,0 +1,17 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!src/**
+!scripts/
+!scripts/**
+!tests/
+!tests/__init__.py
+!tests/real_ray_ownership.py
+!benchmarks/
+!benchmarks/runtime-env-growth/
+!benchmarks/runtime-env-growth/Dockerfile
+**/__pycache__/
+**/*.pyc

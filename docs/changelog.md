@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a bounded Linux RuntimeEnv attribution experiment comparing actual raw Ray
+  packaging with django-ray snapshot/preparation across three restarted sessions
+  per arm. Record emitted archives separately from cache hits and extracted files,
+  with exact source/image checks, finite resource/deadline limits and owned cleanup.
+  The narrowly triggered hosted workflow produces diagnostic evidence; it changes
+  no production exclusions or caches and does not establish a production budget.
+
 ### Fixed
 
 - Include released 0.7.0 in the database upgrade matrix and select it for all
