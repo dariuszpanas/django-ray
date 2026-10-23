@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,25 @@ from scripts import test_planning_shadow as shadow
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE, HEAD, TREE = "1" * 40, "2" * 40, "3" * 40
+BASE_TREE = "4" * 40
 SOURCE = "src/django_ray/doctor/probe.py"
+
+
+@dataclass(frozen=True)
+class ModeEntry:
+    """Test stand-in for the installed reader's already validated typed metadata."""
+
+    path: str
+    oid: str
+    mode: str = "100644"
+    object_type: str = "blob"
+
+
+@dataclass(frozen=True)
+class ModeSelection:
+    commit_sha: str
+    tree_sha: str
+    entries: tuple[ModeEntry, ...]
 
 
 @pytest.fixture
@@ -31,7 +50,19 @@ def baseline():
 
 @pytest.fixture
 def collector(monkeypatch):
-    calls = []
+    calls, structure_reads, imports = [], [], []
+    paths = sorted((*candidate.SOURCE_PATHS, *candidate.COMPANION_PATHS, "README.md"))
+    modes = {
+        commit: ModeSelection(
+            commit_sha=commit,
+            tree_sha=tree,
+            entries=tuple(
+                ModeEntry(path, f"{index + offset:040x}") for index, path in enumerate(paths)
+            ),
+        )
+        for commit, tree, offset in ((BASE, BASE_TREE, 10), (HEAD, TREE, 100))
+    }
+    reader_failures = {}
     collected = SimpleNamespace(
         source=SimpleNamespace(
             base_commit=BASE,
@@ -47,18 +78,34 @@ def collector(monkeypatch):
         calls.append((repo, revision_range))
         return collected
 
+    def read_modes(repo, revision):
+        structure_reads.append((repo, revision))
+        if revision in reader_failures:
+            raise reader_failures[revision]
+        return modes[revision]
+
     monkeypatch.setattr(candidate.importlib.metadata, "version", lambda _: "0.3.0")
     original = candidate.importlib.import_module
-    monkeypatch.setattr(
-        candidate.importlib,
-        "import_module",
-        lambda name: (
-            SimpleNamespace(collect_test_source=collect)
-            if name == "yaga.test_planning.git"
-            else original(name)
-        ),
+
+    def load(name):
+        imports.append(name)
+        if name == "yaga.test_planning.git":
+            return SimpleNamespace(collect_test_source=collect)
+        if name == "yaga.modes.git":
+            return SimpleNamespace(read_mode_selection=read_modes)
+        if name == "yaga.modes.models":
+            return SimpleNamespace(ModeSelection=ModeSelection)
+        return original(name)
+
+    monkeypatch.setattr(candidate.importlib, "import_module", load)
+    return SimpleNamespace(
+        calls=calls,
+        collected=collected,
+        structure_reads=structure_reads,
+        modes=modes,
+        imports=imports,
+        reader_failures=reader_failures,
     )
-    return SimpleNamespace(calls=calls, collected=collected)
 
 
 def evaluate(baseline, **kwargs):
@@ -144,6 +191,8 @@ def test_cross_boundary_rename_keeps_old_and_new_paths_in_baseline(collector, ba
     assert result["baseline_selected"] == result["candidate_selected"]
     assert len(result["baseline_selected"]) > 1
     assert result["changed_paths"] == sorted(collector.collected.changed_paths)
+    assert not result["candidate_eligible"]
+    assert collector.structure_reads == []
 
 
 @pytest.mark.parametrize("selected", [[], ["application", "native"]])
@@ -253,6 +302,7 @@ def test_report_binds_exact_range_without_claiming_coverage_or_runtime(collector
     assert report["authority"] == "offline-counterfactual-only"
     assert report["activation"] == "disabled"
     assert report["path_eligible"]
+    assert report["candidate_eligible"]
     assert report["dependency_review"] == report["coverage_review"] == "required"
     assert (
         report["rule_path_inventory_sha256"]
@@ -267,6 +317,142 @@ def test_report_binds_exact_range_without_claiming_coverage_or_runtime(collector
         "runner_minute_savings": None,
         "new_runtime_observations": 0,
     }
+
+
+def test_structure_metadata_binds_both_endpoints_without_requiring_unchanged_blob_ids(
+    collector, baseline
+):
+    report = evaluate(baseline)
+    assert collector.structure_reads == [(ROOT, BASE), (ROOT, HEAD)]
+    structure = report["structure"]
+    assert structure["status"] == "preserved"
+    assert structure["base"] == {"commit": BASE, "tree": BASE_TREE}
+    assert structure["head"] == {"commit": HEAD, "tree": TREE}
+    paths = sorted(candidate.SOURCE_PATHS + candidate.COMPANION_PATHS)
+    assert len(paths) == len(structure["paths"]) == 13
+    assert [row["path"] for row in structure["paths"]] == paths
+    for row in structure["paths"]:
+        for label in ("base", "head"):
+            assert set(row[label]) == {"mode", "type", "oid"}
+            assert row[label]["mode"] == "100644" and row[label]["type"] == "blob"
+        assert row["base"]["oid"] != row["head"]["oid"]
+    assert report["structure_sha256"] == hashlib.sha256(shadow.encode(structure)).hexdigest()
+    assert report["candidate_eligible"]
+    assert report["candidate_selected"] == []
+
+
+@pytest.mark.parametrize("path", candidate.SOURCE_PATHS + candidate.COMPANION_PATHS)
+@pytest.mark.parametrize("endpoint", [BASE, HEAD])
+@pytest.mark.parametrize("fault", ["missing", "executable", "symlink", "gitlink"])
+def test_every_reviewed_file_must_exist_as_regular_blob_at_both_ends(
+    collector, baseline, path, endpoint, fault
+):
+    selection = collector.modes[endpoint]
+    if fault == "missing":
+        entries = tuple(entry for entry in selection.entries if entry.path != path)
+    else:
+        mode, object_type = {
+            "executable": ("100755", "blob"),
+            "symlink": ("120000", "blob"),
+            "gitlink": ("160000", "commit"),
+        }[fault]
+        entries = tuple(
+            replace(entry, mode=mode, object_type=object_type) if entry.path == path else entry
+            for entry in selection.entries
+        )
+    collector.modes[endpoint] = replace(selection, entries=entries)
+    report = evaluate(baseline)
+    assert report["path_eligible"] and not report["candidate_eligible"]
+    assert report["baseline_selected"] == report["candidate_selected"] == ["application"]
+    assert report["reason"] == "doctor-structure-not-preserved"
+    assert report["structure"]["status"] == "not-preserved"
+    row = next(item for item in report["structure"]["paths"] if item["path"] == path)
+    actual = row["base" if endpoint == BASE else "head"]
+    if fault == "missing":
+        assert actual is None
+    else:
+        assert actual["mode"] == mode and actual["type"] == object_type
+    assert report["summary"]["candidate_variant_cells"] == 1
+    assert report["dependency_review"] == report["coverage_review"] == "required"
+
+
+def test_unchanged_missing_coverage_companion_also_prevents_eligibility(collector, baseline):
+    path = "tests/unit/test_doctor_supervision.py"
+    assert path not in collector.collected.changed_paths
+    for endpoint in (BASE, HEAD):
+        selection = collector.modes[endpoint]
+        collector.modes[endpoint] = replace(
+            selection, entries=tuple(entry for entry in selection.entries if entry.path != path)
+        )
+    report = evaluate(baseline)
+    assert not report["candidate_eligible"]
+    row = next(item for item in report["structure"]["paths"] if item["path"] == path)
+    assert row == {"path": path, "base": None, "head": None}
+
+
+@pytest.mark.parametrize("paths", [(), ("docs/reference/doctor.md",), (SOURCE, "pyproject.toml")])
+def test_ineligible_paths_never_import_or_read_committed_structure(collector, baseline, paths):
+    collector.collected.changed_paths = paths
+    report = evaluate(baseline)
+    assert not report["path_eligible"] and not report["candidate_eligible"]
+    assert report["structure"] == {
+        "status": "not-evaluated",
+        "base": None,
+        "head": None,
+        "paths": [],
+    }
+    assert report["structure_sha256"] is None
+    assert collector.structure_reads == []
+    assert collector.imports == ["yaga.test_planning.git"]
+
+
+@pytest.mark.parametrize(
+    "endpoint,field,value",
+    [
+        (BASE, "commit_sha", HEAD),
+        (HEAD, "commit_sha", BASE),
+        (HEAD, "tree_sha", BASE_TREE),
+        (BASE, "tree_sha", None),
+        (BASE, "tree_sha", "HEAD"),
+        (BASE, "tree_sha", "A" * 40),
+        (BASE, "tree_sha", "a" * 64),
+    ],
+)
+def test_structural_endpoint_identity_failure_is_an_error(
+    collector, baseline, endpoint, field, value
+):
+    collector.modes[endpoint] = replace(collector.modes[endpoint], **{field: value})
+    with pytest.raises(shadow.ShadowError):
+        evaluate(baseline)
+    assert len(collector.structure_reads) == (1 if endpoint == BASE else 2)
+
+
+@pytest.mark.parametrize("endpoint", [BASE, HEAD])
+@pytest.mark.parametrize("result", [None, {}, (), SimpleNamespace(entries=())])
+def test_untyped_or_incomplete_reader_results_cannot_substitute_for_validated_models(
+    collector, baseline, endpoint, result
+):
+    collector.modes[endpoint] = result
+    with pytest.raises(shadow.ShadowError, match="committed structure"):
+        evaluate(baseline)
+
+
+@pytest.mark.parametrize("endpoint", [BASE, HEAD])
+@pytest.mark.parametrize(
+    "failure", ["duplicate paths", "incomplete record", "invalid mode/type", "malformed oid"]
+)
+def test_pinned_reader_validation_failure_is_not_a_structural_fallback(
+    collector, baseline, tmp_path, capsys, endpoint, failure
+):
+    # The installed ModeSelection/ModeEntry validation owns these malformed
+    # metadata cases; its failure must propagate instead of yielding a report.
+    collector.reader_failures[endpoint] = ValueError(failure)
+    argv, output = arguments(tmp_path, baseline)
+    assert candidate.main(argv) == 2
+    assert not output.exists()
+    assert capsys.readouterr().out == (
+        "Doctor candidate could not be evaluated; no selection was activated\n"
+    )
 
 
 @pytest.mark.parametrize(

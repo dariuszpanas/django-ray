@@ -400,6 +400,21 @@ identity mismatches, invalid paths, and baseline-policy drift fail evaluation.
 Only the two reviewed LF/CRLF baseline encodings described above are accepted.
 Output is bounded and create-only; it never writes workflow outputs or a handoff.
 
+For a path-eligible range, the evaluator also reads committed file metadata at
+both endpoints through YAGA's bounded Git reader. All seven source files and six
+companions must exist as regular, non-executable `100644` blobs at both base and
+head, including companions unchanged by the range. A missing file, deletion,
+addition restoring a missing file, executable file, symlink, or gitlink preserves
+the complete baseline selection. Invalid metadata, reader failures, or mismatched
+source identities fail evaluation. Path-ineligible ranges need no metadata reads.
+
+The report distinguishes path eligibility from candidate eligibility and retains
+the thirteen paths' base/head modes, object types, and blob identities with the
+endpoint commit/tree identities and a snapshot digest. This is a review aid, not
+an approval record. It reads no blob content, follows no symlinks or gitlinks, and
+executes no changed code. Only a range passing both path and structure checks can
+propose the offline omission; dependency and coverage review remain required.
+
 Replaying the reusable rule against the retained 31 revisions leaves all **50
 workflow selections and 77 qualification cells unchanged**. The only doctor revision,
 #621, includes shared build and coverage edits and is consequently ineligible. Its
@@ -407,9 +422,11 @@ separate, reviewed historical exception remains 49 selections and 76 cells. Synt
 doctor-only ranges exercise future eligibility and mixed-change fallbacks; they do
 not establish a historical hit rate or successful execution of new doctor code.
 
-Path eligibility does not inspect code semantics, file modes, or dependency changes
-already present in the selected base. Before using any future omission, review that
-source's application consumers and dedicated ordinary-CI coverage. The retained
+Neither path nor structure eligibility inspects code semantics or dependency changes
+already present in the selected base. Regular files can still introduce application
+dependencies or weaken the tests supporting an omission. Before using any future
+omission, review that source's application consumers and dedicated ordinary-CI
+coverage. The retained
 Linux supervision, PostgreSQL, and installed-wheel evidence qualifies its original
 source tree only. Feedback-time savings and aggregate runner-minute savings remain
 unknown, and this offline step requires no new hosted qualification workloads.

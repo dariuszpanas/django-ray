@@ -80,6 +80,43 @@ def compare(changed_paths, baseline_bytes: bytes) -> dict:
     return result
 
 
+def committed_structure(repo: Path, *, base: str, head: str, expected_tree: str) -> dict:
+    """Read metadata only; the pinned typed reader validates complete tree records."""
+    reader = importlib.import_module("yaga.modes.git")
+    models = importlib.import_module("yaga.modes.models")
+    paths = tuple(sorted(SOURCE_PATHS + COMPANION_PATHS))
+    endpoints, entries = {}, {}
+    for label, commit in (("base", base), ("head", head)):
+        selection = reader.read_mode_selection(repo, commit)
+        # ModeSelection validates complete, bounded, sorted, unique leaf metadata,
+        # including topology, supported mode/type pairs and every object ID.
+        if type(selection) is not models.ModeSelection:
+            raise shadow.ShadowError("Invalid candidate committed structure")
+        tree = shadow.oid(selection.tree_sha)
+        if selection.commit_sha != commit or (label == "head" and tree != expected_tree):
+            raise shadow.ShadowError("Candidate structure differs from the expected source")
+        endpoints[label] = {"commit": commit, "tree": tree}
+        entries[label] = {
+            entry.path: {"mode": entry.mode, "type": entry.object_type, "oid": entry.oid}
+            for entry in selection.entries
+            if entry.path in paths
+        }
+    rows = [
+        {"path": path, "base": entries["base"].get(path), "head": entries["head"].get(path)}
+        for path in paths
+    ]
+    preserved = all(
+        row[label] is not None and row[label]["mode"] == "100644" and row[label]["type"] == "blob"
+        for row in rows
+        for label in ("base", "head")
+    )
+    return {
+        "status": "preserved" if preserved else "not-preserved",
+        **endpoints,
+        "paths": rows,
+    }
+
+
 def evaluate_range(repo, baseline_bytes: bytes, *, base, head, expected_tree) -> dict:
     """Bind an offline comparison to one explicit two-dot range and expected tree."""
     digest = baseline_digest(baseline_bytes)
@@ -98,6 +135,17 @@ def evaluate_range(repo, baseline_bytes: bytes, *, base, head, expected_tree) ->
     if any(getattr(source, key, None) != value for key, value in expected.items()):
         raise shadow.ShadowError("Candidate source differs from the expected range")
     comparison = compare(getattr(collected, "changed_paths", None), baseline_bytes)
+    path_eligible = comparison["reason"] == ELIGIBLE_REASON
+    structure = {"status": "not-evaluated", "base": None, "head": None, "paths": []}
+    structure_sha256 = None
+    if path_eligible:
+        structure = committed_structure(
+            Path(repo), base=base, head=head, expected_tree=expected_tree
+        )
+        structure_sha256 = hashlib.sha256(shadow.encode(structure)).hexdigest()
+        if structure["status"] != "preserved":
+            comparison["candidate_selected"] = list(comparison["baseline_selected"])
+            comparison["reason"] = "doctor-structure-not-preserved"
     inventory = {"sources": list(SOURCE_PATHS), "companions": list(COMPANION_PATHS)}
     report = {
         "experiment_version": 1,
@@ -110,7 +158,10 @@ def evaluate_range(repo, baseline_bytes: bytes, *, base, head, expected_tree) ->
         "baseline_policy_sha256": digest,
         "rule_path_inventory": inventory,
         "rule_path_inventory_sha256": hashlib.sha256(shadow.encode(inventory)).hexdigest(),
-        "path_eligible": comparison["reason"] == ELIGIBLE_REASON,
+        "path_eligible": path_eligible,
+        "candidate_eligible": path_eligible and structure["status"] == "preserved",
+        "structure": structure,
+        "structure_sha256": structure_sha256,
         "dependency_review": "required",
         "coverage_review": "required",
         **comparison,
