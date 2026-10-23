@@ -9,11 +9,14 @@ import os
 import subprocess
 import sys
 import traceback
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import Mock
 
 import pytest
 from django.core.management import call_command
@@ -53,7 +56,12 @@ from django_ray.ray_job_request_storage import (
     release_ray_job_request_reservation,
     validate_ray_job_request_storage_config,
 )
-from django_ray.result_storage import ResultStorageError, ResultStorageIntegrityError
+from django_ray.result_storage import (
+    GCSResultStorage,
+    ResultStorageError,
+    ResultStorageIntegrityError,
+    S3ResultStorage,
+)
 from django_ray.runner.base import SubmissionHandle
 
 
@@ -1169,10 +1177,14 @@ def test_register_fails_closed_when_purged_request_cannot_be_restored(
         envelope_version=prepared.envelope_version,
         state=InputPayloadState.PURGED,
     )
+    _request_path(prepared.locator).unlink()
 
     class RestoreStorage:
         def __init__(self, root_path: str) -> None:
             self.root_path = root_path
+
+        def load(self, *, reference: str) -> None:
+            return None
 
         def store_payload(self, *, serialized_payload: str) -> str:
             if isinstance(outcome, Exception):
@@ -1791,3 +1803,458 @@ def test_purge_retains_duplicate_native_and_wrapped_registry_identities(
     assert native not in output.getvalue()
     assert list(TaskInputPayload.objects.order_by("reference").values()) == before
     assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
+
+
+def _reused_request_registration(monkeypatch, *, state):
+    """Use a real prepared request with only provider and ORM seams replaced."""
+    data = {}
+
+    def store_payload(*, serialized_payload):
+        encoded = serialized_payload.encode()
+        digest = hashlib.sha256(encoded).hexdigest()
+        reference = (
+            f"resultfs://sha256/{digest}?rel={digest[:2]}/{digest[2:4]}/{digest}.json"
+            f"&bytes={len(encoded)}"
+        )
+        data[reference] = serialized_payload
+        return reference
+
+    storage = Mock()
+    storage.root_path = Path("unused-request-root").resolve()
+    storage.load.return_value = None
+    storage.store_payload.side_effect = store_payload
+    monkeypatch.setattr(request_storage, "FilesystemResultStorage", Mock(return_value=storage))
+    request = _request()
+    prepared = prepare_ray_job_request(
+        encode_execution_request(request), _filesystem_config(Path("unused-request-root"))
+    )
+    storage.store_payload.reset_mock()
+    data.clear()
+    current, handle, payload, registry, executions = _reused_request_rows(
+        monkeypatch, prepared, state=state
+    )
+    return prepared, current, handle, payload, storage, data, registry, executions
+
+
+def _reused_request_rows(monkeypatch, prepared, *, state):
+    """Replace ORM boundaries while retaining request and execution binding checks."""
+    from django.db import transaction
+
+    from django_ray.ray_job_protocol import (
+        STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX,
+        coordination_sha256,
+    )
+
+    request = prepared.request
+    identity = request.identity
+    job_id = (
+        f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}{coordination_sha256(identity)}"
+    )
+    current = RayTaskExecution(
+        pk=identity.task_execution_pk,
+        task_id=identity.task_id,
+        attempt_number=identity.attempt_number,
+        execution_generation=identity.execution_generation,
+        execution_protocol_version=request.execution_protocol_version,
+        state=TaskState.RUNNING,
+        claimed_by_worker="rq2-worker",
+        ray_job_id=job_id,
+        ray_address="http://unused-ray-head:8265",
+        callable_path=request.callable_path,
+        args_json=request.serialized_args,
+        kwargs_json=request.serialized_kwargs,
+        input_reference=request.input_reference,
+        runtime_env_profile=request.runtime_env_profile,
+        runtime_env_hash=request.runtime_env_hash,
+    )
+    current._state.db = "default"
+    current.save = Mock()
+    handle = SubmissionHandle(
+        ray_job_id=job_id,
+        ray_address=current.ray_address,
+        submitted_at=datetime.now(UTC),
+    )
+    payload = TaskInputPayload(
+        reference=prepared.reference,
+        payload_kind=InputPayloadKind.RAY_JOB_REQUEST,
+        backend=prepared.backend,
+        digest=prepared.digest,
+        size_bytes=prepared.size_bytes,
+        envelope_version=prepared.envelope_version,
+        state=state,
+    )
+    payload.save = Mock()
+    registry = Mock()
+    for method in ("using", "select_for_update", "filter", "values_list"):
+        getattr(registry, method).return_value = registry
+    registry.first.return_value = None
+    registry.get_or_create.return_value = (payload, False)
+    executions = Mock()
+    for method in ("using", "select_for_update", "filter", "only"):
+        getattr(executions, method).return_value = executions
+    executions.first.return_value = current
+    monkeypatch.setattr(TaskInputPayload, "objects", registry)
+    monkeypatch.setattr(RayTaskExecution, "objects", executions)
+    monkeypatch.setattr(transaction, "atomic", lambda **_kwargs: nullcontext())
+    return current, handle, payload, registry, executions
+
+
+@pytest.mark.parametrize("state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+def test_reused_request_revalidates_missing_payload_before_execution_lock(monkeypatch, state):
+    prepared, current, handle, payload, storage, data, registry, executions = (
+        _reused_request_registration(monkeypatch, state=state)
+    )
+    previous_use = payload.last_used_at
+    original_store = storage.store_payload.side_effect
+
+    def restore(*, serialized_payload):
+        assert registry.select_for_update.call_count == 2
+        registry.get_or_create.assert_called_once()
+        executions.select_for_update.assert_not_called()
+        payload.save.assert_not_called()
+        assert payload.last_used_at == previous_use
+        return original_store(serialized_payload=serialized_payload)
+
+    storage.store_payload.side_effect = restore
+    assert (
+        register_and_attach_ray_job_request(
+            prepared, task_execution=current, submission_handle=handle
+        )
+        == prepared.reference
+    )
+    native = prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    assert data[native] == prepared.serialized_request
+    assert current.ray_job_request_reference == prepared.reference
+    assert payload.state == InputPayloadState.ACTIVE
+    assert payload.last_used_at >= previous_use
+    current.save.assert_called_once()
+
+
+@pytest.mark.parametrize("state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+@pytest.mark.parametrize(
+    ("outcome", "classification"),
+    [
+        (ResultStorageError("private"), RayJobRequestStorageRejection.STORAGE_UNAVAILABLE),
+        (ResultStorageIntegrityError("private"), RayJobRequestStorageRejection.INTEGRITY_MISMATCH),
+        ("different-reference", RayJobRequestStorageRejection.INTEGRITY_MISMATCH),
+    ],
+)
+def test_reused_request_failure_preserves_registry_and_reservation(
+    monkeypatch, state, outcome, classification
+):
+    prepared, current, handle, payload, storage, _data, _registry, executions = (
+        _reused_request_registration(monkeypatch, state=state)
+    )
+    previous_use = payload.last_used_at
+    if isinstance(outcome, Exception):
+        storage.store_payload.side_effect = outcome
+    else:
+        storage.store_payload.side_effect = lambda **_kwargs: outcome
+
+    with pytest.raises(RayJobRequestStorageError) as caught:
+        register_and_attach_ray_job_request(
+            prepared, task_execution=current, submission_handle=handle
+        )
+
+    assert caught.value.classification is classification
+    storage.store_payload.assert_called_once_with(serialized_payload=prepared.serialized_request)
+    assert payload.state == state
+    assert payload.last_used_at == previous_use
+    assert current.ray_job_request_reference is None
+    payload.save.assert_not_called()
+    current.save.assert_not_called()
+    executions.select_for_update.assert_not_called()
+
+
+def _reused_cloud_request_registration(monkeypatch, *, backend, state, outcome):
+    """Retain real cloud validation and conditional writes with bounded fake clients."""
+    prefix = "tenant%25/inputs"
+    objects = {}
+    phase = {"guard": False, "reads": 0}
+    client = Mock()
+
+    class PreconditionFailedError(Exception):
+        code = 412
+
+    def require_registry_lock():
+        if not phase["guard"]:
+            return
+        assert registry.select_for_update.call_count == 2
+        registry.get_or_create.assert_called_once()
+        executions.select_for_update.assert_not_called()
+        payload.save.assert_not_called()
+        assert payload.last_used_at == previous_use
+
+    def read_object(key):
+        require_registry_lock()
+        phase["reads"] += 1
+        if outcome == "unavailable_then_corrupt" and phase["reads"] == 1:
+            raise OSError("private provider response")
+        if key not in objects:
+            raise OSError("private missing object")
+        return objects[key]
+
+    def write_object(key, encoded):
+        require_registry_lock()
+        if key in objects:
+            raise PreconditionFailedError("private conditional conflict")
+        objects[key] = encoded
+
+    if backend == "s3":
+        config = {**_s3_config(), "INPUT_STORAGE_S3_PREFIX": prefix}
+
+        def get_object(**kwargs):
+            assert kwargs["Bucket"] == "request-bucket"
+            encoded = read_object(kwargs["Key"])
+            return {"ContentLength": len(encoded), "Body": BytesIO(encoded)}
+
+        def put_object(**kwargs):
+            assert kwargs["Bucket"] == "request-bucket"
+            assert kwargs["IfNoneMatch"] == "*"
+            write_object(kwargs["Key"], kwargs["Body"])
+
+        client.get_object.side_effect = get_object
+        client.put_object.side_effect = put_object
+        storage = S3ResultStorage(bucket="request-bucket", prefix=prefix, client=client)
+        constructor = "S3ResultStorage"
+    else:
+        config = {**_gcs_config(), "INPUT_STORAGE_GCS_PREFIX": prefix}
+        blob = client.bucket.return_value.blob.return_value
+        selected = {}
+
+        def select_blob(key):
+            selected["key"] = key
+            return blob
+
+        def reload_blob():
+            encoded = read_object(selected["key"])
+            blob.size = len(encoded)
+            blob.generation = 1
+
+        def download_as_bytes(**kwargs):
+            assert kwargs["if_generation_match"] == 1
+            return objects[selected["key"]]
+
+        def upload_from_string(encoded, **kwargs):
+            assert kwargs["if_generation_match"] == 0
+            write_object(selected["key"], encoded)
+
+        client.bucket.return_value.blob.side_effect = select_blob
+        blob.reload.side_effect = reload_blob
+        blob.download_as_bytes.side_effect = download_as_bytes
+        blob.upload_from_string.side_effect = upload_from_string
+        storage = GCSResultStorage(bucket="request-bucket", prefix=prefix, client=client)
+        constructor = "GCSResultStorage"
+    monkeypatch.setattr(request_storage, constructor, Mock(return_value=storage))
+    prepared = prepare_ray_job_request(encode_execution_request(_request()), config)
+    canonical = prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    assert "/tenant%2525/inputs/" in canonical
+    retained = prepared.reference.replace("/tenant%2525/", "/tenant%25/")
+    locator = replace(prepared.locator, reference=retained)
+    prepared = replace(
+        prepared,
+        reference=retained,
+        locator=locator,
+        locator_json=request_storage.serialize_ray_job_request_locator(locator),
+        encoded_locator=encode_ray_job_request_locator(locator),
+    )
+    assert request_storage._validate_prepared_request(prepared) is prepared
+    current, handle, payload, registry, executions = _reused_request_rows(
+        monkeypatch, prepared, state=state
+    )
+    previous_use = payload.last_used_at
+    key = request_storage._build_object_key(prefix, prepared.digest)
+    if outcome == "missing":
+        objects.clear()
+    elif outcome in {"corrupt", "unavailable_then_corrupt"}:
+        objects[key] = b"x" * prepared.size_bytes
+    client.reset_mock()
+    phase["guard"] = True
+    monkeypatch.setattr(storage, "load", Mock(wraps=storage.load))
+    monkeypatch.setattr(storage, "store_payload", Mock(wraps=storage.store_payload))
+    return SimpleNamespace(
+        prepared=prepared,
+        current=current,
+        handle=handle,
+        payload=payload,
+        registry=registry,
+        executions=executions,
+        storage=storage,
+        client=client,
+        objects=objects,
+        key=key,
+        canonical=canonical,
+        phase=phase,
+    )
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+def test_reused_request_reads_retained_percent_reference_without_writing(
+    monkeypatch, backend, state
+):
+    retained = _reused_cloud_request_registration(
+        monkeypatch, backend=backend, state=state, outcome="present"
+    )
+    prepared = retained.prepared
+
+    assert (
+        register_and_attach_ray_job_request(
+            prepared, task_execution=retained.current, submission_handle=retained.handle
+        )
+        == prepared.reference
+    )
+
+    retained.storage.load.assert_called_once_with(
+        reference=prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    )
+    retained.storage.store_payload.assert_not_called()
+    assert (
+        retained.payload.reference
+        == retained.current.ray_job_request_reference
+        == prepared.reference
+    )
+    assert retained.payload.state == InputPayloadState.ACTIVE
+    assert retained.objects[retained.key] == prepared.serialized_request.encode()
+    retained.payload.save.assert_called_once()
+    retained.current.save.assert_called_once()
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+def test_reused_request_restores_retained_percent_reference_from_canonical_writer(
+    monkeypatch, backend, state
+):
+    retained = _reused_cloud_request_registration(
+        monkeypatch, backend=backend, state=state, outcome="missing"
+    )
+    prepared = retained.prepared
+
+    assert (
+        register_and_attach_ray_job_request(
+            prepared, task_execution=retained.current, submission_handle=retained.handle
+        )
+        == prepared.reference
+    )
+
+    retained.storage.store_payload.assert_called_once_with(
+        serialized_payload=prepared.serialized_request
+    )
+    assert retained.canonical != prepared.reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    assert (
+        retained.payload.reference
+        == retained.current.ray_job_request_reference
+        == prepared.reference
+    )
+    assert retained.payload.state == InputPayloadState.ACTIVE
+    assert retained.objects[retained.key] == prepared.serialized_request.encode()
+    retained.phase["guard"] = False
+    assert load_ray_job_request(prepared.encoded_locator).request == prepared.request
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("changed", ["authority", "prefix", "digest", "size", "backend", "wrapper"])
+def test_reused_request_rejects_restored_reference_outside_locator_binding(
+    monkeypatch, backend, changed
+):
+    retained = _reused_cloud_request_registration(
+        monkeypatch, backend=backend, state=InputPayloadState.ACTIVE, outcome="missing"
+    )
+    prepared = retained.prepared
+    digest = "b" * 64 if changed == "digest" else prepared.digest
+    scheme = "s3" if backend == "s3" else "gs"
+    if changed == "backend":
+        scheme = "gs" if scheme == "s3" else "s3"
+    reference = request_storage._object_reference(
+        scheme=scheme,
+        bucket="other-bucket" if changed == "authority" else "request-bucket",
+        key=request_storage._build_object_key(
+            "other/inputs" if changed == "prefix" else "tenant%25/inputs", digest
+        ),
+        size_bytes=prepared.size_bytes + (1 if changed == "size" else 0),
+    )
+    if changed == "wrapper":
+        reference = RAY_JOB_REQUEST_REFERENCE_PREFIX + reference
+    retained.storage.store_payload.side_effect = None
+    retained.storage.store_payload.return_value = reference
+    before_payload = vars(retained.payload).copy()
+    before_execution = vars(retained.current).copy()
+
+    with pytest.raises(RayJobRequestStorageError) as caught:
+        register_and_attach_ray_job_request(
+            prepared, task_execution=retained.current, submission_handle=retained.handle
+        )
+
+    assert caught.value.classification is RayJobRequestStorageRejection.INTEGRITY_MISMATCH
+    assert vars(retained.payload) == before_payload
+    assert vars(retained.current) == before_execution
+    retained.payload.save.assert_not_called()
+    retained.current.save.assert_not_called()
+    retained.executions.select_for_update.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+@pytest.mark.parametrize("outcome", ["corrupt", "unavailable_then_corrupt"])
+def test_reused_request_never_overwrites_corrupt_retained_object(
+    monkeypatch, backend, state, outcome
+):
+    retained = _reused_cloud_request_registration(
+        monkeypatch, backend=backend, state=state, outcome=outcome
+    )
+    before_payload = vars(retained.payload).copy()
+    before_execution = vars(retained.current).copy()
+    before_objects = retained.objects.copy()
+
+    with pytest.raises(RayJobRequestStorageError) as caught:
+        register_and_attach_ray_job_request(
+            retained.prepared,
+            task_execution=retained.current,
+            submission_handle=retained.handle,
+        )
+
+    assert caught.value.classification is RayJobRequestStorageRejection.INTEGRITY_MISMATCH
+    assert "private" not in str(caught.value)
+    assert vars(retained.payload) == before_payload
+    assert vars(retained.current) == before_execution
+    assert retained.objects == before_objects
+    retained.payload.save.assert_not_called()
+    retained.current.save.assert_not_called()
+    retained.executions.select_for_update.assert_not_called()
+    if outcome == "corrupt":
+        retained.storage.store_payload.assert_not_called()
+    else:
+        retained.storage.store_payload.assert_called_once_with(
+            serialized_payload=retained.prepared.serialized_request
+        )
+        assert retained.storage.load.call_count == 2
+        if backend == "s3":
+            retained.client.put_object.assert_called_once()
+            assert retained.client.put_object.call_args.kwargs["IfNoneMatch"] == "*"
+        else:
+            upload = retained.client.bucket.return_value.blob.return_value.upload_from_string
+            upload.assert_called_once()
+            assert upload.call_args.kwargs["if_generation_match"] == 0
+
+
+@pytest.mark.parametrize("state", [InputPayloadState.ACTIVE, InputPayloadState.PURGED])
+def test_reused_request_rejects_different_loaded_bytes_without_writing(monkeypatch, state):
+    prepared, current, handle, payload, storage, _data, _registry, executions = (
+        _reused_request_registration(monkeypatch, state=state)
+    )
+    storage.load.return_value = "different request bytes"
+    before_payload = vars(payload).copy()
+    before_execution = vars(current).copy()
+
+    with pytest.raises(RayJobRequestStorageError) as caught:
+        register_and_attach_ray_job_request(
+            prepared, task_execution=current, submission_handle=handle
+        )
+
+    assert caught.value.classification is RayJobRequestStorageRejection.INTEGRITY_MISMATCH
+    assert vars(payload) == before_payload
+    assert vars(current) == before_execution
+    storage.store_payload.assert_not_called()
+    payload.save.assert_not_called()
+    current.save.assert_not_called()
+    executions.select_for_update.assert_not_called()

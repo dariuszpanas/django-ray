@@ -23,6 +23,7 @@ from django_ray.result_storage import (
     GCSResultStorage,
     PayloadStorageBackend,
     ResultStorageError,
+    ResultStorageIntegrityError,
     S3ResultStorage,
     _parse_result_reference,
     _validate_object_reference,
@@ -411,20 +412,47 @@ def register_task_input(
                 "Existing task input registry metadata is inconsistent"
             )
 
-        update_fields = ["last_used_at"]
-        payload.last_used_at = now
-        if payload.state == InputPayloadState.PURGED:
-            _, storage = _storage_backend(resolved_config)
+        # Preparation happens before this registry lock. A concurrent purge may
+        # have deleted its object and then rolled back the tombstone, or lost
+        # the provider's acknowledgement. ACTIVE therefore does not prove that
+        # the prepared bytes still exist. Re-establish them before attachment.
+        storage = _storage_backend_for_reference(metadata, resolved_config)
+        try:
+            stored_payload = storage.load(reference=prepared.input_reference)
+        except ResultStorageIntegrityError as error:
+            raise InputPayloadStorageError("Failed to reactivate durable task input") from error
+        except (ResultStorageError, OSError, UnicodeError):
+            stored_payload = None
+        if stored_payload is not None:
+            if stored_payload != prepared.serialized_payload:
+                raise InputPayloadValidationError(
+                    "Storage backend changed immutable task input bytes"
+                )
+            # A readable legacy URI need not fit the current writer's encoded
+            # URI limit. Verify its exact bytes without requiring a new URI.
+            restored_reference = prepared.input_reference
+        else:
             try:
                 restored_reference = storage.store_payload(
                     serialized_payload=prepared.serialized_payload
                 )
             except (ResultStorageError, OSError, UnicodeError) as error:
                 raise InputPayloadStorageError("Failed to reactivate durable task input") from error
-            if restored_reference != prepared.input_reference:
+        if restored_reference != prepared.input_reference:
+            try:
+                restored_metadata = _validated_reference(restored_reference, resolved_config)
+            except InputPayloadValidationError:
+                restored_metadata = None
+            # Retain an encoding-legacy spelling when the canonical writer
+            # returns the same object in its exact authorized input namespace.
+            if restored_metadata != metadata:
                 raise InputPayloadValidationError(
                     "Storage backend changed an immutable task input reference"
                 )
+
+        update_fields = ["last_used_at"]
+        payload.last_used_at = timezone.now()
+        if payload.state == InputPayloadState.PURGED:
             payload.state = InputPayloadState.ACTIVE
             payload.purged_at = None
             payload.cleanup_error = ""

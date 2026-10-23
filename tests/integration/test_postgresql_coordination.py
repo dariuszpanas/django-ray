@@ -3636,6 +3636,177 @@ def test_input_reenqueue_waits_for_purge_then_restores_shared_payload(
     ) == (["restored input"], {})
 
 
+@pytest.mark.parametrize(
+    "payload_kind", [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST]
+)
+@pytest.mark.parametrize("purge_failure", ["delete_acknowledgement_loss", "tombstone_rollback"])
+def test_payload_registration_restores_active_object_after_purge_failure(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload_kind: str,
+    purge_failure: str,
+) -> None:
+    """An ACTIVE row cannot prove availability after an uncertain purge."""
+    import django_ray.input_storage as input_storage_module
+    from django_ray.ray_job_request_storage import (
+        load_ray_job_request,
+        register_and_attach_ray_job_request,
+    )
+
+    storage_config = {
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **storage_config}
+    old_timestamp = timezone.now() - timedelta(days=60)
+    if payload_kind == InputPayloadKind.TASK_INPUT:
+        prepared_input = prepare_task_input(("restored active input",), {})
+        assert prepared_input.input_reference is not None
+        assert prepared_input.digest is not None
+        reference = prepared_input.input_reference
+        with transaction.atomic():
+            payload = register_task_input(prepared_input)
+        assert payload is not None
+        old_execution = _execution(
+            "postgres-active-input-purge-old",
+            state=TaskState.SUCCEEDED,
+            finished_at=old_timestamp,
+            args_json=prepared_input.args_json,
+            kwargs_json=prepared_input.kwargs_json,
+            input_reference=reference,
+        )
+        digest = prepared_input.digest
+        path = tmp_path / digest[:2] / digest[2:4] / f"{digest}.json"
+
+        def write_reference() -> int:
+            with transaction.atomic():
+                register_task_input(prepared_input)
+                return int(
+                    _execution(
+                        "postgres-active-input-purge-new",
+                        args_json=prepared_input.args_json,
+                        kwargs_json=prepared_input.kwargs_json,
+                        input_reference=reference,
+                    ).pk
+                )
+
+    else:
+        execution, handle = _rq2_reserved_execution("postgres-active-rq2-purge")
+        prepared_request = _prepared_rq2_request(execution, tmp_path)
+        reference = prepared_request.reference
+        payload = TaskInputPayload.objects.create(
+            reference=reference,
+            payload_kind=payload_kind,
+            backend=prepared_request.backend,
+            digest=prepared_request.digest,
+            size_bytes=prepared_request.size_bytes,
+            envelope_version=prepared_request.envelope_version,
+            state=InputPayloadState.ACTIVE,
+        )
+        path = _rq2_request_path(prepared_request)
+
+        def write_reference() -> int:
+            assert (
+                register_and_attach_ray_job_request(
+                    prepared_request,
+                    task_execution=execution,
+                    submission_handle=handle,
+                )
+                == reference
+            )
+            return int(execution.pk)
+
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=old_timestamp)
+    original_bytes = path.read_bytes()
+    cutoff = timezone.now() - timedelta(days=30)
+    deletion_started, release_deletion, writer_connected = Event(), Event(), Event()
+    writer_pid: list[int] = []
+    original_delete = input_storage_module.delete_input_reference
+
+    def uncertain_delete(reference: str) -> None:
+        original_delete(reference, config=storage_config)
+        deletion_started.set()
+        assert release_deletion.wait(timeout=10)
+        if purge_failure == "delete_acknowledgement_loss":
+            raise OSError("simulated lost deletion acknowledgement")
+
+    monkeypatch.setattr(input_storage_module, "delete_input_reference", uncertain_delete)
+
+    def purge() -> str:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                outcome = PurgeInputsCommand()._process_reference(
+                    reference, cutoff=cutoff, delete=True, max_attachments=1
+                )
+                if purge_failure == "tombstone_rollback":
+                    assert outcome == "purged"
+                    tombstone = TaskInputPayload.objects.get(pk=payload.pk)
+                    assert tombstone.state == InputPayloadState.PURGED
+                    assert tombstone.purged_at is not None
+                    transaction.set_rollback(True)
+                    return "rolled_back"
+                assert outcome == "failed"
+                failed_payload = TaskInputPayload.objects.get(pk=payload.pk)
+                assert failed_payload.state == InputPayloadState.ACTIVE
+                assert failed_payload.cleanup_error
+                return outcome
+        finally:
+            close_old_connections()
+
+    def writer() -> int:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pid.append(int(cursor.fetchone()[0]))
+            writer_connected.set()
+            return write_reference()
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        purge_future = executor.submit(purge)
+        try:
+            assert deletion_started.wait(timeout=10)
+            assert not path.exists()
+            writer_future = executor.submit(writer)
+            assert writer_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(writer_pid[0])
+        finally:
+            release_deletion.set()
+        expected_outcome = (
+            "failed" if purge_failure == "delete_acknowledgement_loss" else "rolled_back"
+        )
+        assert purge_future.result(timeout=20) == expected_outcome
+        attached_execution = RayTaskExecution.objects.get(pk=writer_future.result(timeout=20))
+
+    payload.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+    assert payload.purged_at is None
+    assert payload.last_used_at > cutoff
+    assert path.read_bytes() == original_bytes
+    if payload_kind == InputPayloadKind.TASK_INPUT:
+        old_execution.refresh_from_db()
+        assert old_execution.input_reference == reference
+        assert attached_execution.state == TaskState.QUEUED
+        assert attached_execution.input_reference == reference
+        assert load_task_input(
+            args_json=attached_execution.args_json,
+            kwargs_json=attached_execution.kwargs_json,
+            input_reference=attached_execution.input_reference,
+        ) == (["restored active input"], {})
+    else:
+        assert attached_execution.state == TaskState.RUNNING
+        assert attached_execution.ray_job_request_reference == reference
+        assert (
+            load_ray_job_request(prepared_request.encoded_locator).request
+            == prepared_request.request
+        )
+
+
 @pytest.mark.parametrize("transition", ["cancel", "complete", "retry"])
 def test_bounded_input_purge_revalidates_execution_after_lifecycle_lock(
     settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transition: str
