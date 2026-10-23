@@ -51,13 +51,21 @@ def baseline():
 @pytest.fixture
 def collector(monkeypatch):
     calls, structure_reads, imports = [], [], []
-    paths = sorted((*candidate.SOURCE_PATHS, *candidate.COMPANION_PATHS, "README.md"))
+    paths = sorted(
+        (
+            *candidate.SOURCE_PATHS,
+            *candidate.COMPANION_PATHS,
+            *candidate.COVERAGE_HOOKS,
+            "README.md",
+        )
+    )
     modes = {
         commit: ModeSelection(
             commit_sha=commit,
             tree_sha=tree,
             entries=tuple(
-                ModeEntry(path, f"{index + offset:040x}") for index, path in enumerate(paths)
+                ModeEntry(path, candidate.COVERAGE_HOOKS.get(path, f"{index + offset:040x}"))
+                for index, path in enumerate(paths)
             ),
         )
         for commit, tree, offset in ((BASE, BASE_TREE, 10), (HEAD, TREE, 100))
@@ -341,6 +349,116 @@ def test_structure_metadata_binds_both_endpoints_without_requiring_unchanged_blo
     assert report["candidate_selected"] == []
 
 
+def test_coverage_hooks_bind_reviewed_pins_and_both_endpoints_using_the_same_reads(
+    collector, baseline
+):
+    assert candidate.COVERAGE_HOOK_REFERENCE == {
+        "commit": "286ab7f0db450835b438fbb7805b93c9c1791590",
+        "tree": "cec2d810d405a7515d6e2ea18a00b7908b9bd518",
+    }
+    assert candidate.COVERAGE_HOOKS == {
+        ".github/workflows/ci.yml": "524b77b1740b1ac1a1c2c92e1f5f9d75a0a48511",
+        "Makefile": "d10ee0096d39c124b26c3f3a5ab6ca94e764633b",
+        "scripts/verify_wheel.py": "9f82b1c1f5cb9d54fdfb18d874d1a629306ef52e",
+    }
+    report = evaluate(baseline)
+    hooks = report["coverage_hooks"]
+    assert hooks["status"] == "matched"
+    assert hooks["reference"] == candidate.COVERAGE_HOOK_REFERENCE
+    assert hooks["base"] == {"commit": BASE, "tree": BASE_TREE}
+    assert hooks["head"] == {"commit": HEAD, "tree": TREE}
+    assert len(hooks["paths"]) == 3
+    assert [row["path"] for row in hooks["paths"]] == sorted(candidate.COVERAGE_HOOKS)
+    for row in hooks["paths"]:
+        assert (
+            row["reviewed"]
+            == row["base"]
+            == row["head"]
+            == {"mode": "100644", "type": "blob", "oid": candidate.COVERAGE_HOOKS[row["path"]]}
+        )
+    assert report["coverage_hooks_sha256"] == hashlib.sha256(shadow.encode(hooks)).hexdigest()
+    assert len(report["structure"]["paths"]) == 13
+    assert collector.structure_reads == [(ROOT, BASE), (ROOT, HEAD)]
+    assert report["candidate_eligible"]
+    assert report["dependency_review"] == report["coverage_review"] == "required"
+
+
+@pytest.mark.parametrize("path", candidate.COVERAGE_HOOKS)
+@pytest.mark.parametrize("endpoints", [(BASE,), (HEAD,), (BASE, HEAD)])
+@pytest.mark.parametrize("fault", ["missing", "changed-blob", "executable", "symlink", "gitlink"])
+def test_hook_drift_at_either_endpoint_or_inherited_by_both_restores_baseline(
+    collector, baseline, path, endpoints, fault
+):
+    assert path not in collector.collected.changed_paths
+    for endpoint in endpoints:
+        selection = collector.modes[endpoint]
+        if fault == "missing":
+            entries = tuple(entry for entry in selection.entries if entry.path != path)
+        else:
+            mode, object_type = {
+                "changed-blob": ("100644", "blob"),
+                "executable": ("100755", "blob"),
+                "symlink": ("120000", "blob"),
+                "gitlink": ("160000", "commit"),
+            }[fault]
+            entries = tuple(
+                replace(
+                    entry,
+                    mode=mode,
+                    object_type=object_type,
+                    oid="f" * 40 if fault == "changed-blob" else entry.oid,
+                )
+                if entry.path == path
+                else entry
+                for entry in selection.entries
+            )
+        collector.modes[endpoint] = replace(selection, entries=entries)
+    report = evaluate(baseline)
+    assert report["path_eligible"] and not report["candidate_eligible"]
+    assert report["structure"]["status"] == "preserved"
+    assert report["coverage_hooks"]["status"] == "drifted"
+    assert report["reason"] == "doctor-coverage-hooks-drift"
+    assert report["candidate_selected"] == report["baseline_selected"] == ["application"]
+    assert report["summary"]["candidate_variant_cells"] == 1
+    assert collector.structure_reads == [(ROOT, BASE), (ROOT, HEAD)]
+    row = next(item for item in report["coverage_hooks"]["paths"] if item["path"] == path)
+    for endpoint in endpoints:
+        actual = row["base" if endpoint == BASE else "head"]
+        assert actual != row["reviewed"]
+        if fault == "missing":
+            assert actual is None
+    if endpoints == (BASE, HEAD):
+        assert row["base"] == row["head"] != row["reviewed"]
+
+
+def test_structural_fallback_takes_precedence_when_hooks_also_drift(collector, baseline):
+    selection = collector.modes[BASE]
+    collector.modes[BASE] = replace(
+        selection,
+        entries=tuple(
+            entry for entry in selection.entries if entry.path not in {SOURCE, "Makefile"}
+        ),
+    )
+    report = evaluate(baseline)
+    assert report["path_eligible"] and not report["candidate_eligible"]
+    assert report["structure"]["status"] == "not-preserved"
+    assert report["coverage_hooks"]["status"] == "drifted"
+    assert report["reason"] == "doctor-structure-not-preserved"
+    assert report["candidate_selected"] == report["baseline_selected"] == ["application"]
+    assert report["structure_sha256"] and report["coverage_hooks_sha256"]
+    assert collector.structure_reads == [(ROOT, BASE), (ROOT, HEAD)]
+
+
+def test_source_and_test_edits_remain_candidates_with_manual_reviews_required(collector, baseline):
+    collector.collected.changed_paths = (SOURCE, "tests/unit/test_doctor.py")
+    report = evaluate(baseline)
+    assert report["candidate_eligible"]
+    assert report["candidate_selected"] == []
+    assert report["coverage_hooks"]["status"] == "matched"
+    assert report["dependency_review"] == report["coverage_review"] == "required"
+    assert report["summary"]["new_runtime_observations"] == 0
+
+
 @pytest.mark.parametrize("path", candidate.SOURCE_PATHS + candidate.COMPANION_PATHS)
 @pytest.mark.parametrize("endpoint", [BASE, HEAD])
 @pytest.mark.parametrize("fault", ["missing", "executable", "symlink", "gitlink"])
@@ -390,7 +508,15 @@ def test_unchanged_missing_coverage_companion_also_prevents_eligibility(collecto
     assert row == {"path": path, "base": None, "head": None}
 
 
-@pytest.mark.parametrize("paths", [(), ("docs/reference/doctor.md",), (SOURCE, "pyproject.toml")])
+@pytest.mark.parametrize(
+    "paths",
+    [
+        (),
+        ("docs/reference/doctor.md",),
+        (SOURCE, "pyproject.toml"),
+        *((SOURCE, path) for path in candidate.COVERAGE_HOOKS),
+    ],
+)
 def test_ineligible_paths_never_import_or_read_committed_structure(collector, baseline, paths):
     collector.collected.changed_paths = paths
     report = evaluate(baseline)
@@ -402,6 +528,14 @@ def test_ineligible_paths_never_import_or_read_committed_structure(collector, ba
         "paths": [],
     }
     assert report["structure_sha256"] is None
+    assert report["coverage_hooks"] == {
+        "status": "not-evaluated",
+        "reference": candidate.COVERAGE_HOOK_REFERENCE,
+        "base": None,
+        "head": None,
+        "paths": [],
+    }
+    assert report["coverage_hooks_sha256"] is None
     assert collector.structure_reads == []
     assert collector.imports == ["yaga.test_planning.git"]
 
