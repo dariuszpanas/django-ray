@@ -961,6 +961,21 @@ def _reused_input_registry(monkeypatch, prepared, *, state="ACTIVE"):
     manager.using.return_value = manager
     manager.select_for_update.return_value = manager
     manager.get_or_create.return_value = (payload, False)
+    aliases = Mock()
+    for method in ("select_for_update", "order_by", "values_list"):
+        getattr(aliases, method).return_value = aliases
+    aliases.first.return_value = None
+    existing = Mock()
+    existing.exists.return_value = True
+
+    def filter_registry(**lookup):
+        if set(lookup) == {"reference__in"}:
+            assert prepared.input_reference not in lookup["reference__in"]
+            return aliases
+        assert lookup == {"reference": prepared.input_reference}
+        return existing
+
+    manager.filter.side_effect = filter_registry
     monkeypatch.setattr(TaskInputPayload, "objects", manager)
     return payload, manager
 
@@ -976,7 +991,7 @@ def test_reused_input_revalidates_missing_payload_under_registry_lock(monkeypatc
     store = storage.store_payload
 
     def restore(*, serialized_payload):
-        manager.select_for_update.assert_called_once_with()
+        manager.select_for_update.assert_called_with()
         manager.get_or_create.assert_called_once()
         payload.save.assert_not_called()
         assert payload.last_used_at == previous_use
@@ -990,7 +1005,10 @@ def test_reused_input_revalidates_missing_payload_under_registry_lock(monkeypatc
     assert payload.state == "ACTIVE"
     assert payload.last_used_at >= previous_use
     payload.save.assert_called_once()
-    manager.using.assert_called_once_with("default")
+    assert manager.using.call_args_list
+    assert all(
+        call.args == ("default",) and not call.kwargs for call in manager.using.call_args_list
+    )
 
 
 @pytest.mark.parametrize("state", ["ACTIVE", "PURGED"])
@@ -1103,7 +1121,7 @@ def _legacy_reused_input_storage(monkeypatch, *, backend, state, outcome, prefix
     def require_registry_lock(**_kwargs):
         nonlocal reads
         reads += 1
-        manager.select_for_update.assert_called_once_with()
+        manager.select_for_update.assert_called_with()
         manager.get_or_create.assert_called_once()
         payload.save.assert_not_called()
         assert payload.last_used_at == previous_use

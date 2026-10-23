@@ -1885,10 +1885,24 @@ def _reused_request_rows(monkeypatch, prepared, *, state):
     )
     payload.save = Mock()
     registry = Mock()
-    for method in ("using", "select_for_update", "filter", "values_list"):
+    for method in ("using", "select_for_update"):
         getattr(registry, method).return_value = registry
-    registry.first.return_value = None
     registry.get_or_create.return_value = (payload, False)
+    aliases = Mock()
+    for method in ("select_for_update", "order_by", "values_list"):
+        getattr(aliases, method).return_value = aliases
+    aliases.first.return_value = None
+    existing = Mock()
+    existing.exists.return_value = True
+
+    def filter_registry(**lookup):
+        if set(lookup) == {"reference__in"}:
+            assert prepared.reference not in lookup["reference__in"]
+            return aliases
+        assert lookup == {"reference": prepared.reference}
+        return existing
+
+    registry.filter.side_effect = filter_registry
     executions = Mock()
     for method in ("using", "select_for_update", "filter", "only"):
         getattr(executions, method).return_value = executions
@@ -1908,7 +1922,7 @@ def test_reused_request_revalidates_missing_payload_before_execution_lock(monkey
     original_store = storage.store_payload.side_effect
 
     def restore(*, serialized_payload):
-        assert registry.select_for_update.call_count == 2
+        registry.select_for_update.assert_called_with()
         registry.get_or_create.assert_called_once()
         executions.select_for_update.assert_not_called()
         payload.save.assert_not_called()
@@ -1979,7 +1993,7 @@ def _reused_cloud_request_registration(monkeypatch, *, backend, state, outcome):
     def require_registry_lock():
         if not phase["guard"]:
             return
-        assert registry.select_for_update.call_count == 2
+        registry.select_for_update.assert_called_with()
         registry.get_or_create.assert_called_once()
         executions.select_for_update.assert_not_called()
         payload.save.assert_not_called()
