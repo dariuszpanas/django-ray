@@ -1349,7 +1349,7 @@ def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> 
         {"recipe": "jobs-crash", "service": "jobs"},
         {"recipe": "core-loss", "service": "native"},
     ]
-    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "0.6.0"
+    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "0.7.0"
     steps = job["steps"]
     checkout = steps[0]["with"]
     assert checkout["ref"] == job["env"]["SOURCE_SHA"]
@@ -1369,3 +1369,12 @@ def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> 
     upload = steps[-1]
     assert upload["if"] == "always() && steps.native_rehearsal.outcome != 'skipped'"
     assert upload["with"]["name"] == "upgrade-native-qualification-${{ matrix.recipe }}"
+
+
+def test_data_upgrade_covers_current_and_historical_reviewed_baselines() -> None:
+    from qualification.upgrade.contract import BASELINES
+
+    job = _jobs(WORKFLOWS / "upgrade-qualification.yml")["data"]
+    assert job["strategy"]["matrix"]["baseline"] == list(BASELINES)
+    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "${{ matrix.baseline }}"
+    assert job["steps"][-1]["with"]["name"] == "upgrade-data-qualification-${{ matrix.baseline }}"

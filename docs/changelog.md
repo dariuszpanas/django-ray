@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Include released 0.7.0 in the database upgrade matrix and select it for all
+  four native upgrade recipes. Retain historical baselines, the 0.4.0 caller
+  default and historical advisory receipts without claiming release acceptance.
 - Require Linux before the pinned Compiled Graph pilot's private timeout self-test
   launches a child, and remove its native Windows fallback. Preserve the host-side
   Windows containment used for Docker and Kubernetes commands.

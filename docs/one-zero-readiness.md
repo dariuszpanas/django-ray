@@ -28,6 +28,11 @@ tracks the remaining work. Closed issues for API definitions, readiness
 validation, and an earlier release's upgrade rehearsal establish those
 deliverables; they do not accept a later release candidate.
 
+The upgrade recipes select released 0.7.0 for current native rehearsal and include
+it alongside the historical 0.4.0, 0.5.0 and 0.6.0 database lanes. Each final
+candidate still needs source-matched passing receipts and the complete coordinated
+upgrade review; adding this baseline does not change any readiness status.
+
 Use the following sequence to select small releases. These are work stages,
 not assigned version numbers, dates, or a promise that each stage fits in one
 release. Each release selects and qualifies its own scope.

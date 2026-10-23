@@ -12,8 +12,12 @@ stopped-writer upgrade. Mixed-version task managers, rolling execution handoff a
 continued execution of old payload formats are outside that product commitment.
 Ray Jobs remains a supported current execution mode.
 
-The [0.6.0 to 0.7.0 upgrade guide](deployment/upgrading-from-0.6.md) records the
-current Beta boundary and its qualification requirements. The
+Released 0.7.0 is the baseline for ongoing candidate qualification in the
+[upgrade recipes](https://github.com/dariuszpanas/django-ray/blob/main/qualification/upgrade/README.md).
+Their data matrix also retains 0.4.0, 0.5.0 and 0.6.0 historical coverage.
+Selecting a baseline does not supply passing evidence or accept a later release.
+The [0.6.0 to 0.7.0 upgrade guide](deployment/upgrading-from-0.6.md) records that
+released Beta boundary and its qualification requirements. The
 [0.5.0 to 0.6.0 guide](deployment/upgrading-from-0.5.md) and
 [0.4.0 to 0.5.0 procedure](deployment/upgrading-0.5.md) remain the historical
 guides for their released boundaries.

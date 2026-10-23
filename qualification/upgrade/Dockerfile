@@ -5,7 +5,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/released-venv UV_LINK_MODE=copy UV_COMPILE_BYTEC
 ARG UPGRADE_BASELINE_COMMIT=95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485
 WORKDIR /opt/released-source
 COPY --from=released-source source.tar /opt/released-source.tar
-RUN python -c "import os, tarfile; expected=os.environ['UPGRADE_BASELINE_COMMIT']; a=tarfile.open('/opt/released-source.tar'); assert expected in ('95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485', 'ab1186ba4520d8837d1a8658041e05427b990b4d', 'f22429c0d7eaabc7568de9031b3cc4f80e73fceb'); assert a.pax_headers.get('comment') == expected; a.extractall('/opt/released-source', filter='data')"
+RUN python -c "import os, tarfile; expected=os.environ['UPGRADE_BASELINE_COMMIT']; a=tarfile.open('/opt/released-source.tar'); assert expected in ('95ee5dfe95b1c1bed95ff28c4fcb5fcdc491e485', 'ab1186ba4520d8837d1a8658041e05427b990b4d', 'f22429c0d7eaabc7568de9031b3cc4f80e73fceb', 'd8204c9e368336077396679a3019f7f300211e06'); assert a.pax_headers.get('comment') == expected; a.extractall('/opt/released-source', filter='data')"
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev --extra postgres \
     && uv build --wheel --out-dir /opt/released-wheels \
