@@ -1290,6 +1290,7 @@ def test_injected_page_construction_failure_poisons_and_cleans_workspace(
     assert not workspace.path_exists
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="benchmark execution requires Linux")
 def test_subprocess_benchmark_reports_resources_cardinality_spill_and_cleanup(
     tmp_path: Path,
 ) -> None:
@@ -1392,6 +1393,7 @@ def test_subprocess_benchmark_reports_resources_cardinality_spill_and_cleanup(
     assert not list((tmp_path / "workspaces").iterdir())
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="benchmark execution requires Linux")
 def test_parent_watchdog_removes_scenario_workspace_after_worker_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

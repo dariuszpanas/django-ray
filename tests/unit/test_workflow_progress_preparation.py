@@ -3030,6 +3030,7 @@ def test_fork_child_cannot_cleanup_or_detach_parent_authority(tmp_path: Path) ->
     assert storage._prepared_topology_observed_membership_capability_matches(detached)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="benchmark execution requires Linux")
 def test_production_topology_subprocess_benchmark_reports_resource_boundary(
     tmp_path: Path,
 ) -> None:

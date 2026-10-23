@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require Linux before the workflow-progress preparation benchmark creates
+  workspaces or starts workers. Remove its native Windows process fallback and
+  macOS RSS conversion while preserving bounded Linux descendant cleanup and
+  resource-free report validation on developer hosts.
 - Require patched `certifi>=2026.10.19`, `opentelemetry-api>=1.45.1`, and
   `virtualenv>=21.14.9` in published dependency metadata and the contributor lock.
   Keep the locked OpenTelemetry family coordinated at 1.45.1/0.66b1 and validate
