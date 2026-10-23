@@ -342,18 +342,22 @@ def _measure_sample(
     nodes: int,
     change_rate: float,
 ) -> dict[str, int | float | bool | None]:
+    if tracemalloc.is_tracing():
+        raise CommandError("Cannot measure collector memory while tracemalloc is already active")
     tracemalloc.start()
-    started = time.perf_counter()
-    payload = _representative_payload(
-        candidate,
-        record=record,
-        record_count=record_count,
-        nodes=nodes,
-        change_rate=change_rate,
-    )
-    construct_ms = _elapsed_ms(started)
-    _, collector_peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    try:
+        started = time.perf_counter()
+        payload = _representative_payload(
+            candidate,
+            record=record,
+            record_count=record_count,
+            nodes=nodes,
+            change_rate=change_rate,
+        )
+        construct_ms = _elapsed_ms(started)
+        _, collector_peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
 
     started = time.perf_counter()
     encoded = _canonical_bytes(payload)
@@ -383,7 +387,7 @@ def _measure_sample(
     page_response = _canonical_bytes({"items": page})
     page_read_ms = _elapsed_ms(started)
 
-    target = f"node-{max(0, record_count - 1):06d}"
+    target = f"node-{max(0, len(page) - 1):06d}"
     index = {item.get("node_id"): item for item in page if isinstance(item, dict)}
     started = time.perf_counter()
     if candidate in {"current_full_row", "bounded_inline"}:
