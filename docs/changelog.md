@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require Linux before the pinned Compiled Graph pilot's private timeout self-test
+  launches a child, and remove its native Windows fallback. Preserve the host-side
+  Windows containment used for Docker and Kubernetes commands.
 - Require Linux before the workflow-progress preparation benchmark creates
   workspaces or starts workers. Remove its native Windows process fallback and
   macOS RSS conversion while preserving bounded Linux descendant cleanup and

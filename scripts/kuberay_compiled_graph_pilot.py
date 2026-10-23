@@ -3919,11 +3919,6 @@ def _run_probe_child_control_record(topology: str) -> int:
 def _process_group_is_empty(process: subprocess.Popen[str]) -> bool:
     if process.poll() is None:
         return False
-    if os.name == "nt":
-        # The promotion pilot is Linux-only. Windows cannot query an exited
-        # process group without retaining a Job handle, so it remains a
-        # non-blocking development fallback rather than evidence.
-        return True
     try:
         os.killpg(process.pid, 0)
     except ProcessLookupError:
@@ -3934,17 +3929,6 @@ def _process_group_is_empty(process: subprocess.Popen[str]) -> bool:
 
 
 def _terminate_process_group(process: subprocess.Popen[str]) -> None:
-    if os.name == "nt":
-        if process.poll() is not None:
-            return
-        process.send_signal(signal.CTRL_BREAK_EVENT)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-        return
-
     if _process_group_is_empty(process):
         return
     try:
@@ -3973,6 +3957,8 @@ def _terminate_process_group(process: subprocess.Popen[str]) -> None:
 
 
 def _run_hard_timeout_self_test(timeout_seconds: float) -> dict[str, Any]:
+    if sys.platform != "linux":
+        raise PilotError("hard-timeout self-test requires Linux pod execution")
     if not 0.05 <= timeout_seconds <= 5:
         raise PilotError("hard-timeout self-test must be from 0.05 through 5 seconds")
     command = [sys.executable, str(Path(__file__).resolve()), "hang-child"]
@@ -3982,11 +3968,8 @@ def _run_hard_timeout_self_test(timeout_seconds: float) -> dict[str, Any]:
         "text": True,
         "encoding": "utf-8",
         "errors": "replace",
+        "start_new_session": True,
     }
-    if os.name == "nt":
-        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        options["start_new_session"] = True
     started = time.monotonic()
     process = subprocess.Popen(command, **options)
     try:

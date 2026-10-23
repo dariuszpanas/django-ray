@@ -4133,7 +4133,58 @@ def test_internal_probe_failure_record_remains_parseable_for_host(
     assert json.loads(capsys.readouterr().out) == record
 
 
-@pytest.mark.skipif(os.name == "nt", reason="promotion-grade process-group proof is Linux-only")
+@pytest.mark.parametrize("platform", ["win32", "darwin", "freebsd14"])
+def test_hard_timeout_self_test_rejects_non_linux_before_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    platform: str,
+) -> None:
+    monkeypatch.setattr(pilot.sys, "platform", platform)
+    monkeypatch.setattr(
+        pilot.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("unsupported self-test must not spawn"),
+    )
+
+    with pytest.raises(pilot.PilotError, match="requires Linux pod execution"):
+        pilot._run_hard_timeout_self_test(0.05)
+
+    assert pilot.main(["hard-timeout", "--timeout-seconds", "0.05"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "schema_version": pilot.PILOT_SCHEMA_VERSION,
+        "status": "failure",
+        "error_type": "PilotError",
+        "error": "hard-timeout self-test requires Linux pod execution",
+    }
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_pilot_host_dispatch_remains_available_on_non_linux(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    platform: str,
+) -> None:
+    calls = []
+    record = {"schema_version": pilot.PILOT_SCHEMA_VERSION, "status": "blocked"}
+
+    def run(context, namespace, *, keep_cluster):
+        calls.append((context, namespace, keep_cluster))
+        return record
+
+    monkeypatch.setattr(pilot.sys, "platform", platform)
+    monkeypatch.setattr(pilot, "run_host_pilot", run)
+    monkeypatch.setattr(
+        pilot.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("host dispatch fixture must not spawn"),
+    )
+
+    assert pilot.main(["run", "--context", "docker-desktop"]) == 1
+    assert calls == [("docker-desktop", pilot.PILOT_NAMESPACE, False)]
+    assert json.loads(capsys.readouterr().out) == record
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="process-group proof requires Linux")
 def test_hard_timeout_self_test_reaps_its_process_group() -> None:
     result = pilot._run_hard_timeout_self_test(0.05)
 

@@ -91,6 +91,10 @@ django-ray support:
   invocations, an application exception, a one-shot result timeout, explicit result
   discard/consumption, actor termination, and graph teardown.
 
+The private hard-timeout self-test executes in the Linux Ray head pod. It rejects
+other platforms before launching a child. The host-side runner retains its Windows
+command containment and source-path defenses when invoking Docker and Kubernetes.
+
 The Dockerfile, Dockerfile-specific ignore policy, profile, and RayCluster template live
 under `k8s/pilots/compiled-graph/`. The runner captures one clean full Git revision, validates a
 bounded regular-file inventory, and safely materializes a tracked-only `git archive` build
