@@ -133,16 +133,29 @@ Profile selected when the task backend does not specify
 
 - **Type**: `str`
 - **Default**: `"plaintext"`
-- **Values**: `"plaintext"` or `"encrypted"`
+- **Values**: `"plaintext"`, `"encrypted"`, or `"required"`
 
-Selects the format for newly enqueued RuntimeEnv snapshots. Readers always accept
-both supported formats, so changing this setting does not rewrite existing rows.
-`encrypted` requires `RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` to resolve through the
-dedicated key ring or the explicit Django-secret fallback.
+Selects the format for newly enqueued RuntimeEnv snapshots and the execution/retry
+policy for retained snapshots:
 
-Keep `plaintext` during the first dual-read and key-distribution stages of a rolling
-upgrade. See [Runtime Environments](../runtime-environments.md#roll-out-encrypted-writes)
-before enabling encrypted writes.
+- `plaintext` writes canonical plaintext JSON and accepts both supported formats.
+- `encrypted` writes authenticated envelopes and accepts both supported formats.
+- `required` writes authenticated envelopes and refuses plaintext in the execution
+  and manual/automatic retry validation paths, before submission or retry history
+  changes.
+
+Both `encrypted` and `required` need `RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY` to resolve
+through the dedicated key ring or the explicit Django-secret fallback. Changing
+the mode does not rewrite existing rows; encrypted rows still need their original
+keys until rewrapped. The bounded `django_ray_runtime_env` maintenance command can
+inspect plaintext and explicitly rewrite identified snapshots even in `required`
+mode, without authorizing their execution.
+
+Keep `plaintext` during the first dual-read and key-distribution stages of the
+coordinated upgrade. Follow the [encrypted-write rollout](../runtime-environments.md#roll-out-encrypted-writes)
+and the [maintenance and required-mode procedure](../runtime-environments.md#maintain-retained-snapshots-and-require-encryption)
+before enforcing encryption across the stopped cohort. A successful current-table
+check does not authorize retirement of keys needed by restorable backups.
 
 ### RUNTIME_ENV_ENCRYPTION_KEYS
 

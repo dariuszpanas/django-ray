@@ -16,10 +16,14 @@ disposition updates readiness state; removing, renaming, re-owning, or making a
 v1 criterion optional requires an explicit versioned contract change and cannot
 be accomplished by editing the registry and documentation together.
 
-## Delivery sequence after 0.6
+## Delivery sequence after 0.7
 
-Version 0.6.0 was published on 2026-09-27 with the Beta classifier. The
-[graduation roadmap](https://github.com/dariuszpanas/django-ray/issues/372)
+Version [0.7.0](https://github.com/dariuszpanas/django-ray/releases/tag/v0.7.0)
+was published on 2026-10-18 with the Beta classifier. It includes bounded read-only
+diagnostics, shared worker lease policy, retained RuntimeEnv maintenance and opt-in
+required encryption. These delivered controls contribute to operational hardening;
+their release does not satisfy the broader operator-controls criterion or accept
+a later candidate. The [graduation roadmap](https://github.com/dariuszpanas/django-ray/issues/372)
 tracks the remaining work. Closed issues for API definitions, readiness
 validation, and an earlier release's upgrade rehearsal establish those
 deliverables; they do not accept a later release candidate.

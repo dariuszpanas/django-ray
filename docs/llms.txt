@@ -117,9 +117,12 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - Ray Client task managers can hash and upload local RuntimeEnv code paths to Ray's
   content-addressed package store; the path must be readable in the task-manager pod.
 - RuntimeEnv is dependency isolation inside one trust boundary, not tenant isolation.
-- Durable RuntimeEnv snapshots default to canonical plaintext writes. Readers always
-  accept supported plaintext and AES-256-GCM envelope rows, so encrypted rollout is
-  reader-first and a binary downgrade is unsafe while any encrypted row remains.
+- Durable RuntimeEnv snapshots default to canonical plaintext writes. `plaintext`
+  and `encrypted` modes accept supported plaintext and AES-256-GCM envelope rows.
+  `required` mode encrypts new snapshots and refuses plaintext execution and retry;
+  bounded maintenance can still inspect and explicitly convert identified plaintext
+  snapshots. Follow the coordinated reader-first key rollout; a binary downgrade is
+  unsafe while any encrypted row remains.
 - Prefer a separately managed RuntimeEnv encryption key ring. The `django-secret`
   HKDF fallback is explicit only. Retain every dedicated key while a durable row can
   name its key ID. The stable `django-secret` envelope ID does not encode fallback

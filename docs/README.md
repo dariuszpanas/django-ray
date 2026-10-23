@@ -24,6 +24,7 @@ project resources, task stats, and a smoke-task trigger:
 - [Getting Started](getting-started.md) - Installation and basic setup
 - [Configuration](configuration.md) - All configuration options
 - [Worker Modes](worker-modes.md) - Understanding execution modes
+- [Runtime Environments](runtime-environments.md) - Captured dependencies, encrypted snapshots and maintenance
 - [Performance](performance.md) - Choosing task boundaries, batching, and RuntimeEnv strategy
 - [Observability](observability.md) - Versioned services, metrics, and live admin updates
 - [Compatibility](compatibility.md) - Supported versions, CI policy, and platform limits
@@ -51,6 +52,7 @@ project resources, task stats, and a smoke-task trigger:
 ## Reference
 
 - [CLI Reference](reference/cli.md) - Command-line interface
+- [Read-only Doctor](reference/doctor.md) - Bounded diagnostics and incomplete-evidence handling
 - [Settings Reference](reference/settings.md) - All settings
 - [Durable Input Storage](reference/input-storage.md) - Oversized JSON input storage and cleanup
 - [Result Storage](reference/result-storage.md) - Oversized result backends and retrieval

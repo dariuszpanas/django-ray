@@ -35,7 +35,7 @@ point with a suitable trusted settings module.
 | `database` | A dedicated supported connection opened with read-only protection. No task execution or application health claim. |
 | `migrations` | Counts of expected shipped django-ray migrations, applied names and unknown names. Missing/unknown migrations block further model observations. Other applications' migrations are outside this check. |
 | `protocol` | Current supported execution range and validated durable rollout policy. Invalid policy is a blocker. |
-| `leases` | Active, fresh, stale, malformed and active legacy counts. Fresh requires an active unstopped lease, start/heartbeat no later than the observation, and heartbeat within `WORKER_LEASE_SECONDS`. |
+| `leases` | Shared `lease_policy_seconds` and `lease_policy_revision`, plus active, fresh, stale, malformed and active legacy counts. Fresh requires an active unstopped lease, start/heartbeat no later than the observation, and heartbeat within the database authority's duration, which must match `WORKER_LEASE_SECONDS`. |
 | `work` | Queued, running, cancelling and terminal counts; unknown states, retired/unsupported nonterminal protocol or metadata, expired queued work, missing/stale/future active heartbeats and queued work without observed compatible protocol leases are blockers. |
 | `registered_cleanup` | Counts of active/purged registry rows, invalid states and recorded cleanup errors. This never loads error text, references, task arguments, results or progress. |
 | `target`, `queue_capacity`, `artifact_availability`, `orphan_inventory` | Explicitly unavailable. No Ray, HTTP or storage-provider request is made by these probes. |
@@ -45,6 +45,18 @@ A compatible protocol lease does not establish capacity for a particular queue
 or Ray target. A missing/stale heartbeat is an observation, not proof that a
 process or remote task has died. Missing registered cleanup errors do not prove
 that storage is empty or that there are no orphaned objects.
+
+Before observing leases, work or registered cleanup, the database probe checks
+the shared lease authority against the selected settings. A disagreement returns
+`lease_policy_mismatch`; missing or malformed authority returns
+`lease_policy_invalid`; an unreadable authority returns
+`lease_policy_unavailable`. These sections are unavailable, not counts of zero
+workers or tasks. Completed database, migration and protocol observations remain
+visible. Use the read-only
+[`django_ray_lease_policy`](cli.md#django_ray_lease_policy) command to inspect
+configured and authoritative values. Doctor never initializes, repairs or changes
+the authority; an intentional policy transition requires the command's documented
+stopped, drained cohort and revision checks.
 
 Configuration and database are separate probes with their own timestamps. The
 database observations share one transaction (repeatable read and read only on
