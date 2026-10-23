@@ -261,6 +261,71 @@ def test_measure_sample_handles_fail_closed_root_redaction(monkeypatch) -> None:
     assert "raw-decoded-sentinel" not in json.dumps(sample)
 
 
+def test_measure_sample_refuses_existing_tracing_before_construction(monkeypatch) -> None:
+    tracing = Mock()
+    tracing.is_tracing.return_value = True
+    construct = Mock(side_effect=AssertionError("Construction must not start"))
+    monkeypatch.setattr(benchmark, "tracemalloc", tracing)
+    monkeypatch.setattr(benchmark, "_representative_payload", construct)
+
+    with pytest.raises(CommandError, match="tracemalloc.*already active"):
+        benchmark._measure_sample("normalized", record={}, record_count=1, nodes=1, change_rate=1.0)
+
+    construct.assert_not_called()
+    tracing.is_tracing.assert_called_once_with()
+    tracing.start.assert_not_called()
+    tracing.stop.assert_not_called()
+    tracing.reset_peak.assert_not_called()
+    tracing.get_traced_memory.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["construction", "peak"])
+def test_measure_sample_stops_owned_tracing_after_failure(monkeypatch, failure) -> None:
+    error = RuntimeError("measurement failed")
+    tracing = Mock()
+    tracing.is_tracing.return_value = False
+    tracing.get_traced_memory.return_value = (0, 123)
+    monkeypatch.setattr(benchmark, "tracemalloc", tracing)
+    if failure == "construction":
+        monkeypatch.setattr(benchmark, "_representative_payload", Mock(side_effect=error))
+    else:
+        tracing.get_traced_memory.side_effect = error
+
+    with pytest.raises(RuntimeError) as observed:
+        benchmark._measure_sample("normalized", record={}, record_count=1, nodes=1, change_rate=1.0)
+
+    assert observed.value is error
+    tracing.start.assert_called_once_with()
+    tracing.stop.assert_called_once_with()
+
+
+@pytest.mark.parametrize("candidate", ["current_full_row", "normalized"])
+def test_single_node_measurement_selects_a_node_within_the_bounded_page(
+    monkeypatch, candidate
+) -> None:
+    encoded_values: list[object] = []
+    canonical_bytes = benchmark._canonical_bytes
+
+    def record_encoded_value(value: object) -> bytes:
+        encoded_values.append(value)
+        return canonical_bytes(value)
+
+    monkeypatch.setattr(benchmark, "_canonical_bytes", record_encoded_value)
+    sample = benchmark._measure_sample(
+        candidate,
+        record={"node_id": "replaced"},
+        record_count=101,
+        nodes=101,
+        change_rate=1.0,
+    )
+
+    assert sample["redaction_projection_available"] is True
+    page = encoded_values[2]
+    assert isinstance(page, dict) and len(page["items"]) == 100
+    assert encoded_values[-1] == {"node_id": "node-000099"}
+    assert sample["single_node_response_bytes"] == len(canonical_bytes(encoded_values[-1]))
+
+
 def test_candidate_helpers_reject_unknown_identifier() -> None:
     with pytest.raises(ValueError, match="unknown benchmark candidate"):
         benchmark._write_amplification(

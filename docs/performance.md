@@ -405,6 +405,26 @@ retain snapshot and serialization measurements, encoded and decoded bytes,
 parse/redaction work, summary/page/single-node read timings and response bytes, and
 best-effort process memory evidence.
 
+`collector_peak_bytes` measures allocations while constructing the bounded
+representative payload. The sampler requires its own `tracemalloc` session: it
+refuses already-active tracing without changing that session, and stops its own
+tracing even when construction fails. This peak is separate from process RSS and
+does not include the later serialization, redaction, or read projections.
+
+Page reads encode at most the first 100 redacted representative records. Single-node
+reads select the last expected node within that same page. Full-row and inline
+models scan the page; other models use an in-memory page index prepared before the
+lookup timer starts. These measurements exclude database reads and index-building
+cost, and are not full-workflow or worst-case read costs. The collector bounds stay
+unchanged. When redaction makes the projection unavailable, the existing explicit
+unavailable flag and empty/null responses remain in the report; live-only cases
+have no detail records.
+
+Earlier benchmark implementations selected a node beyond this page when a sample
+contained more than 100 records, recording a null response instead of a node read.
+Retained historical reports are unchanged. Use the recorded implementation digest
+when comparing single-node timing or response bytes across this correction.
+
 The same `workload_fingerprint` is intentionally shared by all seven candidates for a
 given profile, node count, and change rate. It identifies a comparable workload, not a
 unique case.
