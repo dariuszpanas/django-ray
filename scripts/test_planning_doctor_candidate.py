@@ -20,6 +20,16 @@ COMPANION_PATHS = (
     "tests/unit/test_doctor_supervision.py",
     "tests/unit/test_verify_doctor_wheel.py",
 )
+COVERAGE_HOOK_REFERENCE = {
+    "commit": "286ab7f0db450835b438fbb7805b93c9c1791590",
+    "tree": "cec2d810d405a7515d6e2ea18a00b7908b9bd518",
+}
+# These reviewed entrypoint blobs are a drift guard, not a complete coverage model.
+COVERAGE_HOOKS = {
+    ".github/workflows/ci.yml": "524b77b1740b1ac1a1c2c92e1f5f9d75a0a48511",
+    "Makefile": "d10ee0096d39c124b26c3f3a5ab6ca94e764633b",
+    "scripts/verify_wheel.py": "9f82b1c1f5cb9d54fdfb18d874d1a629306ef52e",
+}
 MAX_PATHS = 3000
 MAX_PATH_BYTES = 4096
 ELIGIBLE_REASON = "path-eligible-review-required"
@@ -80,11 +90,12 @@ def compare(changed_paths, baseline_bytes: bytes) -> dict:
     return result
 
 
-def committed_structure(repo: Path, *, base: str, head: str, expected_tree: str) -> dict:
+def committed_guards(repo: Path, *, base: str, head: str, expected_tree: str) -> tuple[dict, dict]:
     """Read metadata only; the pinned typed reader validates complete tree records."""
     reader = importlib.import_module("yaga.modes.git")
     models = importlib.import_module("yaga.modes.models")
     paths = tuple(sorted(SOURCE_PATHS + COMPANION_PATHS))
+    retained_paths = {*paths, *COVERAGE_HOOKS}
     endpoints, entries = {}, {}
     for label, commit in (("base", base), ("head", head)):
         selection = reader.read_mode_selection(repo, commit)
@@ -99,7 +110,7 @@ def committed_structure(repo: Path, *, base: str, head: str, expected_tree: str)
         entries[label] = {
             entry.path: {"mode": entry.mode, "type": entry.object_type, "oid": entry.oid}
             for entry in selection.entries
-            if entry.path in paths
+            if entry.path in retained_paths
         }
     rows = [
         {"path": path, "base": entries["base"].get(path), "head": entries["head"].get(path)}
@@ -110,10 +121,26 @@ def committed_structure(repo: Path, *, base: str, head: str, expected_tree: str)
         for row in rows
         for label in ("base", "head")
     )
-    return {
+    structure = {
         "status": "preserved" if preserved else "not-preserved",
         **endpoints,
         "paths": rows,
+    }
+    hook_rows = [
+        {
+            "path": path,
+            "reviewed": {"mode": "100644", "type": "blob", "oid": COVERAGE_HOOKS[path]},
+            "base": entries["base"].get(path),
+            "head": entries["head"].get(path),
+        }
+        for path in sorted(COVERAGE_HOOKS)
+    ]
+    matched = all(row["base"] == row["head"] == row["reviewed"] for row in hook_rows)
+    return structure, {
+        "status": "matched" if matched else "drifted",
+        "reference": dict(COVERAGE_HOOK_REFERENCE),
+        **endpoints,
+        "paths": hook_rows,
     }
 
 
@@ -137,15 +164,21 @@ def evaluate_range(repo, baseline_bytes: bytes, *, base, head, expected_tree) ->
     comparison = compare(getattr(collected, "changed_paths", None), baseline_bytes)
     path_eligible = comparison["reason"] == ELIGIBLE_REASON
     structure = {"status": "not-evaluated", "base": None, "head": None, "paths": []}
+    coverage_hooks = {**structure, "reference": dict(COVERAGE_HOOK_REFERENCE)}
     structure_sha256 = None
+    coverage_hooks_sha256 = None
     if path_eligible:
-        structure = committed_structure(
+        structure, coverage_hooks = committed_guards(
             Path(repo), base=base, head=head, expected_tree=expected_tree
         )
         structure_sha256 = hashlib.sha256(shadow.encode(structure)).hexdigest()
+        coverage_hooks_sha256 = hashlib.sha256(shadow.encode(coverage_hooks)).hexdigest()
         if structure["status"] != "preserved":
             comparison["candidate_selected"] = list(comparison["baseline_selected"])
             comparison["reason"] = "doctor-structure-not-preserved"
+        elif coverage_hooks["status"] != "matched":
+            comparison["candidate_selected"] = list(comparison["baseline_selected"])
+            comparison["reason"] = "doctor-coverage-hooks-drift"
     inventory = {"sources": list(SOURCE_PATHS), "companions": list(COMPANION_PATHS)}
     report = {
         "experiment_version": 1,
@@ -159,9 +192,15 @@ def evaluate_range(repo, baseline_bytes: bytes, *, base, head, expected_tree) ->
         "rule_path_inventory": inventory,
         "rule_path_inventory_sha256": hashlib.sha256(shadow.encode(inventory)).hexdigest(),
         "path_eligible": path_eligible,
-        "candidate_eligible": path_eligible and structure["status"] == "preserved",
+        "candidate_eligible": (
+            path_eligible
+            and structure["status"] == "preserved"
+            and coverage_hooks["status"] == "matched"
+        ),
         "structure": structure,
         "structure_sha256": structure_sha256,
+        "coverage_hooks": coverage_hooks,
+        "coverage_hooks_sha256": coverage_hooks_sha256,
         "dependency_review": "required",
         "coverage_review": "required",
         **comparison,

@@ -408,12 +408,25 @@ addition restoring a missing file, executable file, symlink, or gitlink preserve
 the complete baseline selection. Invalid metadata, reader failures, or mismatched
 source identities fail evaluation. Path-ineligible ranges need no metadata reads.
 
+The same two metadata reads also check three reviewed coverage entry points:
+`.github/workflows/ci.yml`, `Makefile`, and `scripts/verify_wheel.py`. Each must
+match its pinned regular-blob identity at both endpoints. When doctor structure
+is preserved, a missing hook, changed content, or changed mode preserves the
+complete baseline with `doctor-coverage-hooks-drift`. This includes drift already
+present in the base: matching base and head files alone do not establish a match
+to the reviewed hooks.
+The pins and their reviewed commit/tree are explicit in the evaluator; updating
+them requires reviewing the affected CI entry points again. No blob content is
+read or executed during evaluation.
+
 The report distinguishes path eligibility from candidate eligibility and retains
 the thirteen paths' base/head modes, object types, and blob identities with the
-endpoint commit/tree identities and a snapshot digest. This is a review aid, not
-an approval record. It reads no blob content, follows no symlinks or gitlinks, and
-executes no changed code. Only a range passing both path and structure checks can
-propose the offline omission; dependency and coverage review remain required.
+endpoint commit/tree identities and a snapshot digest. A separate coverage-hook
+document and digest retain the reviewed identities and both endpoint observations.
+These are review aids, not approval records. The evaluator follows no symlinks or
+gitlinks and executes no changed code. Only a range passing the path, structure,
+and coverage-hook checks can propose the offline omission; dependency and coverage
+review remain required.
 
 Replaying the reusable rule against the retained 31 revisions leaves all **50
 workflow selections and 77 qualification cells unchanged**. The only doctor revision,
@@ -422,14 +435,37 @@ separate, reviewed historical exception remains 49 selections and 76 cells. Synt
 doctor-only ranges exercise future eligibility and mixed-change fallbacks; they do
 not establish a historical hit rate or successful execution of new doctor code.
 
-Neither path nor structure eligibility inspects code semantics or dependency changes
-already present in the selected base. Regular files can still introduce application
-dependencies or weaken the tests supporting an omission. Before using any future
-omission, review that source's application consumers and dedicated ordinary-CI
-coverage. The retained
-Linux supervision, PostgreSQL, and installed-wheel evidence qualifies its original
-source tree only. Feedback-time savings and aggregate runner-minute savings remain
-unknown, and this offline step requires no new hosted qualification workloads.
+The reviewed ordinary-CI coverage is:
+
+| Doctor behavior or consumer | Required CI coverage |
+|---|---|
+| Contracts, probes, command, and CLI | Test jobs collect `test_doctor.py` |
+| Subprocess supervision | Linux Test jobs collect `test_doctor_supervision.py` |
+| Read-only PostgreSQL observations and deadlines | PostgreSQL job runs `make test-postgres`, including `test_doctor_postgresql.py` |
+| Installed doctor behavior | Build Package calls `verify_wheel.py`, which calls `verify_doctor_wheel.py` |
+| RuntimeEnv maintenance verifier using `DoctorAppConfig` | Build Package also calls `verify_runtime_env_maintenance_wheel.py` |
+
+The coverage-hook guard checks those three entry points only. It does not pin the
+whole coverage chain: pytest configuration, collection hooks, fixtures, taxonomy,
+test assertions, and verifier implementations still need review. Source changes
+with owned test changes remain eligible for review; regular files can still weaken
+assertions or add skips. Unchanged entry points do not prove that tests ran or that
+they detect every relevant regression.
+
+Doctor also depends on shared defaults, encryption, models, execution protocol,
+protocol status, and lease policy, and loads the selected Django settings module.
+The runtime-environment maintenance wheel verifier is an external doctor consumer.
+The reviewed package initialization and application qualification sources do not
+directly import doctor, but the evaluator does not discover new consumers or prove
+dependency isolation. Dependency changes already present in the selected base can
+escape these three pins. Before using any future omission, review the exact
+source's application consumers and dedicated ordinary-CI coverage.
+
+The retained Linux supervision, PostgreSQL, and installed-wheel evidence qualifies
+its original source tree only. In particular, current doctor contracts and probes
+include storage-mode and lease-policy changes made after the historical #621 tree.
+Feedback-time savings and aggregate runner-minute savings remain unknown, and this
+offline step requires no new hosted qualification workloads.
 
 Historical comparison alone does not complete the runtime pilot. Retain full
 same-source observations and controlled selected replays, including excluded
