@@ -144,7 +144,10 @@ def _run_probe(
                 except OSError:
                     cleanup = False
     if done is not None and code in {"observed", "probe_failed"}:
-        code = done["code"]
+        # A failure receipt can refine an expected nonzero exit, but a success
+        # receipt cannot erase an unsuccessful supervisor exit after emission.
+        if code == "observed" or done["code"] != "observed":
+            code = done["code"]
         cleanup = cleanup and done["cleanup_confirmed"]
     if code == "observed" and (received != expected or done is None):
         code = "probe_protocol_invalid"
