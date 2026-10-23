@@ -7,12 +7,14 @@ import copy
 import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import tarfile
 import tomllib
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 from xml.etree import ElementTree
 
@@ -245,7 +247,7 @@ def test_archive_failure_retains_failed_manifest_without_rehashing_missing_file(
     assert ElementTree.fromstring(output["junit.xml"]).attrib["failures"] == "1"
 
 
-@pytest.mark.parametrize("baseline", ["0.4.0", "0.5.0", "0.6.0"])
+@pytest.mark.parametrize("baseline", ["0.4.0", "0.5.0", "0.6.0", "0.7.0"])
 def test_reviewed_baseline_selection_matches_candidate_source(baseline):
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
@@ -263,6 +265,119 @@ def test_reviewed_baseline_selection_matches_candidate_source(baseline):
     )
     expected = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
     assert json.loads(result.stdout) == [baseline, contract.BASELINES[baseline], expected]
+
+
+def test_baseline_defaults_and_image_allowlist_preserve_reviewed_history():
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from qualification.upgrade.contract import BASELINE_VERSION; print(BASELINE_VERSION)",
+        ],
+        cwd=root,
+        env={
+            key: value for key, value in os.environ.items() if key != "DJANGO_RAY_UPGRADE_BASELINE"
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "0.4.0"
+    assert contract.BASELINES["0.7.0"] == "d8204c9e368336077396679a3019f7f300211e06"
+    dockerfile = (root / "qualification/upgrade/Dockerfile").read_text()
+    assert set(re.findall(r"'([0-9a-f]{40})'", dockerfile)) == set(contract.BASELINES.values())
+    compose = yaml.safe_load((root / "qualification/upgrade/data.yaml").read_text())
+    data = compose["services"]["data"]
+    assert (
+        data["environment"]["DJANGO_RAY_UPGRADE_BASELINE"]
+        == "${DJANGO_RAY_UPGRADE_BASELINE:-0.4.0}"
+    )
+    assert data["build"]["args"]["UPGRADE_BASELINE_COMMIT"] == (
+        "${UPGRADE_BASELINE_COMMIT:-" + contract.BASELINES["0.4.0"] + "}"
+    )
+
+
+@pytest.mark.parametrize("swap_installed_bytes", [False, True])
+def test_equal_version_baseline_and_candidate_keep_distinct_verified_sources(
+    tmp_path, monkeypatch, swap_installed_bytes
+):
+    wheel = scenario.wheel
+    sources, targets, wheels = {}, {}, {}
+    for name in ("released", "candidate"):
+        source = tmp_path / name / "source"
+        package = source / "src" / "django_ray"
+        package.mkdir(parents=True)
+        (source / "pyproject.toml").write_text('[project]\nversion = "0.7.0"\n')
+        content = f'__version__ = "0.7.0"\nSOURCE = "{name}"\n'
+        (package / "__init__.py").write_text(content)
+        target = tmp_path / name / "installed"
+        (target / "django_ray").mkdir(parents=True)
+        (target / "django_ray" / "__init__.py").write_text(content)
+        selected = tmp_path / name / "django_ray-0.7.0-py3-none-any.whl"
+        selected.write_bytes(name.encode())
+        sources[name], targets[name], wheels[name] = source, target, selected
+
+    def imported(target):
+        module = ModuleType("django_ray")
+        module.__file__ = str(target / "django_ray" / "__init__.py")
+        return module
+
+    monkeypatch.setattr(
+        wheel, "_target_distribution", lambda _target: SimpleNamespace(version="0.7.0")
+    )
+    monkeypatch.setattr(wheel, "_reject_preinstalled_django_ray", lambda: None)
+    monkeypatch.setattr(wheel, "_import_candidate", imported)
+    identities = {
+        name: wheel._inspect_candidate(wheels[name], targets[name], sources[name])
+        for name in sources
+    }
+    assert identities["released"].version == identities["candidate"].version == "0.7.0"
+    assert identities["released"].source_package_tree_sha256 != (
+        identities["candidate"].source_package_tree_sha256
+    )
+    assert identities["released"].wheel_sha256 != identities["candidate"].wheel_sha256
+    if swap_installed_bytes:
+        (targets["candidate"] / "django_ray" / "__init__.py").write_bytes(
+            (targets["released"] / "django_ray" / "__init__.py").read_bytes()
+        )
+        with pytest.raises(QualificationError, match="candidate-source-tree-mismatch"):
+            wheel._inspect_candidate(
+                wheels["candidate"], targets["candidate"], sources["candidate"]
+            )
+
+
+@pytest.mark.parametrize("phase", ["baseline-run", "candidate-run", "baseline-post-write"])
+def test_native_equal_versions_select_phase_owned_environment(tmp_path, monkeypatch, phase):
+    from qualification.upgrade import native_scenario
+
+    monkeypatch.setattr(native_scenario, "BASELINE_VERSION", "0.7.0")
+    monkeypatch.setattr(native_scenario, "CANDIDATE_VERSION", "0.7.0")
+    target = tmp_path / ("released" if phase.startswith("baseline") else "candidate")
+    module = str((target / "django_ray/__init__.py").resolve())
+
+    def run(command, **kwargs):
+        expected_python = (
+            scenario.RELEASED_PYTHON if phase.startswith("baseline") else Path(sys.executable)
+        )
+        assert command[0] == expected_python
+        assert command[-2] == module
+        assert kwargs["environment"]["PYTHONPATH"].split(os.pathsep)[0] == str(target)
+        command[-1].write_text(
+            json.dumps({"phase": phase, "module": module, "version": "0.7.0", "observations": {}})
+        )
+
+    monkeypatch.setattr(scenario, "_run", run)
+    observed = native_scenario.phase(
+        tmp_path,
+        "sqlite",
+        phase,
+        target,
+        database="restored",
+        artifacts=tmp_path,
+        runner="ray_core",
+    )
+    assert observed["module"] == module and observed["phase"] == phase
 
 
 def test_unreviewed_baseline_fails_before_fixture_execution():
