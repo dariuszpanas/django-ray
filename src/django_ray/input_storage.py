@@ -363,6 +363,10 @@ def register_task_input(
         raise InputPayloadValidationError("Prepared external task input is incomplete")
 
     from django_ray.models import InputPayloadKind, InputPayloadState, TaskInputPayload
+    from django_ray.payload_registry import (
+        _has_other_payload_registry_reference,
+        _payload_registry_references,
+    )
 
     resolved_config = config if config is not None else get_settings()
     metadata = _validated_reference(prepared.input_reference, resolved_config)
@@ -374,6 +378,37 @@ def register_task_input(
     actual_metadata = (metadata.backend, metadata.digest, metadata.size_bytes)
     if actual_metadata != expected_metadata:
         raise InputPayloadValidationError("Prepared task input metadata is inconsistent")
+
+    # Native inputs and wrapped requests have disjoint canonical envelopes.
+    # Validate prepared bytes, not only caller-supplied metadata, so concurrent
+    # first writers cannot introduce both identities for one request object.
+    try:
+        _deserialize_envelope(prepared.serialized_payload)
+        encoded_payload = prepared.serialized_payload.encode("utf-8")
+    except (InputPayloadValidationError, UnicodeError, ValueError, RecursionError):
+        raise InputPayloadValidationError("Prepared task input envelope is invalid") from None
+    if (
+        hashlib.sha256(encoded_payload).hexdigest() != prepared.digest
+        or len(encoded_payload) != prepared.size_bytes
+        or prepared.envelope_version != INPUT_ENVELOPE_VERSION
+    ):
+        raise InputPayloadValidationError("Prepared task input metadata is inconsistent")
+
+    references = _payload_registry_references(prepared.input_reference, resolved_config)
+    if _has_other_payload_registry_reference(
+        prepared.input_reference, references, using=using, lock=True
+    ):
+        raise InputPayloadValidationError("Task input has another physical registry reference")
+    # Current preparation emits canonical references. Keep existing legacy
+    # identities usable, but never introduce a new alias after another writer
+    # has checked for it. Old producers must remain stopped across upgrades.
+    if prepared.input_reference != references.canonical and not (
+        TaskInputPayload.objects.using(using)
+        .select_for_update()
+        .filter(reference=prepared.input_reference)
+        .exists()
+    ):
+        raise InputPayloadValidationError("New task inputs require a canonical registry reference")
 
     now = timezone.now()
     payload, created = (
