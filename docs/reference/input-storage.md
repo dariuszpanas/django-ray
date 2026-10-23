@@ -209,7 +209,8 @@ either payload column. Deletion requires the complete history to fit within the
 attachment budget; overflow retains the object. A concurrent writer cannot lose a
 shared payload and a cross-kind collision fails closed. Successful cleanup keeps
 execution references and a `PURGED` tombstone for
-audit. A future writer of the same kind and content may reactivate the object.
+audit. A future writer of the same kind and content may reactivate the object
+when no other physical reference alias is registered.
 Every attachment/reactivation path must lock or register the payload before it locks and
 updates the execution row. Cleanup safety depends on that common lock order; rq2
 registration/attachment and its definite pre-submission release path follow it.
@@ -258,13 +259,39 @@ locator limit before writing an object. Unknown versions, nested wrappers and
 noncanonical references fail before storage access. Existing native locators
 remain readable and eligible for typed request cleanup without a data rewrite.
 
-Attachment refuses a native registry alias for the same object, including a
-`PURGED` tombstone or a row of another kind. It does not create a second registry
-identity that an older purger could treat as unreferenced. If both spellings
-already exist, current cleanup retains both as incomplete, regardless of kind
-or tombstone state. Investigate these inconsistent records; do not delete a
-tombstone or rewrite references to bypass the refusal. Retrying the identical
-historical request as a new attachment is intentionally refused.
+Task-input registration and request attachment refuse another supported registry
+spelling for the same physical object, including a `PURGED` tombstone or a row of
+another kind. This includes both native/wrapped request references and the raw
+versus percent-encoded S3/GCS keys supported by historical input readers. The
+configured bucket and exact retained prefix resolve the physical key; the check
+never guesses a namespace from a decoded URI. There are at most four supported
+spellings. Cleanup retains an alias pair as incomplete in either direction, and
+an unavailable namespace also makes the alias check incomplete.
+
+Before its own registry insertion or reuse, a producer locks one existing alias
+and refuses. Cleanup holds its candidate row and checks the bounded alias set
+without acquiring a second registry lock. This also prevents a new canonical
+producer from registering while an old alias is being purged. Current producers
+create only canonical identities. Existing legacy readers remain unchanged, and
+an existing legacy task-input identity can still be reused in place when no other
+alias exists. Both `ACTIVE` and `PURGED` rows undergo exact-byte revalidation
+before reuse; reactivation retains its storage checks.
+Constructing a new legacy registry identity is refused, including through the
+private prepared-payload helpers. Keep old producers and purgers stopped during
+the coordinated upgrade.
+
+Input registration validates the prepared canonical task-input envelope and its
+actual digest and byte count before any registry query. Request registration
+already validates its distinct request envelope. A hand-built prepared input
+therefore cannot register request bytes under a native identity while a request
+producer creates the wrapped identity in an empty registry.
+
+This is a fail-closed compatibility boundary, not a reference migration. Canonical
+enqueue can now refuse even when its only alias is a legacy tombstone. Investigate
+these records with producers and cleanup stopped and preserve both registry and
+execution references; do not delete tombstones or rewrite individual references
+to bypass the refusal. Any reconciliation requires a separately reviewed,
+consistent object-and-reference migration. No automatic reconciliation occurs.
 
 Command output identifies a reference only by a 16-character SHA-256 fingerprint. It
 does not print the bucket, prefix, digest locator, provider exception text, or full

@@ -355,9 +355,13 @@ command. Pre-rq2 binaries such as 0.4.0 understand neither `payload_kind` nor
 and `--delete` can remove it. Resume cleanup only from the current rq2 code.
 
 Current request references carry the `rq2ref:v1:` discriminator. Typed request
-cleanup accepts this format and historical native references. A native/wrapped
-registry alias pair is retained as incomplete even when either row is a
-tombstone or has a different payload kind. See the
+cleanup accepts this format and historical native references. Native/wrapped
+request spellings and raw/percent-encoded S3/GCS spellings can identify one
+physical object. Cleanup checks at most four authorized spellings and retains
+registry alias pairs as incomplete even when either row is a tombstone or has a
+different payload kind. A namespace that cannot be authorized is also incomplete.
+Producers refuse an existing alias before insertion or reuse, including legacy
+tombstones; cleanup does not reconcile or rewrite those records. See the
 [reference discriminator contract](input-storage.md#request-reference-discriminator)
 before investigating or upgrading cleanup jobs.
 

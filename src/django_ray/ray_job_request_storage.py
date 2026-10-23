@@ -1076,23 +1076,36 @@ def register_and_attach_ray_job_request(
     ):
         _reject(RayJobRequestStorageRejection.BINDING_MISMATCH)
 
+    from django_ray.payload_registry import (
+        _has_other_payload_registry_reference,
+        _payload_registry_references,
+    )
+
+    references = _payload_registry_references(
+        prepared.reference,
+        {
+            "INPUT_STORAGE_S3_BUCKET": prepared.locator.s3_bucket,
+            "INPUT_STORAGE_S3_PREFIX": prepared.locator.s3_prefix,
+            "INPUT_STORAGE_GCS_BUCKET": prepared.locator.gcs_bucket,
+            "INPUT_STORAGE_GCS_PREFIX": prepared.locator.gcs_prefix,
+        },
+    )
     now = timezone.now()
     with transaction.atomic(using=database):
-        # Do not create a second registry identity for a historical native
-        # object. An obsolete native-reference purger cannot see a wrapped
-        # attachment. Retain the old registry row (including tombstones) and
-        # refuse this adoption before attaching any execution. Current writers
-        # never create native request rows; old writers must be stopped during
-        # the coordinated upgrade. Only this one row is locked before refusal.
-        if (
-            TaskInputPayload.objects.using(database)
-            .select_for_update()
-            .filter(reference=_native_request_reference(prepared.reference))
-            .values_list("reference", flat=True)
-            .first()
-            is not None
+        # Raw/encoded keys and native/wrapped requests can share one object.
+        # Lock one existing alias before our own row and refuse, including
+        # tombstones. Old writers must be stopped during coordinated upgrades.
+        if _has_other_payload_registry_reference(
+            prepared.reference, references, using=database, lock=True
         ):
             _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
+        if prepared.reference != references.canonical and not (
+            TaskInputPayload.objects.using(database)
+            .select_for_update()
+            .filter(reference=prepared.reference)
+            .exists()
+        ):
+            _reject(RayJobRequestStorageRejection.INVALID_REQUEST)
         payload, created = (
             TaskInputPayload.objects.using(database)
             .select_for_update()

@@ -29,6 +29,15 @@ from django_ray.models import (
     TaskInputPayload,
     TaskState,
 )
+from django_ray.payload_registry import (
+    _has_other_payload_registry_reference,
+    _payload_registry_references,
+)
+from django_ray.ray_job_request_storage import (
+    RayJobRequestStorageError,
+    _native_request_reference,
+)
+from django_ray.result_storage import ResultStorageError
 
 TERMINAL_STATES = (
     TaskState.SUCCEEDED,
@@ -247,23 +256,16 @@ class Command(BaseCommand):
             if payload is None or payload.last_used_at > cutoff:
                 return "skipped"
 
-            from django_ray.ray_job_request_storage import (
-                RayJobRequestStorageError,
-                _request_reference_alias,
-            )
-
             try:
-                alias = _request_reference_alias(reference)
-            except RayJobRequestStorageError:
                 if payload.payload_kind == InputPayloadKind.RAY_JOB_REQUEST:
-                    return "incomplete"
-                # Task-input references retain their own validation and limits.
-                alias = None
-            # Supported current writers refuse native aliases under the
-            # registry-first lock. Check every kind: a misclassified native
-            # row must not delete an object used by a wrapped request. Keep
-            # tombstones too. Take no second row lock in reverse order.
-            if alias is not None and TaskInputPayload.objects.filter(reference=alias).exists():
+                    _native_request_reference(reference)
+                references = _payload_registry_references(reference)
+            except (ResultStorageError, RayJobRequestStorageError):
+                return "incomplete"
+            # Every kind/state can own the same physical object through a
+            # different supported spelling. Producers lock existing aliases
+            # before insertion; this check takes no second row lock.
+            if _has_other_payload_registry_reference(reference, references):
                 return "incomplete"
 
             executions = [
