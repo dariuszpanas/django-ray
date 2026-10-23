@@ -9,12 +9,14 @@ import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from threading import Barrier, Event, Lock, get_ident
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from django.contrib import admin
@@ -3477,6 +3479,288 @@ def test_workflow_namespace_collision_retries_under_postgresql_constraint(
     } == {collided_namespace, replacement_namespace}
 
 
+def _prepared_cloud_alias_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    *,
+    serialized_request: str | None = None,
+) -> SimpleNamespace:
+    """Use one physical fake object for its authorized raw and encoded URIs."""
+    import django_ray.input_storage as input_storage_module
+    import django_ray.ray_job_request_storage as request_storage_module
+
+    bucket = "postgres-payloads"
+    prefix = "tenant alpha/résults+100%"
+    scheme = "s3" if backend == "s3" else "gs"
+    config = {
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": backend,
+        f"INPUT_STORAGE_{backend.upper()}_BUCKET": bucket,
+        f"INPUT_STORAGE_{backend.upper()}_PREFIX": prefix,
+    }
+    objects: dict[str, str] = {}
+    writes: list[str] = []
+
+    class MemoryObjectStorage:
+        def __init__(self, **location: Any) -> None:
+            assert location["bucket"] == bucket
+            assert location["prefix"] == prefix
+
+        def store_payload(self, *, serialized_payload: str) -> str:
+            payload = serialized_payload.encode("utf-8")
+            digest = hashlib.sha256(payload).hexdigest()
+            objects[digest] = serialized_payload
+            writes.append(digest)
+            key = f"{prefix}/{digest[:2]}/{digest[2:4]}/{digest}.json"
+            return f"{scheme}://{bucket}/{quote(key, safe='/-._~')}?bytes={len(payload)}"
+
+    storage_name = "S3ResultStorage" if backend == "s3" else "GCSResultStorage"
+    monkeypatch.setattr(input_storage_module, storage_name, MemoryObjectStorage)
+    monkeypatch.setattr(request_storage_module, storage_name, MemoryObjectStorage)
+    if serialized_request is None:
+        prepared = prepare_task_input(("physical alias input",), {}, config)
+        reference = prepared.input_reference
+    else:
+        prepared = request_storage_module.prepare_ray_job_request(serialized_request, config)
+        reference = prepared.reference
+    assert reference is not None
+    native = reference.removeprefix(request_storage_module.RAY_JOB_REQUEST_REFERENCE_PREFIX)
+    legacy_native = native.replace(quote(prefix, safe="/-._~"), prefix, 1)
+    assert native != legacy_native
+    return SimpleNamespace(
+        config=config,
+        prepared=prepared,
+        reference=reference,
+        legacy_native=legacy_native,
+        objects=objects,
+        writes=writes,
+    )
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("writer_uses_legacy", [False, True])
+def test_physical_input_alias_pair_locks_other_row_and_refuses_without_mutation(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    writer_uses_legacy: bool,
+) -> None:
+    """Both existing-row directions wait for the alias and preserve its keeper."""
+    import django_ray.input_storage as input_storage_module
+
+    case = _prepared_cloud_alias_payload(monkeypatch, backend)
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **case.config}
+    old_timestamp = timezone.now() - timedelta(days=60)
+    cutoff = timezone.now() - timedelta(days=30)
+    references = (case.reference, case.legacy_native)
+    writer_reference = case.legacy_native if writer_uses_legacy else case.reference
+    for index, reference in enumerate(references):
+        TaskInputPayload.objects.create(
+            reference=reference,
+            payload_kind=InputPayloadKind.TASK_INPUT,
+            backend=case.prepared.backend,
+            digest=case.prepared.digest,
+            size_bytes=case.prepared.size_bytes,
+            envelope_version=case.prepared.envelope_version,
+            state=InputPayloadState.ACTIVE,
+        )
+        _execution(
+            f"postgres-physical-alias-keeper-{index}",
+            state=TaskState.QUEUED if reference == writer_reference else TaskState.SUCCEEDED,
+            finished_at=None if reference == writer_reference else old_timestamp,
+            input_reference=reference,
+            args_json=case.prepared.args_json,
+            kwargs_json=case.prepared.kwargs_json,
+        )
+    TaskInputPayload.objects.filter(reference__in=references).update(last_used_at=old_timestamp)
+    registry_before = list(TaskInputPayload.objects.order_by("reference").values())
+    executions_before = list(RayTaskExecution.objects.order_by("pk").values())
+    objects_before = dict(case.objects)
+    writes_before = list(case.writes)
+    deletes: list[str] = []
+    monkeypatch.setattr(
+        input_storage_module, "delete_input_reference", lambda reference: deletes.append(reference)
+    )
+    prepared = (
+        replace(case.prepared, input_reference=case.legacy_native)
+        if writer_uses_legacy
+        else case.prepared
+    )
+    other_reference = case.reference if writer_uses_legacy else case.legacy_native
+    writer_connected = Event()
+    writer_pid: list[int] = []
+
+    def reenqueue() -> None:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pid.append(int(cursor.fetchone()[0]))
+            writer_connected.set()
+            with pytest.raises(
+                input_storage_module.InputPayloadValidationError,
+                match="another physical registry reference",
+            ):
+                with transaction.atomic():
+                    register_task_input(prepared, case.config)
+                    _execution(
+                        "postgres-physical-alias-forbidden-new",
+                        input_reference=prepared.input_reference,
+                    )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with transaction.atomic():
+            TaskInputPayload.objects.select_for_update().get(reference=other_reference)
+            writer_future = executor.submit(reenqueue)
+            assert writer_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(writer_pid[0])
+        writer_future.result(timeout=20)
+
+    for reference in references:
+        assert (
+            PurgeInputsCommand()._process_reference(reference, cutoff=cutoff, delete=True)
+            == "incomplete"
+        )
+    assert list(TaskInputPayload.objects.order_by("reference").values()) == registry_before
+    assert list(RayTaskExecution.objects.order_by("pk").values()) == executions_before
+    assert case.objects == objects_before
+    assert case.writes == writes_before
+    assert deletes == []
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize(
+    "payload_kind", [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST]
+)
+def test_canonical_payload_writer_waits_for_legacy_physical_alias_purge_then_refuses(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    payload_kind: str,
+) -> None:
+    """A raw native tombstone blocks new native and rq2 canonical identities."""
+    import django_ray.input_storage as input_storage_module
+    from django_ray.ray_job_request_storage import (
+        RayJobRequestStorageError,
+        RayJobRequestStorageRejection,
+        register_and_attach_ray_job_request,
+    )
+
+    execution, handle = _rq2_reserved_execution("postgres-physical-alias-canonical-writer")
+    serialized_request = (
+        _prepared_rq2_request(execution, tmp_path).serialized_request
+        if payload_kind == InputPayloadKind.RAY_JOB_REQUEST
+        else None
+    )
+    case = _prepared_cloud_alias_payload(
+        monkeypatch, backend, serialized_request=serialized_request
+    )
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **case.config}
+    payload = TaskInputPayload.objects.create(
+        reference=case.legacy_native,
+        payload_kind=InputPayloadKind.TASK_INPUT,
+        backend=case.prepared.backend,
+        digest=case.prepared.digest,
+        size_bytes=case.prepared.size_bytes,
+        envelope_version=case.prepared.envelope_version,
+        state=InputPayloadState.ACTIVE,
+    )
+    old_timestamp = timezone.now() - timedelta(days=60)
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=old_timestamp)
+    old_execution = _execution(
+        "postgres-physical-alias-old-keeper",
+        state=TaskState.SUCCEEDED,
+        finished_at=old_timestamp,
+        input_reference=case.legacy_native,
+    )
+    execution_before = RayTaskExecution.objects.values().get(pk=execution.pk)
+    keeper_before = RayTaskExecution.objects.values().get(pk=old_execution.pk)
+    writes_before = list(case.writes)
+    cutoff = timezone.now() - timedelta(days=30)
+    deletion_started, release_deletion, writer_connected = Event(), Event(), Event()
+    writer_pid: list[int] = []
+    deletes: list[str] = []
+
+    def blocking_delete(reference: str) -> None:
+        assert reference == case.legacy_native
+        deletes.append(reference)
+        del case.objects[case.prepared.digest]
+        deletion_started.set()
+        assert release_deletion.wait(timeout=10)
+
+    monkeypatch.setattr(input_storage_module, "delete_input_reference", blocking_delete)
+
+    def purge() -> str:
+        close_old_connections()
+        try:
+            return PurgeInputsCommand()._process_reference(
+                case.legacy_native, cutoff=cutoff, delete=True, max_attachments=1
+            )
+        finally:
+            close_old_connections()
+
+    def register() -> None:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pid.append(int(cursor.fetchone()[0]))
+            writer_connected.set()
+            if payload_kind == InputPayloadKind.TASK_INPUT:
+                with pytest.raises(
+                    input_storage_module.InputPayloadValidationError,
+                    match="another physical registry reference",
+                ):
+                    with transaction.atomic():
+                        register_task_input(case.prepared, case.config)
+                        _execution(
+                            "postgres-physical-alias-forbidden-new",
+                            input_reference=case.reference,
+                        )
+            else:
+                with pytest.raises(RayJobRequestStorageError) as caught:
+                    register_and_attach_ray_job_request(
+                        case.prepared, task_execution=execution, submission_handle=handle
+                    )
+                assert (
+                    caught.value.classification == RayJobRequestStorageRejection.REGISTRY_MISMATCH
+                )
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        purge_future = executor.submit(purge)
+        try:
+            assert deletion_started.wait(timeout=10)
+            assert case.objects == {}
+            writer_future = executor.submit(register)
+            assert writer_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(writer_pid[0])
+        finally:
+            release_deletion.set()
+        assert purge_future.result(timeout=20) == "purged"
+        writer_future.result(timeout=20)
+
+    payload.refresh_from_db()
+    assert payload.state == InputPayloadState.PURGED
+    assert payload.purged_at is not None
+    assert payload.reference == case.legacy_native
+    assert payload.last_used_at == old_timestamp
+    assert TaskInputPayload.objects.count() == 1
+    assert not TaskInputPayload.objects.filter(reference=case.reference).exists()
+    assert RayTaskExecution.objects.values().get(pk=execution.pk) == execution_before
+    assert RayTaskExecution.objects.values().get(pk=old_execution.pk) == keeper_before
+    assert not RayTaskExecution.objects.filter(
+        task_id="postgres-physical-alias-forbidden-new"
+    ).exists()
+    assert case.objects == {}
+    assert case.writes == writes_before
+    assert deletes == [case.legacy_native]
+
+
 def test_input_cleanup_racing_reenqueue_preserves_shared_payload(settings, tmp_path) -> None:
     settings.DJANGO_RAY = {
         **settings.DJANGO_RAY,
@@ -3634,6 +3918,177 @@ def test_input_reenqueue_waits_for_purge_then_restores_shared_payload(
         kwargs_json=replacement.kwargs_json,
         input_reference=replacement.input_reference,
     ) == (["restored input"], {})
+
+
+@pytest.mark.parametrize(
+    "payload_kind", [InputPayloadKind.TASK_INPUT, InputPayloadKind.RAY_JOB_REQUEST]
+)
+@pytest.mark.parametrize("purge_failure", ["delete_acknowledgement_loss", "tombstone_rollback"])
+def test_payload_registration_restores_active_object_after_purge_failure(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload_kind: str,
+    purge_failure: str,
+) -> None:
+    """An ACTIVE row cannot prove availability after an uncertain purge."""
+    import django_ray.input_storage as input_storage_module
+    from django_ray.ray_job_request_storage import (
+        load_ray_job_request,
+        register_and_attach_ray_job_request,
+    )
+
+    storage_config = {
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+    }
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **storage_config}
+    old_timestamp = timezone.now() - timedelta(days=60)
+    if payload_kind == InputPayloadKind.TASK_INPUT:
+        prepared_input = prepare_task_input(("restored active input",), {})
+        assert prepared_input.input_reference is not None
+        assert prepared_input.digest is not None
+        reference = prepared_input.input_reference
+        with transaction.atomic():
+            payload = register_task_input(prepared_input)
+        assert payload is not None
+        old_execution = _execution(
+            "postgres-active-input-purge-old",
+            state=TaskState.SUCCEEDED,
+            finished_at=old_timestamp,
+            args_json=prepared_input.args_json,
+            kwargs_json=prepared_input.kwargs_json,
+            input_reference=reference,
+        )
+        digest = prepared_input.digest
+        path = tmp_path / digest[:2] / digest[2:4] / f"{digest}.json"
+
+        def write_reference() -> int:
+            with transaction.atomic():
+                register_task_input(prepared_input)
+                return int(
+                    _execution(
+                        "postgres-active-input-purge-new",
+                        args_json=prepared_input.args_json,
+                        kwargs_json=prepared_input.kwargs_json,
+                        input_reference=reference,
+                    ).pk
+                )
+
+    else:
+        execution, handle = _rq2_reserved_execution("postgres-active-rq2-purge")
+        prepared_request = _prepared_rq2_request(execution, tmp_path)
+        reference = prepared_request.reference
+        payload = TaskInputPayload.objects.create(
+            reference=reference,
+            payload_kind=payload_kind,
+            backend=prepared_request.backend,
+            digest=prepared_request.digest,
+            size_bytes=prepared_request.size_bytes,
+            envelope_version=prepared_request.envelope_version,
+            state=InputPayloadState.ACTIVE,
+        )
+        path = _rq2_request_path(prepared_request)
+
+        def write_reference() -> int:
+            assert (
+                register_and_attach_ray_job_request(
+                    prepared_request,
+                    task_execution=execution,
+                    submission_handle=handle,
+                )
+                == reference
+            )
+            return int(execution.pk)
+
+    TaskInputPayload.objects.filter(pk=payload.pk).update(last_used_at=old_timestamp)
+    original_bytes = path.read_bytes()
+    cutoff = timezone.now() - timedelta(days=30)
+    deletion_started, release_deletion, writer_connected = Event(), Event(), Event()
+    writer_pid: list[int] = []
+    original_delete = input_storage_module.delete_input_reference
+
+    def uncertain_delete(reference: str) -> None:
+        original_delete(reference, config=storage_config)
+        deletion_started.set()
+        assert release_deletion.wait(timeout=10)
+        if purge_failure == "delete_acknowledgement_loss":
+            raise OSError("simulated lost deletion acknowledgement")
+
+    monkeypatch.setattr(input_storage_module, "delete_input_reference", uncertain_delete)
+
+    def purge() -> str:
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                outcome = PurgeInputsCommand()._process_reference(
+                    reference, cutoff=cutoff, delete=True, max_attachments=1
+                )
+                if purge_failure == "tombstone_rollback":
+                    assert outcome == "purged"
+                    tombstone = TaskInputPayload.objects.get(pk=payload.pk)
+                    assert tombstone.state == InputPayloadState.PURGED
+                    assert tombstone.purged_at is not None
+                    transaction.set_rollback(True)
+                    return "rolled_back"
+                assert outcome == "failed"
+                failed_payload = TaskInputPayload.objects.get(pk=payload.pk)
+                assert failed_payload.state == InputPayloadState.ACTIVE
+                assert failed_payload.cleanup_error
+                return outcome
+        finally:
+            close_old_connections()
+
+    def writer() -> int:
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pid.append(int(cursor.fetchone()[0]))
+            writer_connected.set()
+            return write_reference()
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        purge_future = executor.submit(purge)
+        try:
+            assert deletion_started.wait(timeout=10)
+            assert not path.exists()
+            writer_future = executor.submit(writer)
+            assert writer_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(writer_pid[0])
+        finally:
+            release_deletion.set()
+        expected_outcome = (
+            "failed" if purge_failure == "delete_acknowledgement_loss" else "rolled_back"
+        )
+        assert purge_future.result(timeout=20) == expected_outcome
+        attached_execution = RayTaskExecution.objects.get(pk=writer_future.result(timeout=20))
+
+    payload.refresh_from_db()
+    assert payload.state == InputPayloadState.ACTIVE
+    assert payload.purged_at is None
+    assert payload.last_used_at > cutoff
+    assert path.read_bytes() == original_bytes
+    if payload_kind == InputPayloadKind.TASK_INPUT:
+        old_execution.refresh_from_db()
+        assert old_execution.input_reference == reference
+        assert attached_execution.state == TaskState.QUEUED
+        assert attached_execution.input_reference == reference
+        assert load_task_input(
+            args_json=attached_execution.args_json,
+            kwargs_json=attached_execution.kwargs_json,
+            input_reference=attached_execution.input_reference,
+        ) == (["restored active input"], {})
+    else:
+        assert attached_execution.state == TaskState.RUNNING
+        assert attached_execution.ray_job_request_reference == reference
+        assert (
+            load_ray_job_request(prepared_request.encoded_locator).request
+            == prepared_request.request
+        )
 
 
 @pytest.mark.parametrize("transition", ["cancel", "complete", "retry"])

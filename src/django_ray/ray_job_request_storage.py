@@ -930,16 +930,45 @@ def load_ray_job_request(
     )
 
 
-def _restore_purged_request(prepared: PreparedRayJobRequest) -> None:
+def _restore_request_payload(prepared: PreparedRayJobRequest) -> None:
+    """Verify or restore prepared bytes while their registry row is locked."""
     storage = _storage_for_locator(prepared.locator)
+    native_reference = _native_request_reference(prepared.reference)
+    try:
+        stored_request = storage.load(reference=native_reference)
+    except ResultStorageIntegrityError:
+        _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
+    except (ResultStorageError, OSError, UnicodeError):
+        stored_request = None
+    if stored_request is not None:
+        if stored_request != prepared.serialized_request:
+            _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
+        return
     try:
         restored_reference = storage.store_payload(serialized_payload=prepared.serialized_request)
     except ResultStorageIntegrityError:
         _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
     except (ResultStorageError, OSError, UnicodeError):
         _reject(RayJobRequestStorageRejection.STORAGE_UNAVAILABLE)
-    if restored_reference != _native_request_reference(prepared.reference):
-        _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
+    if restored_reference != native_reference:
+        try:
+            if _native_request_reference(restored_reference) != restored_reference:
+                _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
+            restored_identity = _validated_reference(
+                restored_reference,
+                backend=prepared.backend,
+                location={
+                    "filesystem_path": prepared.locator.filesystem_path,
+                    "s3_bucket": prepared.locator.s3_bucket,
+                    "s3_prefix": prepared.locator.s3_prefix,
+                    "gcs_bucket": prepared.locator.gcs_bucket,
+                    "gcs_prefix": prepared.locator.gcs_prefix,
+                },
+            )
+        except RayJobRequestStorageError:
+            _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
+        if restored_identity != (prepared.digest, prepared.size_bytes):
+            _reject(RayJobRequestStorageRejection.INTEGRITY_MISMATCH)
 
 
 def _validate_prepared_request(
@@ -1047,23 +1076,36 @@ def register_and_attach_ray_job_request(
     ):
         _reject(RayJobRequestStorageRejection.BINDING_MISMATCH)
 
+    from django_ray.payload_registry import (
+        _has_other_payload_registry_reference,
+        _payload_registry_references,
+    )
+
+    references = _payload_registry_references(
+        prepared.reference,
+        {
+            "INPUT_STORAGE_S3_BUCKET": prepared.locator.s3_bucket,
+            "INPUT_STORAGE_S3_PREFIX": prepared.locator.s3_prefix,
+            "INPUT_STORAGE_GCS_BUCKET": prepared.locator.gcs_bucket,
+            "INPUT_STORAGE_GCS_PREFIX": prepared.locator.gcs_prefix,
+        },
+    )
     now = timezone.now()
     with transaction.atomic(using=database):
-        # Do not create a second registry identity for a historical native
-        # object. An obsolete native-reference purger cannot see a wrapped
-        # attachment. Retain the old registry row (including tombstones) and
-        # refuse this adoption before attaching any execution. Current writers
-        # never create native request rows; old writers must be stopped during
-        # the coordinated upgrade. Only this one row is locked before refusal.
-        if (
-            TaskInputPayload.objects.using(database)
-            .select_for_update()
-            .filter(reference=_native_request_reference(prepared.reference))
-            .values_list("reference", flat=True)
-            .first()
-            is not None
+        # Raw/encoded keys and native/wrapped requests can share one object.
+        # Lock one existing alias before our own row and refuse, including
+        # tombstones. Old writers must be stopped during coordinated upgrades.
+        if _has_other_payload_registry_reference(
+            prepared.reference, references, using=database, lock=True
         ):
             _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
+        if prepared.reference != references.canonical and not (
+            TaskInputPayload.objects.using(database)
+            .select_for_update()
+            .filter(reference=prepared.reference)
+            .exists()
+        ):
+            _reject(RayJobRequestStorageRejection.INVALID_REQUEST)
         payload, created = (
             TaskInputPayload.objects.using(database)
             .select_for_update()
@@ -1097,10 +1139,13 @@ def register_and_attach_ray_job_request(
             )
             if persisted_metadata != expected_metadata:
                 _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
+            # An external delete can succeed even if its acknowledgement or
+            # database tombstone fails. Preparation preceded this registry
+            # lock, so re-establish ACTIVE objects as well as PURGED ones.
+            _restore_request_payload(prepared)
             update_fields = ["last_used_at"]
-            payload.last_used_at = now
+            payload.last_used_at = timezone.now()
             if payload.state == InputPayloadState.PURGED:
-                _restore_purged_request(prepared)
                 payload.state = InputPayloadState.ACTIVE
                 payload.purged_at = None
                 payload.cleanup_error = ""

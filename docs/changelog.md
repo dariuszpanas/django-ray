@@ -9,9 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retain input/request objects when raw and percent-encoded cloud references or
+  native and wrapped request references identify the same physical object. Check the
+  bounded physical alias set before purge and coordinate producer refusal with
+  the existing alias row lock. Canonical producers now refuse legacy aliases,
+  including tombstones. Preserve supported readers and existing unaliased legacy row reuse,
+  but refuse new hand-built legacy registry identities; do not rewrite or
+  automatically reconcile references. Validate prepared input envelope bytes
+  before registration so requests cannot acquire a second native input identity.
 - Require Linux before the pinned Compiled Graph pilot's private timeout self-test
   launches a child, and remove its native Windows fallback. Preserve the host-side
   Windows containment used for Docker and Kubernetes commands.
+- Revalidate reused task-input and Ray Job request objects under the registry
+  lock before attachment. A purge that deleted an object but lost its provider
+  acknowledgement or rolled back its database tombstone can no longer make a
+  waiting producer trust an `ACTIVE` row with missing bytes. Preserve retained
+  namespaces, supported legacy reference spellings, and the existing lock order.
+  Reused registrations verify exact bytes before attempting an immutable recovery
+  write, retaining readable legacy URIs even when the writer cannot encode them.
 - Require Linux before the workflow-progress preparation benchmark creates
   workspaces or starts workers. Remove its native Windows process fallback and
   macOS RSS conversion while preserving bounded Linux descendant cleanup and

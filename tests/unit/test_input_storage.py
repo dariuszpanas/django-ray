@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import traceback
+from io import BytesIO
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -20,7 +23,7 @@ from django_ray.input_storage import (
     prepare_task_input,
     register_task_input,
 )
-from django_ray.result_storage import ResultStorageError
+from django_ray.result_storage import GCSResultStorage, ResultStorageError, S3ResultStorage
 
 
 def _s3_config(**overrides: Any) -> dict[str, Any]:
@@ -830,6 +833,7 @@ def test_register_reactivation_wraps_storage_failure(
     assert payload is not None
     payload.state = InputPayloadState.PURGED
     payload.save(update_fields=["state"])
+    storage.payloads.clear()
     storage.store_error = ResultStorageError("private")
 
     with pytest.raises(InputPayloadStorageError, match="reactivate"):
@@ -849,6 +853,7 @@ def test_register_reactivation_rejects_changed_reference(
     assert payload is not None
     payload.state = InputPayloadState.PURGED
     payload.save(update_fields=["state"])
+    storage.payloads.clear()
     original_store = storage.store_payload
 
     def changed_reference(*, serialized_payload: str) -> str:
@@ -934,3 +939,340 @@ def test_register_inline_input_is_noop() -> None:
     prepared = prepare_task_input((), {}, {"MAX_INLINE_INPUT_SIZE_BYTES": None})
 
     assert register_task_input(prepared) is None
+
+
+def _reused_input_registry(monkeypatch, prepared, *, state="ACTIVE"):
+    """Replace only the ORM boundary; storage and registration remain real."""
+    from django_ray.models import InputPayloadKind, TaskInputPayload
+
+    payload = SimpleNamespace(
+        payload_kind=InputPayloadKind.TASK_INPUT,
+        backend=prepared.backend,
+        digest=prepared.digest,
+        size_bytes=prepared.size_bytes,
+        envelope_version=prepared.envelope_version,
+        state=state,
+        last_used_at=input_storage.timezone.now(),
+        purged_at=None,
+        cleanup_error="InputPayloadStorageError",
+        save=Mock(),
+    )
+    manager = Mock()
+    manager.using.return_value = manager
+    manager.select_for_update.return_value = manager
+    manager.get_or_create.return_value = (payload, False)
+    aliases = Mock()
+    for method in ("select_for_update", "order_by", "values_list"):
+        getattr(aliases, method).return_value = aliases
+    aliases.first.return_value = None
+    existing = Mock()
+    existing.exists.return_value = True
+
+    def filter_registry(**lookup):
+        if set(lookup) == {"reference__in"}:
+            assert prepared.input_reference not in lookup["reference__in"]
+            return aliases
+        assert lookup == {"reference": prepared.input_reference}
+        return existing
+
+    manager.filter.side_effect = filter_registry
+    monkeypatch.setattr(TaskInputPayload, "objects", manager)
+    return payload, manager
+
+
+@pytest.mark.parametrize("state", ["ACTIVE", "PURGED"])
+def test_reused_input_revalidates_missing_payload_under_registry_lock(monkeypatch, state):
+    storage = FakePayloadStorage()
+    _use_fake_storage(monkeypatch, storage)
+    prepared = prepare_task_input(("prepared before deletion",), {}, _s3_config())
+    payload, manager = _reused_input_registry(monkeypatch, prepared, state=state)
+    previous_use = payload.last_used_at
+    storage.payloads.clear()
+    store = storage.store_payload
+
+    def restore(*, serialized_payload):
+        manager.select_for_update.assert_called_with()
+        manager.get_or_create.assert_called_once()
+        payload.save.assert_not_called()
+        assert payload.last_used_at == previous_use
+        return store(serialized_payload=serialized_payload)
+
+    monkeypatch.setattr(storage, "store_payload", restore)
+    registered = register_task_input(prepared, _s3_config(), using="default")
+
+    assert registered is payload
+    assert storage.payloads[prepared.input_reference] == prepared.serialized_payload
+    assert payload.state == "ACTIVE"
+    assert payload.last_used_at >= previous_use
+    payload.save.assert_called_once()
+    assert manager.using.call_args_list
+    assert all(
+        call.args == ("default",) and not call.kwargs for call in manager.using.call_args_list
+    )
+
+
+@pytest.mark.parametrize("state", ["ACTIVE", "PURGED"])
+@pytest.mark.parametrize("error", [ResultStorageError("private"), OSError("private")])
+def test_reused_input_failure_preserves_registry_without_attachment(monkeypatch, state, error):
+    storage = FakePayloadStorage()
+    _use_fake_storage(monkeypatch, storage)
+    prepared = prepare_task_input((), {}, _s3_config())
+    payload, _manager = _reused_input_registry(monkeypatch, prepared, state=state)
+    before = vars(payload).copy()
+    storage.payloads.clear()
+    storage.store_error = error
+
+    with pytest.raises(InputPayloadStorageError, match="reactivate"):
+        register_task_input(prepared, _s3_config())
+
+    assert vars(payload) == before
+    payload.save.assert_not_called()
+    assert storage.payloads == {}
+
+
+@pytest.mark.parametrize(("backend", "scheme"), [("s3", "s3"), ("gcs", "gs")])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_reused_input_preserves_retained_backend_and_reference_spelling(
+    monkeypatch, backend, scheme, legacy
+):
+    serialized = input_storage._serialize_envelope(["retained"], {})
+    digest = hashlib.sha256(serialized.encode()).hexdigest()
+    suffix = f"{digest[:2]}/{digest[2:4]}/{digest}.json?bytes={len(serialized.encode())}"
+    canonical = f"{scheme}://task-inputs/tenant%20alpha/inputs/{suffix}"
+    reference = canonical.replace("tenant%20alpha", "tenant alpha") if legacy else canonical
+    prepared = PreparedTaskInput(
+        args_json="null",
+        kwargs_json="null",
+        input_reference=reference,
+        serialized_payload=serialized,
+        digest=digest,
+        size_bytes=len(serialized.encode()),
+        envelope_version=1,
+        backend=backend,
+    )
+    payload, _manager = _reused_input_registry(monkeypatch, prepared)
+    storage = Mock()
+    storage.load.return_value = None
+    storage.store_payload.return_value = canonical
+    constructor = Mock(return_value=storage)
+    monkeypatch.setattr(
+        input_storage, "S3ResultStorage" if backend == "s3" else "GCSResultStorage", constructor
+    )
+    config = {
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": "unused-active-writer-root",
+        f"INPUT_STORAGE_{backend.upper()}_BUCKET": "task-inputs",
+        f"INPUT_STORAGE_{backend.upper()}_PREFIX": "tenant alpha/inputs",
+    }
+
+    assert register_task_input(prepared, config) is payload
+    storage.store_payload.assert_called_once_with(serialized_payload=serialized)
+    constructor.assert_called_once()
+    assert prepared.input_reference == reference
+
+
+@pytest.mark.parametrize("changed", ["authority", "namespace", "size", "digest"])
+def test_reused_input_rejects_changed_object_before_registry_update(monkeypatch, changed):
+    storage = FakePayloadStorage()
+    _use_fake_storage(monkeypatch, storage)
+    prepared = prepare_task_input((), {}, _s3_config())
+    payload, _manager = _reused_input_registry(monkeypatch, prepared)
+    previous_use = payload.last_used_at
+    assert prepared.input_reference is not None
+    storage.payloads.clear()
+    references = {
+        "authority": prepared.input_reference.replace("task-inputs/", "other/"),
+        "namespace": prepared.input_reference.replace("django-ray/inputs/", "other/"),
+        "size": prepared.input_reference.rsplit("=", 1)[0] + "=1",
+        "digest": FakePayloadStorage().store_payload(serialized_payload="different"),
+    }
+    monkeypatch.setattr(storage, "store_payload", lambda **_kwargs: references[changed])
+
+    with pytest.raises(InputPayloadValidationError, match="changed an immutable"):
+        register_task_input(prepared, _s3_config())
+
+    assert payload.last_used_at == previous_use
+    payload.save.assert_not_called()
+
+
+def _legacy_reused_input_storage(monkeypatch, *, backend, state, outcome, prefix="é" * 150):
+    """Keep the real provider reader/writer, replacing only clients and ORM."""
+    serialized = input_storage._serialize_envelope(["retained"], {})
+    encoded = serialized.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    scheme = "s3" if backend == "s3" else "gs"
+    key = f"{prefix}/{digest[:2]}/{digest[2:4]}/{digest}.json"
+    reference = f"{scheme}://task-inputs/{key}?bytes={len(encoded)}"
+    prepared = PreparedTaskInput(
+        args_json="null",
+        kwargs_json="null",
+        input_reference=reference,
+        serialized_payload=serialized,
+        digest=digest,
+        size_bytes=len(encoded),
+        envelope_version=1,
+        backend=backend,
+    )
+    payload, manager = _reused_input_registry(monkeypatch, prepared, state=state)
+    previous_use = payload.last_used_at
+    client = Mock()
+    reads = 0
+
+    def require_registry_lock(**_kwargs):
+        nonlocal reads
+        reads += 1
+        manager.select_for_update.assert_called_with()
+        manager.get_or_create.assert_called_once()
+        payload.save.assert_not_called()
+        assert payload.last_used_at == previous_use
+        if outcome == "missing" or (outcome == "unavailable_then_corrupt" and reads == 1):
+            raise OSError("private provider error")
+
+    stored_bytes = encoded if outcome == "present" else b"x" * len(encoded)
+    if backend == "s3":
+
+        def get_object(**kwargs):
+            require_registry_lock(**kwargs)
+            return {"ContentLength": len(stored_bytes), "Body": BytesIO(stored_bytes)}
+
+        client.get_object.side_effect = get_object
+        storage = S3ResultStorage(bucket="task-inputs", prefix=prefix, client=client)
+        constructor_name = "S3ResultStorage"
+    else:
+        blob = client.bucket.return_value.blob.return_value
+        blob.reload.side_effect = require_registry_lock
+        blob.size = len(stored_bytes)
+        blob.generation = 1
+        blob.download_as_bytes.return_value = stored_bytes
+        storage = GCSResultStorage(bucket="task-inputs", prefix=prefix, client=client)
+        constructor_name = "GCSResultStorage"
+    monkeypatch.setattr(input_storage, constructor_name, Mock(return_value=storage))
+    config = {
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": "unused-active-writer-root",
+        f"INPUT_STORAGE_{backend.upper()}_BUCKET": "task-inputs",
+        f"INPUT_STORAGE_{backend.upper()}_PREFIX": prefix,
+    }
+    return prepared, payload, storage, client, config
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("state", ["ACTIVE", "PURGED"])
+def test_reused_input_verifies_legacy_bytes_when_writer_uri_is_unrepresentable(
+    monkeypatch, backend, state
+):
+    prepared, payload, storage, client, config = _legacy_reused_input_storage(
+        monkeypatch, backend=backend, state=state, outcome="present"
+    )
+    assert prepared.serialized_payload is not None
+    with pytest.raises(ResultStorageError, match="reference is invalid"):
+        storage.store_payload(serialized_payload=prepared.serialized_payload)
+    client.assert_not_called()
+    assert client.mock_calls == []
+    before_reference = prepared.input_reference
+
+    assert register_task_input(prepared, config) is payload
+
+    assert prepared.input_reference == before_reference
+    assert payload.state == "ACTIVE"
+    payload.save.assert_called_once()
+    client.put_object.assert_not_called()
+    client.bucket.return_value.blob.return_value.upload_from_string.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+@pytest.mark.parametrize("state", ["ACTIVE", "PURGED"])
+@pytest.mark.parametrize("outcome", ["missing", "corrupt"])
+def test_reused_input_refuses_missing_or_corrupt_legacy_bytes_without_mutation(
+    monkeypatch, backend, state, outcome
+):
+    prepared, payload, storage, client, config = _legacy_reused_input_storage(
+        monkeypatch, backend=backend, state=state, outcome=outcome
+    )
+    before = vars(payload).copy()
+    store = Mock(wraps=storage.store_payload)
+    monkeypatch.setattr(storage, "store_payload", store)
+
+    with pytest.raises(InputPayloadStorageError, match="reactivate") as caught:
+        register_task_input(prepared, config)
+
+    assert "private" not in str(caught.value)
+    assert vars(payload) == before
+    payload.save.assert_not_called()
+    client.put_object.assert_not_called()
+    client.bucket.return_value.blob.return_value.upload_from_string.assert_not_called()
+    if outcome == "corrupt":
+        store.assert_not_called()
+    else:
+        store.assert_called_once()
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs"])
+def test_reused_input_unavailable_read_cannot_overwrite_existing_corrupt_object(
+    monkeypatch, backend
+):
+    prepared, payload, _storage, client, config = _legacy_reused_input_storage(
+        monkeypatch,
+        backend=backend,
+        state="ACTIVE",
+        outcome="unavailable_then_corrupt",
+        prefix="tenant alpha/inputs",
+    )
+    before = vars(payload).copy()
+
+    class PreconditionFailedError(ResultStorageError):
+        code = 412
+
+    precondition = PreconditionFailedError("private precondition")
+    client.put_object.side_effect = precondition
+    blob = client.bucket.return_value.blob.return_value
+    blob.upload_from_string.side_effect = precondition
+
+    with pytest.raises(InputPayloadStorageError, match="reactivate"):
+        register_task_input(prepared, config)
+
+    assert vars(payload) == before
+    payload.save.assert_not_called()
+    if backend == "s3":
+        client.put_object.assert_called_once()
+        assert client.put_object.call_args.kwargs["IfNoneMatch"] == "*"
+        assert client.get_object.call_count == 2
+    else:
+        blob.upload_from_string.assert_called_once()
+        assert blob.upload_from_string.call_args.kwargs["if_generation_match"] == 0
+        assert blob.reload.call_count == 2
+
+
+@pytest.mark.parametrize("state", ["ACTIVE", "PURGED"])
+def test_reused_input_rejects_different_loaded_bytes_without_overwriting(monkeypatch, state):
+    storage = FakePayloadStorage()
+    _use_fake_storage(monkeypatch, storage)
+    prepared = prepare_task_input((), {}, _s3_config())
+    payload, _manager = _reused_input_registry(monkeypatch, prepared, state=state)
+    before = vars(payload).copy()
+    assert prepared.input_reference is not None
+    storage.payloads[prepared.input_reference] = "different"
+    store = Mock(wraps=storage.store_payload)
+    monkeypatch.setattr(storage, "store_payload", store)
+
+    with pytest.raises(InputPayloadValidationError, match="immutable task input bytes"):
+        register_task_input(prepared, _s3_config())
+
+    assert vars(payload) == before
+    assert storage.payloads[prepared.input_reference] == "different"
+    store.assert_not_called()
+    payload.save.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [ResultStorageError("private"), OSError("private")])
+def test_reused_input_restores_after_unavailable_read(monkeypatch, error):
+    storage = FakePayloadStorage()
+    _use_fake_storage(monkeypatch, storage)
+    prepared = prepare_task_input((), {}, _s3_config())
+    payload, _manager = _reused_input_registry(monkeypatch, prepared)
+    storage.payloads.clear()
+    storage.load_error = error
+
+    assert register_task_input(prepared, _s3_config()) is payload
+    assert storage.payloads[prepared.input_reference] == prepared.serialized_payload
+    payload.save.assert_called_once()
