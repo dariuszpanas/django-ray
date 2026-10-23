@@ -127,6 +127,9 @@ criterion for the release candidate being evaluated.
 - `operations.soak-certification`: accept the versioned bounded soak and
   failure-certification report owned by issue 370. Every submitted task needs
   an explainable durable outcome and cleanup must remain within named limits.
+  The [proposed soak contract](testing/soak-certification.md) defines profiles
+  and report checks; it includes no execution evidence and this criterion
+  remains pending.
 
 ## Adoption evidence
 
