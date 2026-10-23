@@ -128,6 +128,10 @@ creation and kernel-uninterruptible tasks can exceed ordinary user-space timing 
 the report must preserve `cleanup_unconfirmed` instead of promising successful
 cleanup. The command does not kill unrelated application or Ray processes.
 
+A success receipt cannot override an unsuccessful supervisor exit. With confirmed
+cleanup, doctor marks the affected probe's primary section `unavailable` /
+`probe_failed` and retains its other completed sections as dated observations.
+
 The caller must run on its main thread with the default `SIGCHLD` disposition;
 ignored/custom child-reaping handlers are unsupported and are not changed. Other
 caller code must not independently reap the command's owned children. The

@@ -97,7 +97,15 @@ def test_unconfirmed_cleanup_preserves_dated_counts_and_forces_incomplete_report
         assert "cleanup_confirmed" in contracts.render(report, as_json=as_json)
 
 
-def test_parent_exposes_failure_after_all_sections_were_emitted(monkeypatch):
+@pytest.mark.parametrize(
+    "code,outcome",
+    [
+        ("probe_failed", "unavailable"),
+        ("probe_protocol_invalid", "unavailable"),
+        ("probe_timeout", "budget_exhausted"),
+    ],
+)
+def test_parent_exposes_failure_after_all_sections_were_emitted(monkeypatch, code, outcome):
     monkeypatch.setattr(runner, "peek_status", lambda process: process.status)
     monkeypatch.setattr(
         runner.subprocess, "Popen", lambda *_args, **_kwargs: fake_process(returncode=2)
@@ -111,9 +119,7 @@ def test_parent_exposes_failure_after_all_sections_were_emitted(monkeypatch):
                     contracts.section_frame(name, contracts.observation("observed", "observed"))
                 )
             )
-        receive(
-            contracts.encode({"kind": "done", "code": "probe_failed", "cleanup_confirmed": True})
-        )
+        receive(contracts.encode({"kind": "done", "code": code, "cleanup_confirmed": True}))
         return "probe_failed"
 
     monkeypatch.setattr(runner, "read_frames", read)
@@ -121,8 +127,43 @@ def test_parent_exposes_failure_after_all_sections_were_emitted(monkeypatch):
     assert runner._run_probe(
         "database", "owned.settings", "default", time.monotonic() + 3, sections
     )
-    assert sections["database"]["code"] == "probe_failed"
+    assert sections["database"]["code"] == code
+    assert sections["database"]["outcome"] == outcome
     assert sections["work"]["code"] == "observed"
+
+
+@pytest.mark.parametrize("probe_name", ["configuration", "database"])
+@pytest.mark.parametrize("returncode", [1, pytest.param(-9, id="signalled")])
+def test_success_receipt_cannot_hide_failed_supervisor_exit(monkeypatch, probe_name, returncode):
+    process = fake_process(returncode=returncode)
+    monkeypatch.setattr(runner, "peek_status", lambda child: child.status)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    names = ("configuration",) if probe_name == "configuration" else contracts.DATABASE_SECTIONS
+    completed = {name: contracts.observation("observed", "observed") for name in names}
+
+    def read(_process, _deadline, receive, _interrupted):
+        receive(contracts.encode({"kind": "started", "pid": 12346}))
+        for name, value in completed.items():
+            receive(contracts.encode(contracts.section_frame(name, value)))
+        receive(contracts.encode({"kind": "done", "code": "observed", "cleanup_confirmed": True}))
+        return "probe_failed"
+
+    monkeypatch.setattr(runner, "read_frames", read)
+    sections = contracts.initial_sections()
+    cleanup = runner._run_probe(
+        probe_name, "owned.settings", "default", time.monotonic() + 3, sections
+    )
+    assert cleanup
+    assert sections[probe_name]["code"] == "probe_failed"
+    assert sections[probe_name]["outcome"] == "unavailable"
+    assert sections[probe_name]["values"] == {}
+    assert {name: sections[name] for name in names if name != probe_name} == {
+        name: value for name, value in completed.items() if name != probe_name
+    }
+    report = contracts.result(sections, contracts.Limits(), 0, cleanup)
+    assert report["exit_code"] == 2 and not report["complete"]
+    process.wait.assert_called_once()
+    assert process.stdout.closed and process.stderr.closed
 
 
 @pytest.mark.parametrize("cleanup", [False, PermissionError("private cleanup details")])
