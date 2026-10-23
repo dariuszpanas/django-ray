@@ -339,6 +339,11 @@ database transaction; earlier tombstones remain. Restart a fresh pass after an
 interruption or failed deletion, rechecking storage outcomes before assuming an
 external delete was rolled back with the database.
 
+Producers reusing a registry row verify or restore the prepared object under its
+lock before attachment, including an `ACTIVE` row left by an uncertain delete.
+This verification adds backend I/O and lock-held latency; it fails closed before
+updating registry state or last use if the exact bytes cannot be established.
+
 These limits bound returned rows, materialized data, and reporting. Registry keys
 must match their bounded SQL projections before any deletion or cursor creation.
 The database checks raw execution state against the terminal vocabulary; references use bounded
