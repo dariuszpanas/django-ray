@@ -54,6 +54,95 @@ remote readiness and inventory sections remain unavailable. See the
 [doctor contract](doctor.md) for finite budgets, supported settings, process
 cleanup, exit codes and the standalone entry point that also bounds startup.
 
+## django_ray_inventory_inputs
+
+Observe filesystem task-input and Ray Job request objects and compare their metadata
+with the selected database's payload registry:
+
+```bash
+python manage.py django_ray_inventory_inputs --database default --format json
+python manage.py django_ray_inventory_inputs --shard abcd --max-entries 1000
+```
+
+The command is read-only. It never reads payload contents, writes registry rows,
+changes task state, or deletes objects, and it has no deletion option. Only the active
+configured filesystem input backend is supported. S3, GCS, digest-only and custom
+backends report unavailable; retained namespaces need separate investigation.
+
+| Option | Description |
+| --- | --- |
+| `--database ALIAS` | Django database alias to inspect; default `default` |
+| `--format text\|json` | Human-readable text (default) or a versioned JSON report |
+| `--total-seconds N` | Supervised time budget; default `15`, range `5..60` seconds |
+| `--max-entries N` | Every visited directory entry, including malformed names and directories; default `1000`, range `1..10000` |
+| `--max-objects N` | Canonical object candidates inspected; default `100`, range `1..500` |
+| `--max-details N` | Detailed fingerprint/classification rows; default `20`, range `0..100` |
+| `--grace-hours N` | Age threshold for unregistered observations; default `24`, range `0..87600` hours |
+| `--shard HEX` | Restrict the pass to one digest shard: exactly four lowercase hexadecimal characters, such as `abcd` for `ab/cd` |
+
+Only exact `aa/bb/<sha256>.json` objects with canonical lowercase digest names
+are candidates. The scan does not follow symlinks, including a configured root
+reached through a symlink in any parent directory; filesystem aliases accepted
+by runtime storage may therefore be unsupported by inventory. Root paths containing
+`..` components are also refused to avoid selecting a different namespace after
+lexical path normalization. The shard selector
+opens its two exact directory components directly and counts both against the
+entry budget; it narrows the namespace without increasing any budget. Directory traversal is unordered and
+there is no continuation cursor: repeating an invocation can revisit the same
+entries. A limit or scan failure leaves the pass incomplete. Even an exhausted
+directory is a dated observation, not a repeatable or atomic filesystem/database
+snapshot; concurrent writes can change what a later pass observes.
+
+| Classification | Interpretation |
+| --- | --- |
+| `registered_active` | Observed object metadata matches one active registry identity |
+| `registered_tombstone` | Observed object metadata matches one purged registry identity |
+| `unregistered_recent` | No matching registry identity was observed; object age is below the selected threshold |
+| `unregistered_aged` | No matching registry identity was observed; object age meets the selected threshold |
+| `ambiguous` | Conflicting aliases or inconsistent metadata prevent a single classification |
+| `malformed` | An entry does not meet the supported namespace or metadata contract |
+| `unavailable` | Required storage or database evidence could not be obtained |
+
+Registry comparison includes both the native storage reference and its
+`rq2ref:v1:` spelling because task inputs and requests share the physical namespace.
+Details identify objects only by fingerprints; output excludes paths, references,
+payloads and raw exception messages. The report retains bounded counters, timestamps
+and completion status. It does not inspect execution references or prove that an
+object is safe to delete. In particular, an aged object can be between reuse by a
+writer and database registration. Absence from this listing also cannot establish
+that a registered object is missing.
+
+JSON uses `schema: "django-ray.payload-inventory"`, `schema_version: 1` and
+`mode: "read-only"`. It includes `backend`, a fixed diagnostic `code`, `complete`,
+`cleanup_confirmed`, `exit_code`, UTC `observed_at`, `elapsed_seconds`, `entries`, `objects`, `counts`,
+`counts_complete`, `details`, `details_omitted` and `limits`. Details contain only
+`object_sha256` and `outcome`; `counts` uses the seven classifications above. Output
+is bounded to 16,384 bytes. Detail omission alone does not make traversal incomplete.
+If a deadline or startup failure prevents final counters, `counts_complete: false`
+marks any counts reconstructed from retained details as lower bounds, not totals.
+`counts_complete: true` means final counters for this invocation were received;
+only `complete` reports whether the selected traversal finished.
+
+Exit `0` means the selected traversal completed with confirmed owned-process
+cleanup; findings alone do not change that status. Exit `2` means incomplete or
+unsupported evidence, including unconfirmed cleanup. Neither exit status certifies
+storage health, ownership or deletion safety. Invalid arguments fail before a scan.
+
+Linux process supervision enforces the command budget after the caller's Django
+startup. Its fresh interpreter needs an importable trusted settings module and
+supports the same plain SQLite/PostgreSQL configuration restrictions as
+[doctor](doctor.md#finite-contract). Runtime settings overrides and in-memory
+databases are unsupported. Settings import can itself perform arbitrary Python
+side effects; isolation is not a sandbox. The observation process initializes only
+the package model registry. Timeout and interruption use owned-process cleanup,
+with [doctor's cleanup limitations](doctor.md#isolation-and-cleanup); unconfirmed
+cleanup cannot establish a complete result.
+
+Use this command explicitly when investigating unregistered filesystem objects.
+Ordinary `django_ray_doctor` still makes no storage listing requests and leaves
+`orphan_inventory` unavailable. Cloud inventory, registered-object availability
+probes and coordinated orphan deletion remain deferred under issue #406.
+
 ## django_ray_worker
 
 Before startup, the configured lease duration must match the database authority.

@@ -153,6 +153,7 @@ test-postgres:
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
 		tests/integration/test_doctor_postgresql.py \
+		tests/integration/test_payload_inventory_postgresql.py \
 		tests/integration/test_lease_policy_postgresql.py \
 		tests/integration/test_runtime_env_maintenance_postgresql.py \
 		tests/integration/test_sample_admission.py \

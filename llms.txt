@@ -60,6 +60,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Configuration](https://django-ray.readthedocs.io/en/latest/configuration/)
 - [Settings reference](https://django-ray.readthedocs.io/en/latest/reference/settings/)
 - [Durable input storage](https://django-ray.readthedocs.io/en/latest/reference/input-storage/)
+- [Payload inventory](https://django-ray.readthedocs.io/en/latest/reference/cli/#django_ray_inventory_inputs):
+  bounded read-only filesystem observations; an unregistered aged object is never
+  deletion authorization. Cloud inventory and registered-object availability remain deferred.
 - [API and UI integration](https://django-ray.readthedocs.io/en/latest/reference/api/)
 - [Kubernetes](https://django-ray.readthedocs.io/en/latest/deployment/kubernetes/)
 - [Operator runbook](https://django-ray.readthedocs.io/en/latest/runbook/)

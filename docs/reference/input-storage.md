@@ -258,6 +258,41 @@ Purging makes historical manual retry impossible until the same object is restor
 reactivated. Choose a retention window that covers the application's audit and manual
 recovery requirements. The command never runs automatically.
 
+## Read-only filesystem inventory
+
+An object can survive a failed database transaction after its storage write. Such
+an object has no registry row for `django_ray_purge_inputs` to discover. Use the
+separate inventory command to observe the active filesystem input namespace:
+
+```bash
+python manage.py django_ray_inventory_inputs --database default --format json
+```
+
+Inventory reads directory and file metadata, never payload bytes. It compares
+canonical digest objects with both native and `rq2ref:v1:` registry identities,
+reporting conflicting aliases or inconsistent metadata as ambiguous. Output uses
+fingerprints rather than paths or storage references. It never modifies storage,
+registry rows or execution state, and does not inspect active execution references.
+
+`unregistered_aged` means an unregistered observation at or beyond `--grace-hours`
+(24 by default), **not safe to delete**. A producer can reuse an old object before
+its registry transaction commits. A final absent-row check and age threshold do
+not resolve that race. Preserve the bytes while investigating writer activity and
+transaction outcomes; inventory is not deletion authorization.
+
+The Linux command has finite entry, object, detail and elapsed-time budgets.
+Every visited directory entry counts, including malformed entries. A four-character
+`--shard` selects one `aa/bb` directory without overriding the bounds. Traversal
+has no cursor or stable order, and a limit or failure makes the pass incomplete.
+Neither a partial scan nor a completed traversal proves that registered objects
+are available or missing. See the [CLI contract](cli.md#django_ray_inventory_inputs)
+for options, supported settings and process-cleanup limitations.
+
+S3/GCS inventory, retained-backend selection, registered-object availability
+probes and safe unregistered-object deletion remain deferred under issue #406.
+The default doctor continues to report `orphan_inventory` as unavailable and
+does not invoke this command or enumerate storage.
+
 ## Coordinated Beta upgrade {#rolling-upgrade}
 
 Migration `0021_ray_job_request_reference` is additive preparation for rq2. It gives
