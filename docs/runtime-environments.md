@@ -199,10 +199,13 @@ snapshots fail permanently without reaching Ray; bulk retry operations skip the 
 row and continue.
 
 Rows created before the snapshot fields existed retain migration's exact canonical `{}`
-payload and have neither a profile nor a hash. Only that complete legacy marker resolves
-the current configured default because migration could not reconstruct the environment
-used by the original task. Any other payload without identity metadata fails closed.
-Canonical `{}` plus its hash is instead a valid identified empty RuntimeEnv.
+payload and have neither a profile nor a hash. Execution and retry refuse this legacy
+marker before resolving current configuration because the original environment cannot
+be reconstructed. Preserve the historical row and its results; after checking the
+original outcome and possible side effects, explicitly enqueue new work under the
+intended configuration. Any other payload without identity metadata also fails closed.
+Canonical `{}` plus its hash remains a valid identified empty RuntimeEnv. See the
+[historical-task upgrade guidance](deployment/upgrading-from-0.5.md#historical-tasks-without-a-runtimeenv-snapshot).
 
 `RAY_RUNTIME_ENV` remains supported as the unnamed default. A backend may also
 provide an inline `RAY_RUNTIME_ENV`, but it cannot combine that option with
