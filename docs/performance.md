@@ -482,6 +482,15 @@ removes its private workspace before the parent accepts the result. Neither mode
 Ray, writes Django database rows, accesses Kubernetes, or activates schema-v3
 production.
 
+The benchmark launcher and its private worker mode require Linux. Both reject
+Windows and macOS before creating a workspace or starting a subprocess. Linux
+workers run in an owned process group so timeout cleanup also stops descendants;
+RSS readings use Linux's KiB units. Resource-free report parsing and validation
+remain importable on developer hosts. This removes the benchmark's native Windows
+launch/termination and macOS RSS accommodations as a focused part of
+[issue #456](https://github.com/dariuszpanas/django-ray/issues/456); cross-platform
+filesystem defenses and host tools that launch Linux containers remain separate.
+
 Run the required decision matrix on Linux from an otherwise idle checkout:
 
 ```bash

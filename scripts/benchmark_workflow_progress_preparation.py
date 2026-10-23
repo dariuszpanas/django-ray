@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.require_linux import require_linux  # noqa: E402
+
 REPORT_SCHEMA_VERSION = 2
 DEFAULT_NODES = (100, 500)
 REQUIRED_SCALE_NODES = (25_000, 100_000, 250_000)
@@ -462,7 +464,7 @@ def _peak_resource_rss() -> int | None:
         value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     except (ImportError, OSError, ValueError):
         return None
-    return value if sys.platform == "darwin" else value * 1024
+    return value * 1024
 
 
 class _RssSampler:
@@ -998,51 +1000,25 @@ def _remove_scenario_root(path: Path, *, expected_parent: Path) -> str:
 
 
 def _launch_worker(command: list[str]) -> subprocess.Popen[str]:
-    launch_options: dict[str, Any] = {}
-    if os.name == "posix":
-        launch_options["start_new_session"] = True
-    elif os.name == "nt":
-        launch_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    else:
-        raise RuntimeError(f"unsupported benchmark process-tree platform: {os.name}")
+    require_linux()
     return subprocess.Popen(
         command,
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        **launch_options,
+        start_new_session=True,
     )
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     tree_error: BaseException | None = None
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except OSError as error:
-            tree_error = error
-    elif os.name == "nt":
-        try:
-            terminated = subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30.0,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            tree_error = error
-        else:
-            if terminated.returncode != 0 and process.poll() is None:
-                tree_error = RuntimeError(
-                    "taskkill did not terminate the owned benchmark launcher tree: "
-                    f"{terminated.stderr.strip()!r}"
-                )
-    else:
-        tree_error = RuntimeError(f"unsupported benchmark process-tree platform: {os.name}")
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        tree_error = error
 
     if tree_error is not None and process.poll() is None:
         try:
@@ -2005,6 +1981,7 @@ def _write_report(report: dict[str, Any], output: Path | None) -> None:
 
 def main() -> int:
     args = _parse_args()
+    require_linux()
     if args.worker:
         return _worker(args)
     nodes = _validated_nodes(args)
