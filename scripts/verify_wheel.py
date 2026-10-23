@@ -75,6 +75,12 @@ EXPECTED_FILES = {
     "django_ray/doctor/runner.py",
     "django_ray/doctor/supervisor.py",
     "django_ray/management/commands/django_ray_doctor.py",
+    "django_ray/management/commands/django_ray_inventory_inputs.py",
+    "django_ray/payload_inventory/__init__.py",
+    "django_ray/payload_inventory/contracts.py",
+    "django_ray/payload_inventory/filesystem.py",
+    "django_ray/payload_inventory/probe.py",
+    "django_ray/payload_inventory/process.py",
     *EXPECTED_TARGET_MODULE_FILES,
     *EXPECTED_WORKFLOW_MODULE_FILES,
     "django_ray/models.py",
@@ -613,6 +619,7 @@ def verify_installed_wheel(expected_version: str) -> None:
 
     expected_commands = {
         "django_ray_doctor",
+        "django_ray_inventory_inputs",
         "django_ray_purge_inputs",
         "django_ray_protocol_status",
         "django_ray_worker",

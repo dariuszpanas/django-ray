@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add bounded Linux read-only filesystem payload observations through
+  `django_ray_inventory_inputs`. Compare canonical object metadata with native and
+  wrapped request registry identities without reading payloads or changing storage
+  or database state. Unregistered age is observational, never deletion authority;
+  cloud inventory, registered-object availability and safe orphan deletion remain
+  deferred. Ordinary doctor diagnostics retain their existing no-storage-scan
+  contract. See the [inventory command](reference/cli.md#django_ray_inventory_inputs).
+
 ### Fixed
 
 - Require Linux before the workflow-progress preparation benchmark creates

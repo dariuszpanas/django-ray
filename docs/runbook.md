@@ -655,6 +655,23 @@ Do not edit either reference column, the payload kind, digest metadata, or JSON
 placeholders by hand. Successful cleanup retains a `PURGED` tombstone and execution
 references for audit.
 
+To investigate filesystem objects left after a rolled-back registration, run
+`django_ray_inventory_inputs --database default --format json` on Linux. It observes
+only the active configured filesystem input namespace and compares object metadata
+with the registry without reading or changing payloads. An `unregistered_aged`
+finding is an observation, not permission to remove the object: an active writer
+may be reusing old bytes before registration commits. Preserve those bytes and
+investigate the writer/transaction history. A `registered_tombstone` finding also
+requires review; it is not a deletion instruction.
+
+Retain the completion status and counters with the bounded fingerprints. Entry,
+object or time limits and scan failures leave incomplete evidence. Use a deliberate
+`--shard` to narrow the namespace when needed; there is no cursor and repeated
+passes are unordered. Inventory does not prove execution inactivity or missing
+registered objects. Cloud backends remain unavailable. See the
+[inventory contract](reference/cli.md#django_ray_inventory_inputs) before interpreting
+the report; ordinary doctor diagnostics do not perform this storage scan.
+
 ## 5) Workflow Progress Retention or Orphan Cleanup Failure
 
 Symptoms:
