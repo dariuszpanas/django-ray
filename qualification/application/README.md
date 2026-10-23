@@ -339,8 +339,9 @@ clipped to the remaining observer time, and no command resets that deadline.
 Successful checkers emit only their existing fixed boolean facts. On failure,
 the host emits at most 512 bytes of fixed JSON identifying the observation phase
 and a `timeout`, `invalid` or `unavailable` category. The private checker retains
-its version-1 failure schema over stdout; the version-2 host failure schema adds
-inventory attribution. The host propagates its child phase
+its version-1 failure schema over stdout; the version-4 host failure schema retains
+inventory attribution and adds nullable fixed worker-readiness and log-reason
+diagnostics. The host propagates its child phase
 only after exact schema validation on a failed command. Unknown fields, duplicate
 keys, oversized output and arbitrary exception or subprocess text cannot enter
 these diagnostics. A child database or API timeout and a host command timeout remain
@@ -352,6 +353,64 @@ identity, lifecycle or readiness predicate. These fields never contain Pod names
 images, labels, raw probe output or exception text. A running container that is
 not ready remains a failure; a recent manager heartbeat alone does not replace
 Kubernetes readiness or the required protected-log observation.
+
+Web and manager log acquisition failures additionally retain a fixed `log_reason`
+for the predicate that failed or could not complete. `source_timestamp` and
+`source_interval` identify container start parsing and interval comparison;
+`command` identifies command execution or its remaining deadline; `command_exit`,
+`output_bound` and `command_stderr` identify nonzero exit, excess bytes and stderr;
+`empty_log`, `first_timestamp` and `start_coverage` identify absent evidence,
+timestamp decoding/length/parsing and observation-start coverage. No command,
+exit value, output bytes, timestamp or exception text is exported. Other phases
+retain a null reason, and child failure and successful receipt schemas remain
+unchanged. A log acquisition or coverage refusal happens before private-content
+comparison and cannot establish either a leak or clear log surfaces. These
+classifications improve future failure attribution; they neither recover the
+cause of an older ambiguous record nor repair or accept its failed run.
+
+Only a running, unrestarted manager with the expected source image that fails
+readiness receives one follow-up command. It calls the existing
+`django_ray_worker_ready` command in that manager with the same queue and Pod
+hostname environment as its Kubernetes probe. The follow-up keeps the original
+inventory failure even if it observes a ready lease; it does not read any logs
+after that failed inventory or retry the qualification.
+
+This optional command spends at most ten seconds within the unchanged 30-second
+observer deadline, retaining one second for the failure report. With fewer than
+four seconds available it records `incomplete` without spawning. A separate
+`timeout --signal=KILL` owner in the manager limits Python/Django startup and the
+probe independently of the host transport. The host reserves a second to signal
+its owned kubectl process group before reaping the leader. Missing `timeout`,
+unavailable transport, malformed output, or unconfirmed local cleanup produces
+an incomplete/error diagnostic, never acceptance. The qualification image copies
+this helper with its other application modules; no image or probe configuration
+is changed, and the optional utility is not assumed available as product proof.
+
+The child suppresses ambient stdout/stderr before emitting three ordered, fixed
+milestones: `helper_entry` before importing Django, `django_setup` before setup,
+and `worker_ready` before calling the readiness command. The first milestone
+does not cover interpreter startup or this helper's own module imports. The host
+reads at most 513 bytes to enforce the unchanged 512-byte stream ceiling and
+discards stderr. Only the exact milestone sequence and a complete worker-lease
+report with a matching actual exit code supply a finite status and reason; that
+observation has phase `complete`. Other results retain unknown status/reason.
+
+On timeout, the last complete milestone can survive only successful local owned
+process cleanup. An incomplete suffix must be a byte prefix of the next permitted
+milestone or finite terminal report. Malformed, reordered, extra or oversized
+output invalidates phase evidence too. Cleanup failure or lost process ownership
+discards all phase/report proof. Milestones do not reset the deadline, and even a
+complete buffered report cannot override a timeout or contradictory exit. Exit
+137 is a timeout-class observation compatible with SIGKILL; it does not prove
+that the deadline owner fired or that the remote process was cleaned up.
+
+The entire version-4 host failure still fits 512 bytes, including phase, outcome,
+bounded exit code and elapsed milliseconds (capped at 10,000). A milestone marks
+the last received boundary, not the exact stalled operation: `worker_ready`
+includes command discovery and settings/database/policy/lease reads. The private
+wrapper does not reproduce the normal management CLI's connection-close teardown.
+This remains a later observation without another Pod UID validation, not proof of
+the original readiness failure's cause or replacement source-bound qualification.
 The API/Admin log surface here means the shared django-web server log, not a
 separate rendered Admin-page assertion.
 
@@ -683,6 +742,20 @@ Pod and event projections retain fixed workload roles and validated event timing
 so a readiness failure can be correlated with its source. Probe failure categories
 are conservative: unknown messages stay unknown, and a probe failure category alone
 does not establish CPU contention, database failure or a dependency regression.
+Manager readiness events additionally expose a fixed `readiness_detail` only for
+Warning/Unhealthy events attributed to the manager container. An exact timeout
+message for the pinned Kubernetes version, fixture command and ten-second probe
+is classified `exec_timeout`. A complete closed worker-readiness JSON report with
+the fixed CLI failure suffix is classified `worker_report`, retaining only its
+known not-ready/error status and reason. Events do not provide an independently
+observed exit code. Ready reports inside failure events, changed commands or
+durations, arbitrary timeout phrases, incomplete output and unknown variants
+remain unknown. Candidate messages are capped at 512 bytes; raw text and command
+arguments are never exported, and the 100-record/64-KiB artifact limits remain.
+An event is a historical aggregate, not UID-linked proof of the later follow-up.
+Even `no_live_lease` does not distinguish an expired lease from an absent,
+inactive or coordinate-mismatched row. These classifications do not repair or
+accept a failed qualification.
 
 
 The [affected-scenario policy](../../docs/deployment/local-kuberay-gate.md) determines which product

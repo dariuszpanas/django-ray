@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include released 0.7.0 in the database upgrade matrix and select it for all
   four native upgrade recipes. Retain historical baselines, the 0.4.0 caller
   default and historical advisory receipts without claiming release acceptance.
+- Retain a bounded, secret-free worker-readiness follow-up when application
+  qualification rejects an unready manager, and fixed reasons for web/manager
+  log acquisition or coverage refusals. Preserve the original failure, observation
+  deadline, byte bounds and strict readiness/coverage requirements; classification
+  does not repair or accept an earlier failed run. Retain validated private
+  readiness phase checkpoints across interrupted captures only after owned
+  cleanup, and distinguish exact fixture exec-timeout events from fixed worker
+  readiness reports without exporting event text or inferring a root cause.
 - Restore worker-owned main-thread `SIGTERM` and `SIGINT` handlers after local,
   Core and Client Ray initialization, including failed attempts, reconnects and
   initialization by command-created runners after connection loss.
