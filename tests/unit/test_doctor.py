@@ -19,7 +19,7 @@ from django.db import connections
 from django.db.utils import ConnectionHandler
 
 from django_ray.doctor import contracts, probe, runner
-from django_ray.models import RayTaskExecution, TaskInputPayload
+from django_ray.models import RayTaskExecution, TaskInputPayload, TaskWorkerLeasePolicy
 
 
 @pytest.mark.parametrize(
@@ -92,11 +92,12 @@ def test_nonlinux_and_unreproducible_settings_are_explicit(monkeypatch):
     )
 
 
-def test_configuration_shape_is_finite_and_secret_free():
+@pytest.mark.parametrize("storage_mode", ["encrypted", "required"])
+def test_configuration_shape_is_finite_and_secret_free(storage_mode):
     material = base64.urlsafe_b64encode(b"a" * 32).decode().rstrip("=")
     config = {
         "RUNNER": "ray_core",
-        "RUNTIME_ENV_STORAGE_MODE": "encrypted",
+        "RUNTIME_ENV_STORAGE_MODE": storage_mode,
         "RUNTIME_ENV_ENCRYPTION_KEYS": {"private-key-name": material},
         "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY": "private-key-name",
         "INPUT_STORAGE_BACKEND": "filesystem",
@@ -105,11 +106,51 @@ def test_configuration_shape_is_finite_and_secret_free():
     settings = SimpleNamespace(DJANGO_RAY=config)
     original = copy.deepcopy(config)
     result = probe.configuration(settings)
+    assert result["outcome"] == result["code"] == "observed"
+    assert result["values"]["storage_mode"] == storage_mode
     assert result["values"]["key_count"] == 1
+    assert result["values"]["active_key_configured"] is True
     assert result["values"]["key_material_shape_valid"]
     assert config == original
-    text = json.dumps(result)
+    sections = contracts.initial_sections()
+    sections["configuration"] = result
+    report = contracts.result(sections, contracts.Limits(), 0, True)
+    text = contracts.render(report, as_json=True)
+    assert len(text.encode()) < contracts.OUTPUT_BYTES
     assert "private" not in text and material not in text
+
+
+def test_required_storage_without_active_key_emits_only_fixed_configuration_diagnostic(monkeypatch):
+    import django.conf
+
+    material = base64.urlsafe_b64encode(b"a" * 32).decode().rstrip("=")
+    selected = SimpleNamespace(
+        DJANGO_RAY={
+            "RUNTIME_ENV_STORAGE_MODE": "required",
+            "RUNTIME_ENV_ENCRYPTION_KEYS": {"private-key-name": material},
+        }
+    )
+    with pytest.raises(probe.ProbeUnavailableError, match="^configuration_invalid$"):
+        probe.configuration(selected)
+    monkeypatch.setattr(django.conf, "Settings", lambda _name: selected)
+    frames = []
+    assert (
+        probe.run(
+            probe="configuration",
+            settings_module="owned.settings",
+            using="default",
+            deadline=time.monotonic() + 5,
+            emit=frames.append,
+        )
+        == 0
+    )
+    assert len(frames) == 1
+    raw = contracts.encode(frames[0])
+    name, value = contracts.parse_section(raw)
+    assert name == "configuration"
+    assert value["outcome"] == "blocker" and value["code"] == "configuration_invalid"
+    assert value["values"] == {}
+    assert b"private" not in raw and material.encode() not in raw
 
 
 @pytest.mark.parametrize(
@@ -390,7 +431,7 @@ def owned_database(tmp_path, django_db_blocker, transactional_db):
             del connections.databases[alias]
 
 
-def observe_owned(alias, path):
+def observe_owned(alias, path, *, config=None, output=None):
     source = SimpleNamespace(
         DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": str(path)}}
     )
@@ -399,17 +440,17 @@ def observe_owned(alias, path):
     wrapper.alias = alias
     original = connections[alias]
     connections[alias] = wrapper
-    output = {}
+    output = {} if output is None else output
     try:
         probe.collect_database(
             using=alias,
             budget=probe.QueryBudget(time.monotonic() + 5),
-            config={"WORKER_LEASE_SECONDS": 60},
+            config={"WORKER_LEASE_SECONDS": 60} if config is None else config,
             emit=lambda name, value: output.update({name: value}),
         )
     finally:
         connections[alias] = original
-    assert wrapper.connection is None
+        assert wrapper.connection is None
     return output
 
 
@@ -441,6 +482,64 @@ def test_sqlite_observation_preserves_original_connection_callback_and_database(
         assert cursor.fetchone() == (1,)
     assert callbacks
     original.connection.set_progress_handler(None, 0)
+
+
+def test_doctor_reports_database_lease_duration_and_revision_without_repair(owned_database):
+    alias, path = owned_database
+    TaskWorkerLeasePolicy.objects.using(alias).update(lease_seconds=90, revision=7)
+    before = path.read_bytes()
+    report = observe_owned(alias, path, config={"WORKER_LEASE_SECONDS": 90})
+    assert report["leases"]["outcome"] == report["leases"]["code"] == "observed"
+    assert report["leases"]["values"]["lease_policy_seconds"] == 90
+    assert report["leases"]["values"]["lease_policy_revision"] == 7
+    assert set(report) == set(contracts.DATABASE_SECTIONS)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("mismatch", "lease_policy_mismatch"),
+        ("missing", "lease_policy_invalid"),
+        ("invalid-revision", "lease_policy_invalid"),
+        ("unavailable", "lease_policy_unavailable"),
+    ],
+)
+def test_doctor_refuses_unusable_lease_authority_before_worker_observations(
+    owned_database, fault, code
+):
+    alias, path = owned_database
+    original = connections[alias]
+    if fault == "mismatch":
+        TaskWorkerLeasePolicy.objects.using(alias).update(lease_seconds=90)
+    elif fault == "missing":
+        TaskWorkerLeasePolicy.objects.using(alias).all().delete()
+    else:
+        with original.cursor() as cursor:
+            if fault == "invalid-revision":
+                cursor.execute("PRAGMA ignore_check_constraints=ON")
+                cursor.execute("UPDATE django_ray_taskworkerleasepolicy SET revision=0")
+                cursor.execute("PRAGMA ignore_check_constraints=OFF")
+            else:
+                cursor.execute("DROP TABLE django_ray_taskworkerleasepolicy")
+    before = path.read_bytes()
+    completed = {}
+    with pytest.raises(probe.ProbeUnavailableError, match=f"^{code}$") as captured:
+        observe_owned(alias, path, output=completed)
+    assert captured.value.code == code
+    assert set(completed) == {"database", "migrations", "protocol"}
+    assert all(value["outcome"] == "observed" for value in completed.values())
+    sections = contracts.initial_sections()
+    sections.update(completed)
+    report = contracts.result(sections, contracts.Limits(), 0, True)
+    assert report["exit_code"] == 2 and not report["complete"]
+    assert report["sections"]["leases"]["values"] == {}
+    assert report["sections"]["work"]["values"] == {}
+    assert path.read_bytes() == before
+    assert connections[alias] is original and original.connection is not None
+    with original.cursor() as cursor:
+        cursor.execute("PRAGMA query_only")
+        assert cursor.fetchone() == (0,)
 
 
 def test_sqlite_counts_never_materialize_payloads_and_detect_nul_states(owned_database):

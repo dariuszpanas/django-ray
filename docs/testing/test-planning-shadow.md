@@ -445,6 +445,23 @@ The reviewed ordinary-CI coverage is:
 | Installed doctor behavior | Build Package calls `verify_wheel.py`, which calls `verify_doctor_wheel.py` |
 | RuntimeEnv maintenance verifier using `DoctorAppConfig` | Build Package also calls `verify_runtime_env_maintenance_wheel.py` |
 
+Review the doctor integration separately from its shared dependency tests.
+`test_doctor.py` covers required storage mode and its missing-key refusal, the
+observed lease-policy seconds/revision, and refusal of mismatched, invalid, or
+unavailable lease policy while preserving partial observations and read-only
+cleanup. Passing the encryption or lease-policy provider's own tests alone does
+not establish those doctor behaviors. The maintenance wheel verifier uses
+`DoctorAppConfig` for its model registry; its success does not substitute for
+doctor configuration or lease-policy assertions.
+
+For retained execution evidence, match passing doctor node IDs to the exact
+checkout tree in each supported-Python job. PostgreSQL cases skipped there need
+passing results from the dedicated PostgreSQL job, and the package job must
+contain both installed-doctor and maintenance-verifier success markers. Aggregate
+suite totals or planner-test excerpts alone do not establish this coverage.
+Such evidence records observed outcomes for that source, not proof that every
+future regression is detected.
+
 The coverage-hook guard checks those three entry points only. It does not pin the
 whole coverage chain: pytest configuration, collection hooks, fixtures, taxonomy,
 test assertions, and verifier implementations still need review. Source changes
