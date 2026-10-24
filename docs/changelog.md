@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require `filelock>=4.2.1` and `virtualenv>=21.14.10` in package metadata and the
+  contributor lock, with matching minimum-dependency and distribution checks.
+  This includes upstream file-lock fixes and prevents temporary virtualenv caches
+  from leaving dangling seed-package links. Document environment recreation and
+  the coordinated upgrade required for applications sharing `SoftReadWriteLock`
+  paths across filelock 3 and 4.
 - Include released 0.7.0 in the database upgrade matrix and select it for all
   four native upgrade recipes. Retain historical baselines, the 0.4.0 caller
   default and historical advisory receipts without claiming release acceptance.
