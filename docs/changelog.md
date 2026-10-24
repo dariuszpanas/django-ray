@@ -60,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before lease release and disconnection. Embedded helpers preserve their
   existing signal-ownership boundary; native shutdown crash diagnosis remains
   separate.
+- Preserve the cluster-mode worker's selected address when a command-created
+  Ray Core runner must initialize after connection loss. Startup, reconnect and
+  submission use that address instead of an independent environment/default
+  lookup. Standalone runners, local-mode setup and existing initialization
+  failure handling remain unchanged; this does not add cluster-identity fencing.
 - Require Linux before the pinned Compiled Graph pilot's private timeout self-test
   launches a child, and remove its native Windows fallback. Preserve the host-side
   Windows containment used for Docker and Kubernetes commands.

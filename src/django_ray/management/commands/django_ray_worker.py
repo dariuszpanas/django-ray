@@ -360,7 +360,7 @@ class Command(BaseCommand):
             try:
                 self._init_local_ray()
                 with self._preserve_shutdown_signal_handlers():
-                    self.ray_core_runner = RayCoreRunner()
+                    self.ray_core_runner = self._create_ray_core_runner()
             except Exception as error:
                 diagnostic = render_console_diagnostic(error)
                 self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {diagnostic}"))
@@ -370,13 +370,21 @@ class Command(BaseCommand):
             try:
                 self._init_cluster_ray(self.cluster_address)
                 with self._preserve_shutdown_signal_handlers():
-                    self.ray_core_runner = RayCoreRunner()
+                    self.ray_core_runner = self._create_ray_core_runner()
             except Exception as error:
                 diagnostic = render_console_diagnostic(error)
                 self.stdout.write(
                     self.style.WARNING(f"Initial cluster connection failed: {diagnostic}")
                 )
                 self.stdout.write("Will retry connection during operation...")
+
+    def _create_ray_core_runner(self) -> RayCoreRunner:
+        """Retain the command's selected cluster if construction reconnects."""
+        if self.execution_mode == "cluster":
+            if self.cluster_address is None:
+                raise CommandError("Cluster execution requires a selected Ray address")
+            return RayCoreRunner(address=self.cluster_address)
+        return RayCoreRunner()
 
     def _get_default_execution_mode(self, settings: dict[str, Any]) -> tuple[str, str | None]:
         """Resolve default worker mode from settings when no CLI mode flag is set.
@@ -1508,7 +1516,7 @@ class Command(BaseCommand):
 
                     # Reinitialize the runner with the new connection
                     with self._preserve_shutdown_signal_handlers():
-                        self.ray_core_runner = RayCoreRunner()
+                        self.ray_core_runner = self._create_ray_core_runner()
 
                     return  # Success!
 
@@ -2722,7 +2730,7 @@ class Command(BaseCommand):
         # Ensure runner is initialized
         if self.ray_core_runner is None:
             with self._preserve_shutdown_signal_handlers():
-                self.ray_core_runner = RayCoreRunner()
+                self.ray_core_runner = self._create_ray_core_runner()
         runner = self.ray_core_runner
 
         try:
