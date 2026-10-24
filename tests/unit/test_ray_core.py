@@ -15,7 +15,9 @@ def test_ray_id_to_string_handles_none() -> None:
 
 
 def _make_runner(monkeypatch) -> RayCoreRunner:
-    monkeypatch.setattr(RayCoreRunner, "_ensure_ray_initialized", lambda self: None)
+    monkeypatch.setattr(
+        RayCoreRunner, "_ensure_ray_initialized", lambda self, *, address=None: None
+    )
     return RayCoreRunner()
 
 

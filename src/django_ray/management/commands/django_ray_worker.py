@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from heapq import nsmallest
-from threading import Event
+from threading import Event, current_thread, main_thread
 from types import FrameType
 from typing import Any
 
@@ -359,7 +359,8 @@ class Command(BaseCommand):
         if self.execution_mode == "local":
             try:
                 self._init_local_ray()
-                self.ray_core_runner = RayCoreRunner()
+                with self._preserve_shutdown_signal_handlers():
+                    self.ray_core_runner = self._create_ray_core_runner()
             except Exception as error:
                 diagnostic = render_console_diagnostic(error)
                 self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {diagnostic}"))
@@ -368,13 +369,22 @@ class Command(BaseCommand):
             assert self.cluster_address is not None
             try:
                 self._init_cluster_ray(self.cluster_address)
-                self.ray_core_runner = RayCoreRunner()
+                with self._preserve_shutdown_signal_handlers():
+                    self.ray_core_runner = self._create_ray_core_runner()
             except Exception as error:
                 diagnostic = render_console_diagnostic(error)
                 self.stdout.write(
                     self.style.WARNING(f"Initial cluster connection failed: {diagnostic}")
                 )
                 self.stdout.write("Will retry connection during operation...")
+
+    def _create_ray_core_runner(self) -> RayCoreRunner:
+        """Retain the command's selected cluster if construction reconnects."""
+        if self.execution_mode == "cluster":
+            if self.cluster_address is None:
+                raise CommandError("Cluster execution requires a selected Ray address")
+            return RayCoreRunner(address=self.cluster_address)
+        return RayCoreRunner()
 
     def _get_default_execution_mode(self, settings: dict[str, Any]) -> tuple[str, str | None]:
         """Resolve default worker mode from settings when no CLI mode flag is set.
@@ -732,20 +742,21 @@ class Command(BaseCommand):
 
         if not ray.is_initialized():
             self.stdout.write("Initializing local Ray instance...")
-            ray.init(
-                ignore_reinit_error=True,
-                # Enable dashboard with task visibility
-                dashboard_host="127.0.0.1",
-                dashboard_port=8265,
-                include_dashboard=True,
-                # Use the current Python executable for workers
-                runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join(sys.path)}},
-                # Enable task/actor events for dashboard
-                _system_config={
-                    "enable_timeline": True,
-                    "task_events_report_interval_ms": 100,
-                },
-            )
+            with self._preserve_shutdown_signal_handlers():
+                ray.init(
+                    ignore_reinit_error=True,
+                    # Enable dashboard with task visibility
+                    dashboard_host="127.0.0.1",
+                    dashboard_port=8265,
+                    include_dashboard=True,
+                    # Use the current Python executable for workers
+                    runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join(sys.path)}},
+                    # Enable task/actor events for dashboard
+                    _system_config={
+                        "enable_timeline": True,
+                        "task_events_report_interval_ms": 100,
+                    },
+                )
             self.stdout.write(self.style.SUCCESS("Ray initialized"))
             self.stdout.write(self.style.SUCCESS("  Dashboard: http://127.0.0.1:8265"))
 
@@ -766,10 +777,11 @@ class Command(BaseCommand):
 
         rendered_address = render_console_diagnostic(address)
         self.stdout.write(f"Connecting to Ray cluster at {rendered_address}...")
-        ray.init(
-            address=address,
-            ignore_reinit_error=True,
-        )
+        with self._preserve_shutdown_signal_handlers():
+            ray.init(
+                address=address,
+                ignore_reinit_error=True,
+            )
         self.stdout.write(self.style.SUCCESS("Connected to Ray cluster"))
         # Show cluster resources
         resources = ray.cluster_resources()
@@ -874,6 +886,27 @@ class Command(BaseCommand):
         """Setup signal handlers for graceful shutdown."""
         signal.signal(signal.SIGTERM, self.handle_shutdown_signal)
         signal.signal(signal.SIGINT, self.handle_shutdown_signal)
+
+    @contextmanager
+    def _preserve_shutdown_signal_handlers(self) -> Generator[None]:
+        """Restore only this command's main-thread handlers after Ray init."""
+        owned_signals = (
+            [
+                signum
+                for signum in (signal.SIGTERM, signal.SIGINT)
+                if signal.getsignal(signum) == self.handle_shutdown_signal
+            ]
+            if current_thread() is main_thread()
+            else []
+        )
+        try:
+            yield
+        finally:
+            # Ray init replaces SIGTERM even for Client connections and may
+            # fail after doing so. Its SystemExit handler must not interrupt
+            # a later graceful handoff before the lease can be released.
+            for signum in owned_signals:
+                signal.signal(signum, self.handle_shutdown_signal)
 
     def _write_worker_output(self, message: str, *, minimum_verbosity: int = 1) -> None:
         """Write informational worker output when Django verbosity permits it."""
@@ -1482,7 +1515,8 @@ class Command(BaseCommand):
                         self._mark_stale_ray_core_tasks_as_lost()
 
                     # Reinitialize the runner with the new connection
-                    self.ray_core_runner = RayCoreRunner()
+                    with self._preserve_shutdown_signal_handlers():
+                        self.ray_core_runner = self._create_ray_core_runner()
 
                     return  # Success!
 
@@ -2695,7 +2729,8 @@ class Command(BaseCommand):
 
         # Ensure runner is initialized
         if self.ray_core_runner is None:
-            self.ray_core_runner = RayCoreRunner()
+            with self._preserve_shutdown_signal_handlers():
+                self.ray_core_runner = self._create_ray_core_runner()
         runner = self.ray_core_runner
 
         try:

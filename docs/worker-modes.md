@@ -80,6 +80,22 @@ driver per durable task. This is the lowest-overhead remote mode for bounded sho
 tasks, high throughput, and multi-stage workflows when the task-manager connection is
 operated as part of the workload lifetime.
 
+Cluster-mode workers retain the selected command address when constructing a
+Ray Core runner during startup, reconnect or submission. If the connection
+disappears between the command's check and runner construction, any initialization
+by that constructor uses the same address instead of independently choosing the
+ambient `RAY_ADDRESS` or `auto`. This preserves the selected connection argument;
+it does not attest the identity of an already-connected runtime or provide a
+target fence across every later Ray call.
+If cluster-mode construction has no selected address, it refuses before creating
+a runner instead of falling back to the environment.
+
+Standalone `RayCoreRunner()` calls retain their environment/default lookup, and
+local-mode initialization keeps its existing discovery and helper configuration.
+Initialization failures retain the existing control flow: startup continues to
+the worker loop for recovery, reconnect tries at most five times, and a missing
+runner's constructor failure during submission reaches the worker's outer cleanup.
+
 Ray Client is not an independent job lifecycle. An unexpected disconnect receives a
 30-second reconnect grace period by default; Ray's
 `RAY_CLIENT_RECONNECT_GRACE_PERIOD` environment variable can change it. If the task
