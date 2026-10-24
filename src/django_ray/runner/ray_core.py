@@ -298,18 +298,20 @@ class RayCoreRunner(BaseRunner):
     _pending_tasks: dict[int, RayCoreHandle] = field(default_factory=dict)
     _ray_initialized: bool = False
 
-    def __init__(self) -> None:
+    def __init__(self, *, address: str | None = None) -> None:
         """Initialize the Ray Core runner."""
         self._pending_tasks: dict[int, RayCoreHandle] = {}
-        self._ensure_ray_initialized()
+        self._ensure_ray_initialized(address=address)
 
-    def _ensure_ray_initialized(self) -> None:
+    def _ensure_ray_initialized(self, *, address: str | None = None) -> None:
         """Ensure Ray is initialized."""
         import ray
 
         if not ray.is_initialized():
-            # Get address from environment or use auto
-            address = os.environ.get("RAY_ADDRESS", "auto")
+            # A command-owned runner retains its selected cluster on recovery.
+            # Standalone callers keep the environment/default lookup.
+            if address is None:
+                address = os.environ.get("RAY_ADDRESS", "auto")
             ray.init(address=address, ignore_reinit_error=True)
 
     def submit(
