@@ -3,13 +3,178 @@
 import io
 import json
 import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from qualification.application import protected_log_diagnostics as diagnostics
 from qualification.application import protected_logs as logs
+from qualification.application import safe_diagnostics as safe
 from tests.unit.test_application_protected_surfaces import IMAGE, host_fixture
+
+
+def manager_event(message):
+    return {
+        "type": "Warning",
+        "reason": "Unhealthy",
+        "involvedObject": {
+            "kind": "Pod",
+            "name": "django-manager-a1-b2",
+            "fieldPath": "spec.containers{manager}",
+        },
+        "message": message,
+    }
+
+
+def embedded_report(status, reason):
+    return (
+        safe.READINESS_PREFIX
+        + json.dumps(
+            {"schema_version": 1, "scope": "worker_lease", "status": status, "reason": reason},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + safe.READINESS_SUFFIX
+    )
+
+
+def test_timeout_classifier_is_bound_to_actual_pinned_manager_probe():
+    pending = list(yaml.safe_load_all(Path("qualification/application/core.yaml").read_text()))
+    probes = []
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if item.get("name") == "manager" and "readinessProbe" in item:
+                probes.append(item["readinessProbe"])
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    assert len(probes) == 1
+    probe = probes[0]
+    assert " ".join(probe["exec"]["command"]) == safe.MANAGER_READINESS_COMMAND
+    assert probe["timeoutSeconds"] == 10
+    message = (
+        "Readiness probe failed: command timed out: "
+        + json.dumps(" ".join(probe["exec"]["command"]))
+        + f" timed out after {probe['timeoutSeconds']}s"
+    )
+    assert message == safe.MANAGER_READINESS_TIMEOUT
+    assert safe.resources("events", [manager_event(message)])[0]["readiness_detail"] == {
+        "kind": "exec_timeout",
+        "status": "unknown",
+        "reason": "unknown",
+    }
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        (status, reason)
+        for status, reasons in logs.readiness.REASONS.items()
+        if status != "ready"
+        for reason in reasons
+    ],
+)
+def test_event_embedded_report_retains_only_fixed_facts_without_exit_claim(status, reason):
+    event = manager_event(embedded_report(status, reason))
+    value = safe.resources("events", [event])[0]
+    assert value["probe_failure"] == "readiness_failed"
+    assert value["readiness_detail"] == {
+        "kind": "worker_report",
+        "status": status,
+        "reason": reason,
+    }
+    assert "exit_code" not in value["readiness_detail"]
+
+
+@pytest.mark.parametrize(
+    "change", ["type", "reason", "kind", "role", "container", "missing_container"]
+)
+def test_event_detail_requires_exact_manager_event_coordinates(change):
+    event = manager_event(safe.MANAGER_READINESS_TIMEOUT)
+    if change in {"type", "reason"}:
+        event[change] = "private-canary"
+    elif change == "kind":
+        event["involvedObject"]["kind"] = "Deployment"
+    elif change == "role":
+        event["involvedObject"]["name"] = "django-web-a1-b2"
+    elif change == "container":
+        event["involvedObject"]["fieldPath"] = "spec.containers{web}"
+    else:
+        event["involvedObject"].pop("fieldPath")
+    value = safe.resources("events", [event])[0]
+    assert value["readiness_detail"] == {
+        "kind": "unknown",
+        "status": "unknown",
+        "reason": "unknown",
+    }
+    assert "private-canary" not in json.dumps(value)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        safe.MANAGER_READINESS_TIMEOUT.replace("10s", "11s"),
+        safe.MANAGER_READINESS_TIMEOUT.replace("django_ray_worker_ready", "private-command"),
+        "Readiness probe failed: private-canary timed out",
+        "private-canary " + safe.MANAGER_READINESS_TIMEOUT,
+        safe.MANAGER_READINESS_TIMEOUT + " private-canary",
+        "(combined from similar events): " + safe.MANAGER_READINESS_TIMEOUT,
+        embedded_report("ready", "live_lease"),
+        embedded_report("not_ready", "private-canary"),
+        embedded_report({"private-canary": True}, "no_live_lease"),
+        embedded_report("not_ready", ["private-canary"]),
+        embedded_report("not_ready", "no_live_lease").replace(
+            '"schema_version":1', '"schema_version":true'
+        ),
+        embedded_report("not_ready", "no_live_lease").replace(
+            '"schema_version":1', '"schema_version":1,"schema_version":1'
+        ),
+        embedded_report("not_ready", "no_live_lease").replace(
+            '"scope":', '"private":"canary","scope":'
+        ),
+        embedded_report("not_ready", "no_live_lease")[:-1],
+        embedded_report("not_ready", "no_live_lease") + "private-canary",
+        embedded_report("not_ready", "no_live_lease").replace("CommandError", "private-canary"),
+        "x" * 513,
+        "\ud800",
+        None,
+        {"private-canary": True},
+    ],
+)
+def test_unrecognized_event_output_stays_unknown_without_text(message):
+    value = safe.resources("events", [manager_event(message)])[0]
+    assert value["readiness_detail"] == {
+        "kind": "unknown",
+        "status": "unknown",
+        "reason": "unknown",
+    }
+    assert "private" not in json.dumps(value)
+    assert "timed out" not in json.dumps(value)
+
+
+def test_maximal_event_details_fit_existing_aggregate_artifact_budget():
+    event = manager_event(embedded_report("error", "lease_policy_unavailable"))
+    timestamp = "2026-10-23T14:39:13.123456789Z"
+    event.update(
+        count=1.2345678901234567e-100,
+        firstTimestamp=timestamp,
+        lastTimestamp=timestamp,
+        eventTime=timestamp,
+        series={"lastObservedTime": timestamp},
+    )
+    values = safe.resources("events", [event] * 101)
+    assert len(values) == 100
+    assert all(value["readiness_detail"]["kind"] == "worker_report" for value in values)
+    assert len(json.dumps(values, indent=2).encode()) <= 65536
+
+
+@pytest.fixture(autouse=True)
+def no_live_readiness_command(monkeypatch):
+    monkeypatch.setattr(logs.readiness, "observe", lambda **kwargs: logs.readiness.empty())
 
 
 def child_record():
@@ -74,7 +239,7 @@ def test_each_host_timeout_retains_only_its_phase(position, phase):
     assert value["failure_phase"] == phase
     assert value["failure_type"] == "timeout"
     assert value["child_phase"] is None
-    assert value["schema_version"] == 2
+    assert value["schema_version"] == 5
     assert value["source_role"] is None
     assert value["inventory_reason"] == (
         "inventory_read" if phase in {"inventory", "final_inventory"} else None
@@ -395,6 +560,139 @@ def test_forged_inventory_attribution_is_dropped(field, invalid):
     assert value["source_role"] is None
     assert value["inventory_reason"] is None
     assert "private-canary" not in encoded
+
+
+@pytest.mark.parametrize("role", ["web", "manager"])
+@pytest.mark.parametrize(
+    "fault,reason,kind",
+    [
+        ("source_timestamp", "source_timestamp", "invalid"),
+        ("source_late", "source_interval", "invalid"),
+        ("command_timeout", "command", "timeout"),
+        ("command_error", "command", "unavailable"),
+        ("command_exit", "command_exit", "invalid"),
+        ("output_bound", "output_bound", "invalid"),
+        ("command_stderr", "command_stderr", "invalid"),
+        ("empty_log", "empty_log", "invalid"),
+        ("timestamp_encoding", "first_timestamp", "invalid"),
+        ("timestamp_bound", "first_timestamp", "invalid"),
+        ("timestamp_parse", "first_timestamp", "invalid"),
+        ("timestamp_late", "start_coverage", "invalid"),
+    ],
+)
+def test_log_acquisition_and_coverage_refusals_have_fixed_reasons(role, fault, reason, kind):
+    underlying, calls = host_fixture()
+
+    def run(argv, **kwargs):
+        result = underlying(argv, **kwargs)
+        if "get" in argv and fault.startswith("source_"):
+            inventory = json.loads(result.stdout)
+            pod = next(
+                item
+                for item in inventory["items"]
+                if item["metadata"]["labels"]["app"] == f"django-{role}"
+            )
+            pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"] = (
+                "private-canary" if fault == "source_timestamp" else datetime.now(UTC).isoformat()
+            )
+            return subprocess.CompletedProcess(argv, 0, json.dumps(inventory).encode(), b"")
+        if "logs" not in argv or f"django-{role}-pod" not in argv:
+            return result
+        if fault == "command_timeout":
+            raise subprocess.TimeoutExpired(["private-canary"], 5, output=b"private-canary")
+        if fault == "command_error":
+            raise OSError("private-canary")
+        raw = {
+            "output_bound": b"x" * (logs.LOG_BYTES + 1),
+            "empty_log": b"",
+            "timestamp_encoding": b"\xff private-canary",
+            "timestamp_bound": b"x" * 41 + b" private-canary",
+            "timestamp_parse": b"private-canary private-canary",
+            "timestamp_late": datetime.now(UTC).isoformat().encode() + b" private-canary",
+        }.get(fault, result.stdout)
+        return subprocess.CompletedProcess(
+            argv,
+            1 if fault == "command_exit" else 0,
+            raw,
+            b"private-canary" if fault == "command_stderr" else b"",
+        )
+
+    with pytest.raises((ValueError, OSError, subprocess.TimeoutExpired)) as caught:
+        observe(run)
+    encoded = diagnostics.diagnostic(caught.value, "host")
+    value = json.loads(encoded)
+    assert value["failure_phase"] == f"{role}_log"
+    assert value["failure_type"] == kind
+    assert value["log_reason"] == reason
+    assert value["source_role"] is None
+    assert value["inventory_reason"] is None
+    assert value["worker_readiness"] is None
+    assert "private-canary" not in encoded
+    assert len(encoded.encode()) + 1 <= diagnostics.MAX_BYTES
+    assert not any("--inspect-stdin" in argv for argv, _ in calls)
+    assert sum("get" in argv for argv, _ in calls) == 1
+
+
+@pytest.mark.parametrize("invalid", ["private-canary", {"message": "private-canary"}, 1])
+def test_forged_log_reason_is_never_exported(invalid):
+    error = ValueError("private-canary")
+    value = json.loads(diagnostics.diagnostic(error, "host"))
+    value.update(failure_phase="manager_log", log_reason=invalid)
+    error.__dict__["_protected_log_failure"] = value
+    encoded = diagnostics.diagnostic(error, "host")
+    assert json.loads(encoded)["failure_phase"] == "unavailable"
+    assert json.loads(encoded)["log_reason"] is None
+    assert "private-canary" not in encoded
+
+
+def test_log_reason_cannot_be_attached_to_an_unrelated_phase_or_child():
+    for scope in ("host", "child"):
+        error = ValueError("private-canary")
+        value = json.loads(diagnostics.diagnostic(error, scope))
+        value["log_reason"] = "command_exit"
+        error.__dict__["_protected_log_failure"] = value
+        retained = json.loads(diagnostics.diagnostic(error, scope))
+        assert retained["failure_phase"] == "unavailable"
+        assert retained.get("log_reason") is None
+        assert ("log_reason" in retained) is (scope == "host")
+
+
+def test_later_failure_does_not_retain_the_successful_log_stage_reason():
+    underlying, _ = host_fixture()
+
+    def run(argv, **kwargs):
+        if "--inspect-stdin" in argv:
+            raise OSError("private-canary")
+        return underlying(argv, **kwargs)
+
+    with pytest.raises(OSError) as caught:
+        observe(run)
+    value = json.loads(diagnostics.diagnostic(caught.value, "host"))
+    assert value["failure_phase"] == "private_compare"
+    assert value["log_reason"] is None
+
+
+@pytest.mark.parametrize("role", ["web", "manager"])
+def test_exhausted_observer_deadline_refuses_log_command_with_fixed_reason(monkeypatch, role):
+    underlying, calls = host_fixture()
+    clock = [0.0]
+    monkeypatch.setattr(logs.time, "monotonic", lambda: clock[0])
+
+    def run(argv, **kwargs):
+        result = underlying(argv, **kwargs)
+        if (role == "web" and "--inspect-status" in argv) or (
+            role == "manager" and "logs" in argv and "django-web-pod" in argv
+        ):
+            clock[0] = logs.SECONDS
+        return result
+
+    with pytest.raises(TimeoutError) as caught:
+        observe(run)
+    value = json.loads(diagnostics.diagnostic(caught.value, "host"))
+    assert value["failure_phase"] == f"{role}_log"
+    assert value["failure_type"] == "timeout"
+    assert value["log_reason"] == "command"
+    assert not any("logs" in argv and f"django-{role}-pod" in argv for argv, _ in calls)
 
 
 @pytest.mark.parametrize("role", ["django-manager", "django-web", "ray-head", "ray-worker"])

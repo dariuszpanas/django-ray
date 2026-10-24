@@ -14,6 +14,7 @@ from pathlib import Path
 
 import yaml
 
+from qualification.monitoring.census_diagnostics import CensusError, record
 from qualification.monitoring.render import config_digest, pod_limits, render, validate_resources
 from qualification.platform_auth import observe as observe_ray_auth
 
@@ -133,7 +134,22 @@ def pods_ready(payload: dict) -> bool:
 def census(payload: dict, images: dict[str, str]) -> list[dict]:
     """Reject missing/extra components, restarts and identity mismatches."""
     if not pods_ready(payload):
-        raise ValueError("Monitoring pod census is not ready")
+        # Classify only the existing failed predicate, using the same snapshot.
+        # Keep pods_ready's acceptance and short-circuit ordering unchanged.
+        pods = payload.get("items", [])
+        reason = "pod_count" if len(pods) != 6 else "unclassified"
+        if len(pods) == 6:
+            for pod in pods:
+                if pod.get("status", {}).get("phase") != "Running":
+                    reason = "pod_phase"
+                    break
+                if not any(
+                    condition.get("type") == "Ready" and condition.get("status") == "True"
+                    for condition in pod.get("status", {}).get("conditions", [])
+                ):
+                    reason = "pod_ready_condition"
+                    break
+        raise CensusError(reason, "Monitoring pod census is not ready")
     expected = {
         "django-web": "application",
         "postgres": "postgres",
@@ -151,15 +167,22 @@ def census(payload: dict, images: dict[str, str]) -> list[dict]:
             name = container["name"]
             status = statuses.get(name, {})
             image_id = status.get("imageID", "")
-            if (
-                name not in expected
-                or name in seen
-                or container["image"] != images[expected[name]]
-                or status.get("restartCount") != 0
-                or not status.get("ready")
-                or re.fullmatch(r"[a-zA-Z0-9./:_@-]{0,240}sha256:[0-9a-f]{64}", image_id) is None
-            ):
-                raise ValueError("Monitoring container census differs")
+            message = "Monitoring container census differs"
+            if name not in expected:
+                raise CensusError("unexpected_component", message)
+            if name in seen:
+                raise CensusError("duplicate_component", message)
+            if container["image"] != images[expected[name]]:
+                raise CensusError("spec_image_mismatch", message)
+            if status.get("restartCount") != 0:
+                reason = (
+                    "container_restart_count" if name in statuses else "missing_container_status"
+                )
+                raise CensusError(reason, message)
+            if not status.get("ready"):
+                raise CensusError("container_not_ready", message)
+            if re.fullmatch(r"[a-zA-Z0-9./:_@-]{0,240}sha256:[0-9a-f]{64}", image_id) is None:
+                raise CensusError("image_id_invalid", message)
             seen.add(name)
             observed.append(
                 {
@@ -171,14 +194,35 @@ def census(payload: dict, images: dict[str, str]) -> list[dict]:
                 }
             )
         for status in pod["status"].get("initContainerStatuses", []):
-            if (
-                status.get("restartCount") != 0
-                or status.get("state", {}).get("terminated", {}).get("exitCode") != 0
-            ):
-                raise ValueError("Monitoring initialization did not finish cleanly")
+            message = "Monitoring initialization did not finish cleanly"
+            if status.get("restartCount") != 0:
+                raise CensusError("init_restart_count", message)
+            if status.get("state", {}).get("terminated", {}).get("exitCode") != 0:
+                raise CensusError("init_not_successful", message)
     if seen != set(expected):
-        raise ValueError("Monitoring component census is incomplete")
+        raise CensusError("component_set_incomplete", "Monitoring component census is incomplete")
     return sorted(observed, key=lambda item: item["component"])
+
+
+def final_pod_census(kube: Kubernetes, images: dict[str, str], receipt: dict) -> dict:
+    """Retain a failure code without another query or changing acceptance."""
+    try:
+        live_pods = kube.get("pods")
+    except Exception:
+        receipt["census_diagnostic"] = record("pod_fetch", "query_failed")
+        raise
+    try:
+        receipt["containers"] = census(live_pods, images)
+    except CensusError as error:
+        receipt["census_diagnostic"] = record("pod_census", error.reason)
+        raise
+    except (AttributeError, KeyError, TypeError, IndexError):
+        receipt["census_diagnostic"] = record("pod_census", "malformed_payload")
+        raise
+    except Exception:
+        receipt["census_diagnostic"] = record("pod_census", "unclassified")
+        raise
+    return live_pods
 
 
 def surfaces(services: dict, ingresses: dict, deployment: dict, config: dict) -> None:
@@ -419,8 +463,7 @@ def run(images: dict[str, str], output: Path) -> int:
             deadline=kube.deadline,
         )
         receipt["phase"] = "census"
-        live_pods = kube.get("pods")
-        receipt["containers"] = census(live_pods, images)
+        live_pods = final_pod_census(kube, images, receipt)
         receipt["live_resources"] = validate_resources(live_pods["items"])
         receipt["operator"] = operator_census(
             json.loads(kube.call("get", "pods", "--namespace=kuberay-system", "-o", "json"))

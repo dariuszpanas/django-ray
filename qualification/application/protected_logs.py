@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from qualification.application import protected_log_diagnostics as diagnostics
+from qualification.application import worker_readiness_diagnostics as readiness
+from qualification.application import worker_resource_diagnostics as resources
 from qualification.application.protected_database import read_owned_rows
 from qualification.application.protected_runtime import (
     assert_clear,
@@ -159,7 +161,11 @@ def observe(
     # Restore the runner's original paths so its explicit context remains authoritative.
     environment = {**os.environ, "KUBECONFIG": kubeconfig_paths}
 
-    def command(arguments, *, data=None, maximum=LOG_BYTES, limit=5, private=False):
+    def command(
+        arguments, *, data=None, maximum=LOG_BYTES, limit=5, private=False, log_surface=False
+    ):
+        if log_surface:
+            diagnostics.log("command")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Protected log observation deadline expired")
@@ -175,8 +181,15 @@ def observe(
             failure = diagnostics.parse_child(result.stdout)
             if failure is not None:
                 raise failure
-        if result.returncode or len(result.stdout) > maximum or result.stderr:
-            raise ValueError("Protected log command did not return complete bounded evidence")
+        for reason, invalid in (
+            ("command_exit", lambda: result.returncode),
+            ("output_bound", lambda: len(result.stdout) > maximum),
+            ("command_stderr", lambda: result.stderr),
+        ):
+            if log_surface:
+                diagnostics.log(reason)
+            if invalid():
+                raise ValueError("Protected log command did not return complete bounded evidence")
         return result.stdout
 
     def inventory():
@@ -229,6 +242,30 @@ def observe(
                     raise ValueError("Protected log application source is not live and ready")
                 diagnostics.inventory(container, "container_not_ready")
                 if state.get("ready") is not True:
+                    if container == "manager":
+                        # The failed inventory stays authoritative even if a
+                        # later command observes a ready lease. Never read logs
+                        # or extend this observer's deadline to obtain a report.
+                        report = readiness.empty()
+                        try:
+                            report = readiness.observe(
+                                prefix=[
+                                    "kubectl",
+                                    "--context",
+                                    context,
+                                    "--request-timeout=5s",
+                                    "-n",
+                                    namespace,
+                                ],
+                                pod=pod["metadata"]["name"],
+                                environment=environment,
+                                deadline=deadline,
+                                on_resources=diagnostics.worker_resources,
+                            )
+                        except Exception:
+                            pass  # Optional diagnostics cannot replace this failure.
+                        if readiness.valid(report):
+                            diagnostics.worker_readiness(report)
                     raise ValueError("Protected log application source is not live and ready")
             diagnostics.inventory(container, "source_coordinates")
             found[app] = (
@@ -299,7 +336,10 @@ def observe(
     for app in ("django-web", "django-manager"):
         diagnostics.phase("web_log" if app == "django-web" else "manager_log")
         name, _, container, started = before[app]
-        if datetime.fromisoformat(started) > start:
+        diagnostics.log("source_timestamp")
+        source_started = datetime.fromisoformat(started)
+        diagnostics.log("source_interval")
+        if source_started > start:
             raise ValueError("Protected log source was replaced during the observation interval")
         raw = command(
             [
@@ -310,12 +350,19 @@ def observe(
                 "--timestamps=true",
                 "--tail=-1",
                 f"--limit-bytes={LOG_BYTES + 1}",
-            ]
+            ],
+            log_surface=True,
         )
+        diagnostics.log("empty_log")
         if not raw:
             raise ValueError("Protected log source has no interval evidence")
+        diagnostics.log("first_timestamp")
         first = raw.split(b" ", 1)[0].decode()
-        if len(first) > 40 or datetime.fromisoformat(first) > start:
+        if len(first) > 40:
+            raise ValueError("Protected log source does not cover the observation start")
+        first_observed = datetime.fromisoformat(first)
+        diagnostics.log("start_coverage")
+        if first_observed > start:
             raise ValueError("Protected log source does not cover the observation start")
         logs.append(base64.b64encode(raw).decode())
     diagnostics.phase("private_compare")
@@ -339,6 +386,50 @@ def observe(
     }
 
 
+def _retain_host_failure(output: Path, diagnostic: str) -> bool:
+    """Best-effort retention cannot replace the original observation failure."""
+    try:
+        raw = (diagnostic + "\n").encode("utf-8")
+        if len(raw) > diagnostics.MAX_BYTES:
+            return False
+        value = json.loads(diagnostic)
+        if not diagnostics._valid(value, "host") or diagnostic != json.dumps(
+            value, sort_keys=True, separators=(",", ":")
+        ):
+            return False
+        try:
+            output.with_name(output.name + ".failure-resources.json").lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            # Do not pair this failure with orphaned earlier resource evidence.
+            return False
+        sidecar = output.with_name(output.name + ".failure.json")
+        with sidecar.open("xb") as stream:
+            if stream.write(raw) != len(raw):
+                return False
+        return True
+    except Exception:
+        # Never render storage errors or overwrite earlier evidence, including
+        # an existing symlink. The original stderr diagnostic and exit survive.
+        return False
+
+
+def _retain_resources(output: Path, value: dict | None) -> None:
+    """Optional closed prefix facts cannot change the failed host observation."""
+    try:
+        if not resources.valid_record(value):
+            return
+        raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(raw) > resources.MAX_BYTES:
+            return
+        sidecar = output.with_name(output.name + ".failure-resources.json")
+        with sidecar.open("xb") as stream:
+            stream.write(raw)
+    except Exception:
+        pass
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     private = parser.add_mutually_exclusive_group()
@@ -351,6 +442,7 @@ def main(argv=None) -> int:
     parser.add_argument("--generation", choices=("before", "after"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+    failure_output = None
     try:
         if args.inspect_stdin or args.inspect_status:
             inspect_stdin(status_only=args.inspect_status)
@@ -366,6 +458,7 @@ def main(argv=None) -> int:
                 or args.output is None
             ):
                 raise ValueError("Protected log observer requires its owned namespace and image")
+            failure_output = args.output
             receipt = observe(
                 context=args.context,
                 kubeconfig_paths=args.kubeconfig_paths,
@@ -378,8 +471,11 @@ def main(argv=None) -> int:
                 stream.write(json.dumps(receipt, sort_keys=True))
     except Exception as error:
         private = args.inspect_stdin or args.inspect_status
+        diagnostic = diagnostics.diagnostic(error, "child" if private else "host")
+        if failure_output is not None and _retain_host_failure(failure_output, diagnostic):
+            _retain_resources(failure_output, diagnostics.resource_diagnostic(error))
         print(
-            diagnostics.diagnostic(error, "child" if private else "host"),
+            diagnostic,
             file=sys.stdout if private else sys.stderr,
             flush=True,
         )
