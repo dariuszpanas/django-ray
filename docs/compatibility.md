@@ -326,9 +326,9 @@ dependency is no longer supportable. A published dependency security fix is such
 support boundary: the repository lock protects its own reproducible environment, while
 the declared lower bound controls what a downstream fresh install may resolve.
 
-The runtime security floors also require `certifi>=2026.10.19`, `multidict>=6.9.1`,
-`opentelemetry-api>=1.45.1`, `urllib3>=2.8.0`, and `virtualenv>=21.14.9`.
-These dependencies arrive through Ray's mandatory
+The runtime security floors also require `certifi>=2026.10.19`, `filelock>=4.2.1`,
+`multidict>=6.9.1`, `opentelemetry-api>=1.45.1`, `urllib3>=2.8.0`, and
+`virtualenv>=21.14.10`. These dependencies arrive through Ray and its mandatory
 extras; explicit package requirements protect fresh downstream installs as well
 as the committed lock. Updating an unrelated dependency does not necessarily
 refresh these transitive packages. Current advisory checks can therefore fail
@@ -341,6 +341,17 @@ retroactively repair launchers in existing environments. See the
 [certifi advisory](https://github.com/pypa/advisory-database/blob/main/vulns/certifi/PYSEC-2026-4320.yaml),
 [OpenTelemetry advisory](https://github.com/open-telemetry/opentelemetry-python/security/advisories/GHSA-xcq7-p3pf-p88h),
 and [virtualenv advisory](https://github.com/pypa/virtualenv/security/advisories/GHSA-c978-59m8-c77v).
+
+The filelock 4.2.1 floor includes the upstream lock-file and Windows timeout fixes;
+virtualenv 21.14.10 copies seed packages from temporary app-data even when symlink
+seeding is enabled in configuration or environment variables. Recreate affected
+environments so their seed packages no longer reference deleted temporary caches.
+See the [filelock release notes](https://github.com/tox-dev/filelock/releases/tag/4.2.1)
+and [virtualenv release notes](https://github.com/pypa/virtualenv/releases/tag/21.14.10).
+Applications that also use filelock's `SoftReadWriteLock` must stop all participants
+sharing a lock path, upgrade them together, and then restart them: filelock 4 changed
+that lock's on-disk protocol, so older and newer participants do not exclude each
+other. See the [filelock 4 migration note](https://github.com/tox-dev/filelock/releases/tag/4.0.0).
 
 ## Platforms
 
