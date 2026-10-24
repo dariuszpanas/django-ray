@@ -1,6 +1,7 @@
 """Django settings for testproject."""
 
 import os
+import sys
 from collections.abc import Callable
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -10,7 +11,12 @@ from django.templatetags.static import static
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-_DJANGO_UNFOLD_REQUIREMENT = f"django-unfold=={distribution_version('django-unfold')}"
+_WORKER_READINESS_PROBE_ONLY = sys.argv[1:2] == ["django_ray_worker_ready"]
+_DJANGO_UNFOLD_REQUIREMENT = (
+    "django-unfold"
+    if _WORKER_READINESS_PROBE_ONLY
+    else f"django-unfold=={distribution_version('django-unfold')}"
+)
 
 # The optional Ray Data recipe only accepts inputs and publishes artifacts beneath
 # server-controlled absolute roots. Deployments that use shared storage must give
@@ -115,21 +121,25 @@ SAMPLE_MAX_REQUESTS_PER_WINDOW = 30
 SAMPLE_MAX_OUTSTANDING_EXECUTIONS = 32
 
 # Application definition
-INSTALLED_APPS = [
-    "unfold",  # Must precede django.contrib.admin so its templates and static assets win.
-    "django.contrib.admin",
-    "django.contrib.auth",
-    "django.contrib.contenttypes",
-    "django.contrib.sessions",
-    "django.contrib.messages",
-    "django.contrib.staticfiles",
-    # django-ray
-    "django_ray",
-    # Testproject-owned management commands and integration helpers.
-    "testproject",
-    # Example apps demonstrating different execution modes
-    # (These are in testproject/apps/ for demonstration purposes)
-]
+INSTALLED_APPS = (
+    ["django_ray"]
+    if _WORKER_READINESS_PROBE_ONLY
+    else [
+        "unfold",  # Must precede django.contrib.admin so its templates and static assets win.
+        "django.contrib.admin",
+        "django.contrib.auth",
+        "django.contrib.contenttypes",
+        "django.contrib.sessions",
+        "django.contrib.messages",
+        "django.contrib.staticfiles",
+        # django-ray
+        "django_ray",
+        # Testproject-owned management commands and integration helpers.
+        "testproject",
+        # Example apps demonstrating different execution modes
+        # (These are in testproject/apps/ for demonstration purposes)
+    ]
+)
 
 
 def _static_asset(path: str) -> Callable[[object], str]:

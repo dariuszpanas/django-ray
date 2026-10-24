@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent `django-manager` readiness probe CPU starvation under the 250m
+  application qualification profile by scoping `django_ray_worker_ready`
+  startup to `django_ray`, allowing idle qualification manager polling to
+  back off to 0.5s, and raising the manager readiness probe timeout to 20s.
 - Require `filelock>=4.2.1` and `virtualenv>=21.14.10` in package metadata and the
   contributor lock, with matching minimum-dependency and distribution checks.
   This includes upstream file-lock fixes and prevents temporary virtualenv caches

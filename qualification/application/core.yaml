@@ -790,7 +790,7 @@ spec:
                         --queue "$DJANGO_RAY_QUEUES" --hostname "$DJANGO_RAY_POD_NAME" --json
                     initialDelaySeconds: 5
                     periodSeconds: 10
-                    timeoutSeconds: 10
+                    timeoutSeconds: 20
                     failureThreshold: 6
                 volumes:
                 - name: runtime

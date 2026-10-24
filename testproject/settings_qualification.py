@@ -97,6 +97,7 @@ DJANGO_RAY.update(
         "qualification": os.environ.get("DJANGO_RAY_QUALIFICATION_ENCRYPTION_KEY", "")
     },
     RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK=False,
+    WORKER_POLL_MAX_INTERVAL_SECONDS=0.5,
 )
 validate_runtime_env_encryption_settings(
     DJANGO_RAY, django_secret_key=_base.SECRET_KEY, django_secret_key_fallbacks=[]
