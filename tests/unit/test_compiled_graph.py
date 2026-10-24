@@ -763,9 +763,11 @@ def test_upstream_draft_requires_fresh_redacted_bounded_evidence() -> None:
     assert "reviewed, redacted," in report
     assert "bounded stdout/stderr tails" in report
     assert "Never attach complete" in report
-    assert "2026-07-27" in report
-    assert "issue #100 owns" in report
-    assert "non-blocking for issue #86 / PR #92" in report
+    assert "issue #100 was closed as not planned" in report
+    assert "No fresh Windows or nightly investigation is scheduled" in report
+    assert "Evidence needed if the investigation is reopened" in report
+    assert "Windows remains rejected" in report
+    assert "neither promotes a capability nor blocks guarded Linux/KubeRay work" in report
 
 
 def test_automatic_detection_path_uses_detected_identity(monkeypatch) -> None:

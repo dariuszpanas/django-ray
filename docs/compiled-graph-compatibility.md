@@ -435,10 +435,12 @@ This retained record is explicitly incomplete: the original Windows pass did not
 raw stdout/stderr, an exact dependency inventory, or the policy-v2 Python ABI, libc,
 specific container, immutable deployment/image, shared-memory, and object-store
 profiles. It cannot support a Windows capability promotion or an upstream report by
-itself. Issue #100 owns the fresh Windows release/nightly evidence and upstream report
-and remains an open, non-blocking upstream follow-up. The Linux/Kubernetes fail-closed
-infrastructure delivered by issue #86 / PR #92 does not wait for it; fresh Windows or
-nightly evidence is not required before guarded local KubeRay work continues.
+itself. [Issue #100 was closed as not planned](https://github.com/dariuszpanas/django-ray/issues/100#issuecomment-5130506246)
+under the current supported-product boundary. The reproducer and draft remain historical
+references; no fresh Windows or nightly investigation is scheduled. Reopen that work
+only if Windows Compiled Graph support becomes an explicit project target or an upstream
+change warrants reconsidering the platform policy. Windows remains rejected, and the
+closure promotes no capability. Guarded Linux/KubeRay work does not depend on this report.
 
 No nightly wheel was run. Nightly wheel URLs and ABIs rotate, while this pass was
 designed to classify the three exact published candidates. A nightly result would be
