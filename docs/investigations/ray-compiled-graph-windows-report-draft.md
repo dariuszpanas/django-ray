@@ -6,9 +6,11 @@
 > an exact dependency and runtime-profile inventory. Reproduce in a fresh disposable
 > environment before filing; the current summary is not promotion-grade evidence.
 
-> Follow-up ownership: issue #100 owns the fresh Windows/nightly evidence and upstream
-> report, targeted for 2026-07-27. It is non-blocking for issue #86 / PR #92 and for
-> Linux/Kubernetes promotion work in issue #99.
+> Current disposition: [issue #100 was closed as not planned](https://github.com/dariuszpanas/django-ray/issues/100#issuecomment-5130506246).
+> No fresh Windows or nightly investigation is scheduled. Retain this draft for a
+> possible reopened investigation if the project targets Windows Compiled Graph or
+> an upstream change warrants reviewing the platform policy. Windows remains rejected;
+> this closure neither promotes a capability nor blocks guarded Linux/KubeRay work.
 
 ## Proposed title
 
@@ -94,11 +96,11 @@ Read-only searches of `ray-project/ray` on 2026-07-19 for
 `SharedMemoryChannel Windows` returned no matching issue. Search results can change;
 repeat the search immediately before filing.
 
-## Issue #100 refresh, attachments, and maintainer questions
+## Evidence needed if the investigation is reopened
 
-- Rerun the release and nightly tuples by 2026-07-27 in fresh disposable
-  environments before deciding whether to file this draft. This is not a prerequisite
-  for merging issue #86 / PR #92's fail-closed Linux/Kubernetes infrastructure.
+- If the investigation is reopened, select then-current release and nightly tuples
+  and reproduce in fresh disposable environments before deciding whether to file
+  this draft. That evidence remains separate from Linux/KubeRay promotion.
 - Attach the JSON record, exact dependency/runtime profile, and reviewed, redacted,
   bounded stdout/stderr tails from each disposable run. Never attach complete
   unredacted process output.
