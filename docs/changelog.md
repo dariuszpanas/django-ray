@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   readiness phase checkpoints across interrupted captures only after owned
   cleanup, and distinguish exact fixture exec-timeout events from fixed worker
   readiness reports without exporting event text or inferring a root cause.
+  Add a separate, bounded Linux startup profile to compare ordinary source and
+  precompiled project bytecode without running a database or Ray. Its isolated
+  timing observations do not change probe limits or establish worker readiness.
 - Require Linux before the pinned Compiled Graph pilot's private timeout self-test
   launches a child, and remove its native Windows fallback. Preserve the host-side
   Windows containment used for Docker and Kubernetes commands.

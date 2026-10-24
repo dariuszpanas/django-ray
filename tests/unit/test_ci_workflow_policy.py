@@ -45,6 +45,9 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ("native-shutdown-investigation.yml", "investigate"): (
         "Native shutdown sampling is diagnostic and does not replace CI Gate"
     ),
+    ("application-startup-profile.yml", "startup"): (
+        "Isolated application startup profiling is diagnostic and does not replace CI Gate"
+    ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"

@@ -518,6 +518,10 @@ The host failure schema stays at version 5; earlier private streams retain their
 original parsers. Neither these measurements nor a later ready result accept the
 failed qualification or establish its cause.
 
+The separate [isolated startup profile](../startup/README.md) compares full Django
+setup with and without project bytecode in bounded containers. Its measurements
+are diagnostic controls, not readiness results or a replacement for this fixture.
+
 The fixed positive rq2 callable also inspects actual visible `/proc` argv before
 its first effect. Its strict task context, current process and decoded locator
 must bind the exact persisted canonical request. The scan includes the driver and
