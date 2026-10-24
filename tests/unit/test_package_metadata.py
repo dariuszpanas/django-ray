@@ -431,10 +431,11 @@ def test_ray_transitive_security_floors_protect_fresh_and_locked_installs() -> N
 
     for name, floor, vulnerable in (
         ("certifi", "2026.10.19", "2026.6.17"),
+        ("filelock", "4.2.1", "4.2.0"),
         ("multidict", "6.9.1", "6.9.0"),
         ("opentelemetry-api", "1.45.1", "1.45.0"),
         ("urllib3", "2.8.0", "2.7.0"),
-        ("virtualenv", "21.14.9", "21.14.8"),
+        ("virtualenv", "21.14.10", "21.14.9"),
     ):
         requirements = _requirements_for_distribution(config["project"]["dependencies"], name)
         assert len(requirements) == 1
