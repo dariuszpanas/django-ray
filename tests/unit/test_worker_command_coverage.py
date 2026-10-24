@@ -111,7 +111,8 @@ class TestWorkerCommandCoverage:
         created_runners: list[object] = []
 
         class FakeRayCoreRunner:
-            def __init__(self) -> None:
+            def __init__(self, *, address: str | None = None) -> None:
+                self.address = address
                 created_runners.append(self)
 
         monkeypatch.setattr(
@@ -143,6 +144,7 @@ class TestWorkerCommandCoverage:
 
             assert initialization_calls
             assert isinstance(cmd.ray_core_runner, FakeRayCoreRunner)
+            assert cmd.ray_core_runner.address == overrides.get("cluster")
 
         assert len(created_runners) == 2
 
@@ -191,7 +193,8 @@ class TestWorkerCommandCoverage:
 
     def test_default_cluster_mode_creates_ray_core_runner(self, monkeypatch) -> None:
         class FakeRayCoreRunner:
-            pass
+            def __init__(self, *, address: str | None = None) -> None:
+                self.address = address
 
         cmd = _make_command()
         monkeypatch.setattr(
@@ -218,6 +221,7 @@ class TestWorkerCommandCoverage:
         assert cmd.execution_mode == "cluster"
         assert initialized_addresses == ["ray://cluster:10001"]
         assert isinstance(cmd.ray_core_runner, FakeRayCoreRunner)
+        assert cmd.ray_core_runner.address == "ray://cluster:10001"
 
     def test_heartbeat_skips_ray_health_after_lease_loss(self, monkeypatch) -> None:
         cmd = _make_command()

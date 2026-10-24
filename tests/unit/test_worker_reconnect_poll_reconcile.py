@@ -516,9 +516,15 @@ class TestWorkerDispatchAndReconnectHelpers:
         )
 
         sentinel_runner = cast(Any, SimpleNamespace(sentinel=True))
+        runner_addresses: list[str | None] = []
+
+        def create_runner(*, address: str | None = None):
+            runner_addresses.append(address)
+            return sentinel_runner
+
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.RayCoreRunner",
-            lambda: sentinel_runner,
+            create_runner,
         )
 
         cmd._reconnect_ray()
@@ -526,6 +532,7 @@ class TestWorkerDispatchAndReconnectHelpers:
         assert calls == ["shutdown", "init:ray://cluster:10001"]
         assert stale_marks == [True]
         assert cmd.ray_core_runner is sentinel_runner
+        assert runner_addresses == ["ray://cluster:10001"]
 
     def test_reconnect_ray_shutdown_error_is_logged(self, monkeypatch) -> None:
         cmd = _make_command()
