@@ -143,6 +143,18 @@ persisted as `CANCELLING` before the Ray connection closes.
 | `SIGTERM` | Graceful handoff; exit with `143` |
 | `SIGINT` | Graceful handoff (Ctrl+C); exit with `130` |
 
+The command restores its own main-thread signal handlers after each local,
+Ray Core or Ray Client initialization attempt, including failed startup,
+reconnect attempts, and command-created runners that initialize again after a
+connection loss. Ray initialization can replace `SIGTERM`; restoring the
+worker's handler lets a later signal request shutdown without interrupting
+handoff, lease release or disconnection already in progress. Repeated signals
+preserve the first signal's exit status. Direct embedded initialization helpers
+do not install the command's handlers unless it already owns them on the main
+thread. Standalone runner initialization retains its existing signal behavior.
+This does not protect against forced termination or establish a repair for a
+native Ray shutdown crash.
+
 ### Environment Variables
 
 The management command itself expects CLI flags and Django settings. The Docker entrypoint included

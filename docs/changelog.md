@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Add a separate, bounded Linux startup profile to compare ordinary source and
   precompiled project bytecode without running a database or Ray. Its isolated
   timing observations do not change probe limits or establish worker readiness.
+- Restore worker-owned main-thread `SIGTERM` and `SIGINT` handlers after local,
+  Core and Client Ray initialization, including failed attempts, reconnects and
+  initialization by command-created runners after connection loss.
+  A later signal no longer uses Ray's exit handler to interrupt graceful handoff
+  before lease release and disconnection. Embedded helpers preserve their
+  existing signal-ownership boundary; native shutdown crash diagnosis remains
+  separate.
 - Require Linux before the pinned Compiled Graph pilot's private timeout self-test
   launches a child, and remove its native Windows fallback. Preserve the host-side
   Windows containment used for Docker and Kubernetes commands.
