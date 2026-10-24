@@ -396,3 +396,16 @@ def test_qualification_settings_bootstrap_without_database_or_ray_start(environm
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "qualification-settings-ready"
+
+
+def test_worker_readiness_probe_argv_scopes_installed_apps_and_idle_poll_backoff(
+    environment, monkeypatch
+):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["testproject/manage.py", "django_ray_worker_ready", "--queue", "default"],
+    )
+    config = load_settings()
+    assert config["INSTALLED_APPS"] == ["django_ray"]
+    assert config["DJANGO_RAY"]["WORKER_POLL_MAX_INTERVAL_SECONDS"] == 0.5
