@@ -9,9 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sample bounded helper CPU, elapsed time and optional cgroup counters at the
+  existing application-readiness diagnostic checkpoints. Keep the private stream
+  and separate failure-resource sidecar within their 512-byte bounds, with
+  unavailable values instead of invented zeroes or renewed baselines. Preserve
+  the existing timeout owners, resources, host failure and successful receipts.
+  Accept valid dotted optional kernel counter names while preserving malformed
+  data and duplicate-key refusal, so core-scheduling statistics do not discard
+  the selected counters.
+  Measurements cover only the last observed prefix; they do not account for a
+  killed process's unobserved work or establish the readiness failure's cause.
+- Retain closed, bounded failure reasons for the final Monitoring pod query and
+  census without changing readiness, image, restart or cleanup requirements.
+  Keep failed-run evidence distinct from qualification and omit raw Kubernetes
+  data, names, image strings and exception text from the new diagnostic.
+- Distinguish completed Django setup from the following management-module import
+  in the optional application readiness follow-up. Version the fixed milestone
+  sequence and host failure record while preserving deadlines, byte limits,
+  owned cleanup and the original qualification failure. This diagnostic does not
+  establish the cause of earlier timeouts or change product readiness.
+- Retain the same closed protected-log host failure line in an optional bounded
+  sidecar beside the selected receipt output. Preserve successful receipts,
+  private child behavior and the original failed exit when storage is unavailable
+  or the sidecar already exists. This repairs diagnostic artifact transport, not
+  readiness or the cause of an earlier failed qualification.
+- Require `filelock>=4.2.1` and `virtualenv>=21.14.10` in package metadata and the
+  contributor lock, with matching minimum-dependency and distribution checks.
+  This includes upstream file-lock fixes and prevents temporary virtualenv caches
+  from leaving dangling seed-package links. Document environment recreation and
+  the coordinated upgrade required for applications sharing `SoftReadWriteLock`
+  paths across filelock 3 and 4.
 - Include released 0.7.0 in the database upgrade matrix and select it for all
   four native upgrade recipes. Retain historical baselines, the 0.4.0 caller
   default and historical advisory receipts without claiming release acceptance.
+- Retain a bounded, secret-free worker-readiness follow-up when application
+  qualification rejects an unready manager, and fixed reasons for web/manager
+  log acquisition or coverage refusals. Preserve the original failure, observation
+  deadline, byte bounds and strict readiness/coverage requirements; classification
+  does not repair or accept an earlier failed run. Retain validated private
+  readiness phase checkpoints across interrupted captures only after owned
+  cleanup, and distinguish exact fixture exec-timeout events from fixed worker
+  readiness reports without exporting event text or inferring a root cause.
+  Add a separate, bounded Linux startup profile to compare ordinary source and
+  precompiled project bytecode without running a database or Ray. Its isolated
+  timing observations do not change probe limits or establish worker readiness.
+- Restore worker-owned main-thread `SIGTERM` and `SIGINT` handlers after local,
+  Core and Client Ray initialization, including failed attempts, reconnects and
+  initialization by command-created runners after connection loss.
+  A later signal no longer uses Ray's exit handler to interrupt graceful handoff
+  before lease release and disconnection. Embedded helpers preserve their
+  existing signal-ownership boundary; native shutdown crash diagnosis remains
+  separate.
+- Preserve the cluster-mode worker's selected address when a command-created
+  Ray Core runner must initialize after connection loss. Startup, reconnect and
+  submission use that address instead of an independent environment/default
+  lookup. Standalone runners, local-mode setup and existing initialization
+  failure handling remain unchanged; this does not add cluster-identity fencing.
 - Require Linux before the pinned Compiled Graph pilot's private timeout self-test
   launches a child, and remove its native Windows fallback. Preserve the host-side
   Windows containment used for Docker and Kubernetes commands.

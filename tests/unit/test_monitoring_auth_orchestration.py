@@ -25,6 +25,8 @@ def observer(monkeypatch, tmp_path):
         replaced=False,
         output=tmp_path / "evidence",
         kube=None,
+        final_query_error=None,
+        final_queries=[],
     )
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
@@ -53,6 +55,10 @@ def observer(monkeypatch, tmp_path):
                 return state.namespace
             if resource != "pods":
                 return {}
+            if "browser" in state.events:
+                state.final_queries.append(resource)
+                if state.final_query_error is not None:
+                    raise state.final_query_error
             pods = []
             for name in ("head", "worker", "grafana", "web", "postgres", "prometheus"):
                 uid = name + ("-new" if name == "grafana" and state.replaced else "-old")
@@ -143,6 +149,59 @@ def observer(monkeypatch, tmp_path):
 
     state.execute = execute
     return state
+
+
+@pytest.mark.parametrize("stage", ["pod_fetch", "pod_census"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_final_census_diagnostic_survives_cleanup_without_later_checks(
+    observer, monkeypatch, capsys, stage, cleanup_fails
+):
+    from qualification.monitoring.census_diagnostics import CensusError, record
+
+    if stage == "pod_fetch":
+        observer.final_query_error = RuntimeError("private-query-canary")
+        reason = "query_failed"
+    else:
+        reason = "container_restart_count"
+
+        def fail_census(*_):
+            raise CensusError(reason, "private-census-canary")
+
+        monkeypatch.setattr(run, "census", fail_census)
+    monkeypatch.setattr(
+        run, "validate_resources", lambda *_: pytest.fail("resource census must not run")
+    )
+    cleanup = run.cleanup_namespace
+    cleanups = []
+
+    def checked_cleanup(*args):
+        cleanups.append(True)
+        result = cleanup(*args)
+        if cleanup_fails:
+            raise RuntimeError("private-cleanup-canary")
+        return result
+
+    monkeypatch.setattr(run, "cleanup_namespace", checked_cleanup)
+    assert run.run({"application": "owned-application-image"}, observer.output) == 1
+    raw = (observer.output / "summary.json").read_text(encoding="utf-8")
+    receipt = json.loads(raw)
+    assert receipt["census_diagnostic"] == record(stage, reason)
+    assert receipt["failure_phase"] == "census" and receipt["status"] == "failed"
+    assert receipt["namespace_removed"] is (not cleanup_fails)
+    assert all(key not in receipt for key in ("containers", "live_resources", "operator"))
+    assert observer.final_queries == ["pods"] and cleanups == [True]
+    assert observer.events[-1] == "namespace_cleanup"
+    assert "private-" not in raw + capsys.readouterr().out
+
+
+def test_later_census_failure_is_not_mislabeled_as_pod_census(observer, monkeypatch):
+    def fail_resources(*_):
+        raise ValueError("private-resource-canary")
+
+    monkeypatch.setattr(run, "validate_resources", fail_resources)
+    code, receipt = observer.execute()
+    assert code == 1 and receipt["failure_phase"] == "census"
+    assert "containers" in receipt and "census_diagnostic" not in receipt
 
 
 def test_auth_is_mandatory_after_successful_replay_before_browser(observer):

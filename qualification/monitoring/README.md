@@ -104,3 +104,19 @@ Authentication checks are not a
 general security certification: source-selected component versions require their
 own supported-version and public-advisory review. Raw credentials, target errors,
 response bodies and arbitrary container logs are never included in receipts.
+
+A failure during the final pod query or census adds an optional
+`census_diagnostic` with exactly `schema_version: 1`, `stage` and `reason`.
+The closed, at-most-512-byte record distinguishes a failed pod query from
+the existing census checks for six Ready pods, seven expected components,
+images, container status and initialization. Malformed payloads and otherwise
+unclassified exceptions have fixed reasons. It contains no names, counts,
+image strings, Kubernetes output or exception text. Successful receipts and
+the observation, readiness and cleanup requirements are unchanged; the
+diagnostic uses the same final pod snapshot without retrying it.
+
+The original census diagnostic remains when namespace cleanup also fails;
+`namespace_removed` and the separate infrastructure cleanup receipt still
+report cleanup independently. Partial section statuses describe only retained
+observations. A diagnostic does not establish the cause of an earlier run,
+repair the observed failure or qualify a failed candidate.

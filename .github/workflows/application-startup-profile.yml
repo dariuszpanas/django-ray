@@ -1,0 +1,89 @@
+name: Application Startup Profile
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/application-startup-profile.yml
+      - scripts/investigate_application_startup.py
+      - qualification/startup/**
+      - tests/unit/test_application_startup_profile.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: application-startup-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  startup:
+    name: Isolated startup diagnostic (Linux)
+    runs-on: ubuntu-latest
+    # Archive/admission 1m + build 15m + experiment 8m + cleanup/upload margin.
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Admit the disposable host and archive the exact source
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          # The fresh hosted VM is the build boundary; no cluster is created.
+          test "$(nproc)" -ge 4
+          awk '/MemTotal/ { exit ($2 < 14000000) }' /proc/meminfo
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 10000000
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/application-startup/source" "$RUNNER_TEMP/application-startup/identity"
+          git archive --format=tar HEAD > "$RUNNER_TEMP/application-startup/source.tar"
+          tar -xf "$RUNNER_TEMP/application-startup/source.tar" -C "$RUNNER_TEMP/application-startup/source"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/application-startup/identity/source.txt"
+          sha256sum "$RUNNER_TEMP/application-startup/source.tar" > "$RUNNER_TEMP/application-startup/identity/source.sha256"
+          echo 'Diagnostic only: isolated startup and bytecode comparison cannot establish worker readiness or satisfy Qualification Gate.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build one source-owned runtime baseline
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --provenance=false \
+            --label "org.django-ray.startup-profile=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            -t application-startup-base:candidate "$RUNNER_TEMP/application-startup/source"
+          image=$(docker image inspect application-startup-base:candidate --format '{{.Id}}')
+          echo "BASELINE_IMAGE_ID=$image" >> "$GITHUB_ENV"
+          docker image inspect "$image" > "$RUNNER_TEMP/application-startup/identity/baseline-image.json"
+
+      - name: Compare four bounded fresh startup processes
+        timeout-minutes: 8
+        run: |
+          python scripts/investigate_application_startup.py \
+            --image "$BASELINE_IMAGE_ID" \
+            --source-dir "$RUNNER_TEMP/application-startup/source" \
+            --output "$RUNNER_TEMP/application-startup/evidence" \
+            --owner "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+      - name: Remove only this experiment's owned containers
+        if: always()
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          containers=$(docker ps -aq --filter "label=org.django-ray.startup-profile=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT")
+          if [ -n "$containers" ]; then
+            while IFS= read -r container; do docker rm -f -- "$container"; done <<< "$containers"
+          fi
+
+      - name: Retain bounded diagnostic evidence and source identity
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: application-startup-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/application-startup/identity/
+            ${{ runner.temp }}/application-startup/evidence/
+          retention-days: 14
+          if-no-files-found: warn

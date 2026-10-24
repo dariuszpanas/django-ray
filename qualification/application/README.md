@@ -339,21 +339,188 @@ clipped to the remaining observer time, and no command resets that deadline.
 Successful checkers emit only their existing fixed boolean facts. On failure,
 the host emits at most 512 bytes of fixed JSON identifying the observation phase
 and a `timeout`, `invalid` or `unavailable` category. The private checker retains
-its version-1 failure schema over stdout; the version-2 host failure schema adds
-inventory attribution. The host propagates its child phase
+its version-1 failure schema over stdout; the version-5 host failure schema retains
+inventory attribution and adds nullable fixed worker-readiness and log-reason
+diagnostics. The host propagates its child phase
 only after exact schema validation on a failed command. Unknown fields, duplicate
 keys, oversized output and arbitrary exception or subprocess text cannot enter
 these diagnostics. A child database or API timeout and a host command timeout remain
 distinct observations; elapsed time alone does not identify a cause. The larger
 status host allowance leaves child deadlines, command order and successful receipt
 schemas unchanged; it adds no retry or resource allocation.
+
+The host sends that closed failure line to stderr and also attempts to retain
+the exact same UTF-8 line beside its caller-selected receipt output, appending
+`.failure.json` to the complete filename. The existing fixture therefore uses
+`before-protected-logs.json.failure.json` or
+`after-protected-logs.json.failure.json`. Each sidecar is at most 512 bytes,
+including its newline, and accepts only the canonical current host schema.
+Private child mode and invalid host arguments do not write sidecars. Exclusive
+creation never overwrites an earlier file or follows an existing target symlink.
+Storage errors emit no raw text and cannot replace the original failure or exit
+status. Interrupted execution or failed storage can leave evidence absent or
+incomplete; a sidecar is diagnostic only and cannot replace a required passing
+receipt. This adds no observation call, retry, deadline or resource allocation.
+
 Inventory failures additionally identify a fixed source role and the rejected
 identity, lifecycle or readiness predicate. These fields never contain Pod names,
 images, labels, raw probe output or exception text. A running container that is
 not ready remains a failure; a recent manager heartbeat alone does not replace
 Kubernetes readiness or the required protected-log observation.
+
+Web and manager log acquisition failures additionally retain a fixed `log_reason`
+for the predicate that failed or could not complete. `source_timestamp` and
+`source_interval` identify container start parsing and interval comparison;
+`command` identifies command execution or its remaining deadline; `command_exit`,
+`output_bound` and `command_stderr` identify nonzero exit, excess bytes and stderr;
+`empty_log`, `first_timestamp` and `start_coverage` identify absent evidence,
+timestamp decoding/length/parsing and observation-start coverage. No command,
+exit value, output bytes, timestamp or exception text is exported. Other phases
+retain a null reason, and child failure and successful receipt schemas remain
+unchanged. A log acquisition or coverage refusal happens before private-content
+comparison and cannot establish either a leak or clear log surfaces. These
+classifications improve future failure attribution; they neither recover the
+cause of an older ambiguous record nor repair or accept its failed run.
+
+Only a running, unrestarted manager with the expected source image that fails
+readiness receives one follow-up command. It calls the existing
+`django_ray_worker_ready` command in that manager with the same queue and Pod
+hostname environment as its Kubernetes probe. The follow-up keeps the original
+inventory failure even if it observes a ready lease; it does not read any logs
+after that failed inventory or retry the qualification.
+
+This optional command spends at most ten seconds within the unchanged 30-second
+observer deadline, retaining one second for the failure report. With fewer than
+four seconds available it records `incomplete` without spawning. A separate
+`timeout --signal=KILL` owner in the manager limits Python/Django startup and the
+probe independently of the host transport. The host reserves a second to signal
+its owned kubectl process group before reaping the leader. Missing `timeout`,
+unavailable transport, malformed output, or unconfirmed local cleanup produces
+an incomplete/error diagnostic, never acceptance. The qualification image copies
+this helper with its other application modules; no image or probe configuration
+is changed, and the optional utility is not assumed available as product proof.
+
+The child suppresses ambient stdout/stderr before emitting four ordered, fixed
+milestones: `helper_entry` before importing Django, `django_setup` before setup,
+`django_setup_complete` immediately after setup returns and before importing the
+management module, and `worker_ready` before calling the readiness command.
+These private milestone frames use version 3, with a fixed phase index and bounded
+resource sample; the worker-lease terminal report remains version 1. The host
+requires the complete current sequence, so missing,
+duplicated or older-version frames cannot precede an accepted terminal report.
+Older-version, reordered or duplicated frames invalidate even phase evidence.
+The first milestone does not cover interpreter startup or this helper's own
+module imports. The host reads at most 513 bytes to enforce the unchanged
+512-byte stream ceiling and
+discards stderr. Only the exact milestone sequence and a complete worker-lease
+report with a matching actual exit code supply a finite status and reason; that
+observation has phase `complete`. Other results retain unknown status/reason.
+
+On timeout, the last complete milestone can survive only successful local owned
+process cleanup. An incomplete version-3 milestone invalidates phase and sample
+evidence; the host does not repair or guess a truncated numeric record. After all
+four milestones, an incomplete suffix may be an exact byte prefix of a permitted
+finite terminal report. Malformed, reordered, extra or oversized output invalidates
+phase evidence too. Cleanup failure or lost process ownership discards all
+phase/report/sample proof. Milestones do not reset the deadline, and even a
+complete buffered report cannot override a timeout or contradictory exit. Exit
+137 is a timeout-class observation compatible with SIGKILL; it does not prove
+that the deadline owner fired or that the remote process was cleaned up.
+
+The entire version-5 host failure still fits 512 bytes, including phase, outcome,
+bounded exit code and elapsed milliseconds (capped at 10,000). A milestone marks
+the last received boundary, not the exact stalled operation. In a new observation,
+`django_setup` without `django_setup_complete` means the host did not observe the
+setup-return milestone; it does not prove setup was still running when stopped.
+`django_setup_complete` without `worker_ready` separates that return from the
+following management import and command preparation. `worker_ready`
+includes command discovery and settings/database/policy/lease reads. The private
+wrapper does not reproduce the normal management CLI's connection-close teardown.
+This remains a later observation without another Pod UID validation, not proof of
+the original readiness failure's cause or replacement source-bound qualification.
+Older version-4 observations retain their original, less precise boundary; the
+new checkpoint does not retrospectively diagnose the timeout tracked in
+[#669](https://github.com/dariuszpanas/django-ray/issues/669).
 The API/Admin log surface here means the shared django-web server log, not a
 separate rendered Admin-page assertion.
+
+Each existing checkpoint synchronously samples elapsed monotonic time and the
+helper process's user-plus-system CPU since its initial checkpoint. No sampler
+thread, timer, signal handler, supervisor or extra Kubernetes call is added.
+The same process and timeout owners remain responsible for the observation.
+These samples answer how much time elapsed before a received setup-entry or
+setup-return boundary. They exclude interpreter startup, initial helper imports
+and all work after the last sample. In particular, a timeout whose last phase is
+`django_setup` does not measure the subsequent setup interval or its CPU cost.
+Process CPU includes all helper threads and instrumentation, not descendants or
+only the main thread. CPU can exceed wall time; their ratio does not identify
+waiting, scheduling pressure or a particular cause.
+
+Optional cgroup-v2 samples use only bounded fixed files after verifying the
+supported namespace-root mapping. They retain deltas for usage, periods,
+throttled periods and throttled time, without exporting cgroup paths or process
+identifiers. Unsupported topology, unavailable or malformed data, changed scope
+or limits, counter reset and overflow remain explicit unavailable values, never
+zero or a new baseline. Additional bounded kernel counters, including dotted
+names such as `core_sched.force_idle_usec`, are validated and ignored; they do
+not invalidate the four selected counters or add fields to the record. Duplicate
+keys, malformed names or values, and missing required counters still fail closed.
+All samples use the same initial baseline. Clock brackets around the reads
+identify the sampled interval; these endpoints are
+not atomic and cannot prove that the scope never changed between them.
+
+Cgroup values include the manager, ordinary probes, other exec commands and
+descendants in that group. They are not the helper's CPU usage and cannot name a
+competing process. The group's bandwidth counters do not cover inherited
+ancestor throttling, so a zero delta cannot rule out scheduling or ancestor
+limits. Do not subtract helper CPU from group usage to attribute other work.
+The four synchronous samples spend the existing observation budget. Bounded
+reads limit retained bytes, not kernel syscall latency; collection and encoding
+have overhead and may themselves be interrupted.
+
+Private version-3 frames map phase indices 0 through 3 to the four checkpoints
+above. Their `r` sample is either unavailable (`null`) or this fixed tuple:
+
+| Slot | Meaning | Unit |
+| --- | --- | --- |
+| 0, 1 | Start and end of this sample's read bracket since the initial helper clock | milliseconds |
+| 2 | Helper process CPU since its immutable initial CPU reading | microseconds |
+| 3 | Cgroup usage delta | microseconds |
+| 4, 5 | Cgroup period and throttled-period deltas | counts |
+| 6 | Cgroup throttled-time delta | microseconds |
+| 7 | Cgroup availability category | fixed integer |
+
+Wall values are integers from 0 through 10,000; CPU and cgroup values are integers
+from 0 through 99,999,999 or `null`. Booleans are not integers in this contract.
+Cgroup category 0 means observed; 1 means unsupported, 2 unavailable, 3 reset,
+4 scope changed and 5 overflow. Categories 1 through 5 require all four cgroup
+values to be `null`. Overflow is not clamped into an apparently valid sample.
+
+The host also records when the first and last complete milestone lines arrive,
+within its existing elapsed-time bound. These are receive-time upper bounds;
+buffering and transport prevent treating them as child emission timestamps.
+Only the newest complete validated sample is retained, including its unavailable
+values. A newer unavailable sample never borrows older counters. Malformed output
+or unconfirmed local cleanup discards resource evidence together with phase proof.
+
+An optional, separate `before-protected-logs.json.failure-resources.json` or
+`after-protected-logs.json.failure-resources.json` retains the fixed resource
+record beside the original failure sidecar. Both the private stream and this
+canonical resource sidecar remain capped at 512 bytes including newlines. The
+record explicitly describes the last observed prefix and disclaims terminal
+accounting. Its exclusive, best-effort write cannot overwrite existing evidence,
+follow an existing target symlink, replace the original failure or alter a
+successful receipt. Missing or partial storage supplies no usable measurement.
+Resource retention requires a newly and completely written host failure. An
+existing resource sibling, including an orphaned symlink, prevents a new pair.
+These are exclusively owned output paths, not an atomic multi-writer protocol.
+The host failure schema stays at version 5; earlier private streams retain their
+original parsers. Neither these measurements nor a later ready result accept the
+failed qualification or establish its cause.
+
+The separate [isolated startup profile](../startup/README.md) compares full Django
+setup with and without project bytecode in bounded containers. Its measurements
+are diagnostic controls, not readiness results or a replacement for this fixture.
 
 The fixed positive rq2 callable also inspects actual visible `/proc` argv before
 its first effect. Its strict task context, current process and decoded locator
@@ -559,7 +726,10 @@ budget for the fixed success, failure, recovery and nested-retry matrix. The sha
 `after-workflows.json`, `before-rq2.json`, `after-rq2.json`, `before-showcase.json`,
 `after-showcase.json`, `before-protocol.json`, `after-protocol.json`, producer Pod/image identities, Chainsaw's
 XML report and `summary.json`. Chainsaw streams progress to the foreground; hosted runs retain it
-in the public Actions job log. Receipts are transported from the modules' existing stdout; they are
+in the public Actions job log. The directory artifact also includes any bounded
+host failure sidecars written directly by the protected-log observer; the
+collector does not parse or copy its foreground stderr. Older failed artifacts
+may lack these records. Receipts are transported from the modules' existing stdout; they are
 not inferred from Job status. The cold receipt's predecessor digest must match the retained first
 node receipt. All receipts report `complete_application_gate: false`. Failure output is diagnostic;
 a missing receipt, timeout, failed cleanup or partial report cannot establish a passing stage.
@@ -683,6 +853,20 @@ Pod and event projections retain fixed workload roles and validated event timing
 so a readiness failure can be correlated with its source. Probe failure categories
 are conservative: unknown messages stay unknown, and a probe failure category alone
 does not establish CPU contention, database failure or a dependency regression.
+Manager readiness events additionally expose a fixed `readiness_detail` only for
+Warning/Unhealthy events attributed to the manager container. An exact timeout
+message for the pinned Kubernetes version, fixture command and ten-second probe
+is classified `exec_timeout`. A complete closed worker-readiness JSON report with
+the fixed CLI failure suffix is classified `worker_report`, retaining only its
+known not-ready/error status and reason. Events do not provide an independently
+observed exit code. Ready reports inside failure events, changed commands or
+durations, arbitrary timeout phrases, incomplete output and unknown variants
+remain unknown. Candidate messages are capped at 512 bytes; raw text and command
+arguments are never exported, and the 100-record/64-KiB artifact limits remain.
+An event is a historical aggregate, not UID-linked proof of the later follow-up.
+Even `no_live_lease` does not distinguish an expired lease from an absent,
+inactive or coordinate-mismatched row. These classifications do not repair or
+accept a failed qualification.
 
 
 The [affected-scenario policy](../../docs/deployment/local-kuberay-gate.md) determines which product

@@ -716,6 +716,12 @@ Native shutdown sampling is diagnostic and does not replace CI Gate. The bounded
 its failure remains visible, and a successful sample does not establish a crash repair.
 Review its evidence when investigating issue #557 before release acceptance.
 
+Isolated application startup profiling is diagnostic and does not replace CI Gate.
+The bounded `Application Startup Profile` workflow compares ordinary project source
+with precompiled bytecode on a disposable Linux host. It runs no database, Ray
+runtime or lease readiness command. Its results cannot establish readiness, prove
+an earlier failure's cause, or substitute for required and affected qualification.
+
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:
 

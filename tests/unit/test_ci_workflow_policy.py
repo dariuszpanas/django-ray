@@ -45,6 +45,9 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ("native-shutdown-investigation.yml", "investigate"): (
         "Native shutdown sampling is diagnostic and does not replace CI Gate"
     ),
+    ("application-startup-profile.yml", "startup"): (
+        "Isolated application startup profiling is diagnostic and does not replace CI Gate"
+    ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
@@ -578,7 +581,8 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     assert '"opentelemetry-api==1.45.1"' in minimum_install["run"]
     assert '"sqlparse==0.6.0"' in minimum_install["run"]
     assert '"urllib3==2.8.0"' in minimum_install["run"]
-    assert '"virtualenv==21.14.9"' in minimum_install["run"]
+    assert '"filelock==4.2.1"' in minimum_install["run"]
+    assert '"virtualenv==21.14.10"' in minimum_install["run"]
     assert '"pip-audit==2.10.1"' in minimum_install["run"]
     assert audit_job["name"] == (
         "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"

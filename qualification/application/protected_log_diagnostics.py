@@ -8,6 +8,9 @@ import sys
 from contextvars import ContextVar
 from functools import wraps
 
+from qualification.application import worker_readiness_diagnostics as readiness
+from qualification.application import worker_resource_diagnostics as resources
+
 MAX_BYTES = 512
 PHASES = {
     "host": frozenset(
@@ -47,8 +50,22 @@ INVENTORY_REASONS = frozenset(
         "deadline",
     }
 )
+LOG_REASONS = frozenset(
+    {
+        "source_timestamp",
+        "source_interval",
+        "command",
+        "command_exit",
+        "output_bound",
+        "command_stderr",
+        "empty_log",
+        "first_timestamp",
+        "start_coverage",
+    }
+)
 _STATE = ContextVar("protected_log_failure_phase", default=None)
 _ATTRIBUTE = "_protected_log_failure"
+_RESOURCE_ATTRIBUTE = "_protected_log_resources"
 
 
 def failure_type(error: Exception) -> str:
@@ -77,9 +94,11 @@ def _record(
     child_phase: str | None = None,
     role: str | None = None,
     inventory_reason: str | None = None,
+    worker_readiness: dict | None = None,
+    log_reason: str | None = None,
 ) -> dict:
     value = {
-        "schema_version": 2 if scope == "host" else 1,
+        "schema_version": 5 if scope == "host" else 1,
         "layer": "application_protected_logs",
         "status": "failed",
         "failure_scope": scope,
@@ -88,7 +107,12 @@ def _record(
         "child_phase": child_phase,
     }
     if scope == "host":
-        value.update(source_role=role, inventory_reason=inventory_reason)
+        value.update(
+            source_role=role,
+            inventory_reason=inventory_reason,
+            worker_readiness=worker_readiness,
+            log_reason=log_reason,
+        )
     return value
 
 
@@ -97,7 +121,7 @@ def _valid(value: object, scope: str) -> bool:
         isinstance(value, dict)
         and set(value) == set(_record(scope, "unavailable", "unavailable"))
         and type(value["schema_version"]) is int
-        and value["schema_version"] == (2 if scope == "host" else 1)
+        and value["schema_version"] == (5 if scope == "host" else 1)
         and value["layer"] == "application_protected_logs"
         and value["status"] == "failed"
         and value["failure_scope"] == scope
@@ -130,6 +154,22 @@ def _valid(value: object, scope: str) -> bool:
                 and (
                     value["failure_phase"] in {"inventory", "final_inventory"}
                     or (value["source_role"] is None and value["inventory_reason"] is None)
+                )
+                and (
+                    value["log_reason"] is None
+                    or (
+                        value["failure_phase"] in {"web_log", "manager_log"}
+                        and type(value["log_reason"]) is str
+                        and value["log_reason"] in LOG_REASONS
+                    )
+                )
+                and (
+                    value["worker_readiness"] is None
+                    or (
+                        value["source_role"] == "manager"
+                        and value["inventory_reason"] == "container_not_ready"
+                        and readiness.valid(value["worker_readiness"])
+                    )
                 )
             )
         )
@@ -172,7 +212,21 @@ def phase(name: str) -> None:
         if name not in PHASES[state["scope"]]:
             raise ValueError("Invalid protected log diagnostic phase")
         state["phase"] = name
-        state.update(role=None, inventory_reason=None)
+        state.update(role=None, inventory_reason=None, log_reason=None, worker_resources=None)
+
+
+def log(reason: str) -> None:
+    """Attribute the next log predicate without retaining command or log data."""
+    state = _STATE.get()
+    if (
+        state is None
+        or state["scope"] != "host"
+        or state["phase"] not in {"web_log", "manager_log"}
+        or type(reason) is not str
+        or reason not in LOG_REASONS
+    ):
+        raise ValueError("Invalid protected log surface diagnostic")
+    state["log_reason"] = reason
 
 
 def inventory(role: str | None, reason: str | None) -> None:
@@ -186,7 +240,41 @@ def inventory(role: str | None, reason: str | None) -> None:
         or (reason is not None and reason not in INVENTORY_REASONS)
     ):
         raise ValueError("Invalid protected log inventory diagnostic")
-    state.update(role=role, inventory_reason=reason)
+    state.update(role=role, inventory_reason=reason, worker_resources=None)
+
+
+def worker_readiness(value: dict) -> None:
+    """Attach only a validated follow-up to the original failed predicate."""
+    state = _STATE.get()
+    if (
+        state is None
+        or state["scope"] != "host"
+        or state["role"] != "manager"
+        or state["inventory_reason"] != "container_not_ready"
+        or not readiness.valid(value)
+    ):
+        raise ValueError("Invalid worker readiness diagnostic")
+    state["worker_readiness"] = value
+
+
+def worker_resources(value: dict) -> None:
+    """Keep optional resource evidence outside the unchanged host failure schema."""
+    state = _STATE.get()
+    if (
+        state is None
+        or state["scope"] != "host"
+        or state["phase"] not in {"inventory", "final_inventory"}
+        or state["role"] != "manager"
+        or state["inventory_reason"] != "container_not_ready"
+        or not resources.valid_record(value)
+    ):
+        raise ValueError("Invalid worker resource diagnostic")
+    state["worker_resources"] = value
+
+
+def resource_diagnostic(error: Exception) -> dict | None:
+    value = error.__dict__.get(_RESOURCE_ATTRIBUTE)
+    return value if resources.valid_record(value) else None
 
 
 def tracked(scope: str):
@@ -198,6 +286,9 @@ def tracked(scope: str):
                 "phase": "unavailable",
                 "role": None,
                 "inventory_reason": None,
+                "worker_readiness": None,
+                "worker_resources": None,
+                "log_reason": None,
             }
             token = _STATE.set(state)
             try:
@@ -211,7 +302,12 @@ def tracked(scope: str):
                     child.phase if child else None,
                     state["role"],
                     state["inventory_reason"],
+                    state["worker_readiness"],
+                    state["log_reason"],
                 )
+                error.__dict__.pop(_RESOURCE_ATTRIBUTE, None)
+                if resources.valid_record(state["worker_resources"]):
+                    error.__dict__[_RESOURCE_ATTRIBUTE] = state["worker_resources"]
                 raise
             finally:
                 _STATE.reset(token)

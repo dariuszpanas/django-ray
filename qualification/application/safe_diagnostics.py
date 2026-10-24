@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from qualification.application.http_context import HttpObserver, HttpSubstage
 from qualification.application.run_api import HttpFailureCode, HttpTransportFailure
+from qualification.application.worker_readiness_diagnostics import parse_report
 
 PHASES = {"first", "existing", "rq2", "showcase", "protocol", "cleanup", "generation"}
 COMMANDS = {"first", "nodes", "core", "workflows", "rq2", "showcase", "protocol"}
@@ -63,6 +64,17 @@ WORKLOAD_ROLES = frozenset(
 CONTAINER_ROLES = frozenset(
     {"web", "manager", "postgres", "ray-head", "ray-worker", "assertions", "setup", "ray-tmp"}
 )
+MANAGER_READINESS_COMMAND = (
+    "/bin/sh -c exec python testproject/manage.py django_ray_worker_ready "
+    '--queue "$DJANGO_RAY_QUEUES" --hostname "$DJANGO_RAY_POD_NAME" --json'
+)
+MANAGER_READINESS_TIMEOUT = (
+    "Readiness probe failed: command timed out: "
+    + json.dumps(MANAGER_READINESS_COMMAND)
+    + " timed out after 10s"
+)
+READINESS_PREFIX = "Readiness probe failed: "
+READINESS_SUFFIX = "\nCommandError: Worker lease is not ready.\n"
 
 
 def _timestamp(value):
@@ -101,6 +113,38 @@ def _probe_failure(item):
         ):
             return f"{probe}_errored"
     return "unavailable"
+
+
+def _readiness_detail(item, reference):
+    """Classify only the pinned manager probe grammar; never retain its text."""
+    unknown = {"kind": "unknown", "status": "unknown", "reason": "unknown"}
+    message = item.get("message")
+    if (
+        item.get("type") != "Warning"
+        or item.get("reason") != "Unhealthy"
+        or reference.get("kind") != "Pod"
+        or _workload_role(reference.get("name")) != "django-manager"
+        or reference.get("fieldPath") != "spec.containers{manager}"
+        or type(message) is not str
+        or len(message) > 512
+    ):
+        return unknown
+    try:
+        if len(message.encode()) > 512:
+            return unknown
+    except UnicodeError:
+        return unknown
+    # Kubernetes v1.35.8 CRI timeout formatting for the fixed fixture argv.
+    # Unknown runtimes, command changes and arbitrary timeout phrases stay unknown.
+    if message == MANAGER_READINESS_TIMEOUT:
+        return {"kind": "exec_timeout", "status": "unknown", "reason": "unknown"}
+    if not (message.startswith(READINESS_PREFIX) and message.endswith(READINESS_SUFFIX)):
+        return unknown
+    report = parse_report(message[len(READINESS_PREFIX) : -len(READINESS_SUFFIX)].encode())
+    if report is None or report["status"] == "ready":
+        return unknown
+    # Events carry no independent process-exit observation.
+    return {"kind": "worker_report", **report}
 
 
 STAGES = {
@@ -410,6 +454,7 @@ def resources(kind: str, items: list) -> list:
                     "reason": choice(item.get("reason"), EVENT_REASONS),
                     "count": number(item.get("count")),
                     "probe_failure": _probe_failure(item),
+                    "readiness_detail": _readiness_detail(item, reference),
                     "first_timestamp": _timestamp(item.get("firstTimestamp")),
                     "last_timestamp": _timestamp(item.get("lastTimestamp")),
                     "event_time": _timestamp(item.get("eventTime")),
