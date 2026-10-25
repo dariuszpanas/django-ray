@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Align task cancellation action authorization with execution change permissions.
-- Prevent `django-manager` readiness probe CPU starvation under the 250m
-  application qualification profile by scoping `django_ray_worker_ready`
-  startup to `django_ray`, allowing idle qualification manager polling to
-  back off to 0.5s, and raising the manager readiness probe timeout to 20s.
+- Reduce `django-manager` readiness-probe startup work under the 250m application
+  qualification profile by scoping `django_ray_worker_ready` startup to
+  `django_ray`, allowing idle qualification manager polling to back off to 0.5s,
+  and raising the manager readiness probe timeout to 20s. Passing the revised
+  bounded profile does not establish CPU starvation as the cause of earlier
+  failures or demonstrate sustained readiness under the previous probe bounds.
 - Require `filelock>=4.2.1` and `virtualenv>=21.14.10` in package metadata and the
   contributor lock, with matching minimum-dependency and distribution checks.
   This includes upstream file-lock fixes and prevents temporary virtualenv caches
@@ -75,12 +77,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspaces or starts workers. Remove its native Windows process fallback and
   macOS RSS conversion while preserving bounded Linux descendant cleanup and
   resource-free report validation on developer hosts.
-- Require patched `certifi>=2026.10.19`, `opentelemetry-api>=1.45.1`, and
-  `virtualenv>=21.14.9` in published dependency metadata and the contributor lock.
+- Require patched `certifi>=2026.10.19` and `opentelemetry-api>=1.45.1` in
+  published dependency metadata and the contributor lock; the effective
+  `virtualenv>=21.14.10` floor and environment-recreation guidance are listed above.
   Keep the locked OpenTelemetry family coordinated at 1.45.1/0.66b1 and validate
   these floors in the minimum-dependency lane, built distributions, and installed
-  wheel. Existing virtualenv launchers require environment recreation to receive
-  the fix; upgrading virtualenv alone does not regenerate them.
+  wheel. Upgrading virtualenv alone does not regenerate existing launchers.
 
 ## [0.7.0] - 2026-10-18
 

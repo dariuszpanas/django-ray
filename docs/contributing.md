@@ -1030,12 +1030,12 @@ Linux `CI Gate`, and record that exact full commit SHA:
 git fetch origin
 candidate_sha="$(git rev-parse origin/main)"
 gh workflow run release-candidate-qualification.yml --ref main \
-  -f version=0.7.0 -f candidate_sha="$candidate_sha"
+  -f version=X.Y.Z -f candidate_sha="$candidate_sha"
 ```
 
 The input, workflow event, checkout and freshly fetched `origin/main` must agree.
 The existing candidate validator accepts either nonempty Unreleased development
-notes or a strict-ready, untagged, dated 0.7.0 section with empty Unreleased notes.
+notes or a strict-ready, untagged, dated target-version section with empty Unreleased notes.
 It rejects an already tagged version and preserves the committed-readiness
 evidence checks.
 This command does not invoke the publishing `release.yml` workflow.
