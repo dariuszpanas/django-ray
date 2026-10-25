@@ -3317,9 +3317,11 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             message,
         )
 
-    @admin.action(description="Cancel selected tasks")
+    @admin.action(description="Cancel selected tasks", permissions=["change"])
     def cancel_tasks(self, request: HttpRequest, queryset: QuerySet) -> None:
         """Request package-owned cancellation for each authorized selection."""
+        if not self.has_change_permission(request):
+            raise PermissionDenied
         accepted_count = 0
         unsupported_count = 0
         for task in queryset.only("pk", "attempt_number", "execution_generation"):
