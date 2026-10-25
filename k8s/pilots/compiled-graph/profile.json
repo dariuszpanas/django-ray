@@ -34,7 +34,7 @@
     }
   },
   "dependency_profile": {
-    "django-ray": "0.7.0",
+    "django-ray": "0.7.1",
     "django": "6.0.8",
     "asgiref": "3.11.1",
     "sqlparse": "0.6.0",

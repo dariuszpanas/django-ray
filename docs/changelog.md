@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-27
+
 ### Fixed
 
 - Require `msgpack>=1.2.3` for the upstream security repair and update the
@@ -93,8 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade from 0.7.0 to 0.7.1
 
-The planned 0.7.1 Beta patch is unpublished. These notes prepare operators for
-the changes above; final release qualification remains separate.
+This Beta patch requires a coordinated upgrade. Complete the steps below before
+resuming normal task submission.
 
 1. Follow the [coordinated Beta upgrade](reference/input-storage.md#rolling-upgrade):
    stop producers and cleanup, drain or reconcile active work, then stop all old
@@ -120,8 +122,21 @@ the changes above; final release qualification remains separate.
    references to bypass refusal; reconciliation needs a separately reviewed,
    consistent object-and-reference migration.
 
+Rollback requires stopping writers and restoring the matching pre-upgrade database,
+referenced artifacts and required encryption keys. Reconcile work and external
+effects accepted after the backup; restoring it loses those later writes.
+Read-only access by 0.7.0 does not qualify restarting its writers against data
+changed by 0.7.1.
+
 Deployments upgrading from 0.6.0 must also complete the
 [0.6 to 0.7 upgrade guide](deployment/upgrading-from-0.6.md).
+
+### Known limitations
+
+An intermittent Python 3.13/3.14 process-exit failure after passing tests remains
+under investigation in [#557](https://github.com/dariuszpanas/django-ray/issues/557).
+The worker signal-ownership fix does not establish a cause or repair for this
+separate failure.
 
 ## [0.7.0] - 2026-10-18
 
@@ -2150,7 +2165,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/dariuszpanas/django-ray/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/dariuszpanas/django-ray/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dariuszpanas/django-ray/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dariuszpanas/django-ray/compare/v0.4.0...v0.5.0

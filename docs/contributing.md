@@ -945,8 +945,10 @@ operations.
 1. Fetch `origin` with complete tags and prepare the candidate from current
    `origin/main`.
 2. Keep active release work under `Unreleased`. Update the same development version
-   in `pyproject.toml`, `src/django_ray/__init__.py`, `uv.lock`, and the release
-   assertion.
+   in `pyproject.toml`, `src/django_ray/__init__.py`, `uv.lock`, the active
+   `k8s/pilots/compiled-graph/profile.json` dependency pin, and the release
+   assertion. Keep historical evidence and released upgrade baselines unchanged;
+   updating the active pilot pin does not promote Compiled Graph support.
 3. Run the candidate checks locally against both built distributions and the installed
    wheel:
 
