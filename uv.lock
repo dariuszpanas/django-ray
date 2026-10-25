@@ -706,7 +706,7 @@ wheels = [
 
 [[package]]
 name = "django-ray"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
