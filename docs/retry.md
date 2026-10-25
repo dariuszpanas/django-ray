@@ -310,6 +310,8 @@ for execution in failed:
 ```
 
 The Admin execution list provides filters plus bulk retry and cancellation actions.
+Both actions require the execution model's change permission; view permission
+alone authorizes inspection, not task mutation.
 Open one execution detail page for its diagnostics, retry guidance, and the
 **Retry task...** button when eligible. Directly resetting model fields is an internal
 operation and can leave stale Ray handles or result metadata if implemented

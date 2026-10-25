@@ -4034,7 +4034,7 @@ class TestRayTaskExecutionAdmin:
 
         confirmation = _retry_confirmation(admin_obj, queryset)
         assert admin_obj.retry_tasks(_confirmed_retry_request(confirmation), queryset) is None
-        admin_obj.cancel_tasks(_request(), queryset)
+        admin_obj.cancel_tasks(_retry_request(), queryset)
 
         assert messages == [
             (
@@ -4085,7 +4085,7 @@ class TestRayTaskExecutionAdmin:
         qs = RayTaskExecution.objects.filter(
             pk__in=[queued.pk, running_ray_job.pk, running_core.pk]
         )
-        admin_obj.cancel_tasks(_request(), qs)
+        admin_obj.cancel_tasks(_retry_request(), qs)
 
         queued.refresh_from_db()
         running_ray_job.refresh_from_db()
@@ -4116,7 +4116,7 @@ class TestRayTaskExecutionAdmin:
             kwargs_json="{}",
         )
 
-        admin_obj.cancel_tasks(_request(), RayTaskExecution.objects.filter(pk=failed.pk))
+        admin_obj.cancel_tasks(_retry_request(), RayTaskExecution.objects.filter(pk=failed.pk))
         assert messages[-1] == "No selected tasks accepted cancellation."
 
     def test_cancel_tasks_reports_duplicate_request_as_noop(self, monkeypatch) -> None:
@@ -4134,7 +4134,7 @@ class TestRayTaskExecutionAdmin:
             kwargs_json="{}",
         )
 
-        admin_obj.cancel_tasks(_request(), RayTaskExecution.objects.filter(pk=task.pk))
+        admin_obj.cancel_tasks(_retry_request(), RayTaskExecution.objects.filter(pk=task.pk))
 
         task.refresh_from_db()
         assert task.state == TaskState.CANCELLING
