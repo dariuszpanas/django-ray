@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Hide the task retry admin action from users without execution change permission;
+  preserve the existing server-side permission check before retry selection.
 - Align task cancellation action authorization with execution change permissions.
 - Reduce `django-manager` readiness-probe startup work under the 250m application
   qualification profile by scoping `django_ray_worker_ready` startup to
@@ -83,6 +85,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Keep the locked OpenTelemetry family coordinated at 1.45.1/0.66b1 and validate
   these floors in the minimum-dependency lane, built distributions, and installed
   wheel. Upgrading virtualenv alone does not regenerate existing launchers.
+
+### Upgrade from 0.7.0 to 0.7.1
+
+The planned 0.7.1 Beta patch is unpublished. These notes prepare operators for
+the changes above; final release qualification remains separate.
+
+1. Follow the [coordinated Beta upgrade](reference/input-storage.md#rolling-upgrade):
+   stop producers and cleanup, drain or reconcile active work, then stop all old
+   workers and other writers. Back up the database, referenced artifacts and
+   encryption keys, and verify restore before replacing the cohort. Keep old
+   producers and purgers stopped; mixed-version rolling execution is unsupported.
+2. Rebuild application and worker images and recreate affected virtual environments
+   with the [updated dependency floors](compatibility.md#dependency-policy).
+   Updating virtualenv alone does not repair existing launchers or seed-package
+   links. Applications sharing filelock `SoftReadWriteLock` paths must upgrade
+   every participant together because filelock 3 and 4 use incompatible protocols.
+3. Restart workers with the updated package to receive the signal-handler and
+   selected-cluster fixes. The signal-handler repair does not establish a cause
+   or repair for the separate [shutdown-crash investigation](https://github.com/dariuszpanas/django-ray/issues/557).
+4. Grant filesystem cleanup processes read access and allow for the additional
+   hash-read I/O: cleanup now checks each existing payload's size and digest in
+   bounded chunks before deletion. Corrupt, unreadable, mismatched or observed
+   replaced objects are retained; already absent objects remain successful no-ops.
+5. Review [legacy registry aliases](reference/input-storage.md#request-reference-discriminator)
+   before resuming enqueue. Canonical enqueue can refuse an alias even when it is
+   a `PURGED` tombstone. Investigate with producers and cleanup stopped, preserving
+   registry and execution references. Do not delete tombstones or rewrite isolated
+   references to bypass refusal; reconciliation needs a separately reviewed,
+   consistent object-and-reference migration.
+
+Deployments upgrading from 0.6.0 must also complete the
+[0.6 to 0.7 upgrade guide](deployment/upgrading-from-0.6.md).
 
 ## [0.7.0] - 2026-10-18
 
