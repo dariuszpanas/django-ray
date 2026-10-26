@@ -3160,7 +3160,7 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             job_id[:8],
         )
 
-    @admin.action(description="Retry selected tasks...")
+    @admin.action(description="Retry selected tasks...", permissions=["change"])
     def retry_tasks(
         self,
         request: HttpRequest,
