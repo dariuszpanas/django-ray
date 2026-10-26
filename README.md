@@ -71,6 +71,15 @@ Python 3.15 has a preparatory compatibility check without Ray Core. Full runtime
 support remains blocked by upstream Ray wheels; use Python 3.12–3.14 for installation
 and execution. See the [Python 3.15 policy](https://django-ray.readthedocs.io/en/latest/compatibility/#python-315-preparation).
 
+## Preparing for 0.7.1
+
+The planned 0.7.1 Beta patch is unpublished. Review the
+[0.7.0 to 0.7.1 upgrade notes](https://django-ray.readthedocs.io/en/latest/changelog/#upgrade-from-070-to-071)
+before preparing a deployment: the patch requires coordinated replacement of old
+producers, workers and purgers, environment recreation for dependency fixes, and
+attention to stricter payload cleanup and legacy-reference refusal. Final release
+qualification remains separate.
+
 ## Upgrading to 0.7.0
 
 django-ray 0.7.0 remains **Beta**. Follow the
