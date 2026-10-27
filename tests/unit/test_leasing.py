@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from django.db import IntegrityError, connection
+from django.db import IntegrityError, connections
 
 from django_ray.models import RayTaskExecution, TaskWorkerLease
 from django_ray.runner.leasing import (
@@ -67,13 +67,14 @@ def test_postgresql_worker_id_collision_requires_exact_primary_key(monkeypatch) 
     error = IntegrityError("duplicate key")
     error.__cause__ = cause
 
-    monkeypatch.setattr(connection, "vendor", "postgresql")
+    database = connections["default"]
+    monkeypatch.setattr(database, "vendor", "postgresql")
     assert is_worker_id_primary_key_collision(error) is True
 
     cause.diag.constraint_name = "unrelated_unique_constraint"
     assert is_worker_id_primary_key_collision(error) is False
 
-    monkeypatch.setattr(connection, "vendor", "mysql")
+    monkeypatch.setattr(database, "vendor", "mysql")
     assert is_worker_id_primary_key_collision(error) is False
 
 
