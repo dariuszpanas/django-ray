@@ -15,7 +15,7 @@ from io import StringIO
 from pathlib import Path
 from threading import Barrier, Event, Lock, get_ident
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import pytest
@@ -739,7 +739,14 @@ def test_two_workers_claim_global_priority_frontier_with_fifo_ties() -> None:
     assert set(claimed_a).isdisjoint(claimed_b)
     assert set(claimed_a) | set(claimed_b) == expected_frontier
 
-    ordering = {task.pk: (-int(task.priority), task.created_at, task.pk) for task in all_tasks}
+    ordering = {
+        cast(int, task.pk): (
+            -int(task.priority),
+            cast(datetime, task.created_at),
+            cast(int, task.pk),
+        )
+        for task in all_tasks
+    }
     assert claimed_a == sorted(claimed_a, key=ordering.__getitem__)
     assert claimed_b == sorted(claimed_b, key=ordering.__getitem__)
 

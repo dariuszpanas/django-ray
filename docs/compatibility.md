@@ -327,8 +327,8 @@ support boundary: the repository lock protects its own reproducible environment,
 the declared lower bound controls what a downstream fresh install may resolve.
 
 The runtime security floors also require `certifi>=2026.10.19`, `filelock>=4.2.1`,
-`multidict>=6.9.1`, `opentelemetry-api>=1.45.1`, `urllib3>=2.8.0`, and
-`virtualenv>=21.14.10`. These dependencies arrive through Ray and its mandatory
+`msgpack>=1.2.3`, `multidict>=6.9.1`, `opentelemetry-api>=1.45.1`, `urllib3>=2.8.0`, and
+`virtualenv>=21.14.13`. These dependencies arrive through Ray and its mandatory
 extras; explicit package requirements protect fresh downstream installs as well
 as the committed lock. Updating an unrelated dependency does not necessarily
 refresh these transitive packages. Current advisory checks can therefore fail
@@ -340,7 +340,9 @@ upgrading: patched virtualenv applies to newly generated launchers and does not
 retroactively repair launchers in existing environments. See the
 [certifi advisory](https://github.com/pypa/advisory-database/blob/main/vulns/certifi/PYSEC-2026-4320.yaml),
 [OpenTelemetry advisory](https://github.com/open-telemetry/opentelemetry-python/security/advisories/GHSA-xcq7-p3pf-p88h),
-and [virtualenv advisory](https://github.com/pypa/virtualenv/security/advisories/GHSA-c978-59m8-c77v).
+[msgpack advisory](https://github.com/msgpack/msgpack-python/security/advisories/GHSA-j586-36cw-2gc2),
+[virtualenv launcher advisory](https://github.com/pypa/virtualenv/security/advisories/GHSA-c978-59m8-c77v),
+and [virtualenv Bash activation advisory](https://github.com/pypa/virtualenv/security/advisories/GHSA-cx6f-vjhg-g3cc).
 
 The filelock 4.2.1 floor includes the upstream lock-file and Windows timeout fixes;
 virtualenv 21.14.10 copies seed packages from temporary app-data even when symlink
