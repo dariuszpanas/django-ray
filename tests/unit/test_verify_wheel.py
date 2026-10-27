@@ -113,10 +113,11 @@ def _metadata(
     transitive_requirements: tuple[str, ...] = (
         "certifi>=2026.10.19",
         "filelock>=4.2.1",
+        "msgpack>=1.2.3",
         "multidict>=6.9.1",
         "opentelemetry-api>=1.45.1",
         "urllib3>=2.8.0",
-        "virtualenv>=21.14.10",
+        "virtualenv>=21.14.13",
     ),
 ) -> bytes:
     return (
@@ -137,18 +138,20 @@ def _write_distributions(
     wheel_transitives: tuple[str, ...] = (
         "certifi>=2026.10.19",
         "filelock>=4.2.1",
+        "msgpack>=1.2.3",
         "multidict>=6.9.1",
         "opentelemetry-api>=1.45.1",
         "urllib3>=2.8.0",
-        "virtualenv>=21.14.10",
+        "virtualenv>=21.14.13",
     ),
     sdist_transitives: tuple[str, ...] = (
         "certifi>=2026.10.19",
         "filelock>=4.2.1",
+        "msgpack>=1.2.3",
         "multidict>=6.9.1",
         "opentelemetry-api>=1.45.1",
         "urllib3>=2.8.0",
-        "virtualenv>=21.14.10",
+        "virtualenv>=21.14.13",
     ),
 ) -> None:
     wheel = dist_dir / "django_ray-0.4.0-py3-none-any.whl"
@@ -198,10 +201,11 @@ def test_distribution_archives_reject_a_pre_floor_ray_requirement(
     [
         ("certifi", "2026.10.19", "2026.6.17"),
         ("filelock", "4.2.1", "4.2.0"),
+        ("msgpack", "1.2.3", "1.2.2"),
         ("multidict", "6.9.1", "6.9.0"),
         ("opentelemetry-api", "1.45.1", "1.45.0"),
         ("urllib3", "2.8.0", "2.7.0"),
-        ("virtualenv", "21.14.10", "21.14.9"),
+        ("virtualenv", "21.14.13", "21.14.12"),
     ],
 )
 @pytest.mark.parametrize("defect", ["missing", "old", "optional", "duplicate"])
@@ -211,10 +215,11 @@ def test_distribution_archives_reject_vulnerable_transitive_requirements(
     requirements = [
         "certifi>=2026.10.19",
         "filelock>=4.2.1",
+        "msgpack>=1.2.3",
         "multidict>=6.9.1",
         "opentelemetry-api>=1.45.1",
         "urllib3>=2.8.0",
-        "virtualenv>=21.14.10",
+        "virtualenv>=21.14.13",
     ]
     requirements.remove(f"{name}>={floor}")
     if defect == "old":

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require `msgpack>=1.2.3` for the upstream security repair and update the
+  contributor lock. Validate this floor in the minimum-dependency lane, built
+  distributions and installed packages. Accept newer `pyasn1` releases while
+  retaining its `0.6.4` security floor in the latest-dependency checks.
 - Hide the task retry admin action from users without execution change permission;
   preserve the existing server-side permission check before retry selection.
 - Align task cancellation action authorization with execution change permissions.
@@ -18,10 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and raising the manager readiness probe timeout to 20s. Passing the revised
   bounded profile does not establish CPU starvation as the cause of earlier
   failures or demonstrate sustained readiness under the previous probe bounds.
-- Require `filelock>=4.2.1` and `virtualenv>=21.14.10` in package metadata and the
+- Require `filelock>=4.2.1` and `virtualenv>=21.14.13` in package metadata and the
   contributor lock, with matching minimum-dependency and distribution checks.
   This includes upstream file-lock fixes and prevents temporary virtualenv caches
-  from leaving dangling seed-package links. Document environment recreation and
+  from leaving dangling seed-package links. The virtualenv floor also includes
+  the upstream Bash prompt-escaping repair. Document environment recreation and
   the coordinated upgrade required for applications sharing `SoftReadWriteLock`
   paths across filelock 3 and 4.
 - Include released 0.7.0 in the database upgrade matrix and select it for all
@@ -81,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resource-free report validation on developer hosts.
 - Require patched `certifi>=2026.10.19` and `opentelemetry-api>=1.45.1` in
   published dependency metadata and the contributor lock; the effective
-  `virtualenv>=21.14.10` floor and environment-recreation guidance are listed above.
+  `virtualenv>=21.14.13` floor and environment-recreation guidance are listed above.
   Keep the locked OpenTelemetry family coordinated at 1.45.1/0.66b1 and validate
   these floors in the minimum-dependency lane, built distributions, and installed
   wheel. Upgrading virtualenv alone does not regenerate existing launchers.

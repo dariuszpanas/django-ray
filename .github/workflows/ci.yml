@@ -768,13 +768,14 @@ jobs:
             "cryptography==42.0.8" \
             "django==6.0.8" \
             "filelock==4.2.1" \
+            "msgpack==1.2.3" \
             "multidict==6.9.1" \
             "opentelemetry-api==1.45.1" \
             "pyasn1==0.6.4" \
             "ray[default]==2.58.0" \
             "sqlparse==0.6.0" \
             "urllib3==2.8.0" \
-            "virtualenv==21.14.10" \
+            "virtualenv==21.14.13" \
             "django-ninja==1.5.1" \
             "gunicorn==23.0" \
             "whitenoise==6.6" \

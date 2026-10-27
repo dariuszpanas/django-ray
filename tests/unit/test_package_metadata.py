@@ -375,9 +375,10 @@ def test_pyasn1_security_floor_is_an_unconditional_runtime_dependency() -> None:
 
     lock = tomllib.loads((project_root / "uv.lock").read_text(encoding="utf-8"))
     locked_versions = [
-        package["version"] for package in lock["package"] if package["name"] == "pyasn1"
+        Version(package["version"]) for package in lock["package"] if package["name"] == "pyasn1"
     ]
-    assert locked_versions == ["0.6.4"]
+    assert len(locked_versions) == 1
+    assert locked_versions[0] >= Version("0.6.4")
 
 
 def test_django_and_sqlparse_security_floors_are_runtime_dependencies() -> None:
@@ -432,10 +433,11 @@ def test_ray_transitive_security_floors_protect_fresh_and_locked_installs() -> N
     for name, floor, vulnerable in (
         ("certifi", "2026.10.19", "2026.6.17"),
         ("filelock", "4.2.1", "4.2.0"),
+        ("msgpack", "1.2.3", "1.2.2"),
         ("multidict", "6.9.1", "6.9.0"),
         ("opentelemetry-api", "1.45.1", "1.45.0"),
         ("urllib3", "2.8.0", "2.7.0"),
-        ("virtualenv", "21.14.10", "21.14.9"),
+        ("virtualenv", "21.14.13", "21.14.12"),
     ):
         requirements = _requirements_for_distribution(config["project"]["dependencies"], name)
         assert len(requirements) == 1

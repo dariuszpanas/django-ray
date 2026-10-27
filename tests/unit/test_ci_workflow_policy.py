@@ -579,7 +579,8 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     assert '"sqlparse==0.6.0"' in minimum_install["run"]
     assert '"urllib3==2.8.0"' in minimum_install["run"]
     assert '"filelock==4.2.1"' in minimum_install["run"]
-    assert '"virtualenv==21.14.10"' in minimum_install["run"]
+    assert '"msgpack==1.2.3"' in minimum_install["run"]
+    assert '"virtualenv==21.14.13"' in minimum_install["run"]
     assert '"pip-audit==2.10.1"' in minimum_install["run"]
     assert audit_job["name"] == (
         "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
