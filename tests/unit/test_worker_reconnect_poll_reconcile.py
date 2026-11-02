@@ -4560,6 +4560,37 @@ class TestWorkerReconnectPollReconcile:
         assert task.ray_job_id is None
         assert task.ray_address is None
 
+    def test_claim_clears_stale_error_and_cancellation_fields_from_prior_attempt(
+        self,
+        monkeypatch,
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="claim-clears-stale-attempt-diagnostics-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            attempt_number=2,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            error_message="attempt 1 failed",
+            error_traceback="Traceback (most recent call last): ...",
+            cancellation_status="INDETERMINATE",
+            cancellation_error="attempt 1 stop timed out",
+        )
+        cmd = _make_command()
+        cmd.execution_mode = "ray"
+        monkeypatch.setattr(cmd, "process_task", lambda _task: None)
+
+        cmd._create_lease("default")
+        cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.error_message is None
+        assert task.error_traceback is None
+        assert task.cancellation_status is None
+        assert task.cancellation_error is None
+
     def test_reconcile_tasks_missing_completion_becomes_lost(self, monkeypatch) -> None:
         stale_time = datetime.now(UTC) - timedelta(minutes=10)
         task = RayTaskExecution.objects.create(

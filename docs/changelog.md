@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Require `pyasn1>=0.6.5` in published runtime metadata, minimum-direct CI, built
+  distributions, and the contributor lock to exclude the four upstream `pyasn1`
+  `0.6.4` advisories (`CVE-2026-119194` through `CVE-2026-119197`).
+- Clear `last_heartbeat_at`, `cancellation_status`, and `cancellation_error` when
+  re-queueing automatic retries in `record_failure(..., retry=True)`, and clear
+  stale `error_message`, `error_traceback`, `cancellation_status`, and
+  `cancellation_error` when claiming a `QUEUED` task in `claim_and_process_tasks()`.
+- Prefer `runner.get_pending_handle(...)` and `runner.cancel_pending(...)` in
+  `request_cancellation()` so composite Ray Core job IDs (`{ray_job_id}:{ray_task_id}`)
+  cancel via the generation-fenced in-memory handle.
+- Re-raise `(KeyboardInterrupt, SystemExit)` before best-effort `BaseException`
+  handlers in workflow progress and terminal summary helpers.
+- Reuse the validated in-memory accumulator across contiguous drain iterations in
+  `WorkflowMapResultFold._fold_contiguous_in_context()`.
+
 ## [0.7.1] - 2026-10-27
 
 ### Fixed

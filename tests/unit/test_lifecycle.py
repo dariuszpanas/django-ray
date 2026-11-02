@@ -28,6 +28,7 @@ from django_ray.lifecycle import (
     succeed_task,
 )
 from django_ray.models import (
+    CancellationStatus,
     InputPayloadState,
     RayTaskExecution,
     TaskAttempt,
@@ -2142,19 +2143,29 @@ def test_record_lost_rejects_durable_completion_envelope() -> None:
 
 @pytest.mark.django_db
 def test_record_failure_clears_attempt_selection_when_retrying() -> None:
+    heartbeat_at = datetime.now(UTC)
     task = RayTaskExecution.objects.create(
         runtime_env_hash=normalize_runtime_env({}).digest,
         task_id="lifecycle-retry-selection-001",
         callable_path="testproject.tasks.add_numbers",
         state=TaskState.RUNNING,
+        last_heartbeat_at=heartbeat_at,
+        cancellation_status=CancellationStatus.INDETERMINATE,
+        cancellation_error="prior stop timed out",
         workflow_plan_selection='{"selected_strategy":"dynamic_tasks"}',
     )
 
     assert record_failure(task, error_message="retry", retry=True)
 
     task.refresh_from_db()
+    archived = TaskAttempt.objects.get(execution=task, attempt_number=1)
+    assert archived.state == TaskState.FAILED
+    assert archived.error_message == "retry"
     assert task.state == TaskState.QUEUED
     assert task.workflow_plan_selection is None
+    assert task.last_heartbeat_at is None
+    assert task.cancellation_status is None
+    assert task.cancellation_error is None
 
 
 @pytest.mark.django_db

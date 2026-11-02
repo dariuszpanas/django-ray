@@ -342,6 +342,43 @@ def test_local_fold_handles_empty_single_generator_and_non_commutative_order() -
     assert _fold(reducer=sum_from_none, initial=None).run([1, 2], use_ray=False) == 3
 
 
+def test_contiguous_fold_unpickles_accumulator_once_per_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ray.cloudpickle as cloudpickle
+
+    fold = WorkflowMapResultFold(
+        4,
+        4,
+        4096,
+        f"{__name__}.sum_items",
+        False,
+        (),
+        {},
+        0,
+    )
+    for idx, val in ((1, 20), (2, 30), (3, 40)):
+        ack = fold.append(idx, val)
+        assert ack["released_credits"] == 0
+
+    real_loads = cloudpickle.loads
+    loads_calls = 0
+
+    def counting_loads(payload: bytes):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(payload)
+
+    monkeypatch.setattr(cloudpickle, "loads", counting_loads)
+    ack = fold.append(0, 10)
+    assert ack["released_credits"] == 4
+    # 1 initial accumulator unpickle + 4 contiguous item unpickles = 5 total calls.
+    assert loads_calls == 5
+    value, final_ack = fold.finalize(4)
+    assert value == 100
+    assert final_ack["folded_items"] == 4
+
+
 def test_local_fold_supports_nested_static_chain_and_group_mappers() -> None:
     chained = (
         map_step(chain(step(increment), step(double)))

@@ -366,7 +366,7 @@ def test_pyasn1_security_floor_is_an_unconditional_runtime_dependency() -> None:
     config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
     project = config["project"]
 
-    assert project["dependencies"].count("pyasn1>=0.6.4") == 1
+    assert project["dependencies"].count("pyasn1>=0.6.5") == 1
     assert config["dependency-groups"]["dev"].count("pip-audit==2.10.1") == 1
     assert all(
         all("pyasn1" not in requirement for requirement in requirements)
@@ -378,7 +378,7 @@ def test_pyasn1_security_floor_is_an_unconditional_runtime_dependency() -> None:
         Version(package["version"]) for package in lock["package"] if package["name"] == "pyasn1"
     ]
     assert len(locked_versions) == 1
-    assert locked_versions[0] >= Version("0.6.4")
+    assert locked_versions[0] >= Version("0.6.5")
 
 
 def test_django_and_sqlparse_security_floors_are_runtime_dependencies() -> None:

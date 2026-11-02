@@ -1764,6 +1764,10 @@ class Command(BaseCommand):
                 task.claimed_by_worker = self.worker_id
                 task.managed_with_django_ray_version = django_ray_version
                 task.execution_generation = int(task.execution_generation) + 1
+                task.error_message = None
+                task.error_traceback = None
+                task.cancellation_status = None
+                task.cancellation_error = None
                 task.completion_data = None
                 task.progress_data = None
                 task.workflow_progress_summary_json = None
@@ -1781,6 +1785,10 @@ class Command(BaseCommand):
                         "claimed_by_worker",
                         "managed_with_django_ray_version",
                         "execution_generation",
+                        "error_message",
+                        "error_traceback",
+                        "cancellation_status",
+                        "cancellation_error",
                         "completion_data",
                         "progress_data",
                         "workflow_progress_summary_json",
