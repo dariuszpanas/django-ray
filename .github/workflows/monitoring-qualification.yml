@@ -55,9 +55,9 @@ jobs:
       - name: Build the committed candidate before allocating Kind
         timeout-minutes: 15
         run: |
-          docker run -d --name monitoring-registry --cpus=0.25 --memory=128m \
+          docker run -d --name monitoring-registry -e GOMEMLIMIT=64MiB -e GOGC=25 --cpus=0.25 --memory=512m \
             --label "qualification.django-ray/namespace=monitoring-${GITHUB_RUN_ID}" \
-            --memory-swap=128m --pids-limit=128 -p 127.0.0.1:5001:5000 \
+            --memory-swap=512m --pids-limit=128 -p 127.0.0.1:5001:5000 \
             registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e
           mkdir "$RUNNER_TEMP/monitoring-source"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
@@ -74,6 +74,9 @@ jobs:
             --build-arg DJANGO_RAY_RUNTIME_IMAGE="$base" \
             -t localhost:5001/monitoring:candidate "$RUNNER_TEMP/monitoring-source"
           docker push localhost:5001/monitoring:candidate
+          sync
+          echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+          docker update --cpus=0.25 --memory=128m --memory-swap=128m --pids-limit=128 monitoring-registry
           image=$(docker image inspect localhost:5001/monitoring:candidate --format '{{index .RepoDigests 0}}')
           echo "MONITORING_BASE_IMAGE=$base" >> "$GITHUB_ENV"
           echo "MONITORING_IMAGE=$image" >> "$GITHUB_ENV"
