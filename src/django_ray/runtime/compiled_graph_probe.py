@@ -159,6 +159,7 @@ def run_compiled_graph_probe(
     )
     candidate_canary = _candidate_canary_requested(decision, request)
     bypassable = decision.reason not in {
+        CompiledGraphReason.UNSUPPORTED_OPERATING_SYSTEM,
         CompiledGraphReason.UNSUPPORTED_TOPOLOGY,
         CompiledGraphReason.UNSUPPORTED_SUBMISSION_TRANSPORT,
         CompiledGraphReason.UNSUPPORTED_TRANSPORT,
@@ -174,6 +175,15 @@ def run_compiled_graph_probe(
             duration_seconds=time.monotonic() - started_at,
             error_type="CompiledGraphUnsupportedError",
             error_message=decision.message,
+        )
+
+    if sys.platform != "linux":
+        return CompiledGraphProbeOutcome(
+            status=CompiledGraphProbeStatus.UNSUPPORTED_GUARD,
+            decision=decision,
+            duration_seconds=time.monotonic() - started_at,
+            error_type="CompiledGraphUnsupportedError",
+            error_message="Ray Compiled Graph native probe subprocess execution requires Linux.",
         )
 
     environment = dict(os.environ if _environment is None else _environment)
@@ -237,18 +247,14 @@ def _run_probe_subprocess(
         "encoding": "utf-8",
         "errors": "replace",
         "env": environment,
+        "start_new_session": True,
     }
-    if os.name == "nt":
-        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_options["start_new_session"] = True
 
     process = subprocess.Popen(command, **popen_options)
     stdout_capture = _LiveOutputCapture(process.stdout)
     stderr_capture = _LiveOutputCapture(process.stderr)
-    windows_job: _WindowsJob | None = None
     try:
-        windows_job = _arm_child_process(process, child_start_gate_path)
+        _arm_child_process(process, child_start_gate_path)
     except OSError as error:
         stdout = stdout_capture.finish()
         stderr = stderr_capture.finish()
@@ -269,10 +275,8 @@ def _run_probe_subprocess(
     except subprocess.TimeoutExpired:
         timed_out = True
     finally:
-        _terminate_process_tree(process, windows_job=windows_job)
+        _terminate_process_tree(process)
         _wait_after_termination(process)
-        if windows_job is not None:
-            windows_job.close()
 
     stdout = stdout_capture.finish()
     stderr = stderr_capture.finish()
@@ -370,6 +374,7 @@ def _execute_child_request(request: CompiledGraphProbeRequest) -> dict[str, Any]
         }
     candidate_canary = _candidate_canary_requested(decision, request)
     unsafe_semantic_rejection = decision.reason in {
+        CompiledGraphReason.UNSUPPORTED_OPERATING_SYSTEM,
         CompiledGraphReason.UNSUPPORTED_TOPOLOGY,
         CompiledGraphReason.UNSUPPORTED_SUBMISSION_TRANSPORT,
         CompiledGraphReason.UNSUPPORTED_TRANSPORT,
@@ -383,6 +388,12 @@ def _execute_child_request(request: CompiledGraphProbeRequest) -> dict[str, Any]
             "status": CompiledGraphProbeStatus.UNSUPPORTED_GUARD.value,
             "error_type": "CompiledGraphUnsupportedError",
             "error_message": decision.message,
+        }
+    if sys.platform != "linux":
+        return {
+            "status": CompiledGraphProbeStatus.UNSUPPORTED_GUARD.value,
+            "error_type": "CompiledGraphUnsupportedError",
+            "error_message": "Ray Compiled Graph native probe child execution requires Linux.",
         }
     try:
         details = _run_native_probe(request.topology)
@@ -573,109 +584,17 @@ class _LiveOutputCapture:
         return self._buffer.value()
 
 
-class _WindowsJob:
-    """Windows Job Object that retains descendants after the root process exits."""
-
-    def __init__(self, process: subprocess.Popen[str]) -> None:
-        import ctypes
-        from ctypes import wintypes
-
-        class BasicLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class IoCounters(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_ulonglong),
-                ("WriteOperationCount", ctypes.c_ulonglong),
-                ("OtherOperationCount", ctypes.c_ulonglong),
-                ("ReadTransferCount", ctypes.c_ulonglong),
-                ("WriteTransferCount", ctypes.c_ulonglong),
-                ("OtherTransferCount", ctypes.c_ulonglong),
-            ]
-
-        class ExtendedLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", BasicLimitInformation),
-                ("IoInfo", IoCounters),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-        ]
-        kernel32.SetInformationJobObject.restype = wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-        kernel32.TerminateJobObject.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-
-        self._kernel32 = kernel32
-        self._handle = kernel32.CreateJobObjectW(None, None)
-        if not self._handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        information = ExtendedLimitInformation()
-        information.BasicLimitInformation.LimitFlags = 0x00002000
-        if not kernel32.SetInformationJobObject(
-            self._handle,
-            9,
-            ctypes.byref(information),
-            ctypes.sizeof(information),
-        ):
-            self.close()
-            raise ctypes.WinError(ctypes.get_last_error())
-        process_handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
-        if not kernel32.AssignProcessToJobObject(self._handle, process_handle):
-            self.close()
-            raise ctypes.WinError(ctypes.get_last_error())
-
-    def terminate(self) -> None:
-        if self._handle:
-            self._kernel32.TerminateJobObject(self._handle, 1)
-
-    def close(self) -> None:
-        if self._handle:
-            self._kernel32.CloseHandle(self._handle)
-            self._handle = None
-
-
 def _arm_child_process(
     process: subprocess.Popen[str],
     start_gate_path: Path,
-) -> _WindowsJob | None:
-    """Establish descendant containment before allowing native child work."""
-    windows_job: _WindowsJob | None = None
+) -> None:
+    """Release the Linux process-group-isolated child once its start gate is ready."""
     try:
-        if os.name == "nt":
-            windows_job = _WindowsJob(process)
         _release_child_start_gate(start_gate_path)
     except OSError:
-        _terminate_process_tree(process, windows_job=windows_job)
+        _terminate_process_tree(process)
         _wait_after_termination(process)
-        if windows_job is not None:
-            windows_job.close()
         raise
-    return windows_job
 
 
 def _release_child_start_gate(path: Path) -> None:
@@ -704,30 +623,11 @@ def _wait_for_parent_start_gate(
         time.sleep(0.01)
 
 
-def _terminate_process_tree(
-    process: subprocess.Popen[str],
-    *,
-    windows_job: _WindowsJob | None,
-) -> None:
-    if os.name == "nt":
-        if windows_job is not None:
-            windows_job.terminate()
-        else:
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     if process.poll() is None:
         try:
             process.kill()
@@ -891,8 +791,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--unsafe-native",
         action="store_true",
         help=(
-            "Bypass only the runtime/platform allowlist for reproduction or canary use. "
-            f"Also requires {UNSAFE_PROBE_ENV}=1."
+            "Bypass only the runtime version/candidate allowlist on Linux for reproduction "
+            f"or canary use. Also requires {UNSAFE_PROBE_ENV}=1."
         ),
     )
     parser.add_argument(

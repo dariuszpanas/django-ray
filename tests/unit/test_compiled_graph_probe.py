@@ -93,6 +93,7 @@ def _record_command(
 
 def _force_supported(monkeypatch) -> CompiledGraphCapabilityDecision:
     decision = _decision()
+    monkeypatch.setattr(probe.sys, "platform", "linux")
     monkeypatch.setattr(probe, "evaluate_compiled_graph_support", lambda *_a, **_k: decision)
     return decision
 
@@ -172,6 +173,7 @@ def test_candidate_requires_explicit_canary_opt_in(monkeypatch) -> None:
     assert outcome.status is CompiledGraphProbeStatus.UNSUPPORTED_GUARD
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_candidate_canary_runs_without_unsafe_acknowledgement(monkeypatch) -> None:
     decision = replace(
         _decision(
@@ -193,6 +195,7 @@ def test_candidate_canary_runs_without_unsafe_acknowledgement(monkeypatch) -> No
     assert outcome.decision.candidate is True
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_incomplete_candidate_canary_runs_only_with_explicit_opt_in(monkeypatch) -> None:
     decision = replace(
         _decision(
@@ -213,6 +216,7 @@ def test_incomplete_candidate_canary_runs_only_with_explicit_opt_in(monkeypatch)
     assert outcome.decision.eligible is False
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_success_record_is_parsed_and_output_is_bounded(monkeypatch) -> None:
     decision = _force_supported(monkeypatch)
     command = _record_command(
@@ -234,6 +238,7 @@ def test_success_record_is_parsed_and_output_is_bounded(monkeypatch) -> None:
     assert json.loads(json.dumps(outcome.asdict()))["successful"] is True
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_output_is_drained_into_a_bounded_tail_while_child_runs(monkeypatch) -> None:
     _force_supported(monkeypatch)
     script = (
@@ -261,6 +266,7 @@ def test_bounded_tail_buffer_never_retains_more_than_limit() -> None:
     assert buffer.value() == "89012345678901234567890123456789"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_python_failure_record_survives_nonzero_child_exit(monkeypatch) -> None:
     _force_supported(monkeypatch)
     command = _record_command(
@@ -284,6 +290,7 @@ def test_python_failure_record_survives_nonzero_child_exit(monkeypatch) -> None:
     assert outcome.details is None
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_maximum_escaped_failure_record_cannot_be_truncated_by_human_logs(monkeypatch) -> None:
     _force_supported(monkeypatch)
     script = (
@@ -316,6 +323,7 @@ def test_maximum_escaped_failure_record_cannot_be_truncated_by_human_logs(monkey
     assert len(outcome.stdout_tail) == probe._MAX_OUTPUT_CHARS
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_native_worker_crash_record_survives_nonzero_child_exit(monkeypatch) -> None:
     _force_supported(monkeypatch)
     command = _record_command(
@@ -333,6 +341,7 @@ def test_native_worker_crash_record_survives_nonzero_child_exit(monkeypatch) -> 
     assert outcome.error_type == "WorkerCrashedError"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_invalid_child_record_is_a_native_crash(monkeypatch) -> None:
     _force_supported(monkeypatch)
     command = _record_command({"status": "future-status"})
@@ -343,6 +352,7 @@ def test_invalid_child_record_is_a_native_crash(monkeypatch) -> None:
     assert outcome.error_type == "InvalidChildRecord"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_abrupt_exit_is_classified_with_native_exit_code(monkeypatch) -> None:
     _force_supported(monkeypatch)
     command = [sys.executable, "-c", "import os; os._exit(7)"]
@@ -355,6 +365,7 @@ def test_abrupt_exit_is_classified_with_native_exit_code(monkeypatch) -> None:
     assert outcome.error_type == "AbruptProcessExit"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_abrupt_root_exit_cleans_real_grandchild(monkeypatch, tmp_path: Path) -> None:
     _force_supported(monkeypatch)
     sentinel = tmp_path / "leaked-grandchild.txt"
@@ -379,6 +390,7 @@ def test_abrupt_root_exit_cleans_real_grandchild(monkeypatch, tmp_path: Path) ->
     assert sentinel.exists() is False
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_timeout_terminates_and_reaps_probe_process(monkeypatch) -> None:
     _force_supported(monkeypatch)
     command = [sys.executable, "-c", "import time; time.sleep(5)"]
@@ -400,56 +412,102 @@ def test_timeout_must_be_positive() -> None:
         run_compiled_graph_probe(_request(), timeout_seconds=0)
 
 
-def test_windows_job_cleanup_runs_after_root_already_exited(monkeypatch) -> None:
+def test_linux_process_group_cleanup_runs_after_root_already_exited(monkeypatch) -> None:
     class Process:
         pid = 123
 
         def poll(self) -> int:
             return 7
 
-    class Job:
-        terminated = False
+    killpg_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        probe.os,
+        "killpg",
+        lambda pid, sig: killpg_calls.append((pid, sig)),
+        raising=False,
+    )
+    monkeypatch.setattr(probe.signal, "SIGKILL", 9, raising=False)
 
-        def terminate(self) -> None:
-            self.terminated = True
+    probe._terminate_process_tree(Process())  # type: ignore[arg-type]
 
-    job = Job()
-    monkeypatch.setattr(probe.os, "name", "nt")
-
-    probe._terminate_process_tree(Process(), windows_job=job)
-
-    assert job.terminated is True
+    assert killpg_calls == [(123, 9)]
+    assert not hasattr(probe, "_WindowsJob")
 
 
-def test_windows_job_is_assigned_before_child_start_gate_is_released(
+def test_child_start_gate_release_failure_terminates_and_reaps_process_tree(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
 
     class Process:
-        pass
+        pid = 456
 
-    class Job:
-        pass
+        def poll(self) -> int | None:
+            return 0
 
-    job = Job()
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            events.append("wait")
+            return 0
 
-    def assign_job(_process) -> Job:
-        events.append("job-assigned")
-        return job
+    def fail_gate(_path: Path) -> None:
+        events.append("gate-failed")
+        raise OSError("gate unwritable")
 
-    def release_gate(_path: Path) -> None:
-        events.append("gate-released")
+    monkeypatch.setattr(probe, "_release_child_start_gate", fail_gate)
+    monkeypatch.setattr(
+        probe,
+        "_terminate_process_tree",
+        lambda _process: events.append("terminate"),
+    )
 
-    monkeypatch.setattr(probe.os, "name", "nt")
-    monkeypatch.setattr(probe, "_WindowsJob", assign_job)
-    monkeypatch.setattr(probe, "_release_child_start_gate", release_gate)
+    with pytest.raises(OSError, match="gate unwritable"):
+        probe._arm_child_process(Process(), tmp_path / "gate")  # type: ignore[arg-type]
 
-    result = probe._arm_child_process(Process(), tmp_path / "gate")
+    assert events == ["gate-failed", "terminate", "wait"]
 
-    assert result is job
-    assert events == ["job-assigned", "gate-released"]
+
+def test_unsafe_probe_and_subprocess_boundary_reject_non_linux(monkeypatch) -> None:
+    os_decision = _decision(
+        eligible=False,
+        reason=CompiledGraphReason.UNSUPPORTED_OPERATING_SYSTEM,
+    )
+    monkeypatch.setattr(probe, "evaluate_compiled_graph_support", lambda *_a, **_k: os_decision)
+    monkeypatch.setattr(
+        probe.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("non-Linux probe must not spawn"),
+    )
+    monkeypatch.setenv(probe.UNSAFE_PROBE_ENV, "1")
+
+    parent_os_rejected = run_compiled_graph_probe(
+        _request(unsafe_native=True),
+        _environment={probe.UNSAFE_PROBE_ENV: "1"},
+    )
+    child_os_rejected = probe._execute_child_request(_request(unsafe_native=True))
+
+    assert parent_os_rejected.status is CompiledGraphProbeStatus.UNSUPPORTED_GUARD
+    assert child_os_rejected["status"] == "unsupported_guard"
+
+    eligible_decision = _decision(eligible=True, reason=CompiledGraphReason.ELIGIBLE)
+    monkeypatch.setattr(
+        probe,
+        "evaluate_compiled_graph_support",
+        lambda *_a, **_k: eligible_decision,
+    )
+    monkeypatch.setattr(probe.sys, "platform", "win32")
+
+    parent_platform_rejected = run_compiled_graph_probe(
+        _request(unsafe_native=True),
+        _environment={probe.UNSAFE_PROBE_ENV: "1"},
+    )
+    child_platform_rejected = probe._execute_child_request(_request(unsafe_native=True))
+
+    assert parent_platform_rejected.status is CompiledGraphProbeStatus.UNSUPPORTED_GUARD
+    assert "requires Linux" in (parent_platform_rejected.error_message or "")
+    assert child_platform_rejected["status"] == "unsupported_guard"
+    assert "requires Linux" in child_platform_rejected["error_message"]
 
 
 def test_child_start_gate_blocks_until_parent_releases_it(monkeypatch, tmp_path: Path) -> None:
@@ -487,6 +545,7 @@ def test_signal_outcome_is_distinct_from_native_exit() -> None:
     assert outcome.native_exit_code is None
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_unsafe_runtime_bypass_runs_after_acknowledgement(monkeypatch) -> None:
     decision = _decision(
         eligible=False,
@@ -523,6 +582,7 @@ def test_child_guard_does_not_call_native_probe(monkeypatch) -> None:
 
 
 def test_child_incomplete_candidate_requires_canary_opt_in(monkeypatch) -> None:
+    monkeypatch.setattr(probe.sys, "platform", "linux")
     decision = replace(
         _decision(
             eligible=False,

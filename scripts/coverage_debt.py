@@ -20,6 +20,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.require_linux import require_linux  # noqa: E402
+
 REPORT_SCHEMA_VERSION = 1
 TRACKER_STATE_SCHEMA_VERSION = 1
 TRACKER_MARKER = "<!-- django-ray:coverage-debt-tracker -->"
@@ -74,10 +80,9 @@ class CoveragePhase:
 
 @dataclass
 class _OwnedPhaseProcess:
-    """One phase launcher and the platform boundary containing its descendants."""
+    """One phase launcher and the Linux process-group boundary containing its descendants."""
 
     process: subprocess.Popen[bytes]
-    windows_job_handle: int | None = None
 
 
 class _BoundedPhaseOutput:
@@ -679,179 +684,6 @@ def coverage_phases(
     return default_resources, local_ray
 
 
-def _windows_process_handle(process: subprocess.Popen[bytes]) -> int:
-    """Return a Windows ``Popen`` process handle without widening its public API."""
-    try:
-        return int(vars(process)["_handle"])
-    except (KeyError, TypeError, ValueError) as error:  # pragma: no cover - Windows invariant
-        raise CoverageDebtError(
-            "Windows coverage phase omitted its native process handle"
-        ) from error
-
-
-def _create_windows_phase_job(process: subprocess.Popen[bytes]) -> int:
-    """Contain a suspended Windows phase in a kill-on-close Job."""
-    import ctypes
-    from ctypes import wintypes
-
-    class BasicLimitInformation(ctypes.Structure):
-        _fields_ = [
-            ("per_process_user_time_limit", ctypes.c_longlong),
-            ("per_job_user_time_limit", ctypes.c_longlong),
-            ("limit_flags", wintypes.DWORD),
-            ("minimum_working_set_size", ctypes.c_size_t),
-            ("maximum_working_set_size", ctypes.c_size_t),
-            ("active_process_limit", wintypes.DWORD),
-            ("affinity", ctypes.c_size_t),
-            ("priority_class", wintypes.DWORD),
-            ("scheduling_class", wintypes.DWORD),
-        ]
-
-    class IoCounters(ctypes.Structure):
-        _fields_ = [
-            ("read_operation_count", ctypes.c_ulonglong),
-            ("write_operation_count", ctypes.c_ulonglong),
-            ("other_operation_count", ctypes.c_ulonglong),
-            ("read_transfer_count", ctypes.c_ulonglong),
-            ("write_transfer_count", ctypes.c_ulonglong),
-            ("other_transfer_count", ctypes.c_ulonglong),
-        ]
-
-    class ExtendedLimitInformation(ctypes.Structure):
-        _fields_ = [
-            ("basic_limit_information", BasicLimitInformation),
-            ("io_info", IoCounters),
-            ("process_memory_limit", ctypes.c_size_t),
-            ("job_memory_limit", ctypes.c_size_t),
-            ("peak_process_memory_used", ctypes.c_size_t),
-            ("peak_job_memory_used", ctypes.c_size_t),
-        ]
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_job = kernel32.CreateJobObjectW
-    create_job.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-    create_job.restype = wintypes.HANDLE
-    set_information = kernel32.SetInformationJobObject
-    set_information.argtypes = [
-        wintypes.HANDLE,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-    ]
-    set_information.restype = wintypes.BOOL
-    assign_process = kernel32.AssignProcessToJobObject
-    assign_process.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    assign_process.restype = wintypes.BOOL
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
-
-    handle = create_job(None, None)
-    if not handle:
-        raise CoverageDebtError(
-            f"could not create a Windows coverage phase Job: error {ctypes.get_last_error()}"
-        )
-    information = ExtendedLimitInformation()
-    information.basic_limit_information.limit_flags = 0x00002000
-    if not set_information(handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
-        error_code = ctypes.get_last_error()
-        close_handle(handle)
-        raise CoverageDebtError(
-            f"could not configure a Windows coverage phase Job: error {error_code}"
-        )
-    if not assign_process(
-        handle,
-        wintypes.HANDLE(_windows_process_handle(process)),
-    ):
-        error_code = ctypes.get_last_error()
-        close_handle(handle)
-        raise CoverageDebtError(f"could not contain a Windows coverage phase: error {error_code}")
-    return int(handle)
-
-
-def _resume_windows_phase(process: subprocess.Popen[bytes]) -> None:
-    """Resume a Windows phase only after its Job boundary is installed."""
-    import ctypes
-    from ctypes import wintypes
-
-    resume_process = ctypes.WinDLL("ntdll").NtResumeProcess
-    resume_process.argtypes = [wintypes.HANDLE]
-    resume_process.restype = ctypes.c_long
-    status = int(resume_process(wintypes.HANDLE(_windows_process_handle(process))))
-    if status != 0:
-        raise CoverageDebtError(
-            f"could not resume a contained Windows coverage phase: status {status}"
-        )
-
-
-def _windows_job_active_processes(handle: int) -> int:
-    """Return the number of live processes retained by one Windows Job."""
-    import ctypes
-    from ctypes import wintypes
-
-    class BasicAccountingInformation(ctypes.Structure):
-        _fields_ = [
-            ("total_user_time", ctypes.c_longlong),
-            ("total_kernel_time", ctypes.c_longlong),
-            ("this_period_total_user_time", ctypes.c_longlong),
-            ("this_period_total_kernel_time", ctypes.c_longlong),
-            ("total_page_fault_count", wintypes.DWORD),
-            ("total_processes", wintypes.DWORD),
-            ("active_processes", wintypes.DWORD),
-            ("total_terminated_processes", wintypes.DWORD),
-        ]
-
-    query_information = ctypes.WinDLL("kernel32", use_last_error=True).QueryInformationJobObject
-    query_information.argtypes = [
-        wintypes.HANDLE,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        ctypes.c_void_p,
-    ]
-    query_information.restype = wintypes.BOOL
-    information = BasicAccountingInformation()
-    if not query_information(
-        wintypes.HANDLE(handle),
-        1,
-        ctypes.byref(information),
-        ctypes.sizeof(information),
-        None,
-    ):
-        raise CoverageDebtError(
-            f"could not query a Windows coverage phase Job: error {ctypes.get_last_error()}"
-        )
-    return int(information.active_processes)
-
-
-def _terminate_windows_phase_job(handle: int) -> None:
-    """Forcibly stop every live process retained by one Windows Job."""
-    import ctypes
-    from ctypes import wintypes
-
-    terminate_job = ctypes.WinDLL("kernel32", use_last_error=True).TerminateJobObject
-    terminate_job.argtypes = [wintypes.HANDLE, wintypes.UINT]
-    terminate_job.restype = wintypes.BOOL
-    if not terminate_job(wintypes.HANDLE(handle), 1):
-        raise CoverageDebtError(
-            f"could not terminate a Windows coverage phase Job: error {ctypes.get_last_error()}"
-        )
-
-
-def _close_windows_phase_job(handle: int) -> None:
-    """Close a Windows Job handle, activating its final kill-on-close fence."""
-    import ctypes
-    from ctypes import wintypes
-
-    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
-    if not close_handle(wintypes.HANDLE(handle)):
-        raise CoverageDebtError(
-            f"could not close a Windows coverage phase Job: error {ctypes.get_last_error()}"
-        )
-
-
 def _phase_environment() -> dict[str, str]:
     """Return the deterministic environment inherited by isolated coverage phases."""
     environment = os.environ.copy()
@@ -869,96 +701,41 @@ def _phase_environment() -> dict[str, str]:
 
 
 def _launch_phase(root: Path, phase: CoveragePhase) -> _OwnedPhaseProcess:
-    launch_options: dict[str, Any] = {"env": _phase_environment()}
-    if os.name == "posix":
-        launch_options["start_new_session"] = True
-    elif os.name == "nt":
-        launch_options["creationflags"] = (
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x00000004  # CREATE_SUSPENDED
-        )
-    else:
-        raise CoverageDebtError(f"unsupported coverage phase platform: {os.name}")
-    process = cast(
-        subprocess.Popen[bytes],
-        subprocess.Popen(
-            phase.command,
-            cwd=root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            **launch_options,
-        ),
+    require_linux()
+    process = subprocess.Popen(
+        phase.command,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=_phase_environment(),
+        start_new_session=True,
     )
-    windows_job_handle: int | None = None
-    try:
-        if os.name == "nt":
-            windows_job_handle = _create_windows_phase_job(process)
-            _resume_windows_phase(process)
-    except BaseException:
-        try:
-            if windows_job_handle is not None:
-                _terminate_windows_phase_job(windows_job_handle)
-            else:
-                process.kill()
-            process.wait(timeout=PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS)
-        finally:
-            if windows_job_handle is not None:
-                _close_windows_phase_job(windows_job_handle)
-            if process.stdout is not None:
-                process.stdout.close()
-        raise
-    return _OwnedPhaseProcess(process=process, windows_job_handle=windows_job_handle)
+    return _OwnedPhaseProcess(process=process)
 
 
 def _owned_process_tree_is_active(owned: _OwnedPhaseProcess) -> bool:
-    """Return whether the retained platform boundary still contains live work."""
-    if os.name == "posix":
-        try:
-            os.killpg(owned.process.pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
-    if os.name == "nt":
-        if owned.windows_job_handle is None:  # pragma: no cover - construction is fail closed
-            raise CoverageDebtError("Windows coverage phase has no process-tree containment Job")
-        return _windows_job_active_processes(owned.windows_job_handle) > 0
-    raise CoverageDebtError(f"unsupported coverage phase platform: {os.name}")
-
-
-def _close_owned_process_boundary(owned: _OwnedPhaseProcess) -> str | None:
-    """Release the retained Windows Job handle after phase shutdown."""
-    if owned.windows_job_handle is None:
-        return None
-    handle = owned.windows_job_handle
-    owned.windows_job_handle = None
+    """Return whether the retained Linux process group still contains live work."""
+    require_linux()
     try:
-        _close_windows_phase_job(handle)
-    except CoverageDebtError as error:
-        return " ".join(str(error).split())[:1_000]
-    return None
+        os.killpg(owned.process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _terminate_owned_process_tree(owned: _OwnedPhaseProcess) -> str | None:
     """Terminate only the subprocess tree launched for one coverage phase."""
+    require_linux()
     process = owned.process
     error_message: str | None = None
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except OSError as error:
-            error_message = str(error)
-    elif os.name == "nt" and owned.windows_job_handle is not None:
-        try:
-            _terminate_windows_phase_job(owned.windows_job_handle)
-        except CoverageDebtError as error:
-            error_message = str(error)
-    elif os.name == "nt":  # pragma: no cover - construction is fail closed
-        error_message = "Windows coverage phase has no process-tree containment Job"
-    else:
-        error_message = f"unsupported coverage phase platform: {os.name}"
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        error_message = str(error)
 
     if error_message is not None and process.poll() is None:
         try:
@@ -1237,6 +1014,7 @@ def _timing_evidence_error(path: Path, *, expected_lane: str) -> str | None:
 
 def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
     """Run one phase with a hard process-tree deadline and a capped log tail."""
+    require_linux()
     phase.log_path.parent.mkdir(parents=True, exist_ok=True)
     if phase.timing_path is not None:
         phase.timing_path.unlink(missing_ok=True)
@@ -1258,7 +1036,6 @@ def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
         process = owned.process
         if process.stdout is None:  # pragma: no cover - guaranteed by _launch_phase
             _terminate_owned_process_tree(owned)
-            _close_owned_process_boundary(owned)
             raise CoverageDebtError("coverage phase output pipe was not created")
         reader = threading.Thread(
             target=capture.consume,
@@ -1270,9 +1047,6 @@ def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
             reader.start()
         except BaseException as error:
             termination_error = _terminate_owned_process_tree(owned)
-            boundary_error = _close_owned_process_boundary(owned)
-            if boundary_error is not None and termination_error is None:
-                termination_error = boundary_error
             try:
                 process.stdout.close()
             except (OSError, ValueError):
@@ -1302,9 +1076,6 @@ def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
                 _terminate_owned_process_tree(owned)
                 raise
             finally:
-                boundary_error = _close_owned_process_boundary(owned)
-                if boundary_error is not None and termination_error is None:
-                    termination_error = boundary_error
                 reader.join(timeout=PHASE_FORCED_SHUTDOWN_TIMEOUT_SECONDS)
                 if reader.is_alive():
                     try:
@@ -1442,6 +1213,7 @@ def run_coverage_phases(
     local_ray_timeout_seconds: float,
 ) -> None:
     """Collect replace-then-append coverage with durable per-phase diagnostics."""
+    require_linux()
     phases = coverage_phases(
         output_dir,
         default_timeout_seconds=default_timeout_seconds,

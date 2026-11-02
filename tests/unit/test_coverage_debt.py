@@ -225,6 +225,7 @@ def test_default_phase_includes_shared_sqlite_contracts_without_external_resourc
     assert "2 passed, 3 deselected" in result.stdout
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="coverage phase execution requires Linux")
 def test_coverage_phase_stops_after_first_failure_with_exact_diagnostics(
     tmp_path: Path,
 ) -> None:
@@ -378,6 +379,7 @@ def test_phase_environment_disables_ray_uv_worker_replication(
     assert coverage_debt_module.os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] == "1"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="coverage phase execution requires Linux")
 def test_coverage_phase_timeout_retains_bounded_incomplete_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -440,6 +442,7 @@ def test_coverage_phase_timeout_retains_bounded_incomplete_diagnostics(
     assert "timed-out" in summary
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="coverage phase execution requires Linux")
 def test_coverage_phase_terminates_descendant_that_inherits_output_pipe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -503,6 +506,7 @@ def test_coverage_phase_terminates_descendant_that_inherits_output_pipe(
     assert "post_exit_descendants_terminated: true" in phase_log
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="coverage phase execution requires Linux")
 def test_coverage_phase_reader_start_failure_terminates_owned_process_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -539,13 +543,13 @@ def test_coverage_phase_reader_start_failure_terminates_owned_process_tree(
     assert record["exit_code"] is not None
     assert len(launched) == 1
     assert launched[0].process.poll() is not None
-    assert launched[0].windows_job_handle is None
     assert not any(
         thread.name == "coverage-debt-default-resources-output" and thread.is_alive()
         for thread in coverage_debt_module.threading.enumerate()
     )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="coverage phase execution requires Linux")
 def test_coverage_phase_requires_fresh_valid_timing_evidence(tmp_path: Path) -> None:
     timing_path = tmp_path / "local-ray-timing.json"
     timing_value = {
@@ -990,3 +994,120 @@ def test_monthly_workflow_and_make_target_preserve_coverage_policy() -> None:
             "Dead or non-behavioral code",
         )
     )
+
+
+@pytest.mark.parametrize("platform_name", ["win32", "darwin"])
+def test_coverage_phase_execution_rejects_non_linux_before_spawning_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+) -> None:
+    import scripts.require_linux as require_linux_module
+
+    monkeypatch.setattr(require_linux_module.sys, "platform", platform_name)
+    monkeypatch.setattr(
+        coverage_debt_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-Linux coverage phase must not spawn a subprocess")
+        ),
+    )
+    monkeypatch.setattr(
+        coverage_debt_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-Linux coverage phases must not erase coverage data")
+        ),
+    )
+    phase = CoveragePhase(
+        name="default-resources",
+        selection="non-Linux guard fixture",
+        coverage_mode="replace",
+        timeout_seconds=5,
+        command=(sys.executable, "-c", "print('unreachable')"),
+        log_path=tmp_path / "unreachable.log",
+    )
+
+    with pytest.raises(SystemExit, match="requires Linux"):
+        coverage_debt_module._launch_phase(tmp_path, phase)
+
+    with pytest.raises(SystemExit, match="requires Linux"):
+        coverage_debt_module.run_coverage_phase(tmp_path, phase)
+
+    with pytest.raises(SystemExit, match="requires Linux"):
+        run_coverage_phases(
+            tmp_path,
+            tmp_path / "artifacts",
+            default_timeout_seconds=10,
+            local_ray_timeout_seconds=10,
+        )
+
+
+def test_coverage_phase_linux_process_group_containment_and_termination_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(coverage_debt_module, "require_linux", lambda: None)
+    popen_calls: list[dict[str, Any]] = []
+
+    class FakeProcess:
+        pid = 4242
+        returncode = -9
+        stdout = None
+
+        def __init__(self, command: tuple[str, ...], **kwargs: Any) -> None:
+            popen_calls.append({"command": command, **kwargs})
+
+        def __class_getitem__(cls, _item: object) -> type[FakeProcess]:
+            return cls
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return self.returncode
+
+        def kill(self) -> None:
+            return None
+
+    killpg_calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        killpg_calls.append((pid, sig))
+        if sig == 0 and len(killpg_calls) >= 2:
+            raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(coverage_debt_module.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(coverage_debt_module.os, "killpg", fake_killpg, raising=False)
+    monkeypatch.setattr(coverage_debt_module.signal, "SIGKILL", 9, raising=False)
+
+    phase = CoveragePhase(
+        name="default-resources",
+        selection="linux process-group contract",
+        coverage_mode="replace",
+        timeout_seconds=5,
+        command=(sys.executable, "-c", "print('ok')"),
+        log_path=tmp_path / "phase.log",
+    )
+    owned = coverage_debt_module._launch_phase(tmp_path, phase)
+    assert len(popen_calls) == 1
+    assert popen_calls[0]["start_new_session"] is True
+    assert "creationflags" not in popen_calls[0]
+    assert coverage_debt_module._owned_process_tree_is_active(owned) is True
+    assert coverage_debt_module._terminate_owned_process_tree(owned) is None
+    assert (4242, 9) in killpg_calls
+
+
+def test_coverage_debt_module_retires_windows_job_object_helpers() -> None:
+    retired_names = (
+        "_windows_process_handle",
+        "_create_windows_phase_job",
+        "_resume_windows_phase",
+        "_windows_job_active_processes",
+        "_terminate_windows_phase_job",
+        "_close_windows_phase_job",
+        "_close_owned_process_boundary",
+    )
+    for name in retired_names:
+        assert not hasattr(coverage_debt_module, name), name
