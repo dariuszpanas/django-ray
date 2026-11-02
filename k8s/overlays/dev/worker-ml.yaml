@@ -53,6 +53,10 @@ spec:
             - configMapRef:
                 name: django-ray-config
           env:
+            - name: DJANGO_RAY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: RAY_ADDRESS
               value: ray://ray-head-svc:10001
             - name: DJANGO_SECRET_KEY
@@ -86,3 +90,26 @@ spec:
             limits:
               memory: 512Mi
               cpu: 500m
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  exec python testproject/manage.py django_ray_worker_ready
+                  --queue ml
+                  --hostname "$DJANGO_RAY_POD_NAME" --json
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -d /proc/1 && grep -q python /proc/1/cmdline
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3

@@ -1276,3 +1276,17 @@ def test_reused_input_restores_after_unavailable_read(monkeypatch, error):
     assert register_task_input(prepared, _s3_config()) is payload
     assert storage.payloads[prepared.input_reference] == prepared.serialized_payload
     payload.save.assert_called_once()
+
+
+def test_prepare_task_input_skips_inline_json_serialization_when_externalized(monkeypatch):
+    storage = FakePayloadStorage()
+    _use_fake_storage(monkeypatch, storage)
+    serialize_inline = Mock(wraps=input_storage._serialize_json)
+    monkeypatch.setattr(input_storage, "_serialize_json", serialize_inline)
+
+    prepared = prepare_task_input(["large-value"], {"key": "value"}, _s3_config(threshold=0))
+
+    assert prepared.is_external is True
+    assert prepared.args_json == "null"
+    assert prepared.kwargs_json == "null"
+    serialize_inline.assert_not_called()

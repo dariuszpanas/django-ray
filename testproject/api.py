@@ -1026,10 +1026,13 @@ def liveness_check(request):
     }
 
 
-@api.get("/readyz", response=HealthSchema, tags=["Health"], auth=None)
+@api.get("/readyz", response={200: HealthSchema, 503: HealthSchema}, tags=["Health"], auth=None)
 def readiness_check(request):
     """Readiness endpoint that verifies database access."""
-    return _database_health_payload()
+    payload = _database_health_payload()
+    if payload["database"] != "ok":
+        return _ninja_status(503, payload)
+    return payload
 
 
 @api.get("/health", response=HealthSchema, tags=["Health"], auth=None)

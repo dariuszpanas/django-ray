@@ -6341,3 +6341,24 @@ class TestWorkerReconnectPollReconcile:
         task.refresh_from_db()
         assert task.state == TaskState.FAILED
         assert task.pk in cmd.active_tasks
+
+    def test_maintenance_scans_defer_large_payload_columns(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="defer-scan-columns-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            args_json="[1, 2, 3]",
+            kwargs_json='{"a": 1}',
+            runtime_env_json='{"pip": ["pkg"]}',
+            workflow_plan_json='{"nodes": []}',
+            progress_data='{"pct": 50}',
+            result_data='{"out": 3}',
+            error_traceback="tb",
+        )
+        queryset = Command._defer_maintenance_scan_fields(
+            RayTaskExecution.objects.filter(pk=task.pk)
+        )
+        fetched = queryset.get()
+        assert fetched.get_deferred_fields() == set(Command._DEFERRED_MAINTENANCE_SCAN_FIELDS)
+        sentinel = SimpleNamespace()
+        assert Command._defer_maintenance_scan_fields(sentinel) is sentinel

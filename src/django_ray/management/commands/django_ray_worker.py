@@ -4345,6 +4345,24 @@ class Command(BaseCommand):
             )
         return len(completed_tasks)
 
+    _DEFERRED_MAINTENANCE_SCAN_FIELDS: tuple[str, ...] = (
+        "args_json",
+        "kwargs_json",
+        "runtime_env_json",
+        "workflow_plan_json",
+        "progress_data",
+        "result_data",
+        "error_traceback",
+    )
+
+    @classmethod
+    def _defer_maintenance_scan_fields(cls, queryset: Any) -> Any:
+        from django.db.models import QuerySet
+
+        if isinstance(queryset, QuerySet):
+            return queryset.defer(*cls._DEFERRED_MAINTENANCE_SCAN_FIELDS)
+        return queryset
+
     def reconcile_tasks(self, queues: Sequence[str] | None = None) -> int:
         """Reconcile Ray Jobs, optionally fencing orphan adoption by queue.
 
@@ -4408,12 +4426,14 @@ class Command(BaseCommand):
             return len(completed_tasks)
 
         active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
-        orphaned_tasks = RayTaskExecution.objects.filter(
-            state=TaskState.RUNNING,
-            ray_job_id__startswith="raysubmit_",
-            execution_protocol_version__gte=supported_protocols.minimum,
-            execution_protocol_version__lte=supported_protocols.maximum,
-        ).exclude(pk__in=reconciled_task_ids)
+        orphaned_tasks = self._defer_maintenance_scan_fields(
+            RayTaskExecution.objects.filter(
+                state=TaskState.RUNNING,
+                ray_job_id__startswith="raysubmit_",
+                execution_protocol_version__gte=supported_protocols.minimum,
+                execution_protocol_version__lte=supported_protocols.maximum,
+            ).exclude(pk__in=reconciled_task_ids)
+        )
         if queues is not None:
             orphaned_tasks = orphaned_tasks.filter(queue_name__in=queues)
 
@@ -4471,10 +4491,12 @@ class Command(BaseCommand):
 
         # Check all running tasks. For tasks owned by active workers, skip recovery
         # and let the owning worker manage its own in-flight work.
-        running_tasks = RayTaskExecution.objects.filter(
-            state=TaskState.RUNNING,
-            execution_protocol_version__gte=supported_protocols.minimum,
-            execution_protocol_version__lte=supported_protocols.maximum,
+        running_tasks = self._defer_maintenance_scan_fields(
+            RayTaskExecution.objects.filter(
+                state=TaskState.RUNNING,
+                execution_protocol_version__gte=supported_protocols.minimum,
+                execution_protocol_version__lte=supported_protocols.maximum,
+            )
         )
         if queues is not None:
             running_tasks = running_tasks.filter(queue_name__in=queues)
@@ -4773,10 +4795,12 @@ class Command(BaseCommand):
         supported_protocols = self._authoritative_protocol_range_for_scan()
         if supported_protocols is None:
             return 0
-        cancelling_tasks = RayTaskExecution.objects.filter(
-            state=TaskState.CANCELLING,
-            execution_protocol_version__gte=supported_protocols.minimum,
-            execution_protocol_version__lte=supported_protocols.maximum,
+        cancelling_tasks = self._defer_maintenance_scan_fields(
+            RayTaskExecution.objects.filter(
+                state=TaskState.CANCELLING,
+                execution_protocol_version__gte=supported_protocols.minimum,
+                execution_protocol_version__lte=supported_protocols.maximum,
+            )
         )
         if queues is not None:
             cancelling_tasks = cancelling_tasks.filter(queue_name__in=queues)

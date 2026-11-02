@@ -201,10 +201,13 @@ def surfaces(services: dict, ingresses: dict, deployment: dict, config: dict) ->
     ):
         raise ValueError("Monitoring pod exposes host ports")
     allowed = config["data"]["DJANGO_ALLOWED_HOSTS"].split(",")
-    for key in ("livenessProbe", "readinessProbe"):
+    for key, expected_path in (
+        ("livenessProbe", "/api/livez"),
+        ("readinessProbe", "/api/readyz"),
+    ):
         probe = pod["containers"][0][key]["httpGet"]
         if (
-            probe["path"] != "/api/health"
+            probe["path"] != expected_path
             or probe.get("httpHeaders") != [{"name": "Host", "value": "django-ray.localhost"}]
             or "django-ray.localhost" not in allowed
             or "django-web-svc" not in allowed
