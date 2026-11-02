@@ -268,6 +268,11 @@ python manage.py django_ray_purge_inputs --retention-days=30 --delete
 | `--max-attachments=N` | Execution references inspected per payload; default `100`, range `1..1000`; one extra row detects overflow |
 | `--max-details=N` | Detailed fingerprint/outcome rows; default `20`, range `0..100`, also subject to the detail-byte budget |
 | `--cursor=TOKEN` | Continue after the previous batch's registry primary key with the original fixed cutoff and mode |
+| `--discover-unregistered` | Bounded dry-run inventory of backend storage prefixes for canonical payload envelopes lacking a database registry row |
+| `--delete-unregistered` | Reap eligible unregistered canonical payload objects after inserting a coordinated `PURGED` registry tombstone |
+| `--grace-seconds=N` | Minimum object age in seconds before an unregistered canonical payload is eligible; default `3600`, range `60..31536000` |
+| `--max-inventory-objects=N` | Maximum backend objects inspected during unregistered discovery; default `100`, range `1..1000` |
+| `--max-inventory-pages=N` | Maximum backend listing pages fetched during unregistered discovery; default `10`, range `1..100` |
 | `--format=text\|json` | Human-readable text (default) or a versioned JSON report |
 
 Each invocation fetches at most `max-candidates + 1` registry keys and, for each

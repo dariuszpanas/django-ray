@@ -51,3 +51,4 @@ preserves the original wording.
 - [ADR-0004: Bounded Workflow Progress Storage](adr-0004-bounded-workflow-progress.md)
 - [ADR-0005: Bounded Workflow Progress Preparation](adr-0005-bounded-workflow-preparation.md)
 - [ADR-0006: Bounded Read-only Operator Diagnosis (proposed)](adr-0006-bounded-operator-diagnosis.md)
+- [ADR-0007: Durable Step Checkpoints and Fail-Closed Resume Planning (proposed)](adr-0007-durable-step-checkpoints.md)

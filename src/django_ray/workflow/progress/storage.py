@@ -272,6 +272,39 @@ class PreparedWorkflowProgressDetail:
 
 
 @dataclass(frozen=True)
+class PreparedWorkflowProgressCompositeTopology:
+    """Bounded canonical topology output without an all-observed identity set (#156)."""
+
+    identity: WorkflowRunIdentity
+    topology_version: int
+    manifest_payload: bytes
+    manifest_digest: str
+    pages: tuple[PreparedWorkflowProgressTopologyPage, ...]
+    node_ids: frozenset[str]
+    node_kinds: tuple[tuple[str, str], ...]
+    edges: tuple[tuple[str, str], ...]
+    observed_node_count: int
+    observed_edge_count: int
+    retained_node_count: int
+    retained_edge_count: int
+    encoded_bytes: int
+    decoded_bytes: int
+    truncation_reasons: tuple[str, ...]
+    map_node_ids: frozenset[str] = frozenset()
+    _capability_token: str | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class PreparedWorkflowProgressInitialPublication:
+    """Bounded composite topology and initial detail bound to one workspace (#156)."""
+
+    topology: PreparedWorkflowProgressCompositeTopology
+    detail: PreparedWorkflowProgressDetail
+    reporting_policy: str = "full"
+    _capability_token: str | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class VerifiedWorkflowProgressTopology:
     """Bounded verified view of one stored immutable topology manifest."""
 
@@ -508,11 +541,195 @@ def _prepared_topology_observed_membership_capability_matches(
         )
 
 
+@dataclass(frozen=True)
+class _PreparedInitialPublicationCapability:
+    reference: ReferenceType[PreparedWorkflowProgressInitialPublication]
+    topology_reference: ReferenceType[PreparedWorkflowProgressCompositeTopology]
+    detail_reference: ReferenceType[PreparedWorkflowProgressDetail]
+    scalar_signature: tuple[Any, ...]
+    evidence_references: tuple[object, ...]
+    page_signatures: tuple[tuple[Any, ...], ...]
+    detail_record_signatures: tuple[tuple[Any, ...], ...]
+
+
+_PREPARED_INITIAL_PUBLICATION_CAPABILITIES: dict[str, _PreparedInitialPublicationCapability] = {}
+
+
+def _prepared_initial_publication_scalar_signature(
+    publication: PreparedWorkflowProgressInitialPublication,
+) -> tuple[Any, ...]:
+    topology = publication.topology
+    detail = publication.detail
+    return (
+        _type_exact_capability_value(topology.identity.task_execution_pk),
+        _type_exact_capability_value(topology.identity.attempt_number),
+        _type_exact_capability_value(topology.identity.execution_generation),
+        _type_exact_capability_value(topology.identity.run_id),
+        _type_exact_capability_value(topology.topology_version),
+        _type_exact_capability_value(topology.manifest_digest),
+        _type_exact_capability_value(topology.observed_node_count),
+        _type_exact_capability_value(topology.observed_edge_count),
+        _type_exact_capability_value(topology.retained_node_count),
+        _type_exact_capability_value(topology.retained_edge_count),
+        _type_exact_capability_value(topology.encoded_bytes),
+        _type_exact_capability_value(topology.decoded_bytes),
+        _type_exact_capability_value(detail.observed_count),
+        _type_exact_capability_value(detail.encoded_bytes),
+        _type_exact_capability_value(detail.decoded_bytes),
+        _type_exact_capability_value(publication.reporting_policy),
+    )
+
+
+def _prepared_initial_publication_evidence_references(
+    publication: PreparedWorkflowProgressInitialPublication,
+) -> tuple[object, ...]:
+    topology = publication.topology
+    detail = publication.detail
+    references: list[object] = [
+        topology.identity,
+        topology.manifest_payload,
+        topology.pages,
+        topology.node_ids,
+        topology.node_kinds,
+        topology.edges,
+        topology.truncation_reasons,
+        topology.map_node_ids,
+        detail.records,
+        detail.truncation_reasons,
+    ]
+    for page in topology.pages:
+        references.extend((page, page.payload))
+    for record in detail.records:
+        references.extend((record, record.payload))
+    return tuple(references)
+
+
+def _prepared_initial_publication_page_signatures(
+    topology: PreparedWorkflowProgressCompositeTopology,
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            _type_exact_capability_value(page.collection),
+            _type_exact_capability_value(page.page_index),
+            _type_exact_capability_value(page.digest),
+            _type_exact_capability_value(page.item_count),
+            _type_exact_capability_value(page.encoded_bytes),
+            _type_exact_capability_value(page.decoded_bytes),
+        )
+        for page in topology.pages
+    )
+
+
+def _prepared_initial_publication_detail_signatures(
+    detail: PreparedWorkflowProgressDetail,
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            _type_exact_capability_value(record.node_id),
+            _type_exact_capability_value(record.node_key),
+            _type_exact_capability_value(record.state),
+            _type_exact_capability_value(record.invocation_id),
+            _type_exact_capability_value(record.digest),
+            _type_exact_capability_value(record.encoded_bytes),
+            _type_exact_capability_value(record.decoded_bytes),
+            _type_exact_capability_value(record.event_count),
+            _type_exact_capability_value(record.truncated),
+        )
+        for record in detail.records
+    )
+
+
+def _prepared_initial_publication_record_matches(
+    capability: _PreparedInitialPublicationCapability,
+    publication: PreparedWorkflowProgressInitialPublication,
+) -> bool:
+    try:
+        current_scalar = _prepared_initial_publication_scalar_signature(publication)
+        current_refs = _prepared_initial_publication_evidence_references(publication)
+        current_pages = _prepared_initial_publication_page_signatures(publication.topology)
+        current_details = _prepared_initial_publication_detail_signatures(publication.detail)
+    except (AttributeError, TypeError):
+        return False
+    return bool(
+        capability.reference() is publication
+        and capability.topology_reference() is publication.topology
+        and capability.detail_reference() is publication.detail
+        and publication.topology._capability_token == publication._capability_token
+        and capability.scalar_signature == current_scalar
+        and capability.page_signatures == current_pages
+        and capability.detail_record_signatures == current_details
+        and len(capability.evidence_references) == len(current_refs)
+        and all(
+            retained is current
+            for retained, current in zip(
+                capability.evidence_references,
+                current_refs,
+                strict=True,
+            )
+        )
+    )
+
+
+def _drop_prepared_initial_publication_capability(
+    token: str,
+    observed: ReferenceType[PreparedWorkflowProgressInitialPublication],
+) -> None:
+    with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
+        current = _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.get(token)
+        if current is not None and current.reference is observed:
+            _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.pop(token, None)
+
+
+def _register_prepared_initial_publication_capability(
+    publication: PreparedWorkflowProgressInitialPublication,
+) -> None:
+    with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
+        token = token_hex(32)
+        object.__setattr__(publication, "_capability_token", token)
+        object.__setattr__(publication.topology, "_capability_token", token)
+        observed = ref(
+            publication,
+            lambda reference, capability_token=token: _drop_prepared_initial_publication_capability(
+                capability_token,
+                reference,
+            ),
+        )
+        _PREPARED_INITIAL_PUBLICATION_CAPABILITIES[token] = _PreparedInitialPublicationCapability(
+            reference=observed,
+            topology_reference=ref(publication.topology),
+            detail_reference=ref(publication.detail),
+            scalar_signature=_prepared_initial_publication_scalar_signature(publication),
+            evidence_references=_prepared_initial_publication_evidence_references(publication),
+            page_signatures=_prepared_initial_publication_page_signatures(publication.topology),
+            detail_record_signatures=_prepared_initial_publication_detail_signatures(
+                publication.detail
+            ),
+        )
+
+
+def _prepared_initial_publication_capability_matches(
+    publication: PreparedWorkflowProgressInitialPublication,
+) -> bool:
+    if not isinstance(publication, PreparedWorkflowProgressInitialPublication):
+        return False
+    token = publication._capability_token
+    if token is None:
+        return False
+    with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
+        capability = _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.get(token)
+        return bool(
+            capability is not None
+            and _prepared_initial_publication_record_matches(capability, publication)
+        )
+
+
 def _reset_prepared_topology_capabilities_after_fork() -> None:
     """Drop process-local authority and inherited lock state in a fork child."""
     global _PREPARED_TOPOLOGY_CAPABILITIES
+    global _PREPARED_INITIAL_PUBLICATION_CAPABILITIES
     global _PREPARED_TOPOLOGY_CAPABILITIES_LOCK
     _PREPARED_TOPOLOGY_CAPABILITIES = {}
+    _PREPARED_INITIAL_PUBLICATION_CAPABILITIES = {}
     _PREPARED_TOPOLOGY_CAPABILITIES_LOCK = Lock()
 
 
@@ -4647,7 +4864,9 @@ def stamp_workflow_progress_detail_expiry_locked(
 
 
 __all__ = [
+    "PreparedWorkflowProgressCompositeTopology",
     "PreparedWorkflowProgressDetail",
+    "PreparedWorkflowProgressInitialPublication",
     "PreparedWorkflowProgressNodeDetail",
     "PreparedWorkflowProgressTopology",
     "PreparedWorkflowProgressTopologyPage",
