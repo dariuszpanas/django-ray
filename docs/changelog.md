@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require Linux for `scripts/coverage_debt.py` phase execution and
+  `django_ray.runtime.compiled_graph_probe` subprocess execution, retiring their
+  native Windows Job Object and `taskkill` process-tree fallbacks while keeping
+  resource-free report rendering, tracker updates, and fail-closed capability
+  guards usable on all developer hosts (#456).
+
 ### Fixed
 
+- Align `k8s/base/django-web.yaml` liveness and readiness probes with `/api/livez`
+  and `/api/readyz`, return HTTP 503 from `/api/readyz` when the database is
+  unhealthy, add `django_ray_worker_ready` liveness and readiness probes to the
+  `kuberay-kind` and `dev` worker overlays, and defer large input/result/traceback
+  columns during worker recovery and claim-candidate scans (#688, #689).
 - Require `pyasn1>=0.6.5` in published runtime metadata, minimum-direct CI, built
   distributions, and the contributor lock to exclude the four upstream `pyasn1`
   `0.6.4` advisories (`CVE-2026-119194` through `CVE-2026-119197`).

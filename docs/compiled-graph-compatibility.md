@@ -378,12 +378,12 @@ compiler owner. The parent drains stdout and stderr continuously into separate
 fixed-size human-log tail buffers. The structured child result uses a private per-run
 control file with an independent 512 KiB bound sized for worst-case JSON escaping of
 both bounded error fields, so log pressure cannot share or truncate the record. The
-parent enforces a hard wall-clock limit and owns the child process group or Windows Job
-Object. The native child waits on a private start gate; on Windows the parent assigns
-the child to the Job Object before releasing that gate, so Ray cannot create descendants
-in the pre-assignment window. The parent terminates remaining descendants after every
-outcome, including a clean return or abrupt root crash, then emits one bounded,
-versioned JSON outcome.
+parent enforces a hard wall-clock limit and owns the child Linux process group
+(`start_new_session=True` and `os.killpg`); non-Linux hosts return `unsupported_guard`
+before spawning a child, and the former Windows Job Object and `taskkill` fallback are
+retired. The native child waits on a private start gate before executing native Ray work.
+The parent terminates remaining descendants after every outcome, including a clean
+return or abrupt root crash, then emits one bounded, versioned JSON outcome.
 
 | Outcome | Meaning |
 |---|---|
@@ -397,10 +397,10 @@ versioned JSON outcome.
 ### Unsafe investigation mode
 
 There is a deliberately awkward bypass for reproducing a native failure on an
-unsupported runtime. It requires both `--unsafe-native` and the environment variable
-`DJANGO_RAY_ALLOW_UNSAFE_COMPILED_GRAPH_PROBE=1`. It cannot bypass an unsupported
-owner topology, submission transport, or channel transport. Do not use it in an
-application process or ordinary test run.
+unsupported Linux runtime version. It requires both `--unsafe-native` and the environment
+variable `DJANGO_RAY_ALLOW_UNSAFE_COMPILED_GRAPH_PROBE=1`. It cannot bypass an
+unsupported operating system, owner topology, submission transport, or channel
+transport. Do not use it in an application process or ordinary test run.
 
 ### Retained platform evidence
 

@@ -214,18 +214,7 @@
       "default": {
         "category": "testable-behavior",
         "rationale": "Bounded control-record, subprocess, timeout, and exit-status behavior can be covered with assertion-rich subprocess or fault-injection tests."
-      },
-      "overrides": [
-        {
-          "ranges": [
-            "240-245",
-            "576-678",
-            "710-750"
-          ],
-          "category": "environment-specific",
-          "rationale": "Process-group and Windows Job Object ownership paths require the matching operating system and belong in platform-specific probe evidence."
-        }
-      ]
+      }
     },
     "src/django_ray/runtime/context.py": {
       "default": {
