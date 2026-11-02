@@ -589,6 +589,14 @@ Django task manager and Ray execution path.
 Protect the database, admin, metrics route, Ray dashboard, State API, and storage
 backends independently. Never expose live log access by default.
 
+## Optional OpenTelemetry Correlation
+
+`django_ray.tracing` provides opt-in, fail-open distributed trace correlation (`TaskTracingCoordinator`, `TraceContextEnvelope`, `AttemptAuthorityToken`) across task enqueue, worker claim, Ray submission, remote execution, workflow execution, retry reconciliation, and terminal persistence without requiring OpenTelemetry packages in the base installation.
+
+- **Strict redaction and cardinality bounds**: Task arguments, keyword arguments, results, serialized payloads, `RuntimeEnv` contents, credentials, raw error messages, and tracebacks are stripped before span emission.
+- **Stale-attempt fencing**: Superseded attempts (`stale_generation` or `lease_lost`) are fenced by `AttemptAuthorityToken` and cannot emit an authoritative `django_ray.task.terminal_persist` span.
+- **Bounded workflow fan-out**: Per-run child node spans are capped by `max_workflow_node_spans_per_run` (default 32) and summarized on `django_ray.workflow.execute`.
+
 ## See Also
 
 - [Operator Runbook](runbook.md)

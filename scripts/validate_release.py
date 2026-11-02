@@ -51,6 +51,16 @@ _CAPABILITY_FIELDS = frozenset(
     }
 )
 _EVIDENCE_FILES = frozenset({"environment.json", "packages.txt", "probe.json"})
+_POLICY_V4_DEPENDENCY_CLOSURE = (
+    "ray",
+    "numpy",
+    "pyarrow",
+    "cupy",
+    "cupy-cuda11x",
+    "cupy-cuda12x",
+    "fastrlock",
+)
+_EXACT_DEPENDENCY_VERSION_RE = re.compile(r"^[0-9][0-9A-Za-z.+-]*$")
 _READINESS_PATH = Path("tests/contracts/one_zero_readiness_v1.json")
 _READINESS_DOC_PATH = Path("docs/one-zero-readiness.md")
 _READINESS_MARKER_RE = re.compile(
@@ -903,6 +913,27 @@ def _validate_review_artifacts(
     return expiries, quarantined_artifacts, observed_capabilities, observations
 
 
+def _validate_dependency_profile_closure(dependency_profile: str, *, context: str) -> None:
+    entries = dependency_profile.split(";")
+    parsed: list[tuple[str, str]] = []
+    for entry in entries:
+        distribution, separator, version = entry.partition("=")
+        if not separator or not distribution or not version:
+            raise ValueError(f"{context} does not satisfy policy-v4 dependency closure")
+        parsed.append((distribution, version))
+    if tuple(name for name, _ in parsed) != _POLICY_V4_DEPENDENCY_CLOSURE or any(
+        version != "absent" and _EXACT_DEPENDENCY_VERSION_RE.fullmatch(version) is None
+        for _, version in parsed
+    ):
+        raise ValueError(f"{context} does not satisfy policy-v4 dependency closure")
+    versions = dict(parsed)
+    if (
+        any(versions[name] != "absent" for name in ("cupy", "cupy-cuda11x", "cupy-cuda12x"))
+        and versions["fastrlock"] == "absent"
+    ):
+        raise ValueError(f"{context} requires fastrlock when a CuPy distribution is present")
+
+
 def _validate_maintenance_policy(record: dict[str, Any]) -> None:
     maintenance = record.get("maintenance_policy")
     if not isinstance(maintenance, dict) or maintenance.get("latest_review_wins") is not True:
@@ -944,6 +975,12 @@ def validate_compiled_graph_capability_review(root: Path, *, as_of: date | None 
         raise ValueError(
             "latest Compiled Graph review does not match the capability schema version"
         )
+    if runtime_policy_version >= 4 and record.get("dependency_closure") != list(
+        _POLICY_V4_DEPENDENCY_CLOSURE
+    ):
+        raise ValueError(
+            "latest Compiled Graph review must declare the canonical policy-v4 dependency closure"
+        )
     _validate_maintenance_policy(record)
     (
         artifact_expiries,
@@ -973,6 +1010,11 @@ def validate_compiled_graph_capability_review(root: Path, *, as_of: date | None 
             raise ValueError("each verified row must contain every exact capability dimension")
         if any(not isinstance(value, str) or not value for value in capability.values()):
             raise ValueError("verified capability dimensions must be non-empty strings")
+        if runtime_policy_version >= 4:
+            _validate_dependency_profile_closure(
+                capability["dependency_profile"],
+                context="verified row dependency_profile",
+            )
         capability_rows.append(capability)
 
         evidence_ids = row.get("evidence_ids")

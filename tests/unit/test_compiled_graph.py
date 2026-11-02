@@ -34,7 +34,10 @@ def _runtime(
     architecture: str = "x86_64",
     python_implementation: str | None = "cpython",
     python_abi: str | None = "cpython-312-x86_64-linux-gnu",
-    dependency_profile: str | None = "ray=2.56.1;numpy=2.5.1;pyarrow=absent",
+    dependency_profile: str | None = (
+        "ray=2.56.1;numpy=2.5.1;pyarrow=absent;cupy=absent;"
+        "cupy-cuda11x=absent;cupy-cuda12x=absent;fastrlock=absent"
+    ),
     platform_profile: str | None = "Linux-6.17-x86_64-with-glibc2.39",
     libc_profile: str | None = "glibc-2.39",
     container_profile: str | None = "kubernetes:gha-ubuntu-24.04",
@@ -87,7 +90,10 @@ def test_proposed_linux_cpu_rows_remain_unverified_candidates(
         submission_transport=submission_transport,
         runtime=_runtime(
             ray_version=ray_version,
-            dependency_profile=f"ray={ray_version};numpy=2.5.1;pyarrow=absent",
+            dependency_profile=(
+                f"ray={ray_version};numpy=2.5.1;pyarrow=absent;cupy=absent;"
+                "cupy-cuda11x=absent;cupy-cuda12x=absent;fastrlock=absent"
+            ),
         ),
     )
 
@@ -96,11 +102,11 @@ def test_proposed_linux_cpu_rows_remain_unverified_candidates(
     assert decision.verified is False
     assert decision.reason is CompiledGraphReason.CANDIDATE_REQUIRES_SMOKE
     assert decision.plan_rejection_code == "INCOMPATIBLE_PLATFORM"
-    assert (decision.capability_set or "").startswith("ray-cgraph-policy-v3:")
+    assert (decision.capability_set or "").startswith("ray-cgraph-policy-v4:")
     assert decision.submission_transport == submission_transport.value
     serialized = json.loads(json.dumps(decision.asdict()))
     assert serialized["schema_version"] == 2
-    assert serialized["policy_version"] == 3
+    assert serialized["policy_version"] == 4
     assert serialized["beta"] is True
 
 
@@ -139,7 +145,10 @@ def test_exact_reviewed_capability_can_become_eligible(monkeypatch) -> None:
             "architecture": "x86_64",
             "python_implementation": "cpython",
             "python_abi": "cpython-312-x86_64-linux-gnu",
-            "dependency_profile": "ray=2.56.1;numpy=2.5.1;pyarrow=absent",
+            "dependency_profile": (
+                "ray=2.56.1;numpy=2.5.1;pyarrow=absent;cupy=absent;"
+                "cupy-cuda11x=absent;cupy-cuda12x=absent;fastrlock=absent"
+            ),
             "platform_profile": "Linux-6.17-x86_64-with-glibc2.39",
             "libc_profile": "glibc-2.39",
             "container_profile": "kubernetes:gha-ubuntu-24.04",
@@ -158,7 +167,14 @@ def test_exact_reviewed_capability_can_become_eligible(monkeypatch) -> None:
     [
         ("python_version", "3.12.13"),
         ("python_abi", "cpython-312d-x86_64-linux-gnu"),
-        ("dependency_profile", "ray=2.56.1;numpy=2.5.2;pyarrow=absent"),
+        (
+            "dependency_profile",
+            "ray=2.56.1;numpy=2.5.2;pyarrow=absent;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=absent;fastrlock=absent",
+        ),
+        (
+            "dependency_profile",
+            "ray=2.56.1;numpy=2.5.1;pyarrow=absent;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=14.1.1;fastrlock=0.8.3",
+        ),
         ("platform_profile", "Linux-6.18-x86_64-with-glibc2.39"),
         ("libc_profile", "glibc-2.40"),
         ("container_profile", "kubernetes:gha-ubuntu-24.10"),
@@ -362,12 +378,50 @@ def test_dependency_profile_must_name_the_exact_ray_release() -> None:
     decision = evaluate_compiled_graph_support(
         CompiledGraphTopology.NESTED_RAY_TASK,
         submission_transport=CompiledGraphSubmissionTransport.DIRECT_RAY_CORE,
-        runtime=replace(_runtime(), dependency_profile="ray=2.56.0;numpy=2.5.1"),
+        runtime=replace(
+            _runtime(),
+            dependency_profile=(
+                "ray=2.56.0;numpy=2.5.1;pyarrow=absent;cupy=absent;"
+                "cupy-cuda11x=absent;cupy-cuda12x=absent;fastrlock=absent"
+            ),
+        ),
     )
 
     assert decision.eligible is False
     assert decision.reason is CompiledGraphReason.INCOMPLETE_CAPABILITY_CONTEXT
     assert "dependency_profile_ray_version" in decision.message
+
+
+@pytest.mark.parametrize(
+    ("dependency_profile", "missing_fragment"),
+    [
+        (
+            "ray=2.56.1;numpy=2.5.1;pyarrow=absent;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=absent",
+            "dependency_profile_closure",
+        ),
+        (
+            "numpy=2.5.1;ray=2.56.1;pyarrow=absent;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=absent;fastrlock=absent",
+            "dependency_profile_closure",
+        ),
+        (
+            "ray=2.56.1;numpy=2.5.1;pyarrow=absent;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=14.1.1;fastrlock=absent",
+            "dependency_profile_fastrlock",
+        ),
+    ],
+)
+def test_dependency_profile_requires_complete_policy_v4_closure(
+    dependency_profile: str,
+    missing_fragment: str,
+) -> None:
+    decision = evaluate_compiled_graph_support(
+        CompiledGraphTopology.NESTED_RAY_TASK,
+        submission_transport=CompiledGraphSubmissionTransport.DIRECT_RAY_CORE,
+        runtime=replace(_runtime(), dependency_profile=dependency_profile),
+    )
+
+    assert decision.eligible is False
+    assert decision.reason is CompiledGraphReason.INCOMPLETE_CAPABILITY_CONTEXT
+    assert missing_fragment in decision.message
 
 
 @pytest.mark.parametrize(
@@ -647,7 +701,7 @@ def test_capability_review_retains_exact_no_promotion_decision() -> None:
 
     assert record["schema_version"] == 1
     assert record["policy_version"] == 2
-    assert compiled_graph.COMPILED_GRAPH_POLICY_VERSION == 3
+    assert compiled_graph.COMPILED_GRAPH_POLICY_VERSION == 4
     assert (
         record["capability_schema_version"]
         == compiled_graph.COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION

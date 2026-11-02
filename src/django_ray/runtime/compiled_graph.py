@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 COMPILED_GRAPH_CAPABILITY_SCHEMA_VERSION = 2
-COMPILED_GRAPH_POLICY_VERSION = 3
+COMPILED_GRAPH_POLICY_VERSION = 4
 _MAX_IDENTITY_FIELD_CHARS = 1_024
 _MAX_DECISION_TEXT_CHARS = 2_048
 _MAX_REQUEST_DIMENSION_CHARS = 256
@@ -197,7 +197,7 @@ class _CapabilityIdentity:
 
 # Exact versions are intentional. Compiled Graph is beta, and a future patch release is
 # not silently treated as equivalent until its subprocess canary has passed. These
-# policy-v3 candidates are retained only to interpret historical probes and the blocked
+# policy-v4 candidates are retained only to interpret historical probes and the blocked
 # pilot; both predate the package's Ray 2.58 floor. This does not authorize installing
 # either version with the current package or add 2.58 to the native probe path.
 _CANDIDATE_RUNTIMES = frozenset(
@@ -245,6 +245,7 @@ _PROFILE_DISTRIBUTIONS = (
     "cupy",
     "cupy-cuda11x",
     "cupy-cuda12x",
+    "fastrlock",
 )
 _CONTAINER_PROFILE_ENV = "DJANGO_RAY_COMPILED_GRAPH_CONTAINER_PROFILE"
 _DEPLOYMENT_PROFILE_ENV = "DJANGO_RAY_COMPILED_GRAPH_DEPLOYMENT_PROFILE"
@@ -634,14 +635,34 @@ def _missing_capability_context(runtime: CompiledGraphRuntimeIdentity) -> tuple[
         missing.append("deployment_profile_immutable")
     if not _EXACT_VERSION.match(runtime.python_version):
         missing.append("python_version_patch")
-    if runtime.dependency_profile and runtime.ray_version:
-        dependencies = dict(
-            entry.split("=", maxsplit=1)
-            for entry in runtime.dependency_profile.split(";")
-            if "=" in entry
-        )
-        if dependencies.get("ray") != runtime.ray_version:
+    if runtime.dependency_profile and not _is_unresolved_profile(runtime.dependency_profile):
+        raw_entries = [entry.strip() for entry in runtime.dependency_profile.split(";")]
+        pairs: list[tuple[str, str]] = []
+        for entry in raw_entries:
+            name, separator, version = entry.partition("=")
+            if separator:
+                pairs.append((name, version))
+        dependencies = dict(pairs)
+        if runtime.ray_version and dependencies.get("ray") != runtime.ray_version:
             missing.append("dependency_profile_ray_version")
+        canonical_closure = (
+            len(pairs) == len(raw_entries)
+            and tuple(name for name, _version in pairs) == _PROFILE_DISTRIBUTIONS
+            and all(
+                version == "absent" or bool(_EXACT_VERSION.match(version))
+                for _name, version in pairs
+            )
+        )
+        if not canonical_closure:
+            missing.append("dependency_profile_closure")
+        elif (
+            any(
+                dependencies.get(cupy_dist, "absent") != "absent"
+                for cupy_dist in ("cupy", "cupy-cuda11x", "cupy-cuda12x")
+            )
+            and dependencies.get("fastrlock", "absent") == "absent"
+        ):
+            missing.append("dependency_profile_fastrlock")
     return tuple(missing)
 
 

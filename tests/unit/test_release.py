@@ -1294,24 +1294,24 @@ def test_production_release_source_rejects_lightweight_tag(
 def test_latest_compiled_graph_review_matches_fail_closed_runtime_policy() -> None:
     path = validate_compiled_graph_capability_review(ROOT)
 
-    assert path.name == "compiled-graph-capability-review-2026-08-02.json"
+    assert path.name == "compiled-graph-capability-review-2026-11-01.json"
 
 
 def test_no_promotion_review_remains_safe_after_artifact_expiry() -> None:
     path = validate_compiled_graph_capability_review(ROOT, as_of=date(2030, 1, 1))
 
-    assert path.name == "compiled-graph-capability-review-2026-08-02.json"
+    assert path.name == "compiled-graph-capability-review-2026-11-01.json"
 
 
 def _review_record() -> dict[str, Any]:
-    path = ROOT / "docs" / "investigations" / "compiled-graph-capability-review-2026-08-02.json"
+    path = ROOT / "docs" / "investigations" / "compiled-graph-capability-review-2026-11-01.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _write_review(root: Path, record: dict[str, Any]) -> None:
     directory = root / "docs" / "investigations"
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "compiled-graph-capability-review-2026-08-02.json").write_text(
+    (directory / "compiled-graph-capability-review-2026-11-01.json").write_text(
         json.dumps(record), encoding="utf-8"
     )
 
@@ -1324,7 +1324,7 @@ def _promoted_capability() -> dict[str, str]:
         "architecture": "x86_64",
         "python_implementation": "cpython",
         "python_abi": "cpython-312-x86_64-linux-gnu",
-        "dependency_profile": "ray=2.56.0;numpy=2.5.1;cupy-cuda12x=14.1.1",
+        "dependency_profile": "ray=2.56.0;numpy=2.5.1;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=14.1.1;fastrlock=0.8.3",
         "platform_profile": "Linux-6.17.0-x86_64-with-glibc2.39",
         "libc_profile": "glibc-2.39",
         "container_profile": "ghcr.io/example/django-ray@sha256:container",
@@ -1361,8 +1361,8 @@ def _promotion_review(capability: dict[str, str]) -> dict[str, Any]:
         {
             "capability": capability,
             "evidence_ids": [evidence_id],
-            "reviewed_on": "2026-08-02",
-            "revalidate_on_or_before": "2026-10-18",
+            "reviewed_on": "2026-11-01",
+            "revalidate_on_or_before": "2027-01-18",
             "quarantined": False,
         }
     ]
@@ -1375,17 +1375,17 @@ def test_future_promotion_requires_exact_runtime_parity(
     capability = _promoted_capability()
     record = _promotion_review(capability)
     _write_review(tmp_path, record)
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, [capability]))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [capability]))
     assert record["artifacts"][0]["observation"]["adapter_eligible"] is False
 
     assert validate_compiled_graph_capability_review(
-        tmp_path, as_of=date(2026, 8, 3)
-    ).name.endswith("2026-08-02.json")
+        tmp_path, as_of=date(2026, 9, 1)
+    ).name.endswith("2026-11-01.json")
 
     neighbor = {**capability, "ray_version": "2.56.1"}
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, [neighbor]))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [neighbor]))
     with pytest.raises(ValueError, match="exactly match"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
     record = _promotion_review(capability)
     record["artifacts"][0]["observed_capability"] = {
@@ -1393,40 +1393,40 @@ def test_future_promotion_requires_exact_runtime_parity(
         "python_version": "3.12.14",
     }
     _write_review(tmp_path, record)
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, [capability]))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [capability]))
     with pytest.raises(ValueError, match="retained evidence"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
 
 def test_future_promotion_requires_successful_verified_complete_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     capability = _promoted_capability()
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, [capability]))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [capability]))
 
     record = _promotion_review(capability)
     record["artifacts"][0]["observation"]["native_probe_status"] = "native_crash"
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="successful native probe"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
     record = _promotion_review(capability)
     record["artifacts"][0]["observation"]["result_verified"] = False
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="verify its native result"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
     record = _promotion_review(capability)
     record["artifacts"][0]["observation"]["missing_dimensions"] = ["deployment_profile"]
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="unresolved capability dimensions"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
     record = _promotion_review(capability)
     record["artifacts"][0]["observation"]["adapter_reason"] = "INCOMPLETE_CAPABILITY_CONTEXT"
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="complete unpromoted candidate"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
 
 def test_observed_capability_must_match_artifact_and_probe_dimensions(
@@ -1436,10 +1436,10 @@ def test_observed_capability_must_match_artifact_and_probe_dimensions(
     record = _promotion_review(capability)
     record["artifacts"][0]["observation"]["topology"] = "direct-driver"
     _write_review(tmp_path, record)
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, [capability]))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [capability]))
 
     with pytest.raises(ValueError, match="conflicts with its observation"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
 
 def test_future_promotion_requires_evidence_and_fresh_revalidation(
@@ -1449,22 +1449,22 @@ def test_future_promotion_requires_evidence_and_fresh_revalidation(
     record = _promotion_review(capability)
     record["verified_capability_rows"][0]["evidence_ids"] = []
     _write_review(tmp_path, record)
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, [capability]))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [capability]))
 
     with pytest.raises(ValueError, match="at least one evidence ID"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
     record = _promotion_review(capability)
     record["verified_capability_rows"][0].pop("reviewed_on")
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="row reviewed_on must be an ISO date"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
     record = _promotion_review(capability)
-    record["verified_capability_rows"][0]["revalidate_on_or_before"] = "2026-08-03"
+    record["verified_capability_rows"][0]["revalidate_on_or_before"] = "2026-11-03"
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="requires revalidation"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 4))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 11, 4))
 
 
 def test_future_promotion_rejects_expired_or_quarantined_evidence(
@@ -1474,7 +1474,7 @@ def test_future_promotion_rejects_expired_or_quarantined_evidence(
     record = _promotion_review(capability)
     record["verified_capability_rows"][0]["revalidate_on_or_before"] = "2026-12-31"
     _write_review(tmp_path, record)
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, [capability]))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [capability]))
 
     with pytest.raises(ValueError, match="expired evidence"):
         validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 10, 19))
@@ -1485,13 +1485,13 @@ def test_future_promotion_rejects_expired_or_quarantined_evidence(
     record["quarantined_evidence_ids"] = [evidence_id]
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="quarantined evidence"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
     record = _promotion_review(capability)
     record["verified_capability_rows"][0]["quarantined"] = True
     _write_review(tmp_path, record)
     with pytest.raises(ValueError, match="rows cannot remain verified"):
-        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 8, 3))
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
 
 
 def test_no_promotion_may_retain_expired_quarantined_evidence(
@@ -1502,6 +1502,43 @@ def test_no_promotion_may_retain_expired_quarantined_evidence(
     record["artifacts"][0]["quarantined"] = True
     record["quarantined_evidence_ids"] = [evidence_id]
     _write_review(tmp_path, record)
-    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (3, 2, []))
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, []))
 
     validate_compiled_graph_capability_review(tmp_path, as_of=date(2030, 1, 1))
+
+
+def test_policy_v4_review_requires_canonical_dependency_closure_and_row_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capability = _promoted_capability()
+    monkeypatch.setattr(release, "_load_runtime_policy", lambda _root: (4, 2, [capability]))
+
+    record = _promotion_review(capability)
+    record["dependency_closure"] = ["ray", "numpy", "pyarrow"]
+    _write_review(tmp_path, record)
+    with pytest.raises(ValueError, match="canonical policy-v4 dependency closure"):
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
+
+    incomplete_capability = {
+        **capability,
+        "dependency_profile": "ray=2.56.0;numpy=2.5.1;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=14.1.1",
+    }
+    monkeypatch.setattr(
+        release, "_load_runtime_policy", lambda _root: (4, 2, [incomplete_capability])
+    )
+    record = _promotion_review(incomplete_capability)
+    _write_review(tmp_path, record)
+    with pytest.raises(ValueError, match="policy-v4 dependency closure"):
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))
+
+    missing_fastrlock_capability = {
+        **capability,
+        "dependency_profile": "ray=2.56.0;numpy=2.5.1;pyarrow=19.0.1;cupy=absent;cupy-cuda11x=absent;cupy-cuda12x=14.1.1;fastrlock=absent",
+    }
+    monkeypatch.setattr(
+        release, "_load_runtime_policy", lambda _root: (4, 2, [missing_fastrlock_capability])
+    )
+    record = _promotion_review(missing_fastrlock_capability)
+    _write_review(tmp_path, record)
+    with pytest.raises(ValueError, match="requires fastrlock"):
+        validate_compiled_graph_capability_review(tmp_path, as_of=date(2026, 9, 1))

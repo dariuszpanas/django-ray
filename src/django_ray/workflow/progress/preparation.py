@@ -8,6 +8,7 @@ remain disabled until issues #142 and #79 complete their independent boundaries.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import sqlite3
@@ -32,8 +33,10 @@ SQLITE_SPILL_MAX_BYTES = 1024 * 1024 * 1024
 SQLITE_CONTROL_RESERVE_BYTES = 4 * 1024 * 1024
 SQLITE_NODE_MAX_ITEMS = 1_000_000
 SQLITE_EDGE_MAX_ITEMS = 4_000_000
+SQLITE_DETAIL_MAX_ITEMS = 1_000_000
 SQLITE_BATCH_MAX_ITEMS = 256
 SQLITE_BATCH_MAX_DECODED_BYTES = 4 * 1024 * 1024
+LEGACY_OBSERVED_NODE_MAX_ITEMS = 25_000
 
 _MINIMUM_SPILL_BYTES = 64 * 1024
 _WORKSPACE_PREFIX = "django-ray-preparation-"
@@ -51,6 +54,7 @@ _EDGE_SELECTION_SQL = (
     "ORDER BY e.source, e.target LIMIT ?"
 )
 _OBSERVED_NODE_SELECTION_SQL = "SELECT node_id FROM nodes ORDER BY node_id"
+_DETAIL_SELECTION_SQL = "SELECT * FROM detail WHERE payload IS NOT NULL ORDER BY node_id"
 _LIVE_WORKSPACES: set[SQLitePreparationWorkspace] = set()
 _LIVE_WORKSPACES_LOCK = Lock()
 
@@ -159,6 +163,7 @@ class SQLitePreparationConfig:
     control_reserve_bytes: int = SQLITE_CONTROL_RESERVE_BYTES
     max_node_items: int = SQLITE_NODE_MAX_ITEMS
     max_edge_items: int = SQLITE_EDGE_MAX_ITEMS
+    max_detail_items: int = SQLITE_DETAIL_MAX_ITEMS
     batch_max_items: int = SQLITE_BATCH_MAX_ITEMS
     batch_max_decoded_bytes: int = SQLITE_BATCH_MAX_DECODED_BYTES
 
@@ -171,6 +176,7 @@ class SQLitePreparationConfig:
             "control_reserve_bytes": self.control_reserve_bytes,
             "max_node_items": self.max_node_items,
             "max_edge_items": self.max_edge_items,
+            "max_detail_items": self.max_detail_items,
             "batch_max_items": self.batch_max_items,
             "batch_max_decoded_bytes": self.batch_max_decoded_bytes,
         }
@@ -216,6 +222,7 @@ class SQLitePreparationConfig:
         item_limits = {
             "max_node_items": SQLITE_NODE_MAX_ITEMS,
             "max_edge_items": SQLITE_EDGE_MAX_ITEMS,
+            "max_detail_items": SQLITE_DETAIL_MAX_ITEMS,
         }
         for name, maximum in item_limits.items():
             if not 1 <= getattr(self, name) <= maximum:
@@ -380,6 +387,75 @@ def _candidate_signature_matches(
     )
 
 
+@dataclass(frozen=True)
+class _PreparedDetailCandidateSignature:
+    """Immutable snapshot of the exact detail candidate evidence sealed by a workspace."""
+
+    scalar_signature: tuple[tuple[type[Any], Any], ...]
+    evidence_references: tuple[object, ...]
+    record_signatures: tuple[tuple[tuple[type[Any], Any], ...], ...]
+
+
+def _detail_candidate_signature(
+    detail: storage.PreparedWorkflowProgressDetail,
+) -> _PreparedDetailCandidateSignature:
+    scalar_signature = (
+        _type_exact_candidate_value(detail.observed_count),
+        _type_exact_candidate_value(detail.encoded_bytes),
+        _type_exact_candidate_value(detail.decoded_bytes),
+    )
+    evidence_references: list[object] = [
+        detail.records,
+        detail.truncation_reasons,
+    ]
+    record_signatures = []
+    for record in detail.records:
+        evidence_references.extend((record, record.payload))
+        record_signatures.append(
+            (
+                _type_exact_candidate_value(record.node_id),
+                _type_exact_candidate_value(record.node_key),
+                _type_exact_candidate_value(record.state),
+                _type_exact_candidate_value(record.invocation_id),
+                _type_exact_candidate_value(record.digest),
+                _type_exact_candidate_value(record.encoded_bytes),
+                _type_exact_candidate_value(record.decoded_bytes),
+                _type_exact_candidate_value(record.event_count),
+                _type_exact_candidate_value(record.truncated),
+            )
+        )
+    return _PreparedDetailCandidateSignature(
+        scalar_signature=scalar_signature,
+        evidence_references=tuple(evidence_references),
+        record_signatures=tuple(record_signatures),
+    )
+
+
+def _detail_candidate_signature_matches(
+    detail: storage.PreparedWorkflowProgressDetail,
+    expected: _PreparedDetailCandidateSignature | None,
+) -> bool:
+    if expected is None:
+        return False
+    try:
+        current = _detail_candidate_signature(detail)
+    except (AttributeError, TypeError):
+        return False
+    return bool(
+        current.scalar_signature == expected.scalar_signature
+        and current.record_signatures == expected.record_signatures
+        and len(current.evidence_references) == len(expected.evidence_references)
+        and all(
+            observed is sealed
+            for observed, sealed in zip(
+                current.evidence_references,
+                expected.evidence_references,
+                strict=True,
+            )
+        )
+    )
+
+
 class SQLitePreparationWorkspace:
     """Private, single-owner, disposable preparation workspace.
 
@@ -395,10 +471,17 @@ class SQLitePreparationWorkspace:
         *,
         parent_directory: Path | None = None,
         cancellation_check: Callable[[], None] | None = None,
+        spill_controller: Any | None = None,
     ) -> None:
         self.config = (config or SQLitePreparationConfig()).validated()
-        self.parent_directory = parent_directory
+        self.spill_controller = spill_controller
+        self.parent_directory = (
+            parent_directory
+            if parent_directory is not None
+            else (spill_controller.config.root_directory if spill_controller is not None else None)
+        )
         self.cancellation_check = cancellation_check or (lambda: None)
+        self._spill_reservation: Any | None = None
         self.token = token_hex(16)
         self._owned_parent: Path | None = None
         self._owned_parent_identity: _PathIdentity | None = None
@@ -414,9 +497,15 @@ class SQLitePreparationWorkspace:
         self.spill_items = 0
         self.observed_node_count = 0
         self.observed_edge_count = 0
+        self.observed_detail_count = 0
         self._active_input_iterator: Iterator[Mapping[str, Any]] | None = None
         self._prepared_topology: PreparedWorkflowProgressTopologyCandidate | None = None
         self._prepared_topology_signature: _PreparedTopologyCandidateSignature | None = None
+        self._prepared_detail: storage.PreparedWorkflowProgressDetail | None = None
+        self._prepared_detail_signature: _PreparedDetailCandidateSignature | None = None
+        self._prepared_reporting_policy: str | None = None
+        self._detail_prepared = False
+        self._composite_detachment_ready = False
         self._legacy_observed_node_ids: frozenset[str] | None = None
         self._legacy_detachment_ready = False
         self._creator_pid: int | None = None
@@ -440,6 +529,12 @@ class SQLitePreparationWorkspace:
             try:
                 parent = self._acquire_safe_parent()
                 workspace_id = uuid4()
+                if self.spill_controller is not None:
+                    self._spill_reservation = self.spill_controller.reserve(
+                        requested_bytes=self.config.max_spill_bytes,
+                        workspace_id=str(workspace_id),
+                        workspace_token=self.token,
+                    )
                 directory = parent / f"{_WORKSPACE_PREFIX}{workspace_id}"
                 self._owned_directory = directory
                 self.database_path = directory / _DATABASE_NAME
@@ -482,6 +577,11 @@ class SQLitePreparationWorkspace:
                         self._remove_empty_acquisition_directory()
                 elif not directory_created:
                     self.cleanup_outcome = "not_created"
+                if self._spill_reservation is not None and self.spill_controller is not None:
+                    try:
+                        self.spill_controller.release(self._spill_reservation)
+                    finally:
+                        self._spill_reservation = None
                 raise acquisition_error.with_traceback(acquisition_error.__traceback__)
             return self
 
@@ -738,10 +838,13 @@ class SQLitePreparationWorkspace:
 
     def _retained_query_plans_by_statement(self) -> tuple[tuple[str, ...], ...]:
         connection = self._connection()
+        final_statement = (
+            _DETAIL_SELECTION_SQL if self._detail_prepared else _OBSERVED_NODE_SELECTION_SQL
+        )
         statements = (
             (_NODE_SELECTION_SQL, (257,)),
             (_EDGE_SELECTION_SQL, (257,)),
-            (_OBSERVED_NODE_SELECTION_SQL, ()),
+            (final_statement, ()),
         )
         return tuple(
             tuple(
@@ -774,10 +877,15 @@ class SQLitePreparationWorkspace:
             )
 
     def _assert_query_plans(self) -> None:
+        connection = self._connection()
         statement_plans = self._retained_query_plans_by_statement()
+        detail_plan = tuple(
+            str(row[3])
+            for row in connection.execute(f"EXPLAIN QUERY PLAN {_DETAIL_SELECTION_SQL}").fetchall()
+        )
         normalized = tuple(
             tuple(" ".join(detail.upper().split()) for detail in statement_plan)
-            for statement_plan in statement_plans
+            for statement_plan in (*statement_plans, detail_plan)
         )
         plans = tuple(detail for statement_plan in normalized for detail in statement_plan)
         prohibited = ("TEMP B-TREE", "MATERIALIZE", "AUTOMATIC")
@@ -793,6 +901,7 @@ class SQLitePreparationWorkspace:
                 "SEARCH TARGET_NODE USING PRIMARY KEY (NODE_ID=?)",
             ),
             ("SCAN NODES",),
+            ("SCAN DETAIL",),
         )
         if normalized != expected:
             raise WorkflowProgressPreparationConfigurationError(
@@ -938,22 +1047,216 @@ class SQLitePreparationWorkspace:
         return prepared
 
     @_poison_on_failure
+    def prepare_detail(
+        self,
+        records: Iterable[Mapping[str, Any]],
+        *,
+        topology: PreparedWorkflowProgressTopologyCandidate,
+        reporting_policy: str = "full",
+    ) -> storage.PreparedWorkflowProgressDetail:
+        """Stream one-shot detail inputs and seal the composite topology/detail pair (#156)."""
+        if (
+            self._phase != "prepared"
+            or self._detail_prepared
+            or self._legacy_detachment_ready
+            or topology is not self._prepared_topology
+            or not _candidate_signature_matches(topology, self._prepared_topology_signature)
+            or topology._workspace_token != self.token
+            or topology._workspace_pid != self._creator_pid
+        ):
+            raise RuntimeError("detail preparation requires this workspace's sealed topology")
+        self._check_cancellation()
+        if reporting_policy not in {"full", "sampled", "terminal_only"}:
+            raise storage.WorkflowProgressStorageError("workflow reporting policy is unsupported")
+        connection = self._connection()
+        reasons = set(topology.truncation_reasons)
+        node_kinds = dict(topology.node_kinds)
+        detail_batch_items = 0
+        detail_batch_bytes = 0
+        for value in self._cancelable_values(records):
+            self.observed_detail_count += 1
+            self._check_item_limit(
+                "detail",
+                self.observed_detail_count,
+                self.config.max_detail_items,
+            )
+            if not isinstance(value, Mapping):
+                raise storage.WorkflowProgressStorageError("node detail must be a mapping")
+            detail_keys = frozenset(value)
+            expected_detail_keys = (
+                storage._DETAIL_KEYS_V1
+                if detail_keys == storage._DETAIL_KEYS_V1
+                else storage._DETAIL_KEYS_V2
+            )
+            detail_value = storage._exact_mapping(
+                value,
+                expected_detail_keys,
+                "node detail",
+            )
+            try:
+                node_id = storage._bounded_identity_text(
+                    detail_value["node_id"],
+                    "node detail node_id",
+                    max_bytes=storage.WORKFLOW_PROGRESS_NODE_ID_MAX_BYTES,
+                )
+            except storage.WorkflowProgressStorageLimitError:
+                reasons.add(storage.WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT.value)
+                continue
+            if node_id is None:
+                raise AssertionError("non-null node detail identity normalized to None")
+            node_key = node_id.encode("utf-8")
+            detail_batch_items, detail_batch_bytes = self._prepare_batch_for_potential_item(
+                len(node_key) + storage.WORKFLOW_PROGRESS_RECORD_MAX_ENCODED_BYTES,
+                items=detail_batch_items,
+                decoded_bytes=detail_batch_bytes,
+            )
+            self._insert_detail_identity(node_key)
+            try:
+                record = storage.prepare_workflow_progress_node_detail(
+                    value,
+                    identity=topology.identity,
+                )
+            except storage.WorkflowProgressStorageLimitError:
+                reasons.add(storage.WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT.value)
+                item_bytes = len(node_key) + storage.WORKFLOW_PROGRESS_RECORD_MAX_ENCODED_BYTES
+            else:
+                if record.node_id != node_id:
+                    raise AssertionError("normalized node detail identity changed")
+                if record.node_id in topology.node_ids:
+                    decoded = json.loads(record.payload)
+                    has_fanout = decoded["fanout"] is not None
+                    if (node_kinds[record.node_id] == "map") != has_fanout:
+                        raise storage.WorkflowProgressStorageError(
+                            "node detail fanout does not match the retained topology kind"
+                        )
+                    if record.truncated:
+                        reasons.add(
+                            storage.WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT.value
+                        )
+                    connection.execute(
+                        "UPDATE detail SET state = ?, invocation_id = ?, payload = ?, "
+                        "digest = ?, encoded_bytes = ?, decoded_bytes = ?, event_count = ?, "
+                        "truncated = ? WHERE node_id = ?",
+                        (
+                            record.state,
+                            record.invocation_id,
+                            record.payload,
+                            record.digest,
+                            record.encoded_bytes,
+                            record.decoded_bytes,
+                            record.event_count,
+                            int(record.truncated),
+                            node_key,
+                        ),
+                    )
+                item_bytes = len(node_key) + record.decoded_bytes
+            detail_batch_items, detail_batch_bytes = self._record_batch_item(
+                item_bytes,
+                items=detail_batch_items,
+                decoded_bytes=detail_batch_bytes,
+            )
+        if detail_batch_items:
+            self._flush_batch()
+        self._check_cancellation()
+        if reporting_policy == "full":
+            detail_count = int(connection.execute("SELECT COUNT(*) FROM detail").fetchone()[0])
+            node_count = int(connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0])
+            if detail_count != node_count:
+                raise storage.WorkflowProgressStorageError(
+                    "full detail must contain one record per observed topology node"
+                )
+        else:
+            reasons.add(storage.WorkflowProgressTruncationReason.REPORTING_POLICY.value)
+
+        retained = self._select_retained_detail(topology, reasons)
+        self._check_cancellation()
+        self._measure_spill()
+        self._prepared_detail = retained
+        self._prepared_detail_signature = _detail_candidate_signature(retained)
+        self._prepared_reporting_policy = reporting_policy
+        self._detail_prepared = True
+        self._composite_detachment_ready = True
+        self._phase = "sealed"
+        return retained
+
+    def detach_initial_publication(
+        self,
+        topology: PreparedWorkflowProgressTopologyCandidate,
+        detail: storage.PreparedWorkflowProgressDetail,
+    ) -> storage.PreparedWorkflowProgressInitialPublication:
+        """Issue a composite topology/detail capability only after owned workspace cleanup (#156)."""
+        self._assert_creator_process()
+        self._assert_owner_thread()
+        if (
+            self._phase != "closed"
+            or self.cleanup_outcome != "removed"
+            or self.path_exists
+            or not self._composite_detachment_ready
+            or not self._detail_prepared
+            or topology is not self._prepared_topology
+            or not _candidate_signature_matches(topology, self._prepared_topology_signature)
+            or detail is not self._prepared_detail
+            or not _detail_candidate_signature_matches(detail, self._prepared_detail_signature)
+            or self._prepared_reporting_policy is None
+            or topology._workspace_pid != self._creator_pid
+        ):
+            raise RuntimeError(
+                "composite initial publication cannot detach before owned workspace cleanup succeeds"
+            )
+        composite_topology = storage.PreparedWorkflowProgressCompositeTopology(
+            identity=topology.identity,
+            topology_version=topology.topology_version,
+            manifest_payload=topology.manifest_payload,
+            manifest_digest=topology.manifest_digest,
+            pages=topology.pages,
+            node_ids=topology.node_ids,
+            node_kinds=topology.node_kinds,
+            edges=topology.edges,
+            observed_node_count=topology.observed_node_count,
+            observed_edge_count=topology.observed_edge_count,
+            retained_node_count=topology.retained_node_count,
+            retained_edge_count=topology.retained_edge_count,
+            encoded_bytes=topology.encoded_bytes,
+            decoded_bytes=topology.decoded_bytes,
+            truncation_reasons=topology.truncation_reasons,
+            map_node_ids=topology.map_node_ids,
+        )
+        publication = storage.PreparedWorkflowProgressInitialPublication(
+            topology=composite_topology,
+            detail=detail,
+            reporting_policy=self._prepared_reporting_policy,
+        )
+        storage._register_prepared_initial_publication_capability(publication)
+        self._prepared_topology = None
+        self._prepared_topology_signature = None
+        self._prepared_detail = None
+        self._prepared_detail_signature = None
+        self._prepared_reporting_policy = None
+        self._composite_detachment_ready = False
+        self._phase = "detached"
+        return publication
+
+    @_poison_on_failure
     def prepare_legacy_detachment(
         self,
         topology: PreparedWorkflowProgressTopologyCandidate,
     ) -> None:
         """Capture the one O(observed) compatibility value before cleanup.
 
-        Issue #142 removes this residue by keeping topology and detail in one
-        workspace lifetime. Until then, the package preparer must preserve the
-        historical ``observed_node_ids`` field exactly.
+        Refuses observed node counts above the 25,000-node materialized limit (#156).
         """
         if (
             self._phase != "prepared"
+            or self._detail_prepared
             or topology is not self._prepared_topology
             or not _candidate_signature_matches(topology, self._prepared_topology_signature)
         ):
             raise RuntimeError("legacy detachment requires this workspace's sealed topology")
+        if topology.observed_node_count > LEGACY_OBSERVED_NODE_MAX_ITEMS:
+            raise storage.WorkflowProgressStorageLimitError(
+                f"legacy compatibility topology detachment refuses more than "
+                f"{LEGACY_OBSERVED_NODE_MAX_ITEMS} observed nodes"
+            )
         self._check_cancellation()
         self._legacy_observed_node_ids = frozenset(self._iter_observed_node_ids())
         self._check_cancellation()
@@ -1041,6 +1344,18 @@ class SQLitePreparationWorkspace:
                 PRIMARY KEY (source, target),
                 FOREIGN KEY (source) REFERENCES nodes(node_id),
                 FOREIGN KEY (target) REFERENCES nodes(node_id)
+            ) WITHOUT ROWID;
+            CREATE TABLE detail (
+                node_id BLOB PRIMARY KEY,
+                state TEXT,
+                invocation_id TEXT,
+                payload BLOB,
+                digest TEXT,
+                encoded_bytes INTEGER,
+                decoded_bytes INTEGER,
+                event_count INTEGER,
+                truncated INTEGER,
+                FOREIGN KEY (node_id) REFERENCES nodes(node_id)
             ) WITHOUT ROWID;
             """
         )
@@ -1249,6 +1564,138 @@ class SQLitePreparationWorkspace:
             )
             raise storage.WorkflowProgressStorageError(reason) from error
         self.spill_items += 1
+
+    def _insert_detail_identity(self, node_key: bytes) -> None:
+        try:
+            self._connection().execute(
+                "INSERT INTO detail(node_id) VALUES (?)",
+                (node_key,),
+            )
+        except sqlite3.IntegrityError as error:
+            message = str(error).lower()
+            reason = (
+                "node detail contains a duplicate node_id"
+                if "unique" in message
+                else "node detail references an unknown topology node_id"
+            )
+            raise storage.WorkflowProgressStorageError(reason) from error
+        self.spill_items += 1
+
+    def _select_retained_detail(
+        self,
+        topology: PreparedWorkflowProgressTopologyCandidate,
+        reasons: set[str],
+    ) -> storage.PreparedWorkflowProgressDetail:
+        cursor = self._connection().execute(_DETAIL_SELECTION_SQL)
+        retained: list[storage.PreparedWorkflowProgressNodeDetail] = []
+        encoded_bytes = 0
+        decoded_bytes = 0
+        stop = False
+        try:
+            while not stop:
+                self._check_cancellation()
+                rows = cursor.fetchmany(self.config.batch_max_items)
+                if not rows:
+                    break
+                for row in rows:
+                    node_id = bytes(row["node_id"]).decode("utf-8")
+                    record = storage.PreparedWorkflowProgressNodeDetail(
+                        node_id=node_id,
+                        node_key=hashlib.sha256(bytes(row["node_id"])).hexdigest(),
+                        state=str(row["state"]),
+                        invocation_id=(
+                            None if row["invocation_id"] is None else str(row["invocation_id"])
+                        ),
+                        payload=bytes(row["payload"]),
+                        digest=str(row["digest"]),
+                        encoded_bytes=int(row["encoded_bytes"]),
+                        decoded_bytes=int(row["decoded_bytes"]),
+                        event_count=int(row["event_count"]),
+                        truncated=bool(row["truncated"]),
+                    )
+                    if len(retained) >= storage.WORKFLOW_PROGRESS_DETAIL_MAX_ITEMS:
+                        reasons.add(
+                            storage.WorkflowProgressTruncationReason.DETAIL_COUNT_LIMIT.value
+                        )
+                        stop = True
+                        break
+                    if (
+                        encoded_bytes + record.encoded_bytes
+                        > storage.WORKFLOW_PROGRESS_DETAIL_MAX_ENCODED_BYTES
+                        or topology.encoded_bytes + encoded_bytes + record.encoded_bytes
+                        > storage.WORKFLOW_PROGRESS_COMBINED_MAX_ENCODED_BYTES
+                    ):
+                        reasons.add(
+                            storage.WorkflowProgressTruncationReason.DETAIL_ENCODED_BYTES.value
+                        )
+                        stop = True
+                        break
+                    if (
+                        decoded_bytes + record.decoded_bytes
+                        > storage.WORKFLOW_PROGRESS_DETAIL_MAX_DECODED_BYTES
+                        or topology.decoded_bytes + decoded_bytes + record.decoded_bytes
+                        > storage.WORKFLOW_PROGRESS_COMBINED_MAX_DECODED_BYTES
+                    ):
+                        reasons.add(
+                            storage.WorkflowProgressTruncationReason.DETAIL_DECODED_BYTES.value
+                        )
+                        stop = True
+                        break
+                    retained.append(record)
+                    encoded_bytes += record.encoded_bytes
+                    decoded_bytes += record.decoded_bytes
+        finally:
+            cursor.close()
+
+        decoded_records: dict[str, dict[str, Any]] = {}
+        event_entries: list[tuple[tuple[Any, ...], str, dict[str, Any]]] = []
+        for record in retained:
+            decoded = json.loads(record.payload)
+            decoded_records[record.node_id] = decoded
+            for occurrence, event in enumerate(decoded["recent_events"]):
+                event_entries.append(
+                    (
+                        storage._event_sort_key(
+                            event,
+                            node_id=record.node_id,
+                            occurrence=occurrence,
+                        ),
+                        record.node_id,
+                        event,
+                    )
+                )
+        selected_events = sorted(event_entries, key=lambda item: item[0])[
+            -storage.WORKFLOW_PROGRESS_RECENT_EVENT_MAX_ITEMS :
+        ]
+        events_by_node: dict[str, list[dict[str, Any]]] = {}
+        for _, node_id, event in selected_events:
+            events_by_node.setdefault(node_id, []).append(event)
+
+        event_bounded: list[storage.PreparedWorkflowProgressNodeDetail] = []
+        for record in retained:
+            retained_events = sorted(
+                events_by_node.get(record.node_id, []),
+                key=storage._event_sort_key,
+            )
+            if len(retained_events) != record.event_count:
+                decoded = decoded_records[record.node_id]
+                decoded["recent_events"] = retained_events
+                record = storage._prepared_node_detail(
+                    decoded,
+                    invocation_id=record.invocation_id,
+                    truncated=True,
+                )
+                reasons.add(storage.WorkflowProgressTruncationReason.RECORD_SIZE_LIMIT.value)
+            event_bounded.append(record)
+        encoded_bytes = sum(record.encoded_bytes for record in event_bounded)
+        decoded_bytes = sum(record.decoded_bytes for record in event_bounded)
+        return storage.PreparedWorkflowProgressDetail(
+            records=tuple(event_bounded),
+            observed_count=topology.observed_node_count,
+            encoded_bytes=encoded_bytes,
+            decoded_bytes=decoded_bytes,
+            truncation_reasons=tuple(sorted(reasons)),
+        )
 
     def _set_retained_nodes(self, node_ids: set[str]) -> None:
         connection = self._connection()
@@ -1756,6 +2203,10 @@ class SQLitePreparationWorkspace:
         self._lease_identity = None
         self.cleanup_outcome = "removed"
         _discard_live_workspace(self)
+        if self._spill_reservation is not None and self.spill_controller is not None:
+            reservation = self._spill_reservation
+            self._spill_reservation = None
+            self.spill_controller.release(reservation)
 
     def _validated_owned_path(self) -> Path:
         directory = self._owned_directory
@@ -2014,6 +2465,32 @@ if hasattr(os, "register_at_fork"):
 atexit.register(_cleanup_live_workspaces_at_exit)
 
 
+def prepare_workflow_progress_initial_publication(
+    identity: WorkflowRunIdentity,
+    topology_version: int,
+    nodes: Iterable[Mapping[str, Any]],
+    edges: Iterable[Mapping[str, Any]],
+    detail_records: Iterable[Mapping[str, Any]],
+    *,
+    reporting_policy: str = "full",
+) -> storage.PreparedWorkflowProgressInitialPublication:
+    """Prepare bounded composite topology and initial detail in one owned workspace (#156)."""
+    workspace = SQLitePreparationWorkspace()
+    with workspace:
+        topology = workspace.prepare_topology(
+            identity,
+            topology_version,
+            nodes,
+            edges,
+        )
+        detail = workspace.prepare_detail(
+            detail_records,
+            topology=topology,
+            reporting_policy=reporting_policy,
+        )
+    return workspace.detach_initial_publication(topology, detail)
+
+
 def prepare_workflow_progress_topology(
     identity: WorkflowRunIdentity,
     topology_version: int,
@@ -2038,7 +2515,14 @@ def prepare_workflow_progress_topology(
     return workspace.detach_legacy_topology(candidate)
 
 
+PreparedWorkflowProgressCompositeTopology = storage.PreparedWorkflowProgressCompositeTopology
+PreparedWorkflowProgressInitialPublication = storage.PreparedWorkflowProgressInitialPublication
+
 __all__ = [
+    "LEGACY_OBSERVED_NODE_MAX_ITEMS",
+    "PreparedWorkflowProgressCompositeTopology",
+    "PreparedWorkflowProgressInitialPublication",
+    "SQLITE_DETAIL_MAX_ITEMS",
     "WorkflowProgressPreparationConfigurationError",
     "WorkflowProgressPreparationCleanupOperationalError",
     "WorkflowProgressPreparationCleanupRefusedError",
@@ -2058,5 +2542,6 @@ __all__ = [
     "SQLitePreparationConfig",
     "SQLitePreparationWorkspace",
     "canonical_topology_evidence",
+    "prepare_workflow_progress_initial_publication",
     "prepare_workflow_progress_topology",
 ]

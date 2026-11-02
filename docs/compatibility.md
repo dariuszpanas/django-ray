@@ -373,7 +373,7 @@ that Ray is available on every Python/platform combination.
 - Ray publishes Linux aarch64 wheels for supported Python versions, but users must
   confirm their OS, architecture, and Python ABI match an available Ray wheel.
 
-Compiled Graph is more restrictive than ordinary Ray use: policy version 3 rejects
+Compiled Graph is more restrictive than ordinary Ray use: policy version 4 rejects
 Windows, aarch64, Ray Client, GPU transport, and every unverified native tuple before
 calling `experimental_compile()`. Dynamic workflows remain supported according to the
 version matrix above.

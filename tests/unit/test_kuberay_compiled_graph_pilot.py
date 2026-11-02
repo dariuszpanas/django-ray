@@ -2992,6 +2992,7 @@ def test_native_observation_validation_binds_every_policy_dimension() -> None:
                 "cupy",
                 "cupy-cuda11x",
                 "cupy-cuda12x",
+                "fastrlock",
             )
         ),
         "platform_profile": expected_runtime["platform_profile"],
@@ -3631,7 +3632,7 @@ def test_historical_blocked_evidence_remains_self_consistent_across_profile_vers
     record = json.loads(evidence_bytes)
     retained_decisions = [outcome["decision"] for outcome in record["topologies"]]
 
-    assert pilot.COMPILED_GRAPH_POLICY_VERSION == 3
+    assert pilot.COMPILED_GRAPH_POLICY_VERSION == 4
     assert {decision["policy_version"] for decision in retained_decisions} == {2}
     assert all(
         decision["capability_set"].startswith("ray-cgraph-policy-v2:")
@@ -3753,6 +3754,7 @@ def test_physical_near_neighbor_keeps_pilot_dependencies_outside_policy_identity
         "cupy",
         "cupy-cuda11x",
         "cupy-cuda12x",
+        "fastrlock",
     )
     versions = dict(profile["dependency_profile"])
     lookups: list[str] = []
@@ -3828,8 +3830,13 @@ def test_physical_near_neighbor_keeps_pilot_dependencies_outside_policy_identity
     ]
     assert result["pilot_dependency_profile"] == profile["dependency_profile"]
     assert result["changed_admission"]["changed_dimensions"] == ["shared_memory_profile"]
-    assert (
-        "fastrlock=" not in result["changed_admission"]["decision"]["runtime"]["dependency_profile"]
+    dependency_profile_text = result["changed_admission"]["decision"]["runtime"][
+        "dependency_profile"
+    ]
+    assert "fastrlock=0.8.3" in dependency_profile_text
+    assert all(
+        f"{pilot_only}=" not in dependency_profile_text
+        for pilot_only in ("django-ray", "django", "asgiref", "sqlparse")
     )
     assert result["native_started"] is False
 
@@ -3865,6 +3872,41 @@ def test_probe_parent_checks_pilot_dependencies_before_native_spawn(
         match="pilot dependency profile changed before native execution",
     ):
         pilot._run_probe_parent("direct-driver", 1)
+
+
+def test_worker_and_child_paths_attest_pilot_dependencies_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_dependencies(_profile: dict[str, Any]) -> dict[str, str]:
+        raise pilot.PilotError("pilot dependency profile changed before native execution")
+
+    monkeypatch.setattr(pilot, "_require_exact_pilot_dependency_profile", reject_dependencies)
+
+    for construct in (
+        lambda: pilot._PilotStage("left"),
+        lambda: pilot._PilotFailureStage(),
+        lambda: pilot._PilotDelayStage(),
+    ):
+        with pytest.raises(
+            pilot.PilotError,
+            match="pilot dependency profile changed before native execution",
+        ):
+            construct()
+    with pytest.raises(
+        pilot.PilotError,
+        match="pilot dependency profile changed before native execution",
+    ):
+        pilot._inspect_pod_runtime()
+    with pytest.raises(
+        pilot.PilotError,
+        match="pilot dependency profile changed before native execution",
+    ):
+        pilot._nested_probe_owner("cgraph-owner-test")
+    with pytest.raises(
+        pilot.PilotError,
+        match="pilot dependency profile changed before native execution",
+    ):
+        pilot._run_probe_child("direct-driver")
 
 
 def test_near_neighbor_container_is_physically_changed_and_network_isolated(

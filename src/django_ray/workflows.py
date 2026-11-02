@@ -2124,6 +2124,69 @@ class WorkflowSignature(ABC):
             reporting_policy=_workflow_progress_policy(policy),
         )
 
+    def with_execution_strategy(
+        self,
+        policy: str,
+        *,
+        regions: Sequence[Any] = (),
+        pool_specs: Mapping[str, Any] | None = None,
+        compiled_graph_capability_decision: Any | None = None,
+    ) -> _ConfiguredWorkflowRun:
+        """Return an invocation runner with an explicit whole-plan strategy policy."""
+        return _ConfiguredWorkflowRun(
+            signature=self,
+            reporting_policy=None,
+            requested_strategy_policy=policy,
+            regions=tuple(regions),
+            pool_specs=pool_specs,
+            compiled_graph_capability_decision=compiled_graph_capability_decision,
+        )
+
+    def inspect_strategy(
+        self,
+        *args: Any,
+        use_ray: bool | None = None,
+        requested_policy: str | None = None,
+        reporting_policy: str | None = None,
+        regions: Sequence[Any] = (),
+        pool_specs: Mapping[str, Any] | None = None,
+        compiled_graph_capability_decision: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Validate strategy selection and return bounded observability without executing."""
+        from django_ray.runtime.context import get_current_task_context
+        from django_ray.workflow.plans import materialize_workflow_plan
+        from django_ray.workflow.strategy import (
+            WorkflowRequestedStrategyPolicy,
+            resolve_execution_strategy,
+        )
+
+        effective_reporting = _workflow_progress_policy(reporting_policy)
+        materialized_plan = materialize_workflow_plan(
+            self,
+            invocation_args=args,
+            invocation_kwargs=kwargs,
+            task_context=get_current_task_context(),
+        )
+        strategy, selection = resolve_execution_strategy(
+            self,
+            materialized_plan,
+            use_ray=use_ray,
+            requested_policy=requested_policy,
+            reporting_policy=effective_reporting,
+            regions=tuple(regions),
+            pool_specs=pool_specs,
+            compiled_graph_capability_decision=compiled_graph_capability_decision,
+        )
+        return strategy.observability(
+            materialized_plan,
+            selection,
+            regions=tuple(regions),
+            fallback_allowed_before_start=(
+                selection.requested_policy == WorkflowRequestedStrategyPolicy.AUTO.value
+            ),
+        )
+
     def _run_with_configuration(
         self,
         args: tuple[Any, ...],
@@ -2131,18 +2194,59 @@ class WorkflowSignature(ABC):
         *,
         use_ray: bool | None,
         reporting_policy: str | None,
+        requested_strategy_policy: str | None = None,
+        regions: Sequence[Any] = (),
+        pool_specs: Mapping[str, Any] | None = None,
+        compiled_graph_capability_decision: Any | None = None,
     ) -> Any:
         """Execute with package-owned options separate from application kwargs."""
         from django_ray.runtime.context import get_current_task_context
         from django_ray.workflow.plans import materialize_workflow_plan
 
+        explicit_reporting_policy = (
+            _workflow_progress_policy(reporting_policy) if reporting_policy is not None else None
+        )
         reporting_policy = _workflow_progress_policy(reporting_policy)
+        task_context = get_current_task_context()
         materialized_plan = materialize_workflow_plan(
             self,
             invocation_args=args,
             invocation_kwargs=kwargs,
-            task_context=get_current_task_context(),
+            task_context=task_context,
         )
+        if requested_strategy_policy is not None or regions or pool_specs:
+            from django_ray.workflow.strategy import resolve_execution_strategy
+
+            strategy, selection = resolve_execution_strategy(
+                self,
+                materialized_plan,
+                use_ray=use_ray,
+                requested_policy=requested_strategy_policy,
+                reporting_policy=explicit_reporting_policy,
+                regions=tuple(regions),
+                pool_specs=pool_specs,
+                compiled_graph_capability_decision=compiled_graph_capability_decision,
+            )
+            run_identity = (
+                WorkflowRunIdentity.create(task_context) if task_context is not None else None
+            )
+            prepared = strategy.prepare(
+                materialized_plan,
+                selection=selection,
+                run_identity=run_identity,
+                regions=tuple(regions),
+            )
+            admitted = strategy.admit(prepared)
+            handle = strategy.execute(admitted, self, args, kwargs)
+            try:
+                return strategy.consume_result(
+                    handle,
+                    expected_run_identity=prepared.run_identity,
+                )
+            finally:
+                strategy.drain(handle, expected_run_identity=prepared.run_identity)
+                strategy.cleanup(handle, expected_run_identity=prepared.run_identity)
+
         executor = _get_executor(use_ray)
         executor.bind_plan(
             materialized_plan,
@@ -2168,7 +2272,40 @@ class _ConfiguredWorkflowRun:
     """One explicit execution configuration without reserving task keywords."""
 
     signature: WorkflowSignature
-    reporting_policy: str
+    reporting_policy: str | None = None
+    requested_strategy_policy: str | None = None
+    regions: tuple[Any, ...] = ()
+    pool_specs: Mapping[str, Any] | None = None
+    compiled_graph_capability_decision: Any | None = None
+
+    def with_progress_reporting(self, policy: str) -> _ConfiguredWorkflowRun:
+        """Return a copy with an explicit progress reporting policy."""
+        return _ConfiguredWorkflowRun(
+            signature=self.signature,
+            reporting_policy=_workflow_progress_policy(policy),
+            requested_strategy_policy=self.requested_strategy_policy,
+            regions=self.regions,
+            pool_specs=self.pool_specs,
+            compiled_graph_capability_decision=self.compiled_graph_capability_decision,
+        )
+
+    def with_execution_strategy(
+        self,
+        policy: str,
+        *,
+        regions: Sequence[Any] = (),
+        pool_specs: Mapping[str, Any] | None = None,
+        compiled_graph_capability_decision: Any | None = None,
+    ) -> _ConfiguredWorkflowRun:
+        """Return a copy with an explicit whole-plan strategy policy."""
+        return _ConfiguredWorkflowRun(
+            signature=self.signature,
+            reporting_policy=self.reporting_policy,
+            requested_strategy_policy=policy,
+            regions=tuple(regions),
+            pool_specs=pool_specs,
+            compiled_graph_capability_decision=compiled_graph_capability_decision,
+        )
 
     def run(
         self,
@@ -2176,12 +2313,16 @@ class _ConfiguredWorkflowRun:
         use_ray: bool | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute the underlying signature with this reporting policy."""
+        """Execute the underlying signature with this configuration."""
         return self.signature._run_with_configuration(
             args,
             kwargs,
             use_ray=use_ray,
             reporting_policy=self.reporting_policy,
+            requested_strategy_policy=self.requested_strategy_policy,
+            regions=self.regions,
+            pool_specs=self.pool_specs,
+            compiled_graph_capability_decision=self.compiled_graph_capability_decision,
         )
 
 

@@ -5351,3 +5351,88 @@ def test_concurrent_legacy_runtime_env_retries_preserve_row(automatic) -> None:
     assert _run_concurrently(refuse, refuse) == ["refused", "refused"]
     assert RayTaskExecution.objects.filter(pk=task.pk).values().get() == before
     assert not TaskAttempt.objects.filter(execution=task).exists()
+
+
+def test_unregistered_object_reap_coordinates_with_inflight_writer_on_postgresql(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-flight writer blocks on unregistered tombstone lock and restores payload."""
+    import django_ray.input_storage as input_storage_module
+    from django_ray.payload_registry import discover_and_reap_unregistered_payloads
+
+    storage_config = {
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        "MAX_INLINE_INPUT_SIZE_BYTES": 16,
+    }
+    settings.DJANGO_RAY = {**settings.DJANGO_RAY, **storage_config}
+    prepared = prepare_task_input(("postgres-inflight-unregistered-reap-payload",), {"ok": True})
+    assert prepared.input_reference is not None
+    object_path = next(tmp_path.rglob("*.json"))
+    assert object_path.is_file()
+
+    deletion_started = Event()
+    release_deletion = Event()
+    register_connected = Event()
+    register_backend_pid: list[int] = []
+    original_delete = input_storage_module.delete_input_reference
+
+    def blocking_delete(reference: str, *, config=None) -> None:
+        original_delete(reference, config=config or storage_config)
+        deletion_started.set()
+        if not release_deletion.wait(timeout=10):
+            raise TimeoutError("test did not release unregistered object deletion")
+
+    monkeypatch.setattr(input_storage_module, "delete_input_reference", blocking_delete)
+
+    def reap_unregistered():
+        close_old_connections()
+        try:
+            return discover_and_reap_unregistered_payloads(
+                grace_seconds=60,
+                now=timezone.now() + timedelta(seconds=120),
+                delete_unregistered=True,
+                max_objects=10,
+                max_pages=2,
+            )
+        finally:
+            close_old_connections()
+
+    def finish_writer_registration():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                register_backend_pid.append(int(cursor.fetchone()[0]))
+            register_connected.set()
+            with transaction.atomic():
+                return register_task_input(prepared)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reap_future = executor.submit(reap_unregistered)
+        try:
+            assert deletion_started.wait(timeout=10)
+            assert not object_path.exists()
+            register_future = executor.submit(finish_writer_registration)
+            assert register_connected.wait(timeout=10)
+            _wait_for_postgresql_lock(register_backend_pid[0])
+        finally:
+            release_deletion.set()
+        summary = reap_future.result(timeout=20)
+        restored_row = register_future.result(timeout=20)
+
+    assert summary.counts["purged"] == 1
+    assert restored_row is not None
+    restored_row.refresh_from_db()
+    assert restored_row.state == InputPayloadState.ACTIVE
+    assert restored_row.purged_at is None
+    assert object_path.is_file()
+    assert load_task_input(
+        args_json=prepared.args_json,
+        kwargs_json=prepared.kwargs_json,
+        input_reference=prepared.input_reference,
+    ) == (["postgres-inflight-unregistered-reap-payload"], {"ok": True})

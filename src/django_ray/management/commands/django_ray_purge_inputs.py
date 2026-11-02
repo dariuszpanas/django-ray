@@ -30,8 +30,16 @@ from django_ray.models import (
     TaskState,
 )
 from django_ray.payload_registry import (
+    DEFAULT_INVENTORY_MAX_OBJECTS,
+    DEFAULT_INVENTORY_MAX_PAGES,
+    DEFAULT_UNREGISTERED_GRACE_SECONDS,
+    MAX_INVENTORY_MAX_OBJECTS,
+    MAX_INVENTORY_MAX_PAGES,
+    MAX_UNREGISTERED_GRACE_SECONDS,
+    MIN_UNREGISTERED_GRACE_SECONDS,
     _has_other_payload_registry_reference,
     _payload_registry_references,
+    discover_and_reap_unregistered_payloads,
 )
 from django_ray.ray_job_request_storage import (
     RayJobRequestStorageError,
@@ -92,6 +100,32 @@ class Command(BaseCommand):
         parser.add_argument("--max-attachments", type=int, default=DEFAULT_ATTACHMENTS)
         parser.add_argument("--max-details", type=int, default=DEFAULT_DETAILS)
         parser.add_argument("--cursor", help="Continue a report with its fixed cutoff and mode.")
+        parser.add_argument(
+            "--discover-unregistered",
+            action="store_true",
+            help="Inventory configured input storage for unregistered orphan objects.",
+        )
+        parser.add_argument(
+            "--delete-unregistered",
+            action="store_true",
+            help="Revalidate and delete eligible unregistered objects (requires --discover-unregistered and --delete).",
+        )
+        parser.add_argument(
+            "--grace-seconds",
+            type=int,
+            default=DEFAULT_UNREGISTERED_GRACE_SECONDS,
+            help=f"Grace period in seconds before an unregistered object is eligible (default: {DEFAULT_UNREGISTERED_GRACE_SECONDS}).",
+        )
+        parser.add_argument(
+            "--max-inventory-objects",
+            type=int,
+            default=DEFAULT_INVENTORY_MAX_OBJECTS,
+        )
+        parser.add_argument(
+            "--max-inventory-pages",
+            type=int,
+            default=DEFAULT_INVENTORY_MAX_PAGES,
+        )
         parser.add_argument("--format", choices=("text", "json"), default="text")
 
     @staticmethod
@@ -114,6 +148,28 @@ class Command(BaseCommand):
                 f"--retention-days must be zero or greater, at most {RETENTION_MAX_DAYS}"
             )
         delete = bool(options["delete"])
+        discover_unregistered = bool(options.get("discover_unregistered"))
+        delete_unregistered = bool(options.get("delete_unregistered"))
+        if delete_unregistered and (not discover_unregistered or not delete):
+            raise CommandError(
+                "--delete-unregistered requires both --discover-unregistered and --delete"
+            )
+        grace_seconds = self._budget(
+            options,
+            "grace_seconds",
+            MAX_UNREGISTERED_GRACE_SECONDS,
+            minimum=MIN_UNREGISTERED_GRACE_SECONDS,
+        )
+        max_inventory_objects = self._budget(
+            options,
+            "max_inventory_objects",
+            MAX_INVENTORY_MAX_OBJECTS,
+        )
+        max_inventory_pages = self._budget(
+            options,
+            "max_inventory_pages",
+            MAX_INVENTORY_MAX_PAGES,
+        )
         after = ""
         if options["cursor"] is not None:
             try:
@@ -189,8 +245,23 @@ class Command(BaseCommand):
                     details.append(detail)
                     detail_bytes += size
 
+        inventory_report = None
+        if discover_unregistered:
+            try:
+                inventory_report = discover_and_reap_unregistered_payloads(
+                    grace_seconds=grace_seconds,
+                    max_objects=max_inventory_objects,
+                    max_pages=max_inventory_pages,
+                    max_details=detail_limit,
+                    delete_unregistered=delete_unregistered,
+                )
+            except Exception as error:
+                raise CommandError(
+                    f"Unregistered payload inventory failed ({self._format_cleanup_error(error)})."
+                ) from None
+
         mode = "delete" if delete else "dry-run"
-        report = {
+        report: dict[str, Any] = {
             "schema_version": 1,
             "mode": mode,
             "cutoff": cutoff.isoformat(),
@@ -207,6 +278,8 @@ class Command(BaseCommand):
                 "output_bytes": OUTPUT_MAX_BYTES,
             },
         }
+        if inventory_report is not None:
+            report["unregistered_inventory"] = inventory_report.as_dict()
         if options["format"] == "json":
             rendered = json.dumps(report, ensure_ascii=True, separators=(",", ":"))
         else:
@@ -221,6 +294,19 @@ class Command(BaseCommand):
                 f"reference_sha256={detail['reference_sha256']} outcome={detail['outcome']}"
                 for detail in details
             )
+            if inventory_report is not None:
+                inv_counts = inventory_report.counts
+                lines.append(
+                    f"Unregistered inventory ({inventory_report.backend}): "
+                    f"scanned {inv_counts['scanned']}, "
+                    f"eligible {inv_counts['unregistered_eligible']}, "
+                    f"recent {inv_counts['unregistered_recent']}, "
+                    f"purged {inv_counts['purged']}, "
+                    f"ambiguous {inv_counts['ambiguous']}, "
+                    f"malformed {inv_counts['malformed_key']}, "
+                    f"missing {inv_counts['registered_missing']}, "
+                    f"failed {inv_counts['failed']}."
+                )
             if next_cursor is not None:
                 lines.append(f"Next cursor: {next_cursor}")
             rendered = "\n".join(lines)
@@ -229,11 +315,20 @@ class Command(BaseCommand):
         if len(rendered.encode("utf-8")) > OUTPUT_MAX_BYTES - 256:
             raise CommandError("Purge report exceeded its output bound.")
         self.stdout.write(rendered)
-        if counts["failed"]:
+        inventory_failed = inventory_report.counts["failed"] if inventory_report is not None else 0
+        if counts["failed"] or inventory_failed:
             raise CommandError(
-                f"Failed to purge {counts['failed']} input payload(s); see cleanup_error"
+                f"Failed to purge {counts['failed'] + inventory_failed} input payload(s); see cleanup_error"
             )
-        if has_more or counts["incomplete"]:
+        inventory_incomplete = (
+            inventory_report.has_more
+            or inventory_report.counts["ambiguous"] > 0
+            or inventory_report.counts["malformed_key"] > 0
+            or inventory_report.counts["registered_missing"] > 0
+            if inventory_report is not None
+            else False
+        )
+        if has_more or counts["incomplete"] or inventory_incomplete:
             raise CommandError("Purge pass incomplete; inspect the bounded report.", returncode=2)
 
     def _process_reference(

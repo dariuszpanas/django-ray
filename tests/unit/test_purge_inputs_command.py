@@ -746,3 +746,694 @@ def test_sqlite_malformed_attachment_fields_are_bounded_and_retained(
     execution.refresh_from_db()
     assert payload.state == InputPayloadState.ACTIVE
     assert getattr(execution, field) == original
+
+
+@pytest.mark.django_db
+def test_filesystem_unregistered_inventory_and_coordinated_reap(tmp_path, settings):
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    from django_ray.execution_codec import (
+        ExecutionIdentity,
+        ExecutionRequest,
+        encode_execution_request,
+    )
+    from django_ray.input_storage import prepare_task_input, register_task_input
+    from django_ray.payload_registry import discover_and_reap_unregistered_payloads
+    from django_ray.ray_job_request_storage import prepare_ray_job_request
+    from django_ray.result_storage import FilesystemResultStorage
+
+    root = tmp_path / "inputs"
+    root.mkdir()
+    config = {
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(root),
+    }
+    settings.DJANGO_RAY = {**getattr(settings, "DJANGO_RAY", {}), **config}
+    storage = FilesystemResultStorage(root)
+    now = datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC)
+    old_mtime = (now - timedelta(hours=3)).timestamp()
+    recent_mtime = (now - timedelta(minutes=5)).timestamp()
+
+    # 1. Old unregistered TASK_INPUT (also used to test post-reap writer reactivation)
+    prepared_old_input = prepare_task_input(["orphan-old-input"], {"k": 1}, config)
+    assert prepared_old_input.input_reference is not None
+    assert prepared_old_input.digest is not None
+    old_input_path = (
+        root
+        / prepared_old_input.digest[:2]
+        / prepared_old_input.digest[2:4]
+        / f"{prepared_old_input.digest}.json"
+    )
+    os.utime(old_input_path, (old_mtime, old_mtime))
+
+    # 2. Recent unregistered TASK_INPUT (retained by grace period)
+    prepared_recent_input = prepare_task_input(["orphan-recent-input"], {"k": 2}, config)
+    assert prepared_recent_input.digest is not None
+    recent_input_path = (
+        root
+        / prepared_recent_input.digest[:2]
+        / prepared_recent_input.digest[2:4]
+        / f"{prepared_recent_input.digest}.json"
+    )
+    os.utime(recent_input_path, (recent_mtime, recent_mtime))
+
+    # 3. Registered ACTIVE TASK_INPUT
+    prepared_active_input = prepare_task_input(["registered-active-input"], {"k": 3}, config)
+    register_task_input(prepared_active_input, config)
+
+    # 4. Old unregistered RAY_JOB_REQUEST
+    request_obj = ExecutionRequest(
+        identity=ExecutionIdentity(1, "orphan-request-task", 1, 1),
+        execution_protocol_version=1,
+        callable_path="testproject.tasks.add_numbers",
+        transport_version=1,
+        serialized_args="[1,2]",
+        serialized_kwargs="{}",
+        input_reference=None,
+        runtime_env_profile=None,
+        runtime_env_hash="a" * 64,
+        runtime_env_plan_identity={},
+        compiled_graph_submission_transport="ray-job",
+    )
+    prepared_old_request = prepare_ray_job_request(encode_execution_request(request_obj), config)
+    old_request_path = (
+        root
+        / prepared_old_request.digest[:2]
+        / prepared_old_request.digest[2:4]
+        / f"{prepared_old_request.digest}.json"
+    )
+    os.utime(old_request_path, (old_mtime, old_mtime))
+
+    # 5. Ignored temp file and lock dir, plus malformed key and ambiguous non-envelope JSON
+    (root / ".django-ray-result-0123456789abcdef0123456789abcdef.tmp").write_text("tmp")
+    (root / ".lock.install-lock").mkdir()
+    (root / "unexpected.txt").write_text("malformed")
+    ambiguous_raw = '{"not":"a-valid-envelope"}'
+    ambiguous_ref = storage.store_payload(serialized_payload=ambiguous_raw)
+    ambiguous_digest = ambiguous_ref.split("/")[3].split("?")[0]
+    ambiguous_path = (
+        root / ambiguous_digest[:2] / ambiguous_digest[2:4] / f"{ambiguous_digest}.json"
+    )
+    os.utime(ambiguous_path, (old_mtime, old_mtime))
+
+    # 6. Registered ACTIVE row missing from backend
+    missing_digest = "e" * 64
+    missing_ref = f"resultfs://sha256/{missing_digest}?rel=ee/ee/{missing_digest}.json&bytes=12"
+    TaskInputPayload.objects.create(
+        reference=missing_ref,
+        payload_kind=InputPayloadKind.TASK_INPUT,
+        backend="filesystem",
+        digest=missing_digest,
+        size_bytes=12,
+        envelope_version=1,
+        state=InputPayloadState.ACTIVE,
+        last_used_at=now,
+    )
+
+    dry_report = discover_and_reap_unregistered_payloads(
+        config=config,
+        grace_seconds=3600,
+        delete_unregistered=False,
+        now=now,
+    )
+    assert dry_report.counts["scanned"] == 6
+    assert (
+        dry_report.counts["unregistered_eligible"] == 3
+    )  # old input, old request, ambiguous before read
+    assert dry_report.counts["unregistered_recent"] == 1
+    assert dry_report.counts["registered_active"] == 1
+    assert dry_report.counts["malformed_key"] == 1
+    assert dry_report.counts["registered_missing"] == 1
+    assert dry_report.counts["purged"] == 0
+    assert old_input_path.exists()
+    assert old_request_path.exists()
+
+    # Now run delete_unregistered=True: old_input and old_request are reaped; ambiguous is retained!
+    reap_report = discover_and_reap_unregistered_payloads(
+        config=config,
+        grace_seconds=3600,
+        delete_unregistered=True,
+        now=now,
+    )
+    assert reap_report.counts["purged"] == 2
+    assert reap_report.counts["ambiguous"] == 1
+    assert not old_input_path.exists()
+    assert not old_request_path.exists()
+    assert recent_input_path.exists()
+    assert ambiguous_path.exists()
+
+    # Both reaped objects now have PURGED tombstones with their exact canonical references
+    tombstone_input = TaskInputPayload.objects.get(reference=prepared_old_input.input_reference)
+    tombstone_request = TaskInputPayload.objects.get(reference=prepared_old_request.reference)
+    assert tombstone_input.state == InputPayloadState.PURGED
+    assert tombstone_input.payload_kind == InputPayloadKind.TASK_INPUT
+    assert tombstone_request.state == InputPayloadState.PURGED
+    assert tombstone_request.payload_kind == InputPayloadKind.RAY_JOB_REQUEST
+
+    # Concurrent writer coordination: a writer that prepared old_input before reap
+    # now calls register_task_input -> restores the file and reactivates the tombstone!
+    reactivated = register_task_input(prepared_old_input, config)
+    assert reactivated is not None
+    assert reactivated.state == InputPayloadState.ACTIVE
+    assert old_input_path.exists()
+
+
+@pytest.mark.django_db
+def test_s3_and_gcs_unregistered_inventory_pagination_and_prefix_guard():
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from django_ray.input_storage import _serialize_envelope
+    from django_ray.payload_registry import discover_and_reap_unregistered_payloads
+    from django_ray.result_storage import GCSResultStorage, ResultStorageError, S3ResultStorage
+
+    now = datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC)
+    old_time = now - timedelta(hours=2)
+    serialized = _serialize_envelope(["s3-orphan"], {})
+    payload_bytes = serialized.encode("utf-8")
+    digest = hashlib.sha256(payload_bytes).hexdigest()
+    key = f"django-ray/inputs/{digest[:2]}/{digest[2:4]}/{digest}.json"
+
+    s3_client = Mock()
+    s3_client.list_objects_v2.side_effect = [
+        {
+            "Contents": [{"Key": key, "Size": len(payload_bytes), "LastModified": old_time}],
+            "IsTruncated": True,
+            "NextContinuationToken": "page-2",
+        },
+        {
+            "Contents": [
+                {"Key": "django-ray/inputs/malformed.txt", "Size": 4, "LastModified": old_time}
+            ],
+            "IsTruncated": False,
+        },
+    ]
+    s3_client.head_object.return_value = {"LastModified": old_time}
+    s3_client.get_object.return_value = {
+        "ContentLength": len(payload_bytes),
+        "Body": SimpleNamespace(read=lambda _n: payload_bytes, close=lambda: None),
+        "ETag": '"etag-1"',
+    }
+    s3_config = {
+        "INPUT_STORAGE_BACKEND": "s3",
+        "INPUT_STORAGE_S3_BUCKET": "my-bucket",
+        "INPUT_STORAGE_S3_PREFIX": "django-ray/inputs",
+    }
+    s3_storage = S3ResultStorage(bucket="my-bucket", prefix="django-ray/inputs", client=s3_client)
+
+    report = discover_and_reap_unregistered_payloads(
+        config=s3_config,
+        grace_seconds=3600,
+        max_objects=10,
+        max_pages=2,
+        delete_unregistered=True,
+        now=now,
+        storage_backend=("s3", s3_storage),
+    )
+    assert report.counts["scanned"] == 2
+    assert report.counts["purged"] == 1
+    assert report.counts["malformed_key"] == 1
+    assert report.has_more is False
+    s3_client.delete_object.assert_called_once_with(Bucket="my-bucket", Key=key, IfMatch='"etag-1"')
+
+    # Prefix violation must fail closed
+    s3_client.list_objects_v2.side_effect = [
+        {
+            "Contents": [
+                {
+                    "Key": "other-prefix/aa/bb/" + digest + ".json",
+                    "Size": 10,
+                    "LastModified": old_time,
+                }
+            ],
+            "IsTruncated": False,
+        }
+    ]
+    with pytest.raises(ResultStorageError, match="outside the authorized prefix"):
+        discover_and_reap_unregistered_payloads(
+            config=s3_config,
+            now=now,
+            storage_backend=("s3", s3_storage),
+        )
+
+    # GCS pagination and reap
+    gcs_digest = "b" * 64
+    gcs_serialized = _serialize_envelope(["gcs-orphan"], {})
+    gcs_bytes = gcs_serialized.encode("utf-8")
+    gcs_digest = hashlib.sha256(gcs_bytes).hexdigest()
+    gcs_key = f"django-ray/inputs/{gcs_digest[:2]}/{gcs_digest[2:4]}/{gcs_digest}.json"
+    fake_blob = Mock()
+    fake_blob.name = gcs_key
+    fake_blob.size = len(gcs_bytes)
+    fake_blob.updated = old_time
+    fake_blob.generation = 42
+    fake_blob.download_as_bytes.return_value = gcs_bytes
+
+    gcs_client = Mock()
+    gcs_client.list_blobs.return_value = SimpleNamespace(
+        pages=[[fake_blob]],
+        next_page_token=None,
+    )
+    gcs_client.bucket.return_value.blob.return_value = fake_blob
+    gcs_config = {
+        "INPUT_STORAGE_BACKEND": "gcs",
+        "INPUT_STORAGE_GCS_BUCKET": "my-gcs-bucket",
+        "INPUT_STORAGE_GCS_PREFIX": "django-ray/inputs",
+    }
+    gcs_storage = GCSResultStorage(
+        bucket="my-gcs-bucket", prefix="django-ray/inputs", client=gcs_client
+    )
+    gcs_report = discover_and_reap_unregistered_payloads(
+        config=gcs_config,
+        grace_seconds=3600,
+        delete_unregistered=True,
+        now=now,
+        storage_backend=("gcs", gcs_storage),
+    )
+    assert gcs_report.counts["purged"] == 1
+    fake_blob.delete.assert_called_once_with(if_generation_match=42)
+
+
+@pytest.mark.django_db
+def test_purge_inputs_cli_discover_and_delete_unregistered_modes(tmp_path, settings):
+    import os
+
+    from django_ray.input_storage import prepare_task_input
+
+    with pytest.raises(CommandError, match="requires both --discover-unregistered and --delete"):
+        call_command("django_ray_purge_inputs", delete_unregistered=True)
+
+    root = tmp_path / "cli-inputs"
+    root.mkdir()
+    config = {
+        "MAX_INLINE_INPUT_SIZE_BYTES": 0,
+        "INPUT_STORAGE_BACKEND": "filesystem",
+        "INPUT_STORAGE_FILESYSTEM_PATH": str(root),
+    }
+    settings.DJANGO_RAY = {**getattr(settings, "DJANGO_RAY", {}), **config}
+    prepared = prepare_task_input(["cli-orphan"], {}, config)
+    assert prepared.digest is not None
+    orphan_path = root / prepared.digest[:2] / prepared.digest[2:4] / f"{prepared.digest}.json"
+    old_mtime = (timezone.now() - timedelta(hours=2)).timestamp()
+    os.utime(orphan_path, (old_mtime, old_mtime))
+
+    dry_report, dry_code, _ = _report(discover_unregistered=True, grace_seconds=60)
+    assert dry_code == 0
+    assert dry_report["unregistered_inventory"]["counts"]["unregistered_eligible"] == 1
+    assert orphan_path.exists()
+
+    del_report, del_code, _ = _report(
+        discover_unregistered=True,
+        delete=True,
+        delete_unregistered=True,
+        grace_seconds=60,
+    )
+    assert del_code == 0
+    assert del_report["unregistered_inventory"]["counts"]["purged"] == 1
+    assert not orphan_path.exists()
+
+
+@pytest.mark.django_db
+def test_payload_registry_validation_and_inventory_edge_branches():
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from django_ray.payload_registry import (
+        _normalize_timestamp,
+        discover_and_reap_unregistered_payloads,
+    )
+    from django_ray.result_storage import GCSResultStorage, ResultStorageError, S3ResultStorage
+
+    assert _normalize_timestamp(None) is None
+    assert _normalize_timestamp(123) is None
+    assert _normalize_timestamp("   ") is None
+    assert _normalize_timestamp("not-iso") is None
+    naive = datetime(2026, 11, 1, 10, 0, 0)
+    assert _normalize_timestamp(naive) == datetime(2026, 11, 1, 10, 0, 0, tzinfo=UTC)
+    assert _normalize_timestamp("2026-11-01T10:00:00Z") is None
+
+    with pytest.raises(ValueError, match="grace_seconds"):
+        discover_and_reap_unregistered_payloads(grace_seconds=10)
+    with pytest.raises(ValueError, match="max_objects"):
+        discover_and_reap_unregistered_payloads(max_objects=0)
+    with pytest.raises(ValueError, match="max_pages"):
+        discover_and_reap_unregistered_payloads(max_pages=0)
+    with pytest.raises(ValueError, match="max_details"):
+        discover_and_reap_unregistered_payloads(max_details=-1)
+    with pytest.raises(ResultStorageError, match="Unsupported payload inventory backend"):
+        discover_and_reap_unregistered_payloads(storage_backend=("unknown", object()))
+
+    now = datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC)
+    old_time = now - timedelta(hours=2)
+
+    # GCS iterator without .pages (fallback iteration + TypeError fallback on list_blobs)
+    gcs_digest = "c" * 64
+    gcs_key = f"django-ray/inputs/{gcs_digest[:2]}/{gcs_digest[2:4]}/{gcs_digest}.json"
+    blob1 = SimpleNamespace(
+        name=gcs_key,
+        size=15,
+        updated=None,
+        time_created=old_time,
+    )
+    blob_malformed = SimpleNamespace(
+        name="django-ray/inputs/not-sharded.json",
+        size=10,
+        updated=old_time,
+    )
+
+    class _FallbackGCSClient:
+        def list_blobs(self, bucket, prefix="", **kwargs):
+            if kwargs:
+                raise TypeError("unexpected kwargs")
+            return [blob1, blob_malformed]
+
+    gcs_storage = GCSResultStorage(
+        bucket="my-gcs",
+        prefix="django-ray/inputs",
+        client=_FallbackGCSClient(),
+    )
+    gcs_config = {
+        "INPUT_STORAGE_BACKEND": "gcs",
+        "INPUT_STORAGE_GCS_BUCKET": "my-gcs",
+        "INPUT_STORAGE_GCS_PREFIX": "django-ray/inputs",
+    }
+    # Create a PURGED tombstone row for blob1 to cover tombstone classification
+    canonical_gcs_ref = f"gs://my-gcs/{gcs_key}?bytes=15"
+    TaskInputPayload.objects.create(
+        reference=canonical_gcs_ref,
+        payload_kind=InputPayloadKind.TASK_INPUT,
+        backend="gcs",
+        digest=gcs_digest,
+        size_bytes=15,
+        envelope_version=1,
+        state=InputPayloadState.PURGED,
+        last_used_at=old_time,
+        purged_at=now,
+    )
+    rep = discover_and_reap_unregistered_payloads(
+        config=gcs_config,
+        now=now,
+        storage_backend=("gcs", gcs_storage),
+    )
+    assert rep.counts["tombstone"] == 1
+    assert rep.counts["malformed_key"] == 1
+
+    # S3 missing NextContinuationToken when IsTruncated=True
+    s3_bad = Mock()
+    s3_bad.list_objects_v2.return_value = {"Contents": [], "IsTruncated": True}
+    s3_storage = S3ResultStorage(bucket="b", prefix="django-ray/inputs", client=s3_bad)
+    with pytest.raises(ResultStorageError, match="NextContinuationToken"):
+        discover_and_reap_unregistered_payloads(
+            config={
+                "INPUT_STORAGE_BACKEND": "s3",
+                "INPUT_STORAGE_S3_BUCKET": "b",
+                "INPUT_STORAGE_S3_PREFIX": "django-ray/inputs",
+            },
+            now=now,
+            storage_backend=("s3", s3_storage),
+        )
+
+
+@pytest.mark.django_db
+def test_payload_registry_reap_and_modified_at_edge_cases(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from django_ray.payload_registry import (
+        _current_object_modified_at,
+        _payload_registry_references,
+        _RawDiscoveredObject,
+        _reap_unregistered_object,
+        discover_and_reap_unregistered_payloads,
+    )
+    from django_ray.result_storage import (
+        FilesystemResultStorage,
+        GCSResultStorage,
+        ResultStorageError,
+        S3ResultStorage,
+    )
+
+    now = datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC)
+    old_time = now - timedelta(hours=2)
+    cutoff = now - timedelta(hours=1)
+
+    # _current_object_modified_at edge cases
+    no_key_item = _RawDiscoveredObject(fingerprint_sha256="fp", malformed=False, storage_key=None)
+    assert _current_object_modified_at(object(), no_key_item) is None
+
+    fs_storage = FilesystemResultStorage(tmp_path)
+    missing_item = _RawDiscoveredObject(
+        fingerprint_sha256="fp",
+        malformed=False,
+        storage_key="aa/bb/" + "a" * 64 + ".json",
+        modified_at=old_time,
+    )
+    assert _current_object_modified_at(fs_storage, missing_item) is None
+    assert _current_object_modified_at(object(), missing_item) == old_time
+
+    # S3 without head_object callable falls back to item.modified_at; head_object error raises
+    s3_no_head = S3ResultStorage(bucket="b", prefix="p", client=SimpleNamespace(head_object=None))
+    assert _current_object_modified_at(s3_no_head, missing_item) == old_time
+    s3_err_client = Mock()
+    s3_err_client.head_object.side_effect = RuntimeError("head boom")
+    s3_err = S3ResultStorage(bucket="b", prefix="p", client=s3_err_client)
+    with pytest.raises(ResultStorageError, match="revalidate S3 payload age"):
+        _current_object_modified_at(s3_err, missing_item)
+
+    # GCS reload error raises
+    gcs_err_client = Mock()
+    gcs_err_client.bucket.return_value.blob.return_value.reload.side_effect = RuntimeError(
+        "gcs boom"
+    )
+    gcs_err = GCSResultStorage(bucket="b", prefix="p", client=gcs_err_client)
+    with pytest.raises(ResultStorageError, match="revalidate GCS payload age"):
+        _current_object_modified_at(gcs_err, missing_item)
+
+    # _reap_unregistered_object edge outcomes: skipped (missing file), unregistered_recent, failed, attached execution
+    digest = "d" * 64
+    native_ref = f"resultfs://sha256/{digest}?rel=dd/dd/{digest}.json&bytes=10"
+    refs = _payload_registry_references(native_ref, {})
+    raw_obj = _RawDiscoveredObject(
+        fingerprint_sha256="fp-d",
+        malformed=False,
+        digest=digest,
+        size_bytes=10,
+        native_reference=native_ref,
+        modified_at=old_time,
+        storage_key=f"dd/dd/{digest}.json",
+    )
+    assert (
+        _reap_unregistered_object(
+            fs_storage,
+            backend_name="filesystem",
+            item=raw_obj,
+            references=refs,
+            cutoff=cutoff,
+            use_default_delete=False,
+        )
+        == "skipped"
+    )
+
+    # Create file with recent mtime -> unregistered_recent
+    dd_dir = tmp_path / "dd" / "dd"
+    dd_dir.mkdir(parents=True)
+    f_path = dd_dir / f"{digest}.json"
+    f_path.write_text('{"a":"bc"}', encoding="utf-8")
+    assert (
+        _reap_unregistered_object(
+            fs_storage,
+            backend_name="filesystem",
+            item=raw_obj,
+            references=refs,
+            cutoff=cutoff,
+            use_default_delete=False,
+        )
+        == "unregistered_recent"
+    )
+
+    # Discover with mismatched digest in DB row -> ambiguous, and attached RayTaskExecution -> ambiguous
+    import os
+
+    os.utime(f_path, (old_time.timestamp(), old_time.timestamp()))
+    TaskInputPayload.objects.create(
+        reference=native_ref,
+        payload_kind=InputPayloadKind.TASK_INPUT,
+        backend="filesystem",
+        digest="0" * 64,  # mismatch!
+        size_bytes=10,
+        envelope_version=1,
+        state=InputPayloadState.ACTIVE,
+        last_used_at=old_time,
+    )
+    rep_mismatch = discover_and_reap_unregistered_payloads(
+        config={
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        },
+        now=now,
+        storage_backend=("filesystem", fs_storage),
+    )
+    assert rep_mismatch.counts["ambiguous"] >= 1
+
+    TaskInputPayload.objects.filter(reference=native_ref).delete()
+    _execution(native_ref)
+    rep_attached = discover_and_reap_unregistered_payloads(
+        config={
+            "INPUT_STORAGE_BACKEND": "filesystem",
+            "INPUT_STORAGE_FILESYSTEM_PATH": str(tmp_path),
+        },
+        now=now,
+        storage_backend=("filesystem", fs_storage),
+    )
+    assert rep_attached.counts["ambiguous"] >= 1
+
+
+@pytest.mark.django_db
+def test_payload_registry_s3_gcs_and_filesystem_error_branches(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from django_ray.payload_registry import (
+        _discover_filesystem_objects,
+        _discover_gcs_objects,
+        _discover_s3_objects,
+        _payload_registry_references,
+        _RawDiscoveredObject,
+        _reap_unregistered_object,
+    )
+    from django_ray.result_storage import (
+        FilesystemResultStorage,
+        GCSResultStorage,
+        ResultStorageError,
+        S3ResultStorage,
+    )
+
+    now = datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC)
+    old_time = now - timedelta(hours=2)
+    cutoff = now - timedelta(hours=1)
+
+    # _discover_filesystem_objects: missing root returns ([], False); file root raises; non-hex subdir
+    missing_fs = FilesystemResultStorage(tmp_path / "missing-root")
+    assert _discover_filesystem_objects(missing_fs, max_objects=10) == ([], False)
+
+    file_root = tmp_path / "file-root"
+    file_root.write_text("x", encoding="utf-8")
+    with pytest.raises(ResultStorageError, match="not a directory"):
+        _discover_filesystem_objects(FilesystemResultStorage(file_root), max_objects=10)
+
+    hex_root = tmp_path / "hex-root"
+    (hex_root / "bad_dir_1").mkdir(parents=True)
+    (hex_root / "bad_dir_2").mkdir(parents=True)
+    items, has_more = _discover_filesystem_objects(FilesystemResultStorage(hex_root), max_objects=1)
+    assert len(items) == 1 and items[0].malformed is True and has_more is True
+
+    # _discover_s3_objects error branches
+    s3_client = Mock()
+    s3_storage = S3ResultStorage(bucket="b", prefix="p", client=s3_client)
+    s3_client.list_objects_v2.side_effect = RuntimeError("s3 down")
+    with pytest.raises(ResultStorageError, match="Failed to list S3"):
+        _discover_s3_objects(s3_storage, max_objects=5, max_pages=2)
+
+    s3_client.list_objects_v2.side_effect = None
+    s3_client.list_objects_v2.return_value = "not-a-dict"
+    with pytest.raises(ResultStorageError, match="invalid response"):
+        _discover_s3_objects(s3_storage, max_objects=5, max_pages=2)
+
+    s3_client.list_objects_v2.return_value = {"Contents": "not-a-list"}
+    with pytest.raises(ResultStorageError, match="Contents must be a list"):
+        _discover_s3_objects(s3_storage, max_objects=5, max_pages=2)
+
+    s3_client.list_objects_v2.return_value = {"Contents": ["not-a-dict"]}
+    with pytest.raises(ResultStorageError, match="entry must be an object"):
+        _discover_s3_objects(s3_storage, max_objects=5, max_pages=2)
+
+    s3_client.list_objects_v2.return_value = {"Contents": [{"Key": ""}]}
+    with pytest.raises(ResultStorageError, match="missing a valid Key"):
+        _discover_s3_objects(s3_storage, max_objects=5, max_pages=2)
+
+    s3_client.list_objects_v2.return_value = {"Contents": [], "IsTruncated": "bad"}
+    with pytest.raises(ResultStorageError, match="IsTruncated flag is invalid"):
+        _discover_s3_objects(s3_storage, max_objects=5, max_pages=2)
+
+    # _discover_gcs_objects error and max_pages branches
+    gcs_client = Mock()
+    gcs_storage = GCSResultStorage(bucket="b", prefix="p", client=gcs_client)
+    gcs_client.list_blobs.side_effect = RuntimeError("gcs down")
+    with pytest.raises(ResultStorageError, match="Failed to list GCS"):
+        _discover_gcs_objects(gcs_storage, max_objects=5, max_pages=1)
+
+    gcs_client.list_blobs.side_effect = None
+    bad_blob = SimpleNamespace(name="", size=10, updated=old_time)
+    gcs_client.list_blobs.return_value = SimpleNamespace(pages=[[bad_blob]], next_page_token=None)
+    with pytest.raises(ResultStorageError, match="missing a valid name"):
+        _discover_gcs_objects(gcs_storage, max_objects=5, max_pages=1)
+
+    good_blob = SimpleNamespace(name="p/not-digest.json", size=10, updated=old_time)
+    gcs_client.list_blobs.return_value = SimpleNamespace(
+        pages=[[good_blob], [good_blob]], next_page_token="more"
+    )
+    g_items, g_more = _discover_gcs_objects(gcs_storage, max_objects=5, max_pages=1)
+    assert len(g_items) == 1 and g_more is True
+
+    # _reap_unregistered_object when load returns None, when row exists, or when attached
+    from django_ray.input_storage import _serialize_envelope
+
+    env_str = _serialize_envelope(["x"], {})
+    digest = "f" * 64
+    native_ref = f"resultfs://sha256/{digest}?rel=ff/ff/{digest}.json&bytes={len(env_str)}"
+    refs = _payload_registry_references(native_ref, {})
+    raw_obj = _RawDiscoveredObject(
+        fingerprint_sha256="fp-f",
+        malformed=False,
+        digest=digest,
+        size_bytes=len(env_str),
+        native_reference=native_ref,
+        modified_at=old_time,
+        storage_key=f"ff/ff/{digest}.json",
+    )
+    fake_backend = SimpleNamespace(load=lambda **_kw: None, delete=lambda **_kw: None)
+    assert (
+        _reap_unregistered_object(
+            fake_backend,
+            backend_name="s3",
+            item=raw_obj,
+            references=refs,
+            cutoff=cutoff,
+            use_default_delete=False,
+        )
+        == "skipped"
+    )
+
+    fake_backend_valid = SimpleNamespace(load=lambda **_kw: env_str, delete=lambda **_kw: None)
+    _execution(native_ref)
+    assert (
+        _reap_unregistered_object(
+            fake_backend_valid,
+            backend_name="s3",
+            item=raw_obj,
+            references=refs,
+            cutoff=cutoff,
+            use_default_delete=False,
+        )
+        == "ambiguous"
+    )
+
+    _payload(native_ref)
+    assert (
+        _reap_unregistered_object(
+            fake_backend_valid,
+            backend_name="s3",
+            item=raw_obj,
+            references=refs,
+            cutoff=cutoff,
+            use_default_delete=False,
+        )
+        == "skipped"
+    )

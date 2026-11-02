@@ -215,7 +215,10 @@ BASE_RUNTIME = CompiledGraphRuntimeIdentity(
     architecture="x86_64",
     python_implementation="cpython",
     python_abi="cp312-cp312-manylinux_2_39_x86_64",
-    dependency_profile="ray=2.56.1;django=6.0.7",
+    dependency_profile=(
+        "ray=2.56.1;numpy=2.5.1;pyarrow=19.0.1;cupy=absent;"
+        "cupy-cuda11x=absent;cupy-cuda12x=absent;fastrlock=absent"
+    ),
     platform_profile="linux-x86_64",
     libc_profile="glibc-2.39",
     container_profile="django-ray:test",
@@ -762,7 +765,7 @@ def test_compiled_graph_compatibility_uses_the_versioned_adapter_record() -> Non
 
     assert "message" not in compatibility
     assert compatibility["schema_version"] == 2
-    assert compatibility["policy_version"] == 3
+    assert compatibility["policy_version"] == 4
     assert compatibility["reason"] == "CANDIDATE_REQUIRES_SMOKE"
     assert compatibility["plan_rejection_code"] == "INCOMPATIBLE_PLATFORM"
     assert compatibility["topology"] == "nested-ray-task"

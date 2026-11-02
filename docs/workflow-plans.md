@@ -286,7 +286,7 @@ or a database schema:
     "django_ray_plan_api": 1,
     "compiled_graph": {
       "schema_version": 2,
-      "policy_version": 3,
+      "policy_version": 4,
       "reason": "CANDIDATE_REQUIRES_SMOKE",
       "topology": "nested-ray-task",
       "submission_transport": "direct-ray-core",
@@ -778,6 +778,9 @@ The public API remains source compatible while the plan boundary is introduced:
 | `bounded_map.with_result_buffer(...)` | Link the dynamic map's existing actor-layout slot to one versioned physical result-buffer actor contract. Local execution fingerprints the selection but does not create the actor or enforce its retained-byte measurement. |
 | `bounded_map.reduce(step(...), initial=..., ...)` | Link the actor-layout slot to a versioned strict ordered-fold contract. The reducer callable/bootstrap/bound schema and resolved RuntimeEnv, actor resources and placement, serialized bounds, incorporation-credit ordering, lifetime/restart policy, and direct-return semantics are fingerprinted. The initial value remains invocation data and only its required binding schema is recorded. |
 | `signature.run(*args, **kwargs)` | Materialize/validate a plan, create one invocation envelope, choose a strategy, execute, and return the same concrete result. |
+| `signature.with_execution_strategy(policy, ...)` | Configure an explicit requested execution-strategy policy (`automatic`, `dynamic`, `compiled`, or `local`), optional region specifications (`WorkflowRegionSpec`), and experimental Compiled Graph opt-in without mutating the base signature. |
+| `signature.inspect_strategy(*args, **kwargs)` | Materialize the effective plan and return a `WorkflowStrategyObservability` record containing the plan fingerprint, requested policy, selected strategy, eligible strategies, and structured rejection diagnostics without executing remote work. |
+| `build_fixed_actor_graph_plan(...)` | Build an explicit static actor-stage plan (`FixedActorGraphPlan`) from `StaticActorPoolSpec` and `StaticActorStageSpec` declarations for evaluation by `CompiledGraphExecutionStrategy` when `COMPILED_GRAPH_EXPERIMENTAL_ENABLED` is enabled and capability policy validation succeeds. |
 | `use_ray=False` | Select the local strategy for deterministic tests; it does not create a different task type. |
 
 The adapter preserves current argument ordering, bound-keyword precedence, ordered

@@ -60,7 +60,15 @@ from django_ray.runtime.compiled_graph_probe import (
 )
 
 PILOT_SCHEMA_VERSION = 1
-_HISTORICAL_COMPILED_GRAPH_POLICY_VERSIONS = frozenset({2})
+_HISTORICAL_COMPILED_GRAPH_POLICY_VERSIONS = frozenset({2, 3})
+_HISTORICAL_PROFILE_DISTRIBUTIONS = (
+    "ray",
+    "numpy",
+    "pyarrow",
+    "cupy",
+    "cupy-cuda11x",
+    "cupy-cuda12x",
+)
 _CANDIDATE_REQUIRES_SMOKE_MESSAGE = (
     "Runtime matches a candidate Compiled Graph row, but no reviewed native "
     "subprocess smoke verifies this exact capability tuple. Dynamic execution "
@@ -3306,6 +3314,7 @@ def run_host_pilot(context: str, namespace: str, *, keep_cluster: bool) -> dict[
 
 class _PilotStage:
     def __init__(self, name: str) -> None:
+        _require_exact_pilot_dependency_profile(_load_profile())
         self.name = name
         self.invocations = 0
 
@@ -3323,6 +3332,9 @@ class _PilotStage:
 
 
 class _PilotFailureStage:
+    def __init__(self) -> None:
+        _require_exact_pilot_dependency_profile(_load_profile())
+
     def fail(self, marker: str) -> None:
         raise PilotApplicationError(marker)
 
@@ -3331,6 +3343,9 @@ class _PilotFailureStage:
 
 
 class _PilotDelayStage:
+    def __init__(self) -> None:
+        _require_exact_pilot_dependency_profile(_load_profile())
+
     def delay(self, seconds: float) -> str:
         time.sleep(seconds)
         return "delayed-result-consumed"
@@ -3673,6 +3688,7 @@ def _shared_memory_entry_summary(entries: list[tuple[str, int]]) -> dict[str, An
 
 
 def _inspect_pod_runtime() -> dict[str, Any]:
+    _require_exact_pilot_dependency_profile(_load_profile())
     stat = os.statvfs("/dev/shm")
     entries: list[tuple[str, int]] = []
     try:
@@ -3862,6 +3878,7 @@ def _execute_native_suite() -> dict[str, Any]:
 
 
 def _nested_probe_owner(owner_task_name: str) -> dict[str, Any]:
+    _require_exact_pilot_dependency_profile(_load_profile())
     return {
         "owner_pid": os.getpid(),
         "owner_task_name": owner_task_name,
@@ -3871,6 +3888,7 @@ def _nested_probe_owner(owner_task_name: str) -> dict[str, Any]:
 
 
 def _run_probe_child(topology: str) -> dict[str, Any]:
+    _require_exact_pilot_dependency_profile(_load_profile())
     import ray
 
     ray.init(address="auto", namespace=PILOT_NAMESPACE, logging_level="ERROR")
@@ -3998,10 +4016,17 @@ def _expected_policy_identity(
     image_id: str,
     configuration_id: str,
     shared_memory_profile: str,
+    policy_version: Any = COMPILED_GRAPH_POLICY_VERSION,
 ) -> dict[str, str | None]:
     dependencies = profile["dependency_profile"]
     expected_runtime = profile["runtime_expectations"]
-    dependency_profile = ";".join(f"{name}={dependencies[name]}" for name in _PROFILE_DISTRIBUTIONS)
+    distributions = (
+        _HISTORICAL_PROFILE_DISTRIBUTIONS
+        if type(policy_version) is int
+        and policy_version in _HISTORICAL_COMPILED_GRAPH_POLICY_VERSIONS
+        else _PROFILE_DISTRIBUTIONS
+    )
+    dependency_profile = ";".join(f"{name}={dependencies[name]}" for name in distributions)
     return {
         "ray_version": profile["ray_version"],
         "python_version": profile["python_version"],
@@ -4075,6 +4100,7 @@ def _validate_native_observation(
     *,
     profile: dict[str, Any] | None = None,
     configuration_id: str | None = None,
+    policy_version: Any = COMPILED_GRAPH_POLICY_VERSION,
 ) -> None:
     expected_profile = _load_profile() if profile is None else profile
     expected_configuration_id = (
@@ -4155,9 +4181,12 @@ def _validate_native_observation(
         shared_memory_profile=(
             f"tmpfs:/dev/shm:size={expected_profile['cluster']['shared_memory_bytes_per_pod']}"
         ),
+        policy_version=policy_version,
     )
     if identity != expected_identity:
-        raise PilotError(f"policy-v3 runtime identity changed: {identity!r}")
+        raise PilotError(
+            f"policy-v{COMPILED_GRAPH_POLICY_VERSION} runtime identity changed: {identity!r}"
+        )
     if decision.runtime.asdict() != identity:
         raise PilotError("parent capability decision and child runtime identity differ")
     if (
@@ -4444,6 +4473,7 @@ def _expected_retained_decision(
             image_id=record["image_id"],
             configuration_id=record["configuration_id"],
             shared_memory_profile=f"tmpfs:/dev/shm:size={shared_memory_bytes}",
+            policy_version=policy_version,
         )
     )
     return _candidate_smoke_decision(
@@ -4710,6 +4740,7 @@ def _validate_retained_topology_outcome(
         topology,
         profile=profile,
         configuration_id=record["configuration_id"],
+        policy_version=retained_decision.get("policy_version"),
     )
     runtime = observation.get("runtime")
     _require_exact_keys(
@@ -4797,19 +4828,6 @@ def _validate_retained_near_neighbor(
         "child_spawned",
         "native_started",
     }
-    baseline_bytes = profile["cluster"]["shared_memory_bytes_per_pod"]
-    changed_bytes = baseline_bytes // 2
-    baseline_identity = _expected_policy_identity(
-        profile,
-        revision=record["source_revision"],
-        image_id=record["image_id"],
-        configuration_id=record["configuration_id"],
-        shared_memory_profile=f"tmpfs:/dev/shm:size={baseline_bytes}",
-    )
-    changed_identity = {
-        **baseline_identity,
-        "shared_memory_profile": f"tmpfs:/dev/shm:size={changed_bytes}",
-    }
     baseline_admission = value.get("baseline_admission")
     changed_admission = value.get("changed_admission")
     if not isinstance(baseline_admission, dict) or not isinstance(changed_admission, dict):
@@ -4822,6 +4840,20 @@ def _validate_retained_near_neighbor(
     changed_policy_version = changed_decision.get("policy_version")
     if baseline_policy_version != changed_policy_version:
         raise PilotError("blocked evidence near-neighbor proof is inconsistent")
+    baseline_bytes = profile["cluster"]["shared_memory_bytes_per_pod"]
+    changed_bytes = baseline_bytes // 2
+    baseline_identity = _expected_policy_identity(
+        profile,
+        revision=record["source_revision"],
+        image_id=record["image_id"],
+        configuration_id=record["configuration_id"],
+        shared_memory_profile=f"tmpfs:/dev/shm:size={baseline_bytes}",
+        policy_version=baseline_policy_version,
+    )
+    changed_identity = {
+        **baseline_identity,
+        "shared_memory_profile": f"tmpfs:/dev/shm:size={changed_bytes}",
+    }
     expected_baseline_admission = _evaluate_exact_pilot_profile_admission(
         baseline_identity,
         baseline_identity,

@@ -32,6 +32,11 @@ WORKFLOW_MODULES = {
     "contracts.py",
     "plans.py",
     "previews.py",
+    "checkpoints.py",
+    "concurrency.py",
+    "map_transport.py",
+    "paged_input.py",
+    "strategy.py",
 }
 WORKFLOW_PROGRESS_MODULES = {
     "__init__.py",
@@ -49,6 +54,7 @@ WORKFLOW_PROGRESS_MODULES = {
     "capture_diagnostics.py",
     "reporting_diagnostics.py",
     "terminal_capture.py",
+    "spill_capacity.py",
 }
 PUBLIC_WORKFLOW_FACADE_SYMBOLS = (
     "Chain",
@@ -128,7 +134,13 @@ def test_pure_workflow_foundation_modules_do_not_import_django_or_ray() -> None:
     code = f"""
 import sys
 sys.path.insert(0, {str(source_root)!r})
+import django_ray.workflow.checkpoints
+import django_ray.workflow.concurrency
+import django_ray.workflow.map_transport
+import django_ray.workflow.paged_input
 import django_ray.workflow.previews
+import django_ray.workflow.progress.limits
+import django_ray.workflow.progress.limits
 import django_ray.workflow.progress.limits
 
 unexpected = sorted(
