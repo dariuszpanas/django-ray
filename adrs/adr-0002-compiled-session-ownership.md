@@ -14,18 +14,18 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-09-21; source and issue audit at `273e987` |
+| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
 not a new native execution qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
 | Explicit topology and capability checks | Implemented | [Compatibility policy](../src/django_ray/runtime/compiled_graph.py) and [policy tests](../tests/unit/test_compiled_graph.py) |
-| Ownership investigation | Probe tooling exists | [Topology probe tests](../tests/unit/test_compiled_session_topology_probe.py); tooling is not product activation evidence |
-| Application session owner and native strategy | Pending integration and activation | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72) remains open; `_VERIFIED_CAPABILITIES` is empty |
+| Ownership investigation | Probe tooling exists; [#69](https://github.com/dariuszpanas/django-ray/issues/69) closed `NOT_PLANNED` and [#74](https://github.com/dariuszpanas/django-ray/issues/74)/[#87](https://github.com/dariuszpanas/django-ray/issues/87)/[#88](https://github.com/dariuszpanas/django-ray/issues/88) closed `COMPLETED` | [Topology probe tests](../tests/unit/test_compiled_session_topology_probe.py); tooling is not product activation evidence |
+| Application session owner and native strategy | Blocked on upstream Ray shared-memory reclamation | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72) and [#154](https://github.com/dariuszpanas/django-ray/issues/154) remain open; `_VERIFIED_CAPABILITIES` is empty |
 
 The historical pilot decision does not establish a supported native topology.
 Use [current compatibility guidance](../docs/compiled-graph-compatibility.md)

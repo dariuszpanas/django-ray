@@ -187,13 +187,14 @@ may issue the same string. Do not repoint `default` from Celery to Ray while a s
 retention window remains. Route new work explicitly to `ray`, then retire or repoint an
 old alias only after all of its obligations have drained.
 
-Keep the executable task identity available for the same period. The Celery adapter
-uses extended result metadata to resolve the registered Django task, while django-ray
-reconstructs a result by importing the callable path stored at enqueue. Do not remove
-or rename those definitions, stop importing them in worker and result-reader
-processes, or remove a compatibility import until historical result lookups have
-drained. A deliberate callable move needs an application compatibility shim or data
-migration; changing the backend alias does not repair it.
+Keep the executable task identity available while queued or retryable work remains. The
+Celery adapter uses extended result metadata to resolve the registered Django task,
+while django-ray workers import `callable_path` when executing queued or retried tasks
+and `get_result()` reconstructs historical `TaskResult` metadata from stored execution
+fields without importing the callable. Do not remove or rename task definitions while
+queued or retryable executions remain, and use an application compatibility shim or
+data migration before retiring a callable path that may still be executed or retried.
+Changing the backend alias does not repair a missing callable path.
 
 The bridge simplifies the mechanical change; it does **not** prove execution
 compatibility. Before moving a cohort from the Celery-backed adapter to django-ray,

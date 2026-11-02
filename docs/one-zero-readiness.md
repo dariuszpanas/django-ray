@@ -19,11 +19,16 @@ be accomplished by editing the registry and documentation together.
 ## Delivery sequence after 0.7
 
 Version [0.7.0](https://github.com/dariuszpanas/django-ray/releases/tag/v0.7.0)
-was published on 2026-10-18 with the Beta classifier. It includes bounded read-only
+was published on 2026-10-18 and [0.7.1](https://github.com/dariuszpanas/django-ray/releases/tag/v0.7.1)
+was published on 2026-10-27 with the Beta classifier. The 0.7.x line includes bounded read-only
 diagnostics, shared worker lease policy, retained RuntimeEnv maintenance and opt-in
 required encryption. These delivered controls contribute to operational hardening;
 their release does not satisfy the broader operator-controls criterion or accept
-a later candidate. The [graduation roadmap](https://github.com/dariuszpanas/django-ray/issues/372)
+a later candidate. Initial sanitized adopter observations from two internal Linux
+KubeRay deployments (fixed and autoscaled) are recorded in
+[`docs/investigations/adopter-records-v1.md`](investigations/adopter-records-v1.md)
+under [#606](https://github.com/dariuszpanas/django-ray/issues/606). The
+[graduation roadmap](https://github.com/dariuszpanas/django-ray/issues/372)
 tracks the remaining work. Closed issues for API definitions, readiness
 validation, and an earlier release's upgrade rehearsal establish those
 deliverables; they do not accept a later release candidate.

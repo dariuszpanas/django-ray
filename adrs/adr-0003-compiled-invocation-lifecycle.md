@@ -14,18 +14,18 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-09-21; source and issue audit at `273e987` |
+| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
 not a new native execution qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
 | Ray-free session/invocation reducer | Implemented within its protocol scope | [Reducer](../src/django_ray/runtime/compiled_graph_lifecycle.py), [lifecycle tests](../tests/unit/test_compiled_graph_lifecycle.py), and [completed issue #85](https://github.com/dariuszpanas/django-ray/issues/85) |
 | Output ownership, deadlines and reuse decisions | Represented and tested in the reducer | Tests cover one-shot consumption, fallback cutoff, timeout and quarantine transitions |
-| Native adapter execution of returned actions | Pending | The module describes a future adapter; [issue #72](https://github.com/dariuszpanas/django-ray/issues/72) owns integration |
+| Native adapter execution of returned actions | Pending upstream Ray shared-memory reclamation | The module describes a future adapter; [issue #72](https://github.com/dariuszpanas/django-ray/issues/72) and [#154](https://github.com/dariuszpanas/django-ray/issues/154) own integration (#69/#71 closed `NOT_PLANNED`) |
 
 Implemented here means the Ray-free protocol, not a working or supported native
 Compiled Graph strategy. No replacement ADR was identified in the archive.
@@ -406,7 +406,7 @@ previous invocation. Metrics must report graph reuse and durable attempts separa
 ## Bounded diagnostics and snapshots
 
 Every reducer snapshot is explicitly versioned, JSON-safe, secret-free, count-bounded,
-and byte-bounded. Version 1 admits at most 64 declared output slots, eight stable
+and byte-bounded. Version 1 admits at most 64 declared output slots, nine stable
 cleanup diagnostic codes, and 16,384 canonical JSON bytes. It contains only stable
 identity summaries, protocol version, exact capacity, session and invocation state,
 current action token, fallback and retry disposition, absolute deadlines, output
