@@ -287,7 +287,7 @@ the complete ordered list and therefore uses O(total output) consumer memory, wh
 object store holds the final object. The actor itself transiently decodes the complete
 list during finalization. Chunked/reducer transport and total-independent object-store
 or consumer memory remain in [GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91),
-and production-shaped throughput and memory validation remain in
+and the bounded Stage A throughput and memory evaluation is recorded in
 [GitHub issue #87](https://github.com/dariuszpanas/django-ray/issues/87).
 
 A version 1 result-buffer map cannot be nested inside a dynamic map; plan
@@ -397,8 +397,9 @@ cancellation failures stop admission, recursively cancel pending nested dependen
 without fetching their payloads into the coordinator, discard actor state, and preserve
 the original exception. Non-detached ownership and fixed no-restart semantics match the
 result-buffer protocol. List-preserving chunk or hierarchical transport remains in
-[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91), and production
-evidence remains in [GitHub issue #87](https://github.com/dariuszpanas/django-ray/issues/87).
+[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91), and the
+bounded Stage A evaluation is recorded in
+[GitHub issue #87](https://github.com/dariuszpanas/django-ray/issues/87).
 
 Calling `map_step()` without `with_limits()` retains the original eager behavior for
 compatibility. New dynamic workloads should normally choose an explicit window and an

@@ -631,6 +631,12 @@ with their exact detail revision. Drain older workers during the default-termina
 upgrade; the additive column accepts old inserts but does not make mixed writer
 behavior the supported final deployment.
 
+Migration `0028` (`0028_worker_lease_policy`) adds the database-scoped common
+`TaskWorkerLeasePolicy` singleton seeded explicitly to 60 seconds (revision 1).
+Workers, readiness probes, doctor checks, and lease-aware Admin actions require
+`DJANGO_RAY["WORKER_LEASE_SECONDS"]` to match this database authority before
+claiming work or mutating lease-governed state.
+
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
 PostgreSQL adds the constraint as `NOT VALID` before validating it, while other
@@ -1266,10 +1272,12 @@ task-manager process before enabling encrypted writes. An application-level roll
 to plaintext writes remains readable only while the dual-reader code and all historical
 keys stay deployed. A binary downgrade to a release that does not understand encrypted
 envelopes is unsafe after the first encrypted row. Key rotation adds a reader key before
-making it active and retains every old key until no durable row needs it; this release
-does not rewrite or rewrap historical rows. This configuration ordering does not
-authorize a mixed-version package upgrade; package changes use the coordinated Beta
-procedure linked above.
+making it active and retains every old key until no durable row or backup needs it;
+operators can use `python manage.py django_ray_runtime_env --mode rewrite --confirm`
+during coordinated maintenance to encrypt plaintext rows or rewrap historical keys in
+the current table before enabling `RUNTIME_ENV_STORAGE_MODE="required"`. This
+configuration ordering does not authorize a mixed-version package upgrade; package
+changes use the coordinated Beta procedure linked above.
 
 The completion envelope and `execution_generation` fields are part of the Ray Job
 protocol. The explicit legacy-v1 adapter retains compatible 0.4 completion reads and

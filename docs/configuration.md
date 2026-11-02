@@ -97,8 +97,65 @@ Start the dedicated Ray Job worker on compatible code, enable the backend option
 then resume producers. An older worker does not understand the affinity option and can
 still claim the queue; do not overlap it with newly protected work. This configuration
 ordering does not authorize mixed-version package deployment. If worker code must be
-upgraded, complete the [coordinated Beta upgrade](deployment/upgrading-from-0.5.md)
+upgraded, complete the [coordinated Beta upgrade](deployment/upgrading-from-0.6.md)
 before enabling protected work.
+
+## Choosing an Execution Mode, Task Pattern, and KubeRay Setup
+
+When configuring `django-ray` for a new project (or steering an AI coding assistant),
+choose three things in order: **worker execution mode**, **task/fan-out pattern**, and
+**cluster/RuntimeEnv delivery**.
+
+### 1. Execution mode decision matrix
+
+| Mode | Worker CLI flag | Minimal `DJANGO_RAY` settings | Best for | Key trade-off |
+|---|---|---|---|---|
+| **Synchronous** (`sync`) | `--sync` | `{"RUNNER": "ray_core"}` (no Ray cluster needed) | Unit tests, local debugging, tiny maintenance queues | Runs in the worker process; no Ray parallelism or isolation |
+| **Local Ray Core** (`local`) | `--local` | `{"RAY_ADDRESS": "auto", "RUNNER": "ray_core"}` | Single-host multi-CPU tasks and local development | Starts or attaches to a local Ray instance on the worker machine |
+| **Cluster Ray Core** (`cluster`) | `--cluster` | `{"RAY_ADDRESS": "ray://ray-head-svc:10001", "RUNNER": "ray_core"}` | Low-latency distributed tasks and dynamic workflows (`chain`/`group`/`map_step`) | Tied to the task manager's Ray Client connection (`30s` default reconnect grace) |
+| **Ray Job** (`ray_job`) | `--execution-mode ray_job` | `{"RAY_ADDRESS": "http://ray-head-svc:8265", "RUNNER": "ray_job"}` | Long-running batch jobs, Ray Data pipelines, per-job RuntimeEnv isolation, and manager-restart survival | Higher per-task startup overhead (spawns an isolated Ray Job driver process) |
+
+> [!TIP]
+> **Rule of thumb**: Start with **Cluster Ray Core** (`RUNNER="ray_core"`, `--cluster`) for
+> sub-second to multi-minute tasks and DAG workflows. Route long-running jobs, Ray Data
+> transforms, or tasks that must survive a Django worker pod restart to a dedicated
+> queue served by a **Ray Job** (`--execution-mode ray_job`) worker with
+> `OPTIONS={"RAY_JOB_ONLY": True}`.
+
+### 2. Task vs. in-task fan-out vs. workflow DAGs
+
+Do not create hundreds of separate Django database task rows (`task.enqueue()`) when you
+actually want parallel compute inside one logical job. Pick the simplest pattern that
+matches your data size and failure boundary:
+
+| Pattern | Entry point | Durable DB rows | When to use | When **not** to use |
+|---|---|---|---|---|
+| **Single Django task** | `@task` + `.enqueue(...)` | `1` row per `.enqueue()` | Independent background jobs (webhooks, reports, single-item processing) | Fan-out over hundreds of items (creates DB polling/row overhead instead of Ray parallelism) |
+| **In-task fan-out** | `parallel_map`, `parallel_starmap`, `scatter_gather` inside one `@task` | `1` outer `RayTaskExecution` row | Fast parallel fan-out where all inputs and outputs fit comfortably in one task's memory and share one retry/timeout boundary | Multi-stage pipelines, per-step RuntimeEnv profiles, or large map outputs that would exceed coordinator memory |
+| **Ray-native workflow DAG** | `step`, `chain`, `group`, `map_step` via `WorkflowSignature.run(...)` inside one `@task` | `1` outer `RayTaskExecution` row + bounded terminal graph | Multi-stage pipelines (`chain`/`group`), bounded concurrency (`map_step(...).with_limits(...)`), or large fan-out maps needing coordinator-free buffering (`with_result_buffer`) or folding (`reduce`) | When you need independent per-step database retries without replaying from the workflow entry node |
+
+### 3. KubeRay (fixed vs. autoscaling), cold starts, and upgrades
+
+- **Fixed-size vs. autoscaled KubeRay clusters**:
+  Both fixed-replica and autoscaled KubeRay `RayCluster` topologies are supported. With
+  KubeRay autoscaling enabled, newly scaled Ray worker pods experience a cold-start
+  delay when first scheduling tasks or unpacking RuntimeEnv dependencies.
+- **Avoiding cold-start penalties**:
+  Bake heavy Python dependencies into your Ray container image (`Dockerfile.ray`) and
+  deliver application code via a pre-built deterministic zip archive on a shared
+  read-only volume (`snapshot_local_runtime_env()`), rather than resolving `pip`
+  packages dynamically per task.
+- **Shared worker lease policy**:
+  Every process sharing the database must use the same `WORKER_LEASE_SECONDS` (seeded to
+  `60` seconds by migration `0028`). Inspect or update it during a drained maintenance
+  window with `python manage.py django_ray_lease_policy`. Use
+  `python manage.py django_ray_worker_ready` for Kubernetes `readinessProbe` (never
+  `livenessProbe`).
+- **Queue drain for upgrades**:
+  Beta upgrades use a coordinated stopped-writer procedure: pause producers, let active
+  queues drain (or stop/reconcile workers during an agreed maintenance window), back up
+  the database and artifacts, run `python manage.py migrate`, and start the upgraded
+  worker cohort together.
 
 ## All Settings
 
@@ -177,7 +234,7 @@ single worker loop. It does not change at-least-once execution or retry eligibil
 | `WORKER_HEARTBEAT_SECONDS` | `int` | `15` | Heartbeat interval (`1`-`86400` seconds), which must be below the lease duration |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `int` | `15` | Minimum interval between database heartbeat writes for in-flight Ray Core tasks |
 | `WORKFLOW_PROGRESS_REPORTING_POLICY` | `str` | `"full"` | Default Ray workflow progress policy: `"full"`, `"terminal_only"`, or `"disabled"` |
-| `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between full-mode workflow progress snapshot writes |
+| `WORKFLOW_PROGRESS_FLUSH_SECONDS` | `int` | `1` | Minimum interval between coordinator reads of the full-reporting collector snapshot |
 | `WORKFLOW_PROGRESS_TERMINAL_FLUSH_TIMEOUT_SECONDS` | `int` | `15` | Total deadline for the final full-mode snapshot while a progress actor starts or drains (`1`-`60` seconds) |
 | `WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS` | `int` | `7` | Terminal workflow topology and node-detail retention (`0`-`30` days) |
 
@@ -489,9 +546,9 @@ DJANGO_RAY = {
 
 ### Production
 
-For 0.5.0, prefer direct Core/GCS or explicit HTTP(S) Jobs configuration when
-avoiding Client startup failures. The `ray://` example below remains subject to
-the unresolved [Ray Client limitation](compatibility.md#ray-client-startup-limitation).
+Prefer direct Core/GCS or explicit HTTP(S) Jobs configuration when avoiding Client
+startup failures. The `ray://` example below remains subject to the unresolved
+[Ray Client limitation](compatibility.md#ray-client-startup-limitation).
 
 ```python
 DJANGO_RAY = {
@@ -508,6 +565,12 @@ DJANGO_RAY = {
     "WORKER_POLL_MAX_INTERVAL_SECONDS": 0.5,
 }
 ```
+
+> [!IMPORTANT]
+> Migration `0028` seeds the shared database lease authority at `60` seconds. Before
+> starting workers with `"WORKER_LEASE_SECONDS": 120`, update the database policy during
+> a stopped, drained window with
+> `python manage.py django_ray_lease_policy --set-seconds=120 --expected-revision=<rev>`.
 
 ### High-Throughput Starting Point
 

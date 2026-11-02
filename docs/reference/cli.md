@@ -520,3 +520,52 @@ task row now belongs to another attempt; it does not substitute that newer summa
 | `--run-id=UUID` | Required workflow run identifier |
 | `--database=ALIAS` | Django database alias; default `default` |
 
+## django_ray_worker_ready
+
+Probe one exact Django task-manager worker lease without mutating lease or policy state:
+
+```bash
+python manage.py django_ray_worker_ready \
+  --database default \
+  --queue default \
+  --hostname worker-pod-0 \
+  --json
+```
+
+| Option | Description |
+|--------|-------------|
+| `--database=ALIAS` | Django database alias to inspect; default `default` |
+| `--queue=QUEUE` | Required queue coordinate recorded on the worker lease |
+| `--hostname=HOST` | Required hostname coordinate recorded on the worker lease |
+| `--worker-id=ID` | Optional exact worker ID when multiple workers share a queue and hostname |
+| `--json` | Emit the canonical versioned JSON report instead of the text summary |
+
+The command checks that `WORKER_LEASE_SECONDS` matches the database `TaskWorkerLeasePolicy` authority and that exactly one active, non-stopped lease matches the supplied coordinates within the current lease duration window. It never connects to Ray, never proves queue or cluster capacity, and never echoes coordinates or lease rows into output. Exit code `0` means `ready` (`live_lease`); `1` means `not_ready` (`no_live_lease` or `ambiguous_lease`); and `2` means `error` (such as `invalid_coordinates`, `invalid_database`, `invalid_settings`, `transaction_active`, `database_unavailable`, or a lease-policy mismatch).
+
+## django_ray_benchmark_workflow_progress
+
+Benchmark workflow-progress storage shapes and write amplification without importing Ray:
+
+```bash
+python manage.py django_ray_benchmark_workflow_progress \
+  --nodes 64 256 1024 \
+  --change-rates 0.05 0.25 1.0 \
+  --repetitions 5 \
+  --warmups 1 \
+  --seed 20260720 \
+  --database-deployment local-postgres \
+  --output-json /tmp/workflow-progress-bench.json \
+  --output-markdown /tmp/workflow-progress-bench.md
+```
+
+| Option | Description |
+|--------|-------------|
+| `--nodes N [N ...]` | Node counts to evaluate across storage profiles |
+| `--change-rates R [R ...]` | Per-flush node change rates in `(0, 1]` |
+| `--repetitions=N` | Measured repetitions per case; default `5` |
+| `--warmups=N` | Unrecorded warmup iterations per case; default `1` |
+| `--seed=N` | Deterministic RNG seed; default `20260720` |
+| `--database-deployment=LABEL` | Metadata label recorded in the benchmark report; default `unspecified` |
+| `--output-json=PATH` | Optional path to write the canonical JSON benchmark report |
+| `--output-markdown=PATH` | Optional path to write the rendered Markdown summary (must differ from `--output-json`) |
+

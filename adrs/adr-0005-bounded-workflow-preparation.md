@@ -14,19 +14,19 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-09-21; source and issue audit at `273e987` |
+| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
 not a new preparation benchmark or deployed qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
 | Spill-backed topology preparation | Implemented with a legacy boundary | [preparation.py](../src/django_ray/workflow/progress/preparation.py) still materializes legacy `observed_node_ids`; see [preparation tests](../tests/unit/test_workflow_progress_preparation.py) |
-| General composite topology/detail engine | Pending | [#156](https://github.com/dariuszpanas/django-ray/issues/156) and [#157](https://github.com/dariuszpanas/django-ray/issues/157) are open |
-| Aggregate spill admission/reclamation | Pending | [#158](https://github.com/dariuszpanas/django-ray/issues/158) remains open |
-| Default terminal publication preparation | Uses a later bounded in-memory path | [Terminal admission](../src/django_ray/workflow/progress/terminal_input.py), [publication](../src/django_ray/workflow/progress/publication.py), and [admission tests](../tests/unit/test_workflow_terminal_input.py) |
+| General composite topology/detail engine | Deferred outside the default terminal path | [#156](https://github.com/dariuszpanas/django-ray/issues/156) and [#157](https://github.com/dariuszpanas/django-ray/issues/157) are open |
+| Aggregate spill admission/reclamation | Deferred outside the default terminal path | [#158](https://github.com/dariuszpanas/django-ray/issues/158) remains open |
+| Default terminal publication preparation | Implemented via bounded in-memory admission ([#79](https://github.com/dariuszpanas/django-ray/issues/79) closed `COMPLETED`) | [Terminal admission](../src/django_ray/workflow/progress/terminal_input.py), [publication](../src/django_ray/workflow/progress/publication.py), and [admission tests](../tests/unit/test_workflow_terminal_input.py) |
 
 [#142](https://github.com/dariuszpanas/django-ray/issues/142) was closed as
 superseded by #156/#157, not as implemented. The default terminal path admits at

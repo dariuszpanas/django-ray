@@ -14,19 +14,18 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-09-21; source and issue audit at `273e987` |
+| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
 not a new deployed qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
 | Bounded durable storage and authorized reads | Implemented | [Storage](../src/django_ray/workflow/progress/storage.py) and [read services](../src/django_ray/workflow/progress/reads.py) |
-| Default terminal graph publication | Implemented; historical pending status is stale | [Publication](../src/django_ray/workflow/progress/publication.py), [terminal admission tests](../tests/unit/test_workflow_terminal_admission.py), and [default activation commit](https://github.com/dariuszpanas/django-ray/commit/3c97a30) |
-| General live reporting and cost proof | Still separate work | [Issue #79](https://github.com/dariuszpanas/django-ray/issues/79) remains open |
-| General composite preparation and spill admission | Pending | [#156](https://github.com/dariuszpanas/django-ray/issues/156), [#157](https://github.com/dariuszpanas/django-ray/issues/157), and [#158](https://github.com/dariuszpanas/django-ray/issues/158) remain open |
+| Default terminal graph publication | Implemented (`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` removed; `WORKFLOW_PROGRESS_REPORTING_POLICY` active) | [Publication](../src/django_ray/workflow/progress/publication.py), [terminal admission tests](../tests/unit/test_workflow_terminal_admission.py), and completed issues [#79](https://github.com/dariuszpanas/django-ray/issues/79), [#261](https://github.com/dariuszpanas/django-ray/issues/261), [#507](https://github.com/dariuszpanas/django-ray/issues/507), and [#571](https://github.com/dariuszpanas/django-ray/issues/571) |
+| General composite preparation and spill admission | Deferred outside the default terminal path | [#156](https://github.com/dariuszpanas/django-ray/issues/156), [#157](https://github.com/dariuszpanas/django-ray/issues/157), and [#158](https://github.com/dariuszpanas/django-ray/issues/158) remain open |
 
 The storage decision remains represented in source, but its original activation
 plan no longer describes default terminal publication. Terminal publication uses
@@ -363,6 +362,7 @@ The summary and service response use this exact availability vocabulary:
 | `NOT_REPORTED` | No accepted detail revision has been published for this run yet |
 | `AVAILABLE` | The referenced revision is complete within the applied limits |
 | `TRUNCATED` | A deterministic retained subset is available and the summary names every truncation reason |
+| `LIMIT_EXCEEDED` | Terminal admission or preparation exceeded the bounded input or storage limits; the summary remains readable with a diagnostic reason while normalized detail is omitted |
 | `OMITTED_BY_POLICY` | The reporting policy intentionally retained only the summary |
 | `DISABLED` | Workflow node reporting was disabled for the run |
 | `EXPIRED` | Previously published detail was removed by the recorded retention policy |

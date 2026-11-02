@@ -1,6 +1,8 @@
 # Upgrade from 0.6 to 0.7
 
-This guide covers the coordinated **0.6.0 → 0.7.0 Beta** upgrade. A version bump,
+This guide covers the coordinated **0.6.0 → 0.7.x Beta** upgrade (including the
+`0.7.1` patch release; see the [0.7.1 changelog notes](../changelog.md#071-2026-10-27)
+for the follow-up dependency and packaging updates). A version bump,
 passing unit tests or a selected qualification receipt does not establish release
 acceptance. Keep the final source, artifact and deployed evidence together before
 publishing or upgrading.
@@ -85,7 +87,7 @@ rendered panels after replay instead of treating successful import as sufficient
 
 ## Bounded diagnosis
 
-The candidate adds Linux read-only diagnosis:
+Version 0.7.0 adds Linux read-only diagnosis:
 
 ```bash
 python manage.py django_ray_doctor --database default --format json
@@ -108,7 +110,7 @@ observed blocker.
 
 ## Migration and execution boundary
 
-The candidate also adds bounded retained RuntimeEnv maintenance and opt-in
+Version 0.7.0 also adds bounded retained RuntimeEnv maintenance and opt-in
 `RUNTIME_ENV_STORAGE_MODE="required"`. Existing `plaintext` and `encrypted` modes
 keep their dual-read behavior. Required mode encrypts new snapshots and refuses
 plaintext execution and retry; it must be an explicit coordinated policy change.

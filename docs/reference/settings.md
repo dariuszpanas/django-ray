@@ -483,8 +483,8 @@ Validation requires it to be strictly less than `STUCK_TASK_TIMEOUT_SECONDS`.
 - **Allowed**: `"full"`, `"terminal_only"`, or `"disabled"`
 
 Default node-reporting policy for Ray-native workflow invocations. `"full"` preserves
-the progress actor, per-node events, application progress, and periodic
-`progress_data` snapshots. A full-reporting leaf invocation holds at most one
+the progress actor, per-node events, application progress, and bounded terminal
+schema-v3 graph publication (without live `progress_data` database writes). A full-reporting leaf invocation holds at most one
 outstanding application-progress acknowledgement plus one canonical latest-value
 slot and makes at most one bounded terminal handoff/report. `STARTED`, `COMPLETED`,
 `FAILED`, and other structural or lifecycle events are never coalesced. This is

@@ -14,21 +14,21 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-09-21; source and issue audit at `273e987` |
+| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `273e987` on 2026-09-21. This is a source and issue audit,
+Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
 not a new native execution qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
-| Immutable, secret-free plan boundary | Implemented | [plans.py](../src/django_ray/workflow/plans.py), [plan tests](../tests/unit/test_workflow_plans.py), and [plan migration](../src/django_ray/migrations/0011_raytaskexecution_workflow_plan.py) |
-| Whole-plan strategy integration | Partial | [Issue #70](https://github.com/dariuszpanas/django-ray/issues/70) remains open |
-| Compiled Graph execution strategy | Not delivered as a supported strategy | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72); the verified capability set in [compiled_graph.py](../src/django_ray/runtime/compiled_graph.py) is empty |
+| Immutable, secret-free plan boundary | Implemented (`plan_format_version=1`, `PLAN_SELECTION_FORMAT_VERSION=2` with `reporting_policy`) | [plans.py](../src/django_ray/workflow/plans.py), [plan tests](../tests/unit/test_workflow_plans.py), and [plan migration](../src/django_ray/migrations/0011_raytaskexecution_workflow_plan.py) |
+| Whole-plan strategy integration | Partial | [Issue #70](https://github.com/dariuszpanas/django-ray/issues/70) remains open; [#71](https://github.com/dariuszpanas/django-ray/issues/71) closed `NOT_PLANNED` |
+| Compiled Graph execution strategy | Not delivered as a supported strategy | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72) and [#154](https://github.com/dariuszpanas/django-ray/issues/154); the verified capability set in [compiled_graph.py](../src/django_ray/runtime/compiled_graph.py) is empty |
 
 The plan contract survives. Acceptance did not activate every proposed strategy.
-No replacement ADR was identified in this five-record archive; that is not proof
+No replacement ADR was identified in this six-record archive; that is not proof
 that every historical detail remains current.
 
 ## Historical decision

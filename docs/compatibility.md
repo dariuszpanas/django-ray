@@ -28,8 +28,8 @@ be replayed merely because connection setup failed.
 
 [Upstream PR #65982](https://github.com/ray-project/ray/pull/65982) was unmerged
 when reviewed on 2026-10-17; it has not been adopted or backported here. Further
-investigation and requalification require an available upstream fix; the 0.7
-candidate does not establish a repair. Verify startup and abrupt-parent-death cleanup before
+investigation and requalification require an available upstream fix; the 0.7.x
+releases do not establish a repair. Verify startup and abrupt-parent-death cleanup before
 removing this warning: the proposed patch changes child fate sharing. This is
 not a promise that a particular upstream release will contain the fix.
 
@@ -130,7 +130,7 @@ Compiled Graph retains its separate exact-tuple capability policy.
 Django 6.0.8 is the django-ray security floor. Django 6.0.0 through 6.0.7 are not
 supported; newer compatible releases are exercised by the latest-dependency lane.
 
-Ray 2.58.0 remains the security and runtime baseline for django-ray 0.7.0,
+Ray 2.58.0 remains the security and runtime baseline for django-ray 0.7.x,
 unchanged from 0.5.0 and 0.6.0. Ray 2.57 added
 [Dashboard log-path validation](https://github.com/ray-project/ray/pull/64701),
 which is absent from 2.56.0 and 2.56.1. Ray 2.58 additionally fixes
@@ -141,7 +141,7 @@ bundled Data recipe reads JSON, not Lance or nested pickle data. These extend th
 earlier fixes behind django-ray 0.4's Ray 2.56.0 floor.
 
 Keep the task managers, Ray head, and Ray workers on one compatible tuple when
-installing django-ray 0.7.0; follow the [coordinated Beta upgrade
+installing django-ray 0.7.x; follow the [coordinated Beta upgrade
 procedure](deployment/upgrading-from-0.6.md). Do not use a mixed Ray minor-version
 cluster as a rolling-upgrade shortcut. The Ray upgrade does not activate Compiled
 Graph, task-event migration, Sandbox, or a new execution protocol. Existing
