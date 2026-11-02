@@ -498,9 +498,9 @@ class WorkflowMapResultFold:
         candidate_out_of_order_bytes = self._out_of_order_bytes
         candidate_index = index
         current_item = serialized_item
+        accumulator = cloudpickle.loads(candidate_accumulator)
 
         while True:
-            accumulator = cloudpickle.loads(candidate_accumulator)
             item = cloudpickle.loads(current_item)
             reduced = self._reducer(
                 accumulator,
@@ -520,6 +520,7 @@ class WorkflowMapResultFold:
                 )
 
             candidate_accumulator = next_accumulator
+            accumulator = reduced
             candidate_index += 1
             next_item = candidate_out_of_order.pop(candidate_index, None)
             if next_item is not None:

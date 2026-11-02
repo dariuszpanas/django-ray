@@ -538,11 +538,11 @@ def verify_installed_wheel(expected_version: str) -> None:
         .replace("_", "-")
         .startswith("pyasn1-modules")
     ]
-    if pyasn1_requirements != ["pyasn1>=0.6.4"]:
-        raise RuntimeError("pyasn1>=0.6.4 must be exactly one runtime security floor")
+    if pyasn1_requirements != ["pyasn1>=0.6.5"]:
+        raise RuntimeError("pyasn1>=0.6.5 must be exactly one runtime security floor")
     installed_pyasn1 = Version(importlib.metadata.version("pyasn1"))
-    if installed_pyasn1 < Version("0.6.4"):
-        raise RuntimeError(f"installed pyasn1 {installed_pyasn1} is below the 0.6.4 security floor")
+    if installed_pyasn1 < Version("0.6.5"):
+        raise RuntimeError(f"installed pyasn1 {installed_pyasn1} is below the 0.6.5 security floor")
 
     _verify_ray_security_floor(
         list(distribution.requires or ()),

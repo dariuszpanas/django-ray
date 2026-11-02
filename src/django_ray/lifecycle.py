@@ -406,6 +406,8 @@ def _prepare_terminal_only_workflow_progress_summary(
             summary,
             expected_identity=identity,
         )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return None
 
@@ -442,6 +444,8 @@ def _persist_terminal_only_workflow_progress_summary(
                 ).update(workflow_progress_summary_json=serialized_summary)
                 if current != 1:
                     raise RuntimeError("terminal-only current summary fence was rejected")
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return False
     if retain_as_current:
@@ -930,6 +934,7 @@ def record_failure(
             )
             current.started_at = None
             current.finished_at = None
+            current.last_heartbeat_at = None
             current.claimed_by_worker = None
             current.managed_with_django_ray_version = None
             current.executor_django_ray_version = None
@@ -938,6 +943,8 @@ def record_failure(
             current.workflow_run_id = None
             current.workflow_plan_selection = None
             current.completion_data = None
+            current.cancellation_status = None
+            current.cancellation_error = None
         else:
             current.state = TaskState.FAILED
         current.save(
@@ -952,6 +959,7 @@ def record_failure(
                 "cancellation_error",
                 "started_at",
                 "finished_at",
+                "last_heartbeat_at",
                 "claimed_by_worker",
                 "managed_with_django_ray_version",
                 "executor_django_ray_version",

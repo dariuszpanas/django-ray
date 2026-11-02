@@ -570,7 +570,7 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
         if step.get("name") == "Audit locked runtime dependencies"
     )
 
-    assert '"pyasn1==0.6.4"' in minimum_install["run"]
+    assert '"pyasn1==0.6.5"' in minimum_install["run"]
     assert '"ray[default]==2.58.0"' in minimum_install["run"]
     assert '"django==6.0.8"' in minimum_install["run"]
     assert '"certifi==2026.10.19"' in minimum_install["run"]

@@ -1371,6 +1371,8 @@ def publish_terminal_workflow_progress(
             accepted=False,
             reason=WorkflowProgressPilotReason.PUBLICATION_FAILED,
         )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         result = WorkflowProgressPilotPublicationResult(
             accepted=False,
@@ -1384,6 +1386,8 @@ def publish_terminal_workflow_progress(
                 manifest_id=manifest_id,
                 using=using,
             )
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
             if not result.accepted:
                 return WorkflowProgressPilotPublicationResult(

@@ -744,6 +744,8 @@ class _RayExecutor(_Executor):
                 payload,
                 limits=self.workflow_progress_limits,
             )
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
             # Workflow observability remains best effort. The protocol prepares and
             # validates before the actor call, so invalid internal metadata cannot
@@ -1777,6 +1779,8 @@ class _RayExecutor(_Executor):
                 input_exhausted=input_exhausted,
             ):
                 self._map_progress_sent_at[node_id] = now
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
             # Observational failures must not replace the workflow outcome.
             return
@@ -1823,6 +1827,8 @@ class _RayExecutor(_Executor):
                         WorkflowProgressEventKind.PRODUCER_REPORT,
                         report,
                     )
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except BaseException:
                 pass
         if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
@@ -2022,6 +2028,8 @@ class _RayExecutor(_Executor):
                 detail_days=int(get_settings().get("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS", 7)),
                 limit_exceeded=limit_exceeded,
             )
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
             self._progress_warning(
                 "Workflow terminal summary was not completed", reason="publication_failed"
@@ -2050,6 +2058,8 @@ class _RayExecutor(_Executor):
                 snapshot,
                 detail_days=int(config.get("WORKFLOW_PROGRESS_DETAIL_RETENTION_DAYS", 7)),
             )
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
             self._progress_warning(
                 "Workflow terminal publication was not completed",

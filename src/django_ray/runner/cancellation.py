@@ -149,18 +149,17 @@ def request_cancellation(
         )
 
         try:
-            if str(task_execution.ray_job_id).startswith("ray_core:"):
-                get_pending_handle = getattr(runner, "get_pending_handle", None)
-                cancel_pending = getattr(runner, "cancel_pending", None)
-                if callable(get_pending_handle) and callable(cancel_pending):
-                    pending_handle = get_pending_handle(
-                        execution_id,
-                        attempt_number=task_execution.attempt_number,
-                        execution_generation=task_execution.execution_generation,
-                    )
-                    if pending_handle is not None:
-                        cancel_pending(pending_handle)
-            else:
+            get_pending_handle = getattr(runner, "get_pending_handle", None)
+            cancel_pending = getattr(runner, "cancel_pending", None)
+            if callable(get_pending_handle) and callable(cancel_pending):
+                pending_handle = get_pending_handle(
+                    execution_id,
+                    attempt_number=task_execution.attempt_number,
+                    execution_generation=task_execution.execution_generation,
+                )
+                if pending_handle is not None:
+                    cancel_pending(pending_handle)
+            elif not str(task_execution.ray_job_id).startswith("ray_core:"):
                 runner.cancel(handle)
         except (RuntimeError, ConnectionError, TimeoutError):
             # Best effort - cancellation may fail due to Ray connection issues

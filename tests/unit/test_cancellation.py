@@ -194,6 +194,46 @@ class TestCancellationHelpers:
         assert task.state == TaskState.CANCELLING
         assert lookups == [(task.pk, 2, 5)]
 
+    def test_request_cancellation_uses_pending_handle_for_composite_ray_core_id(self) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="cancel-composite-ray-core-001",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            attempt_number=2,
+            execution_generation=5,
+            ray_job_id="01000000:abcdef123456",
+            args_json="[]",
+            kwargs_json="{}",
+        )
+        sentinel_handle = object()
+        lookups: list[tuple[int, int, int]] = []
+        cancelled: list[object] = []
+
+        class Runner:
+            def get_pending_handle(
+                self,
+                task_pk: int,
+                *,
+                attempt_number: int,
+                execution_generation: int,
+            ) -> object:
+                lookups.append((task_pk, attempt_number, execution_generation))
+                return sentinel_handle
+
+            def cancel_pending(self, handle: object) -> bool:
+                cancelled.append(handle)
+                return True
+
+            def cancel(self, _handle: object) -> bool:
+                pytest.fail("composite Ray Core handle must use cancel_pending when available")
+
+        assert request_cancellation(task, runner=Runner()) is True
+
+        task.refresh_from_db()
+        assert task.state == TaskState.CANCELLING
+        assert lookups == [(task.pk, 2, 5)]
+        assert cancelled == [sentinel_handle]
+
     def test_request_cancellation_finalizes_queued_without_runner(self) -> None:
         task = RayTaskExecution.objects.create(
             task_id="cancel-queued-001",
