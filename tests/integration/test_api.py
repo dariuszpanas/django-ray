@@ -336,6 +336,33 @@ class TestHealthAPI:
         assert data["database"] == "ok"
         assert data["version"] == django_ray_version
 
+    def test_readiness_check_returns_503_when_database_fails(
+        self, unauthenticated_client, monkeypatch
+    ):
+        """Readiness probe returns HTTP 503 when database check fails while health stays 200."""
+        from django.db import connection
+
+        def broken_cursor():
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(connection, "cursor", broken_cursor)
+
+        ready_response = unauthenticated_client.get("/api/readyz")
+        assert ready_response.status_code == 503
+        assert ready_response.json() == {
+            "status": "degraded",
+            "database": "error",
+            "version": django_ray_version,
+        }
+
+        health_response = unauthenticated_client.get("/api/health")
+        assert health_response.status_code == 200
+        assert health_response.json()["status"] == "degraded"
+
+        live_response = unauthenticated_client.get("/api/livez")
+        assert live_response.status_code == 200
+        assert live_response.json()["status"] == "alive"
+
     def test_prometheus_metrics(self, client):
         """Test the Prometheus metrics endpoint."""
         # Create some tasks to have metrics data

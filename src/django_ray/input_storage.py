@@ -303,16 +303,23 @@ def prepare_task_input(
         raise InputPayloadValidationError("Task kwargs must be an object")
 
     args_list = list(args)
-    args_json = _serialize_json(args_list, description="args")
-    kwargs_json = _serialize_json(kwargs, description="kwargs")
     resolved_config = config if config is not None else get_settings()
     threshold = _optional_threshold(resolved_config)
     if threshold is None:
+        args_json = _serialize_json(args_list, description="args")
+        kwargs_json = _serialize_json(kwargs, description="kwargs")
         return PreparedTaskInput(args_json=args_json, kwargs_json=kwargs_json)
 
-    serialized_payload = _serialize_envelope(args_list, kwargs)
+    try:
+        serialized_payload = _serialize_envelope(args_list, kwargs)
+    except InputPayloadValidationError:
+        _serialize_json(args_list, description="args")
+        _serialize_json(kwargs, description="kwargs")
+        raise
     payload_bytes = serialized_payload.encode("utf-8")
     if len(payload_bytes) <= threshold:
+        args_json = _serialize_json(args_list, description="args")
+        kwargs_json = _serialize_json(kwargs, description="kwargs")
         return PreparedTaskInput(args_json=args_json, kwargs_json=kwargs_json)
 
     backend_name, storage = _storage_backend(resolved_config)

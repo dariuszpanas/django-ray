@@ -136,6 +136,10 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/env
         value:
+          - name: DJANGO_RAY_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
           - name: DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE
             value: encrypted
           - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY
@@ -185,6 +189,10 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/env
         value:
+          - name: DJANGO_RAY_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
           - name: DJANGO_RAY_RUNTIME_ENV_STORAGE_MODE
             value: encrypted
           - name: DJANGO_RAY_RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY

@@ -95,6 +95,39 @@ def test_worker_readiness_observes_its_lease_without_changing_liveness(
     assert "django_ray_worker_ready" not in " ".join(container["livenessProbe"]["exec"]["command"])
     assert container["readinessProbe"]["timeoutSeconds"] > 0
 
+    for worker_name, expected_queue in (
+        ("django-ray-worker-sync", "sync"),
+        ("django-ray-worker-ml", "ml"),
+        ("django-ray-worker-ray-job", "ray-data"),
+    ):
+        matches = [
+            resource
+            for resource in resources
+            if resource.get("kind") == "Deployment"
+            and resource.get("metadata", {}).get("name") == worker_name
+        ]
+        if not matches:
+            continue
+        extra_container = next(
+            item
+            for item in matches[0]["spec"]["template"]["spec"]["containers"]
+            if item["name"] == "django-ray-worker"
+        )
+        extra_cmd = extra_container["readinessProbe"]["exec"]["command"]
+        assert extra_cmd[:2] == ["/bin/sh", "-c"]
+        assert extra_cmd[2] == (
+            "exec python testproject/manage.py django_ray_worker_ready "
+            f"--queue {expected_queue} "
+            '--hostname "$DJANGO_RAY_POD_NAME" --json'
+        )
+        extra_pod_name = next(
+            item for item in extra_container["env"] if item["name"] == "DJANGO_RAY_POD_NAME"
+        )
+        assert extra_pod_name["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
+        assert "django_ray_worker_ready" not in " ".join(
+            extra_container["livenessProbe"]["exec"]["command"]
+        )
+
 
 @pytest.mark.django_db
 def test_http_web_probes_send_a_host_django_accepts(
@@ -122,6 +155,9 @@ def test_http_web_probes_send_a_host_django_accepts(
                 if header["name"].lower() == "host"
             ]
             assert len(host_headers) == 1, f"{path} {probe_name} must send one Host header"
+
+            expected_probe_path = "/api/readyz" if probe_name == "readinessProbe" else "/api/livez"
+            assert http_get["path"] == expected_probe_path
 
             request = RequestFactory().get(http_get["path"], HTTP_HOST=host_headers[0])
             assert request.get_host() == host_headers[0]

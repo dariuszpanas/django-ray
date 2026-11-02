@@ -2665,7 +2665,12 @@ def inspect_probe_contract(deployment: Mapping[str, Any], config_map: Mapping[st
     for probe_name in ("readinessProbe", "livenessProbe"):
         probe = _mapping(web.get(probe_name), field_name=probe_name)
         http_get = _mapping(probe.get("httpGet"), field_name=f"{probe_name}.httpGet")
-        if http_get.get("path") != EXPECTED_PROBE_PATH:
+        expected_paths = (
+            {EXPECTED_PROBE_PATH, "/api/readyz"}
+            if probe_name == "readinessProbe"
+            else {EXPECTED_PROBE_PATH, "/api/livez"}
+        )
+        if http_get.get("path") not in expected_paths:
             raise ValueError(f"{probe_name} path is not {EXPECTED_PROBE_PATH}")
         headers = _sequence(http_get.get("httpHeaders"), field_name=f"{probe_name} headers")
         host_values = [
