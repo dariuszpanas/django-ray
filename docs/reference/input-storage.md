@@ -307,7 +307,17 @@ concurrent earlier-key inserts require a fresh pass, so finishing a cursor range
 is not a global inventory certificate. These bounds do not impose a query or
 backend-I/O deadline. See the [CLI contract](cli.md#django_ray_purge_inputs) for
 JSON fields, limits, status precedence, interruption handling, and cursor key
-rotation. This command still cannot discover objects absent from the registry.
+rotation.
+
+For crash-window objects written to backend storage before their database
+registration transaction committed, `--discover-unregistered` (and
+`--delete-unregistered` together with `--delete`) invokes
+`discover_and_reap_unregistered_payloads()`. Discovery scans only the configured
+canonical storage prefixes within explicit `--max-inventory-objects`,
+`--max-inventory-pages`, and `--grace-seconds` bounds. Before deleting an eligible
+unregistered canonical payload, reaping inserts a coordinated `PURGED`
+`TaskInputPayload` tombstone (checking the bounded alias set) to fence concurrent
+producers and revalidates exact canonical envelope bytes.
 
 Purging makes historical manual retry impossible until the same object is restored or
 reactivated. Choose a retention window that covers the application's audit and manual

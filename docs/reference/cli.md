@@ -382,6 +382,15 @@ tombstones; cleanup does not reconcile or rewrite those records. See the
 [reference discriminator contract](input-storage.md#request-reference-discriminator)
 before investigating or upgrading cleanup jobs.
 
+`--discover-unregistered` adds a bounded backend prefix scan for canonical
+task-input and Ray Job request envelopes absent from `TaskInputPayload` and older
+than `--grace-seconds` (default `3600`, bounded by `--max-inventory-objects` and
+`--max-inventory-pages`). Supplying `--delete-unregistered` (which requires both
+`--discover-unregistered` and `--delete`) inserts a coordinated `PURGED` registry
+tombstone under alias checks before revalidating canonical envelope bytes and
+deleting the backend object, so a concurrent producer cannot attach to an object
+being reaped.
+
 ## django_ray_cleanup_workflow_progress
 
 Preview expired normalized detail, stale unpublished topology storage, and empty

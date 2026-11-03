@@ -9,26 +9,27 @@
 | Field | Value |
 | --- | --- |
 | Decision status | Accepted historically; current applicability unverified |
-| Implementation status | Implemented as a Ray-free protocol; native adapter remains separate |
+| Implementation status | Ray-free protocol and default-off strategy adapter implemented; native capability set remains empty |
 | Decision review | [Original merged PR #123](https://github.com/dariuszpanas/django-ray/pull/123); not a current implementation approval |
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
+| Last verified | 2026-11-02; source and issue audit on `main` (`2f9721f`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
+Reviewed against `main` (`2f9721f`) on 2026-11-02. This is a source and issue audit,
 not a new native execution qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
 | Ray-free session/invocation reducer | Implemented within its protocol scope | [Reducer](../src/django_ray/runtime/compiled_graph_lifecycle.py), [lifecycle tests](../tests/unit/test_compiled_graph_lifecycle.py), and [completed issue #85](https://github.com/dariuszpanas/django-ray/issues/85) |
-| Output ownership, deadlines and reuse decisions | Represented and tested in the reducer | Tests cover one-shot consumption, fallback cutoff, timeout and quarantine transitions |
-| Native adapter execution of returned actions | Pending upstream Ray shared-memory reclamation | The module describes a future adapter; [issue #72](https://github.com/dariuszpanas/django-ray/issues/72) and [#154](https://github.com/dariuszpanas/django-ray/issues/154) own integration (#69/#71 closed `NOT_PLANNED`) |
+| Output ownership, deadlines and reuse decisions | Represented and tested in the reducer and strategy seam | Tests cover one-shot consumption, fallback cutoff, callback fencing, timeout and quarantine transitions |
+| Strategy adapter execution of returned actions | Default-off `CompiledGraphExecutionStrategy` implemented ([#70](https://github.com/dariuszpanas/django-ray/issues/70), [#72](https://github.com/dariuszpanas/django-ray/issues/72) closed `COMPLETED`); native capability promotion gated on upstream Ray | [strategy.py](../src/django_ray/workflow/strategy.py) and [strategy tests](../tests/unit/test_workflow_strategy.py); [#154](https://github.com/dariuszpanas/django-ray/issues/154) and [#102](https://github.com/dariuszpanas/django-ray/issues/102) remain open (#69/#71 closed `NOT_PLANNED`) |
 
-Implemented here means the Ray-free protocol, not a working or supported native
-Compiled Graph strategy. No replacement ADR was identified in the archive.
+Policy version 4 ([compiled_graph.py](../src/django_ray/runtime/compiled_graph.py))
+still keeps `_VERIFIED_CAPABILITIES` empty, so native Compiled Graph execution remains
+fail-closed in production. No replacement ADR was identified in the archive.
 
 ## Historical decision
 

@@ -14,18 +14,18 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
+| Last verified | 2026-11-02; source and issue audit on `main` (`2f9721f`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
+Reviewed against `main` (`2f9721f`) on 2026-11-02. This is a source and issue audit,
 not a new native execution qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
-| Explicit topology and capability checks | Implemented | [Compatibility policy](../src/django_ray/runtime/compiled_graph.py) and [policy tests](../tests/unit/test_compiled_graph.py) |
+| Explicit topology and capability checks | Implemented (`COMPILED_GRAPH_POLICY_VERSION = 4` with `fastrlock`, [#159](https://github.com/dariuszpanas/django-ray/issues/159) closed `COMPLETED`) | [Compatibility policy](../src/django_ray/runtime/compiled_graph.py) and [policy tests](../tests/unit/test_compiled_graph.py) |
 | Ownership investigation | Probe tooling exists; [#69](https://github.com/dariuszpanas/django-ray/issues/69) closed `NOT_PLANNED` and [#74](https://github.com/dariuszpanas/django-ray/issues/74)/[#87](https://github.com/dariuszpanas/django-ray/issues/87)/[#88](https://github.com/dariuszpanas/django-ray/issues/88) closed `COMPLETED` | [Topology probe tests](../tests/unit/test_compiled_session_topology_probe.py); tooling is not product activation evidence |
-| Application session owner and native strategy | Blocked on upstream Ray shared-memory reclamation | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72) and [#154](https://github.com/dariuszpanas/django-ray/issues/154) remain open; `_VERIFIED_CAPABILITIES` is empty |
+| Per-run strategy adapter and native capability promotion | Per-run default-off adapter implemented ([#72](https://github.com/dariuszpanas/django-ray/issues/72) closed `COMPLETED`); native promotion blocked on upstream Ray shared-memory reclamation | `CompiledGraphExecutionStrategy` in [strategy.py](../src/django_ray/workflow/strategy.py); [#154](https://github.com/dariuszpanas/django-ray/issues/154) and [#102](https://github.com/dariuszpanas/django-ray/issues/102) remain open, and `_VERIFIED_CAPABILITIES` is empty |
 
 The historical pilot decision does not establish a supported native topology.
 Use [current compatibility guidance](../docs/compiled-graph-compatibility.md)

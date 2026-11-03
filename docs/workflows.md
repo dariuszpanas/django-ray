@@ -906,13 +906,21 @@ a SQLite spill workspace. Oversized or invalid snapshots are refused without a
 durable candidate. These are preparation bounds, not a claim about Ray mailbox or
 deserialization memory. This small terminal path does not enable live visualization
 or admit workloads near the larger storage-protocol ceilings.
-ADR-0005's production topology phase now externalizes exact node/edge identity,
-duplicate, reference, and selection state into a private bounded SQLite workspace and
-removes it before returning prepared evidence. The unchanged result still includes
-complete `observed_node_ids` for the existing materialized detail API. Open issues
-[#156](https://github.com/dariuszpanas/django-ray/issues/156) and
-[#157](https://github.com/dariuszpanas/django-ray/issues/157) own the shared
-topology/detail lifetime for the general path; #142 was closed as superseded.
+ADR-0005's general composite preparation path
+(`prepare_workflow_progress_initial_publication()`,
+`PreparedWorkflowProgressCompositeTopology`,
+`PreparedWorkflowProgressInitialPublication`, and capability-verified
+`persist_workflow_progress_publication()`) externalizes exact node/edge identity,
+duplicate, reference, selection, and initial node-detail state into one private
+bounded SQLite workspace without materializing unbounded Python `observed_node_ids`
+(legacy `prepare_workflow_progress_topology()` caps detached `observed_node_ids` at
+25,000 nodes). `SpillCapacityController` in
+`django_ray.workflow.progress.spill_capacity` enforces node-local aggregate byte
+reservations, workspace and per-owner quotas, filesystem free-space headroom checks,
+and PID-reuse-safe janitor cleanup of proven-stale workspaces and quarantines
+(#156, #158). Open issue
+[#157](https://github.com/dariuszpanas/django-ray/issues/157) owns the remaining
+25k/100k/250k-node native Linux benchmark matrix; #142 was closed as superseded.
 This does not block the admitted terminal path described above. See
 [ADR-0004: Bounded Workflow Progress Storage](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0004-bounded-workflow-progress.md)
 and
@@ -922,10 +930,14 @@ Ray Core tasks already run inside an initialized Ray worker. Ray Job drivers
 initialize their cluster connection lazily when a workflow first requests Ray, and
 use the same durable context and progress graph protocol.
 
-Future execution strategies must preserve this outer durability boundary. In
-particular, Compiled Graph is a possible engine for a validated static actor region,
-not a Django task type or a flag that makes data-dependent `map_step` expansion static.
-See [Workflow Plans and Execution Strategies](workflow-plans.md).
+Execution strategies preserve this outer durability boundary through the whole-plan
+strategy seam in `django_ray.workflow.strategy`
+(`signature.with_execution_strategy(...)`, `signature.inspect_strategy(...)`,
+`build_fixed_actor_graph_plan()`, and the experimental default-off
+`CompiledGraphExecutionStrategy`). Compiled Graph remains an execution strategy for a
+validated static actor region, not a Django task type or a flag that makes
+data-dependent `map_step` expansion static. See
+[Workflow Plans and Execution Strategies](workflow-plans.md).
 
 Apply database migrations before starting upgraded workers. Migration
 `0012_workflow_progress_summary` adds nullable summary fields, and migration
@@ -946,9 +958,10 @@ task entrypoints to supply the strict execution request and attempt fence. A cus
 `durable_task_execution()` context alone does not authorize nested Ray execution:
 unbound durable contexts are rejected before creating workflow remotes.
 
-The drain statement is a contract for those later strategies. The current release
-provides fingerprint comparison and stale-owner helper functions but has no resident
-graph owner or prepared-graph cache to drain.
+The drain statement governs any strategy that retains prepared actor state.
+`django_ray.workflow.strategy` provides per-run fixed-actor preparation, drain, and
+cleanup hooks alongside fingerprint comparison and stale-owner helpers, while
+cross-run resident graph ownership and operational graph caching remain deferred.
 
 An identified context whose attempt or execution generation is stale is different: its
 plan claim fails closed before local application code, progress actors, or Ray leaves
@@ -962,7 +975,12 @@ retry, result, cancellation, or audit boundary.
 
 Durable selective stage resume remains a planned extension. It requires verified
 intermediate outputs and side-effect receipts bound to the plan, inputs, code,
-RuntimeEnv, and retry identity. Progress and future node-output previews are
+RuntimeEnv, and retry identity. `django_ray.workflow.checkpoints`
+(`WorkflowCheckpointResumePlanner`,
+[ADR-0007](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0007-durable-step-checkpoints.md))
+implements the Ray-free fail-closed checkpoint envelope, side-effect classification,
+and transitive dependency-cone invalidation state machine ahead of runtime storage
+integration. Progress and node-output previews remain
 observational rather than recovery logs: after a cluster loss, the outer task retry
 remains the recovery boundary. Never infer that an external effect is safe to skip or
 repeat solely from the node color or terminal state.
@@ -1183,6 +1201,38 @@ discovered nodes, and `detail.availability="OMITTED_BY_POLICY"`. Topology and
 node-detail routes return empty omitted-by-policy responses, and the Admin shows no
 execution graph for either fixture.
 
+## Bounded Transport, Paged Inputs, and Concurrency Helpers
+
+Package-owned workflow submodules provide strategy-neutral primitives for large
+fan-out maps, paginated external inventories, cross-run coordination, and step
+checkpoint planning:
+
+- **List-preserving map result transport (`django_ray.workflow.map_transport`)**:
+  `BoundedMapListTransportConfig`, `BoundedMapListAggregator`, and
+  `DownstreamMapListHandoff` chunk contiguous leaf completions, bound out-of-order
+  buffers, k-ary tree-merge chunk handles when live coordinator references approach
+  `max_coordinator_live_refs`, hand downstream steps a single root reference, and
+  clean up pending leaf, chunk, and tree handles on failure or cancellation.
+- **Backpressure-bounded paged map inputs (`django_ray.workflow.paged_input`)**:
+  `PagedMapInputConfig`, `BoundedPagedMapInputStream`, and `PagedSourceProtocol`
+  pull paginated external sources (such as Kubernetes `continue` cursors or keyset
+  queries) under producer-ahead page, item, and byte caps with deterministic 0-based
+  item indexing, snapshot-drift (`PagedSnapshotDriftError`) and expired-cursor
+  (`PagedCursorExpiredError`) guards, bounded `Retry-After` backoff, and guaranteed
+  source cleanup.
+- **Cross-run concurrency and service budgets (`django_ray.workflow.concurrency`)**:
+  `ConcurrencyScopeSpec` and `WorkflowConcurrencyCoordinator` coordinate overlapping
+  runs on a logical `scope_key` (`ALLOW`, `QUEUE`, `REJECT`, `COALESCE_LATEST`) using
+  monotonic fencing tokens, priority/FIFO queuing, and TTL lease reclamation.
+  `ExternalServiceBudgetSpec` and `SharedServiceBudgetController` enforce shared
+  concurrency and token-bucket rate budgets with per-run anti-starvation caps and
+  `Retry-After` cooldowns.
+- **Fail-closed step checkpoint planning (`django_ray.workflow.checkpoints`)**:
+  `CheckpointableNodeSpec`, `DurableStepCheckpointEnvelope`, and
+  `WorkflowCheckpointResumePlanner` validate pinned plan fingerprints, strict
+  prior-attempt/generation fences, side-effect dispositions, and transitive
+  dependency-cone invalidation without importing Ray.
+
 ## API Reference
 
 | API | Behavior |
@@ -1194,6 +1244,9 @@ execution graph for either fixture.
 | `map_step(callable_or_signature, ...)` | Fan out over the preceding iterable; callable keyword arguments remain leaf arguments |
 | `map_signature.with_limits(max_concurrency=None, max_items=None, cancel_timeout_seconds=1.0)` | Add bounded admission, expansion, and failure-cleanup controls |
 | `bounded_map.with_result_buffer(max_serialized_bytes=..., actor_options=...)` | Opt into a resource-accounted Ray actor that forwards one ordered payload reference without coordinator decoding |
+| `bounded_map.reduce(reducer, *, initial=..., max_serialized_bytes=..., actor_options=...)` | Fold bounded map outputs in strict input order inside one resource-accounted Ray actor |
 | `report_progress(current, total, message=None, metrics=None)` | Report progress from a running leaf |
 | `signature.run(*args, use_ray=None, **kwargs)` | Execute with Ray when initialized, otherwise locally |
 | `signature.with_progress_reporting(policy).run(...)` | Execute one invocation with explicit `"full"`, `"terminal_only"`, or `"disabled"` progress reporting without reserving an application keyword |
+| `signature.with_execution_strategy(policy, *, regions=(), pool_specs=None, ...).run(...)` | Execute one invocation under an explicit whole-plan strategy policy (`"auto"`, `"local"`, `"dynamic_tasks"`, `"static_actors"`, or experimental default-off `"compiled_graph"`) |
+| `signature.inspect_strategy(*args, use_ray=None, requested_policy=None, ...)` | Validate whole-plan strategy selection and return bounded observability metadata without executing |

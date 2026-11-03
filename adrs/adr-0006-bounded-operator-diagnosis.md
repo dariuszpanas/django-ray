@@ -13,7 +13,7 @@
 | Delivery tracking | [#368](https://github.com/dariuszpanas/django-ray/issues/368); bounded first slice [#620](https://github.com/dariuszpanas/django-ray/issues/620) (completed in `v0.7.0`) |
 | Supersedes | None |
 | Superseded by | None |
-| Last verified | 2026-11-01 at `v0.7.1` (`e72aaaa`). First-slice Linux supervision, `TaskWorkerLeasePolicy` observation ([#624](https://github.com/dariuszpanas/django-ray/issues/624)), `RUNTIME_ENV_STORAGE_MODE="required"` observation ([#210](https://github.com/dariuszpanas/django-ray/issues/210)), independent PostgreSQL, installed-wheel/sdist verification, and source-matched cold application qualification shipped in `v0.7.0`/`v0.7.1` ([#629](https://github.com/dariuszpanas/django-ray/issues/629) and [#386](https://github.com/dariuszpanas/django-ray/issues/386) closed `COMPLETED`). Each release still requires fresh wheel and sdist qualification. |
+| Last verified | 2026-11-02 on `main` (`2f9721f`). First-slice Linux supervision, `TaskWorkerLeasePolicy` observation ([#624](https://github.com/dariuszpanas/django-ray/issues/624)), `RUNTIME_ENV_STORAGE_MODE="required"` observation ([#210](https://github.com/dariuszpanas/django-ray/issues/210)), independent PostgreSQL, installed-wheel/sdist verification, and source-matched cold application qualification shipped in `v0.7.0`/`v0.7.1` ([#629](https://github.com/dariuszpanas/django-ray/issues/629) and [#386](https://github.com/dariuszpanas/django-ray/issues/386) closed `COMPLETED`). Each release still requires fresh wheel and sdist qualification. |
 
 ## Context and scope
 

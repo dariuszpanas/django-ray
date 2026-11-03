@@ -7,8 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add the whole-plan workflow execution-strategy seam in
+  `django_ray.workflow.strategy` (`WorkflowSignature.with_execution_strategy()`,
+  `WorkflowSignature.inspect_strategy()`, `resolve_execution_strategy()`,
+  `WorkflowStrategyObservability`, strategy-specific opaque handles, run-identity
+  callback fencing, and explicit `MIXED_REGIONS_UNSUPPORTED` rejection for V1 mixed
+  dynamic/static partitions), the per-run fixed-actor graph builder
+  (`build_fixed_actor_graph_plan()`, `InProcessFixedActorAdapter`), and the
+  experimental default-off `CompiledGraphExecutionStrategy` guarded behind
+  `DJANGO_RAY["COMPILED_GRAPH_EXPERIMENTAL_ENABLED"]` and fail-closed capability
+  checks. Policy version 4 retains an empty `_VERIFIED_CAPABILITIES` set pending
+  upstream Ray shared-memory reclamation (#70, #72).
+- Add composite SQLite workflow-progress topology and initial-publication preparation
+  (`prepare_workflow_progress_initial_publication()`,
+  `PreparedWorkflowProgressCompositeTopology`,
+  `PreparedWorkflowProgressInitialPublication`, and capability-verified
+  `persist_workflow_progress_publication()`) plus a 25,000-node cap on legacy
+  `observed_node_ids` detachment in `prepare_workflow_progress_topology()`. Pair
+  spill workspaces with `SpillCapacityController` in
+  `django_ray.workflow.progress.spill_capacity` for node-local aggregate byte
+  reservations, workspace and per-owner quotas, filesystem free-space headroom
+  checks, and PID-reuse-safe janitor cleanup of proven-stale workspaces and
+  quarantines. The 25k/100k/250k-node native Linux benchmark matrix remains tracked
+  separately in #157 (#156, #158).
+- Add bounded unregistered canonical payload discovery and coordinated tombstone
+  reaping (`discover_and_reap_unregistered_payloads()`,
+  `django_ray_purge_inputs --discover-unregistered`, and `--delete-unregistered`).
+  Inventory passes stay within explicit `--max-inventory-objects`,
+  `--max-inventory-pages`, and `--grace-seconds` bounds; reaping inserts a
+  coordinated `PURGED` `TaskInputPayload` tombstone to fence concurrent producers
+  and revalidates canonical payload envelope bytes before backend deletion (#406).
+- Add optional, fail-open OpenTelemetry task and workflow trace correlation in
+  `django_ray.tracing` (`TaskTracingCoordinator`, `TracingConfig`,
+  `TraceContextEnvelope`, `AttemptAuthorityToken`) across task enqueue, worker
+  claim, Ray submission, remote execution, workflow execution, retry reconciliation,
+  and terminal persistence without requiring OpenTelemetry packages in the base
+  installation. Enforce W3C `traceparent` and `tracestate` validation, strict
+  redaction of arguments, results, `RuntimeEnv` payloads, credentials, and
+  tracebacks, stale-attempt fencing against superseded terminal spans, and bounded
+  per-run child workflow node spans (#369).
+- Add bounded, chunked, k-ary tree-merged list-preserving workflow map result
+  transport in `django_ray.workflow.map_transport`
+  (`BoundedMapListTransportConfig`, `BoundedMapListAggregator`,
+  `DownstreamMapListHandoff`), bounding live coordinator handles and out-of-order
+  completion buffers while handing downstream steps one root reference and cleaning
+  up pending leaf, chunk, and tree handles on failure or cancellation (#91).
+- Add pull-driven, backpressure-bounded paged workflow map input streaming in
+  `django_ray.workflow.paged_input` (`PagedMapInputConfig`,
+  `BoundedPagedMapInputStream`, `PagedSourceProtocol`) with producer-ahead page,
+  item, and byte caps, deterministic 0-based indexing across page boundaries,
+  snapshot consistency (`PagedSnapshotDriftError`) and expired-cursor
+  (`PagedCursorExpiredError`) guards, bounded `Retry-After` throttle backoff, and
+  guaranteed source cleanup on downstream failure or cancellation (#94).
+- Add strategy-neutral cross-run workflow concurrency coordination and shared
+  external-service budgets in `django_ray.workflow.concurrency`
+  (`ConcurrencyScopeSpec`, `OverlapPolicy`, `WorkflowConcurrencyCoordinator`,
+  `ExternalServiceBudgetSpec`, `SharedServiceBudgetController`), supporting
+  `ALLOW`, `QUEUE`, `REJECT`, and `COALESCE_LATEST` overlap policies with monotonic
+  fencing tokens, priority/FIFO queuing, TTL lease reclamation, per-run
+  anti-starvation caps, and `Retry-After` cooldowns (#95).
+- Add [ADR-0007](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0007-durable-step-checkpoints.md)
+  and the Ray-free fail-closed durable step checkpoint state machine in
+  `django_ray.workflow.checkpoints` (`CheckpointableNodeSpec`,
+  `DurableStepCheckpointEnvelope`, `NodeResumabilityClass`,
+  `SideEffectDisposition`, `WorkflowCheckpointResumePlanner`). Enforce pinned plan
+  fingerprint matching, strict prior-attempt/generation fencing, indeterminate
+  side-effect refusal, transitive dependency-cone invalidation, and committed
+  non-idempotent downstream protection; outer-task replay from the entry node
+  remains the runtime retry boundary until durable checkpoint storage is integrated
+  (#289).
+- Add the Execution Mode and Task Pattern Decision Guide to
+  `docs/configuration.md` and `llms.txt`, document `django_ray_worker_ready` and
+  `django_ray_benchmark_workflow_progress` in the CLI reference, audit historical
+  ADRs `0001` through `0006`, and record sanitized KubeRay adopter evidence in
+  `docs/investigations/adopter-records-v1.md` (#684).
+
 ### Changed
 
+- Advance `COMPILED_GRAPH_POLICY_VERSION` from 3 to 4, requiring `fastrlock` in
+  Compiled Graph dependency profile closure checks alongside `ray`, `numpy`,
+  `pyarrow`, and `cupy`, record the `2026-11-01` Ray `2.58.0` capability review
+  artifact while retaining an empty verified capability set, and verify the
+  expanded `django_ray/workflow/` module layout in built wheels (#159).
 - Require Linux for `scripts/coverage_debt.py` phase execution and
   `django_ray.runtime.compiled_graph_probe` subprocess execution, retiring their
   native Windows Job Object and `taskkill` process-tree fallbacks while keeping
@@ -35,7 +117,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-raise `(KeyboardInterrupt, SystemExit)` before best-effort `BaseException`
   handlers in workflow progress and terminal summary helpers.
 - Reuse the validated in-memory accumulator across contiguous drain iterations in
-  `WorkflowMapResultFold._fold_contiguous_in_context()`.
+  `WorkflowMapResultFold._fold_contiguous_in_context()` (#685).
+- Refresh contributor lock (`uv.lock`) minor and patch dependencies (`certifi`
+  `2026.10.23`, `multidict` `7.2.1`, `opentelemetry-api` `1.45.2`, `virtualenv`
+  `21.15.1`, `boto3` `1.43.122`, `django-ninja` `1.7.3`, `ruff` `0.17.3`, `ty`
+  `0.0.95`, `pytest` `9.2.0`, and `zensical` `0.0.73`), and bound disposable OCI
+  registry Go heap (`GOMEMLIMIT=64MiB`, `GOGC=25`) and page-cache pressure during
+  `monitoring-qualification.yml` candidate image push before restoring the runtime
+  `128 MiB` cgroup limit for Kind qualification (#695).
 
 ## [0.7.1] - 2026-10-27
 

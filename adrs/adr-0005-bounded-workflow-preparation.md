@@ -14,26 +14,26 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
+| Last verified | 2026-11-02; source and issue audit on `main` (`2f9721f`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
-not a new preparation benchmark or deployed qualification.
+Reviewed against `main` (`2f9721f`) on 2026-11-02. This is a source and issue audit,
+not a new 250k-node Linux preparation benchmark or deployed qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
-| Spill-backed topology preparation | Implemented with a legacy boundary | [preparation.py](../src/django_ray/workflow/progress/preparation.py) still materializes legacy `observed_node_ids`; see [preparation tests](../tests/unit/test_workflow_progress_preparation.py) |
-| General composite topology/detail engine | Deferred outside the default terminal path | [#156](https://github.com/dariuszpanas/django-ray/issues/156) and [#157](https://github.com/dariuszpanas/django-ray/issues/157) are open |
-| Aggregate spill admission/reclamation | Deferred outside the default terminal path | [#158](https://github.com/dariuszpanas/django-ray/issues/158) remains open |
+| Spill-backed topology preparation | Implemented (legacy detached `observed_node_ids` capped at 25,000 nodes) | [preparation.py](../src/django_ray/workflow/progress/preparation.py) and [preparation tests](../tests/unit/test_workflow_progress_preparation.py) |
+| General composite topology/detail engine | Implemented ([#156](https://github.com/dariuszpanas/django-ray/issues/156) closed `COMPLETED`); native Linux scale benchmark matrix pending | `prepare_workflow_progress_initial_publication()` in [preparation.py](../src/django_ray/workflow/progress/preparation.py), `PreparedWorkflowProgressInitialPublication` in [storage.py](../src/django_ray/workflow/progress/storage.py); [#157](https://github.com/dariuszpanas/django-ray/issues/157) tracks the 25k/100k/250k-node Linux benchmark matrix |
+| Aggregate spill admission/reclamation | Implemented ([#158](https://github.com/dariuszpanas/django-ray/issues/158) closed `COMPLETED`) | `SpillCapacityController` in [spill_capacity.py](../src/django_ray/workflow/progress/spill_capacity.py) and [spill capacity tests](../tests/unit/test_workflow_progress_spill_capacity.py) |
 | Default terminal publication preparation | Implemented via bounded in-memory admission ([#79](https://github.com/dariuszpanas/django-ray/issues/79) closed `COMPLETED`) | [Terminal admission](../src/django_ray/workflow/progress/terminal_input.py), [publication](../src/django_ray/workflow/progress/publication.py), and [admission tests](../tests/unit/test_workflow_terminal_input.py) |
 
 [#142](https://github.com/dariuszpanas/django-ray/issues/142) was closed as
-superseded by #156/#157, not as implemented. The default terminal path admits at
-most 4 MiB, 131,072 primitive values and depth 16 before materialized preparation.
-Its activation does not prove the proposed general composite spill lifetime.
-No replacement ADR captures that narrower preparation choice; this audit records
-the divergence without rewriting the original proposal as if it had shipped.
+superseded by #156/#157. While the composite SQLite topology/detail engine (#156)
+and node-local spill capacity controller (#158) are now implemented, the default
+terminal path continues to use bounded in-memory admission (at most 4 MiB,
+131,072 primitive values, and depth 16), and native Linux 25k/100k/250k-node
+benchmarking remains open in #157.
 
 ## Historical decision
 
