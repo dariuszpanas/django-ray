@@ -315,6 +315,12 @@ cleanup cannot delete an object between registration and attachment.
 Migration `0021` adds this typed registry and request-reference link as dormant schema.
 Existing and released writers omit the new kind and receive the database default
 `task_input`; no Ray Job changes transport merely because the migration is applied.
+For crash-window objects written to external storage before database registration
+committed, `discover_and_reap_unregistered_payloads()`
+(`django_ray_purge_inputs --discover-unregistered` and `--delete-unregistered`)
+performs bounded prefix inventories within explicit object, page, and grace-window
+caps, inserts a coordinated `PURGED` `TaskInputPayload` tombstone to fence concurrent
+producers, and revalidates canonical envelope bytes before deleting the backend object.
 
 ### `TaskAttempt`
 
@@ -436,20 +442,22 @@ changes, and advances the summary pointer atomically. A stale fence, corrupt can
 or summary conflict rolls back the current-state mutation instead of exposing partial
 detail.
 
-Those durable-storage bounds are now paired with spill-backed production topology
-preparation. [ADR-0005](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md) uses a
-package-owned, private SQLite workspace for exact one-shot node/edge duplicate and
-reference validation, canonical selection, and cleanup before capability issuance.
-Only retained topology and bounded batches enter Python during that phase. The public
-prepared value still materializes the complete `observed_node_ids` compatibility set
-needed by initial detail, so this is not yet an end-to-end O(retained) preparation
-claim. Composite detail preparation remains tracked by
-[#156](https://github.com/dariuszpanas/django-ray/issues/156) and
+Those durable-storage bounds are paired with spill-backed composite topology and
+initial-detail preparation.
+[ADR-0005](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md)
+uses a package-owned, private SQLite workspace (`prepare_workflow_progress_initial_publication()`,
+`PreparedWorkflowProgressCompositeTopology`, `PreparedWorkflowProgressInitialPublication`,
+and capability-verified `persist_workflow_progress_publication()`) for exact one-shot
+node/edge duplicate and reference validation, canonical topology and initial-detail
+selection, and cleanup before capability issuance without materializing unbounded
+Python `observed_node_ids` (legacy `prepare_workflow_progress_topology()` caps detached
+`observed_node_ids` at 25,000 nodes). `SpillCapacityController` in
+`django_ray.workflow.progress.spill_capacity` enforces node-local aggregate byte
+reservations, workspace and per-owner quotas, filesystem free-space headroom checks,
+and PID-reuse-safe janitor cleanup of proven-stale workspaces and quarantines (#156,
+#158). Native Linux 25k/100k/250k-node scale benchmarking remains tracked in
 [#157](https://github.com/dariuszpanas/django-ray/issues/157); the former umbrella
-#142 was closed as superseded. #79 separately
-owns sampled/coalesced reporting, live wire and cost attribution, aggregate
-producer/mailbox admission, producer backpressure, bounded actor-to-preparer draining,
-and large-fan-out slow-consumer evidence.
+#142 was closed as superseded.
 The default terminal adapter uses the narrower profile of 512 nodes, 2,048 edges,
 2 MiB topology, 1 MiB detail and 4 MiB combined. Lifetime admission and local leaf
 capture bound this path. Higher-scale and live reporting still require the broader
@@ -1336,6 +1344,11 @@ and quiescence.
 - Worker logs for claim/submit/reconcile/retry events.
 - Structured workflow-leaf logs correlated by durable task, workflow node, and Ray IDs.
 - Optional Ray State API lookup for live task attempts and bounded stdout/stderr tails.
+- Optional, fail-open OpenTelemetry trace correlation (`django_ray.tracing`) across
+  enqueue, claim, Ray submission, remote execution, workflow execution, retry
+  reconciliation, and terminal persistence with W3C `traceparent` validation, strict
+  payload/credential/traceback redaction, `AttemptAuthorityToken` stale-attempt
+  fencing, and bounded per-run child workflow node spans.
 - Optional authenticated HTTP adapters in the `testproject` example app.
 
 ## See Also
@@ -1349,5 +1362,6 @@ and quiescence.
 - [ADR-0003: Compiled Invocation Lifecycle](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0003-compiled-invocation-lifecycle.md)
 - [ADR-0004: Bounded Workflow Progress Storage](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0004-bounded-workflow-progress.md)
 - [ADR-0005: Bounded Workflow Progress Preparation](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md)
+- [ADR-0007: Durable Step Checkpoints and Fail-Closed Resume Planning](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0007-durable-step-checkpoints.md)
 - [Runtime Environments](runtime-environments.md)
 - [Retry & Error Handling](retry.md)

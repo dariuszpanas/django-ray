@@ -14,18 +14,18 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
+| Last verified | 2026-11-02; source and issue audit on `main` (`2f9721f`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
+Reviewed against `main` (`2f9721f`) on 2026-11-02. This is a source and issue audit,
 not a new deployed qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
 | Bounded durable storage and authorized reads | Implemented | [Storage](../src/django_ray/workflow/progress/storage.py) and [read services](../src/django_ray/workflow/progress/reads.py) |
 | Default terminal graph publication | Implemented (`WORKFLOW_PROGRESS_SCHEMA_V3_PILOT` removed; `WORKFLOW_PROGRESS_REPORTING_POLICY` active) | [Publication](../src/django_ray/workflow/progress/publication.py), [terminal admission tests](../tests/unit/test_workflow_terminal_admission.py), and completed issues [#79](https://github.com/dariuszpanas/django-ray/issues/79), [#261](https://github.com/dariuszpanas/django-ray/issues/261), [#507](https://github.com/dariuszpanas/django-ray/issues/507), and [#571](https://github.com/dariuszpanas/django-ray/issues/571) |
-| General composite preparation and spill admission | Deferred outside the default terminal path | [#156](https://github.com/dariuszpanas/django-ray/issues/156), [#157](https://github.com/dariuszpanas/django-ray/issues/157), and [#158](https://github.com/dariuszpanas/django-ray/issues/158) remain open |
+| General composite preparation and spill admission | Implemented ([#156](https://github.com/dariuszpanas/django-ray/issues/156) and [#158](https://github.com/dariuszpanas/django-ray/issues/158) closed `COMPLETED`); native Linux scale benchmark matrix pending | [preparation.py](../src/django_ray/workflow/progress/preparation.py), [spill_capacity.py](../src/django_ray/workflow/progress/spill_capacity.py); [#157](https://github.com/dariuszpanas/django-ray/issues/157) tracks the 25k/100k/250k-node Linux benchmark matrix |
 
 The storage decision remains represented in source, but its original activation
 plan no longer describes default terminal publication. Terminal publication uses

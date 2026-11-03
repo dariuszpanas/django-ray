@@ -14,22 +14,23 @@
 | Delivery tracking | Current delivery issues and boundaries are listed in the audit below |
 | Supersedes | Not reconstructed |
 | Superseded by | No replacement ADR identified; later divergences are recorded below |
-| Last verified | 2026-11-01; source and issue audit at `v0.7.1` (`e72aaaa`) |
+| Last verified | 2026-11-02; source and issue audit on `main` (`2f9721f`) |
 
 ## Current implementation and evidence
 
-Reviewed against main `e72aaaa` (`v0.7.1`) on 2026-11-01. This is a source and issue audit,
+Reviewed against `main` (`2f9721f`) on 2026-11-02. This is a source and issue audit,
 not a new native execution qualification.
 
 | Requirement | Current finding | Evidence and remaining work |
 | --- | --- | --- |
 | Immutable, secret-free plan boundary | Implemented (`plan_format_version=1`, `PLAN_SELECTION_FORMAT_VERSION=2` with `reporting_policy`) | [plans.py](../src/django_ray/workflow/plans.py), [plan tests](../tests/unit/test_workflow_plans.py), and [plan migration](../src/django_ray/migrations/0011_raytaskexecution_workflow_plan.py) |
-| Whole-plan strategy integration | Partial | [Issue #70](https://github.com/dariuszpanas/django-ray/issues/70) remains open; [#71](https://github.com/dariuszpanas/django-ray/issues/71) closed `NOT_PLANNED` |
-| Compiled Graph execution strategy | Not delivered as a supported strategy | [Issue #72](https://github.com/dariuszpanas/django-ray/issues/72) and [#154](https://github.com/dariuszpanas/django-ray/issues/154); the verified capability set in [compiled_graph.py](../src/django_ray/runtime/compiled_graph.py) is empty |
+| Whole-plan strategy seam and bounded workflow helpers | Implemented ([#70](https://github.com/dariuszpanas/django-ray/issues/70), [#91](https://github.com/dariuszpanas/django-ray/issues/91), [#94](https://github.com/dariuszpanas/django-ray/issues/94), [#95](https://github.com/dariuszpanas/django-ray/issues/95), [#289](https://github.com/dariuszpanas/django-ray/issues/289) closed `COMPLETED`; [#71](https://github.com/dariuszpanas/django-ray/issues/71) closed `NOT_PLANNED`) | [strategy.py](../src/django_ray/workflow/strategy.py), [map_transport.py](../src/django_ray/workflow/map_transport.py), [paged_input.py](../src/django_ray/workflow/paged_input.py), [concurrency.py](../src/django_ray/workflow/concurrency.py), and [checkpoints.py](../src/django_ray/workflow/checkpoints.py) |
+| Compiled Graph execution strategy | Default-off experimental adapter implemented ([#72](https://github.com/dariuszpanas/django-ray/issues/72), [#159](https://github.com/dariuszpanas/django-ray/issues/159) closed `COMPLETED`); not promoted as a supported native strategy | `CompiledGraphExecutionStrategy` in [strategy.py](../src/django_ray/workflow/strategy.py); `_VERIFIED_CAPABILITIES` in [compiled_graph.py](../src/django_ray/runtime/compiled_graph.py) (policy v4) remains empty pending [#154](https://github.com/dariuszpanas/django-ray/issues/154) and [#102](https://github.com/dariuszpanas/django-ray/issues/102) |
 
-The plan contract survives. Acceptance did not activate every proposed strategy.
-No replacement ADR was identified in this six-record archive; that is not proof
-that every historical detail remains current.
+The plan contract survives. Acceptance did not activate native Compiled Graph
+capabilities by default. See [ADR-0007](adr-0007-durable-step-checkpoints.md) for
+fail-closed step checkpoint resume planning; no replacement ADR supersedes this
+plan contract in the seven-record archive.
 
 ## Historical decision
 

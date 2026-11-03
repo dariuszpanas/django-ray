@@ -2,10 +2,13 @@
 
 This document defines the architecture contract between the public workflow builders,
 durable Django task execution, and current or future Ray execution engines. The version
-1 effective-plan materializer, identity pinning, dynamic/local selection metadata,
-Compiled Graph compatibility adapter, and Ray-free compiled-invocation lifecycle
-reducer are implemented. Static actors, a native Compiled Graph execution adapter, and
-a resident owner remain future strategy work.
+1 effective-plan materializer, identity pinning, whole-plan execution-strategy seam
+(`django_ray.workflow.strategy`), per-run fixed-actor graph builder
+(`build_fixed_actor_graph_plan()`), Compiled Graph compatibility policy (v4), Ray-free
+compiled-invocation lifecycle reducer, and default-off `CompiledGraphExecutionStrategy`
+are implemented. Native Compiled Graph capability promotion remains gated on upstream
+Ray shared-memory reclamation (#154) and pilot qualification (#102), and cross-run
+resident graph ownership remains deferred.
 
 The governing plan decision is
 [ADR-0001](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0001-workflow-plan-contract.md). The first Compiled Graph
@@ -62,13 +65,21 @@ node progress is disabled:
 - `workflow_plan_selection` records the requested policy, selected baseline strategy,
   effective workflow reporting policy, eligible strategies, and bounded rejections.
 
-Local execution and ordinary dynamic Ray tasks are the only selectable strategies in
-this change. Current task-shaped leaves always receive an `UNSUPPORTED_NODE_MODEL`
-rejection for Compiled Graph. A dynamic map also receives `DYNAMIC_TOPOLOGY`, and
-unresolved code, RuntimeEnv, or platform identity adds its own rejection. A later
-strategy may route only by the exact fingerprint and must drain prepared state when it
-changes. The current `cache_key()`, owner assertion, and drain predicate are contract
-helpers; this release does not create a resident owner or operational graph cache.
+Local execution and ordinary dynamic Ray tasks remain the default runtime strategies.
+Callers may inspect or select whole-plan strategies explicitly through
+`WorkflowSignature.inspect_strategy(...)` and
+`WorkflowSignature.with_execution_strategy(...)` in `django_ray.workflow.strategy`,
+which also provides per-run fixed-actor plan construction
+(`build_fixed_actor_graph_plan()`, `InProcessFixedActorAdapter`), explicit
+`MIXED_REGIONS_UNSUPPORTED` rejection for V1 mixed dynamic/static partitions,
+run-identity callback fencing, and the experimental default-off
+`CompiledGraphExecutionStrategy` (`COMPILED_GRAPH_EXPERIMENTAL_ENABLED`). Current
+task-shaped leaves still receive an `UNSUPPORTED_NODE_MODEL` rejection for Compiled
+Graph, dynamic maps receive `DYNAMIC_TOPOLOGY`, unresolved code, RuntimeEnv, or
+platform identity adds its own rejection, and policy version 4 retains an empty
+`_VERIFIED_CAPABILITIES` set pending #154. Any strategy that prepares actor state
+routes only by the exact fingerprint and drains on change; cross-run resident graph
+ownership and operational graph caching remain deferred.
 
 Context-free `WorkflowSignature.run()` materializes its plan before the public path
 resolves a Ray executor. Version 1 therefore leaves compiler-owner topology and

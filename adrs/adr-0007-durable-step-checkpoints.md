@@ -10,10 +10,10 @@
 | Proposed | 2026-11-01 |
 | Accepted | Not accepted |
 | Decision review | PR `#694` |
-| Delivery tracking | `#289` |
+| Delivery tracking | [#289](https://github.com/dariuszpanas/django-ray/issues/289) (Ray-free state machine completed in `e36865b`; durable storage integration deferred) |
 | Supersedes | None |
 | Superseded by | None |
-| Last verified | 2026-11-01 (`src/django_ray/workflow/checkpoints.py`) |
+| Last verified | 2026-11-02 on `main` (`2f9721f`, `src/django_ray/workflow/checkpoints.py`) |
 
 ## Context and scope
 

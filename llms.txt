@@ -97,6 +97,20 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   `django_ray_runtime_env`, `django_ray_protocol_status`,
   `django_ray_cleanup_workflow_progress`, and `django_ray_audit_workflow_progress`.
 - `src/django_ray/workflows.py`: workflow signature construction and execution.
+- `src/django_ray/workflow/strategy.py`: whole-plan execution-strategy seam, fixed-actor
+  plan builder, and default-off Compiled Graph strategy adapter.
+- `src/django_ray/workflow/map_transport.py`: bounded chunked and tree-merged
+  list-preserving workflow map result transport.
+- `src/django_ray/workflow/paged_input.py`: pull-driven, backpressure-bounded paged
+  workflow map input streaming.
+- `src/django_ray/workflow/concurrency.py`: cross-run workflow concurrency scopes and
+  shared external-service rate/concurrency budgets.
+- `src/django_ray/workflow/checkpoints.py`: Ray-free fail-closed durable step checkpoint
+  state machine and resume planner (ADR-0007).
+- `src/django_ray/workflow/progress/spill_capacity.py`: node-local spill workspace
+  reservations, owner quotas, headroom checks, and stale-workspace janitor.
+- `src/django_ray/tracing.py`: optional, fail-open OpenTelemetry task and workflow trace
+  correlation with strict redaction and stale-attempt fencing.
 - `src/django_ray/runtime/runtime_env.py`: profile validation, inheritance, hashing,
   and local-path preparation.
 - `src/django_ray/runtime/runtime_env_encryption.py`: key validation, HKDF
