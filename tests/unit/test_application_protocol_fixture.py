@@ -29,6 +29,7 @@ def manager(monkeypatch):
     command.execution_mode = "cluster"
     command.worker_id = "protocol-fixture-manager"
     command.active_tasks = {}
+    command._is_ray_core_initialized = lambda: True
     command._create_lease("default")
 
     def forbidden(*args, **kwargs):

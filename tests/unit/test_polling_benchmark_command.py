@@ -888,6 +888,29 @@ def test_capture_production_claim_sql_uses_real_worker_boundary(monkeypatch) -> 
     assert delete_leases.call_args.args[0][0].worker_id == "capture-worker"
 
 
+@pytest.mark.django_db
+def test_capture_production_claim_sql_reaches_priority_select_without_live_ray(
+    monkeypatch,
+) -> None:
+    table = benchmark.RayTaskExecution._meta.db_table.upper()
+    monkeypatch.setattr(
+        benchmark,
+        "_is_claim_query",
+        lambda sql: (
+            " ".join(sql.upper().split()).startswith("SELECT")
+            and table in sql.upper()
+            and "ORDER BY" in sql.upper()
+        ),
+    )
+
+    captured = Command._capture_production_claim_sql(
+        queue_name="real-worker-sqlite-capture",
+        query_limit=3,
+    )
+
+    assert benchmark._has_inclusive_protocol_predicates(captured)
+
+
 def test_benchmark_worker_fails_closed_before_claim_after_lease_loss(monkeypatch) -> None:
     command = Command()
 

@@ -108,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent disconnected `ray_core` (`--local` and `--cluster`) workers from claiming
+  `QUEUED` tasks while `ray.is_initialized()` is false, hand back remaining unsubmitted
+  claim-batch items if the Ray driver disconnects mid-batch, clear stale Ray Core task
+  references immediately on broken-session teardown even when reconnection fails, and
+  renew `TaskWorkerLease` heartbeats across signal-interruptible reconnect backoff waits
+  (#699).
 - Align `k8s/base/django-web.yaml` liveness and readiness probes with `/api/livez`
   and `/api/readyz`, return HTTP 503 from `/api/readyz` when the database is
   unhealthy, add `django_ray_worker_ready` liveness and readiness probes to the

@@ -671,6 +671,7 @@ class Command(BaseCommand):
         command.shutdown_requested = False
         command.active_tasks = {}
         command.ray_core_runner = None
+        command._is_ray_core_initialized = lambda: True  # type: ignore[method-assign]
         captured_sql: str | None = None
 
         def reject_process_task(_task: RayTaskExecution) -> None:
@@ -1061,6 +1062,7 @@ class Command(BaseCommand):
                 command.shutdown_requested = False
                 command.active_tasks = {}
                 command.ray_core_runner = None
+                command._is_ray_core_initialized = lambda: True  # type: ignore[method-assign]
                 command.process_task = on_claim  # type: ignore[method-assign]
                 command._create_lease(queue_name)
                 if command.lease_identity is None:

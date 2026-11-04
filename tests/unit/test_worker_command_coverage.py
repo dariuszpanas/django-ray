@@ -593,6 +593,7 @@ class TestWorkerCommandCoverage:
         )
         cmd = _make_command()
         cmd.execution_mode = "local"
+        monkeypatch.setattr(cmd, "_is_ray_core_initialized", lambda: True)
         cmd._create_lease("default")
         processed: list[int] = []
         original_save = RayTaskExecution.save

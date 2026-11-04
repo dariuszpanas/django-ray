@@ -210,6 +210,7 @@ def _claim_command(worker_id: str, claimed: list[int]):
     command.shutdown_requested = False
     command.active_tasks = {}
     command.ray_core_runner = None
+    command._is_ray_core_initialized = lambda: True
     command.process_task = lambda task: claimed.append(task.pk)
     command._create_lease("default")
     return command

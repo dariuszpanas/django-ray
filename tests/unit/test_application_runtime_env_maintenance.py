@@ -338,6 +338,7 @@ def test_database_required_plaintext_manager_and_real_retry_preserve_history(
     command = Command()
     command.stdout = StringIO()
     command.execution_mode = "cluster"
+    monkeypatch.setattr(command, "_is_ray_core_initialized", lambda: True)
     command.worker_id = "maintenance-fixture-manager"
     command.active_tasks = {}
     command._create_lease("default")
@@ -444,6 +445,7 @@ def test_database_only_exact_prior_generation_blockers_allow_inactive_owner(
         command = Command()
         command.stdout = StringIO()
         command.execution_mode = "cluster"
+        monkeypatch.setattr(command, "_is_ray_core_initialized", lambda: True)
         command.worker_id = f"maintenance-{generation}-manager"
         command.active_tasks = {}
         command._create_lease("default")
