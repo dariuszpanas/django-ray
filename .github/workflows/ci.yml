@@ -186,6 +186,8 @@ jobs:
     env:
       # Keep fatal-signal diagnostics enabled after pytest restores its handlers.
       PYTHONFAULTHANDLER: "1"
+      # Reuse the synchronized interpreter instead of rebuilding uv virtual environments.
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
       COVERAGE_RAY_JOB_MIN: "90"
