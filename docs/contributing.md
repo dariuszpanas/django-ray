@@ -705,8 +705,11 @@ testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and 
 report `success`. Its `always()` condition makes a failed, cancelled, timed-out, or skipped dependency
 visible as a failed gate instead of a successful skip. This repository uses rebase auto-merge rather
 than a merge queue: auto-merge
-waits for `Commit Messages`, `CI Gate` and `Qualification Gate`, then applies the rebase method.
-Approval and review-conversation state do not block merges in this single-maintainer repository.
+waits for `Commit Messages`, `CI Gate`, `Qualification Gate`, one approving review (dismissed on
+new pushes), and resolved review threads, then applies the rebase method. On ordinary pull requests,
+`Pull Request Review Verdict` (`github-actions[bot]`) submits that approving review once the
+`.yaga/agent-review-policy.toml` `codex` lens passes on the current head; on trusted
+`dependabot[bot]` pull requests, the maintainer approves after CI succeeds.
 
 Native Compiled Graph evidence is produced only by the guarded local KubeRay pilot, not a public
 hosted workflow. Coverage-debt review and benchmark workflows are evidence producers, not merge
@@ -749,9 +752,10 @@ title separately before enabling auto-merge.
 
 If an auto-merge branch becomes stale or conflicted, rebase it onto the latest `main`, resolve the
 conflicts, rerun the affected checks, re-evaluate the full-gate triggers above, and push. Auto-merge
-recalculates the required checks. The merge policy requires `Commit Messages`, `CI Gate` and
-`Qualification Gate`, does not require approvals or resolved review conversations, and allows rebase
-merges only. The active ruleset has no bypass actors.
+recalculates the required checks. The merge policy requires `Commit Messages`, `CI Gate`,
+`Qualification Gate`, one approving review (with stale reviews dismissed on push and extra approval
+for unattributed changes), and resolved review threads, and allows rebase merges only. The active
+ruleset has no bypass actors.
 Administrator privileges are not a configured exception to the required checks.
 Any separately authorized infrastructure recovery must preserve and restore the exact
 original ruleset, record its validation evidence and verify the resulting history.
