@@ -11,6 +11,7 @@
 # Bindings identify existing fixed workflows; commands and secrets live outside
 # this policy. First adoption must compare plans in shadow mode.
 
+required-version = ">=0.5.0"
 test-policy-version = 1
 unknown-paths = "full"
 full-on = [

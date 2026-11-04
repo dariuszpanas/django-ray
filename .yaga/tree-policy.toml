@@ -1,9 +1,11 @@
+required-version = ">=0.5.0"
 tree-policy-version = 1
 required-paths = [
   "AGENTS.md", "CONTRIBUTING.md", "LICENSE", "README.md", "SECURITY.md",
   "pyproject.toml", "uv.lock", ".yaga.toml", ".githooks/commit-msg",
   ".yaga/checks/repository.toml", ".yaga/checks/workflows.toml",
-  ".yaga/branch-policy.toml", ".yaga/change-policy.toml",
+  ".yaga/agent-review-policy.toml", ".yaga/branch-policy.toml",
+  ".yaga/change-policy.toml", ".yaga/description-policy.toml",
   ".yaga/mode-policy.toml", ".yaga/path-policy.toml",
   ".yaga/size-policy.toml", ".yaga/tree-policy.toml",
 ]

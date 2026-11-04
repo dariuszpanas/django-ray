@@ -1,3 +1,4 @@
+required-version = ">=0.5.0"
 mode-policy-version = 1
 default-allowed-modes = ["regular"]
 

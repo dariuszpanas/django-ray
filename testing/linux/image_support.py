@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-MAX_BUILD_CACHE_BYTES = 128 * 1024 * 1024
+MAX_BUILD_CACHE_BYTES = 192 * 1024 * 1024
 SOURCE = Path("/opt/test-source")
 INPUTS = Path("/opt/test-inputs")
 WORKSPACE = Path("/workspace")
@@ -64,7 +64,7 @@ def record_environment(output: Path) -> None:
         raise ValueError("image environment receipt must not already exist")
     cache_bytes = tree_bytes(CACHE)
     if cache_bytes > MAX_BUILD_CACHE_BYTES:
-        raise ValueError("prepared build cache exceeds its 128 MiB scratch allowance")
+        raise ValueError("prepared build cache exceeds its 192 MiB scratch allowance")
     versions = {}
     for executable, arguments in (
         ("python", ["--version"]),

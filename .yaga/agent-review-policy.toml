@@ -1,0 +1,4 @@
+[agent-review]
+version = 1
+required-version = ">=0.5.0"
+required = ["codex"]

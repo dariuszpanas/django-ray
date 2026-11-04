@@ -1,3 +1,4 @@
+required-version = ">=0.5.0"
 change-policy-version = 1
 
 [[rules]]

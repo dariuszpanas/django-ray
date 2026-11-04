@@ -1,0 +1,163 @@
+name: Pull Request Review Verdict
+run-name: >-
+  ${{ github.event_name == 'pull_request_target' &&
+  format('PR review verdict for #{0}', github.event.pull_request.number) ||
+  format('PR review verdict from {0} run #{1}', github.event.workflow_run.name, github.event.workflow_run.run_number) }}
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_run:
+    workflows: [CI, "Pull Request Review Wake"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve Pull Request Target
+    if: >-
+      (
+        github.event_name == 'pull_request_target' &&
+        github.event.pull_request.base.ref == github.event.repository.default_branch &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.login != 'github-actions[bot]' &&
+        (
+          github.event.pull_request.user.login != 'dependabot[bot]' ||
+          github.event.pull_request.user.type != 'Bot'
+        )
+      ) ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+        (
+          (
+            github.event.workflow_run.path == '.github/workflows/ci.yml' &&
+            github.event.workflow_run.event == 'pull_request' &&
+            github.event.workflow_run.run_attempt > 1
+          ) ||
+          (
+            github.event.workflow_run.path == '.github/workflows/pr-review-wake.yml' &&
+            github.event.workflow_run.conclusion == 'success'
+          )
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    outputs:
+      pull_request_number: ${{ steps.resolve.outputs.pull_request_number }}
+      wait_seconds: ${{ steps.resolve.outputs.wait_seconds }}
+    steps:
+      - name: Extract bounded pull-request target
+        id: resolve
+        run: |
+          python3 -I -S - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          raw = pathlib.Path(os.environ["GITHUB_EVENT_PATH"]).read_bytes()
+          if len(raw) > 1024 * 1024:
+              raise SystemExit("GitHub event exceeds 1 MiB")
+          payload = json.loads(raw.decode("utf-8"))
+          pr_number = None
+          wait_seconds = None
+
+          if event_name == "pull_request_target":
+              pr = payload.get("pull_request") or {}
+              repo = payload.get("repository") or {}
+              base = pr.get("base") or {}
+              user = pr.get("user") or {}
+              number = pr.get("number")
+              is_dependabot = (
+                  user.get("login") == "dependabot[bot]" and user.get("type") == "Bot"
+              )
+              if (
+                  repo.get("full_name") == repository
+                  and pr.get("state") == "open"
+                  and pr.get("draft") is False
+                  and base.get("ref") == repo.get("default_branch")
+                  and user.get("login") != "github-actions[bot]"
+                  and not is_dependabot
+                  and isinstance(number, int)
+                  and not isinstance(number, bool)
+                  and 1 <= number <= 10**18
+              ):
+                  pr_number = number
+                  wait_seconds = 480
+          elif event_name == "workflow_run":
+              run = payload.get("workflow_run") or {}
+              repo = run.get("repository") or {}
+              path = run.get("path")
+              title = run.get("display_title")
+              attempt = run.get("run_attempt")
+              if repo.get("full_name") == repository:
+                  if (
+                      path == ".github/workflows/ci.yml"
+                      and run.get("event") == "pull_request"
+                      and isinstance(attempt, int)
+                      and not isinstance(attempt, bool)
+                      and attempt > 1
+                  ):
+                      prs = run.get("pull_requests")
+                      if isinstance(prs, list) and len(prs) == 1 and isinstance(prs[0], dict):
+                          candidate = prs[0].get("number")
+                          base_repo = (prs[0].get("base") or {}).get("repo") or {}
+                          if (
+                              base_repo.get("id") == repo.get("id")
+                              and isinstance(candidate, int)
+                              and not isinstance(candidate, bool)
+                              and 1 <= candidate <= 10**18
+                          ):
+                              pr_number = candidate
+                              wait_seconds = 60
+                  elif (
+                      path == ".github/workflows/pr-review-wake.yml"
+                      and run.get("conclusion") == "success"
+                      and run.get("event") in {"issue_comment", "workflow_dispatch"}
+                      and isinstance(title, str)
+                  ):
+                      match = re.fullmatch(r"YAGA review wake for #([1-9][0-9]{0,18})", title)
+                      if match is not None:
+                          pr_number = int(match.group(1))
+                          wait_seconds = 60
+
+          if pr_number is not None and wait_seconds is not None:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  handle.write(f"pull_request_number={pr_number}\n")
+                  handle.write(f"wait_seconds={wait_seconds}\n")
+          PY
+
+  publish-review:
+    name: Publish Pull Request Review
+    needs: [resolve]
+    if: needs.resolve.outputs.pull_request_number != ''
+    concurrency:
+      group: yaga-pr-review-${{ needs.resolve.outputs.pull_request_number }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Evaluate and submit pull-request review
+        uses: dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3 # v0.5.0
+        with:
+          check: pr-review
+          policy: .yaga/agent-review-policy.toml
+          pr: ${{ needs.resolve.outputs.pull_request_number }}
+          repo: ${{ github.repository }}
+          wait-seconds: ${{ needs.resolve.outputs.wait_seconds }}
+          submit-review: both
+          github-token: ${{ secrets.GITHUB_TOKEN }}

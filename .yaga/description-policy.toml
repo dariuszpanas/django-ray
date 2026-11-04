@@ -1,0 +1,9 @@
+required-version = ">=0.5.0"
+description-policy-version = 1
+min-words = 8
+max-length = 65536
+placeholders = ["TODO", "TBD", "FIXME"]
+require-checked-tasks = true
+typos = "check"
+heading-min-level = 2
+heading-max-length = 120

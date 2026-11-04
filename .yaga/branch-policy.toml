@@ -1,3 +1,4 @@
+required-version = ">=0.5.0"
 branch-policy-version = 1
 allowed-patterns = [
   "main", "feat/*", "fix/*", "docs/*", "chore/*", "test/*", "perf/*",

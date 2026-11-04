@@ -105,7 +105,7 @@ for the distinction between advisory lead and unmeasured selective execution sav
 
 ## Local comparison and evidence
 
-The workflow pins released `yaga-cli==0.3.0` in an isolated uv environment;
+The workflow pins released `yaga-cli==0.5.0` in an isolated uv environment;
 project dependencies and `uv.lock` are unchanged. Run the module with that same
 dependency available, from the reviewed adapter checkout:
 

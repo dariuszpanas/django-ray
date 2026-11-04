@@ -1,5 +1,6 @@
-# Shared policy for released YAGA 0.3.0 CLI and immutable Action.
+# Shared policy for released YAGA 0.5.0 CLI and immutable Action.
 config-version = 1
+required-version = ">=0.5.0"
 [commit]
 # Preserve the trusted same-repository Dependabot exemption.
 dependabot-pull-requests = "skip"

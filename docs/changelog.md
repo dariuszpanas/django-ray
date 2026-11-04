@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Upgrade repository YAGA tooling and GitHub Actions integration to released YAGA
+  `0.5.0` (`yaga-cli==0.5.0` and SHA-pinned root `dariuszpanas/yaga` Marketplace
+  Action), enforce `required-version = ">=0.5.0"` and `yaga policy check --strict`
+  across all tracked `.yaga` policies, add pull-request description validation
+  (`.yaga/description-policy.toml`) to `Commit Messages` for non-Dependabot pull
+  requests, and add automated Codex pull-request review verdict publication
+  (`.yaga/agent-review-policy.toml`, `pr-review.yml`, and `pr-review-wake.yml`).
+  Package runtime dependencies are unchanged.
 - Advance `COMPILED_GRAPH_POLICY_VERSION` from 3 to 4, requiring `fastrlock` in
   Compiled Graph dependency profile closure checks alongside `ray`, `numpy`,
   `pyarrow`, and `cupy`, record the `2026-11-01` Ray `2.58.0` capability review
