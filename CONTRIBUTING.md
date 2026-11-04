@@ -121,8 +121,11 @@ inside the PR. Do not squash a PR. After CI is green, enable auto-merge with the
 gh pr merge --auto --rebase <PR-number>
 ```
 
-Auto-merge waits for `Commit Messages`, `CI Gate` and `Qualification Gate`. Approval and
-review-conversation state do not block merges in this single-maintainer repository. The rebase method preserves each descriptive
+Auto-merge waits for `Commit Messages`, `CI Gate`, `Qualification Gate`, one approving review
+(dismissed on new pushes), and resolved review threads. On ordinary pull requests, `Pull Request
+Review Verdict` (`github-actions[bot]`) submits that approving review once the `.yaga/agent-review-policy.toml`
+`codex` lens passes on the current head; on trusted `dependabot[bot]` pull requests, the maintainer
+approves after CI succeeds. The rebase method preserves each descriptive
 commit on `main`. The `Commit Messages` workflow validates ordinary PR titles and commit messages from
 a base-branch checkout with read-only repository permission. Its Dependabot exclusion still verifies
 the exact event head and is limited by trusted `pull_request_target` event metadata to the bot's
@@ -174,9 +177,10 @@ the final PR title separately before enabling auto-merge.
 
 If an auto-merge PR becomes stale or conflicts, update the branch from the latest `main`, resolve
 conflicts, rerun the affected checks, re-evaluate the full-gate triggers below, and push. Auto-merge
-waits for the new head's checks. The merge policy requires `Commit Messages`, `CI Gate` and
-`Qualification Gate`, does not require approvals or resolved review conversations, and permits rebase
-merges only. The active ruleset has no bypass actors.
+waits for the new head's checks. The merge policy requires `Commit Messages`, `CI Gate`,
+`Qualification Gate`, one approving review (with stale reviews dismissed on push and extra approval
+for unattributed changes), and resolved review threads, and permits rebase merges only. The active
+ruleset has no bypass actors.
 Administrator privileges are not a configured exception to the required checks.
 Any separately authorized infrastructure recovery must preserve and restore the exact
 original ruleset, record its validation evidence and verify the resulting history.
