@@ -257,6 +257,7 @@ class TestWorkerLeaseCollisionSafety:
         )
         command = _make_command(f"shared-{execution_mode}")
         command.execution_mode = execution_mode
+        monkeypatch.setattr(command, "_is_ray_core_initialized", lambda: True)
         allocated_worker = f"allocated-{execution_mode}"
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.generate_worker_id",

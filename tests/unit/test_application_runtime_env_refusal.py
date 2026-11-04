@@ -34,6 +34,7 @@ def refused(fixture_settings, db, monkeypatch):
     command = Command()
     command.stdout = StringIO()
     command.execution_mode = "cluster"
+    monkeypatch.setattr(command, "_is_ray_core_initialized", lambda: True)
     command.worker_id = "negative-fixture-manager"
     command.active_tasks = {}
     command._create_lease("default")

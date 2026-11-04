@@ -4479,6 +4479,7 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
         )
         cmd = _make_command()
+        cmd.execution_mode = "ray"
         monkeypatch.setattr(cmd, "process_task", lambda _task: None)
 
         assert cmd.claim_and_process_tasks(queues=["default"], concurrency=1) == 1
@@ -6362,3 +6363,250 @@ class TestWorkerReconnectPollReconcile:
         assert fetched.get_deferred_fields() == set(Command._DEFERRED_MAINTENANCE_SCAN_FIELDS)
         sentinel = SimpleNamespace()
         assert Command._defer_maintenance_scan_fields(sentinel) is sentinel
+
+    @pytest.mark.parametrize("mode", ["local", "cluster"])
+    def test_disconnected_ray_core_worker_skips_claiming_and_leaves_queue_for_healthy_peer(
+        self,
+        monkeypatch,
+        mode: str,
+    ) -> None:
+        overdue = RayTaskExecution.objects.create(
+            task_id=f"disconnected-core-overdue-{mode}",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            queue_timeout_seconds=60,
+            queue_deadline_at=datetime.now(UTC) - timedelta(seconds=5),
+        )
+        eligible = RayTaskExecution.objects.create(
+            task_id=f"disconnected-core-eligible-{mode}",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.QUEUED,
+            args_json="[3, 4]",
+            kwargs_json="{}",
+        )
+
+        disconnected = _make_command()
+        disconnected.worker_id = f"disconnected-{mode}-worker"
+        disconnected.execution_mode = mode
+        disconnected.cluster_address = "ray://dead-head:10001" if mode == "cluster" else None
+        disconnected._create_lease("default")
+        monkeypatch.setattr(
+            disconnected,
+            "_init_local_ray",
+            lambda: (_ for _ in ()).throw(RuntimeError("local ray unavailable")),
+        )
+        monkeypatch.setattr(
+            disconnected,
+            "_init_cluster_ray",
+            lambda _addr: (_ for _ in ()).throw(RuntimeError("cluster head unreachable")),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "ray",
+            SimpleNamespace(is_initialized=lambda: False),
+        )
+        disconnected._initialize_ray_execution()
+        assert disconnected._ray_reconnect_backoff_until > 0.0
+
+        # Disconnected worker still sweeps expired rows under its lease fence,
+        # but refuses to claim eligible QUEUED work or burn attempt_number.
+        assert disconnected.claim_and_process_tasks(["default"], concurrency=2) == 1
+        overdue.refresh_from_db()
+        eligible.refresh_from_db()
+        assert overdue.state == TaskState.EXPIRED
+        assert eligible.state == TaskState.QUEUED
+        assert eligible.claimed_by_worker is None
+        assert eligible.attempt_number == 1
+        assert eligible.execution_generation == 0
+        assert not TaskAttempt.objects.filter(execution=eligible).exists()
+
+        healthy = _make_command()
+        healthy.worker_id = f"healthy-{mode}-worker"
+        healthy.execution_mode = mode
+        healthy.cluster_address = "ray://healthy-head:10001" if mode == "cluster" else None
+        healthy._create_lease("default")
+        processed_by_healthy: list[int] = []
+        monkeypatch.setattr(healthy, "_is_ray_core_initialized", lambda: True)
+        monkeypatch.setattr(
+            healthy,
+            "process_task",
+            lambda current_task: processed_by_healthy.append(int(current_task.pk)),
+        )
+
+        assert healthy.claim_and_process_tasks(["default"], concurrency=2) == 1
+        eligible.refresh_from_db()
+        assert processed_by_healthy == [eligible.pk]
+        assert eligible.state == TaskState.RUNNING
+        assert eligible.claimed_by_worker == healthy.worker_id
+        assert eligible.attempt_number == 1
+        assert eligible.execution_generation == 1
+
+    def test_mid_batch_ray_core_disconnect_hands_back_remaining_unsubmitted_tasks(
+        self,
+        monkeypatch,
+    ) -> None:
+        tasks = [
+            RayTaskExecution.objects.create(
+                task_id=f"mid-batch-disconnect-{idx}",
+                callable_path="testproject.tasks.add_numbers",
+                queue_name="default",
+                state=TaskState.QUEUED,
+                args_json=f"[{idx}, 1]",
+                kwargs_json="{}",
+            )
+            for idx in range(3)
+        ]
+
+        cmd = _make_command()
+        cmd.worker_id = "mid-batch-disconnect-worker"
+        cmd.execution_mode = "cluster"
+        cmd.cluster_address = "ray://flaky-head:10001"
+        cmd._create_lease("default")
+
+        state = {"connected": True}
+        monkeypatch.setattr(cmd, "_is_ray_core_initialized", lambda: state["connected"])
+        dispatched: list[int] = []
+
+        def fail_first_and_disconnect(claimed: RayTaskExecution) -> None:
+            dispatched.append(int(claimed.pk))
+            state["connected"] = False
+            cmd._handle_task_failure(
+                claimed,
+                error_message="Ray cluster not available",
+                exception_type="RayConnectionError",
+                expected_claimed_by_worker=cmd.worker_id,
+                expected_attempt_number=int(claimed.attempt_number),
+                expected_execution_generation=int(claimed.execution_generation),
+            )
+
+        monkeypatch.setattr(cmd, "process_task", fail_first_and_disconnect)
+
+        assert cmd.claim_and_process_tasks(["default"], concurrency=3) == 3
+
+        assert dispatched == [tasks[0].pk]
+        for remaining in tasks[1:]:
+            remaining.refresh_from_db()
+            assert remaining.state == TaskState.QUEUED
+            assert remaining.claimed_by_worker is None
+            assert remaining.started_at is None
+            assert remaining.last_heartbeat_at is None
+            assert remaining.attempt_number == 1
+            assert not TaskAttempt.objects.filter(execution=remaining).exists()
+
+    def test_reconnect_ray_renews_lease_and_clears_stale_handles_when_all_attempts_fail(
+        self,
+        monkeypatch,
+    ) -> None:
+        cmd = _make_command()
+        cmd.worker_id = "reconnect-lease-renewal-worker"
+        cmd.execution_mode = "cluster"
+        cmd.cluster_address = "ray://unreachable-head:10001"
+        cmd._create_lease("default")
+
+        stale_marks: list[bool] = []
+        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=1))
+        monkeypatch.setattr(
+            cmd,
+            "_mark_stale_ray_core_tasks_as_lost",
+            lambda: stale_marks.append(True),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "ray",
+            SimpleNamespace(
+                is_initialized=lambda: False,
+                shutdown=lambda: None,
+                cluster_resources=lambda: {"CPU": 1},
+            ),
+        )
+        monkeypatch.setattr(
+            cmd,
+            "_init_cluster_ray",
+            lambda _addr: (_ for _ in ()).throw(RuntimeError("head down")),
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep",
+            lambda *_: None,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_heartbeat_interval",
+            lambda: timedelta(seconds=15),
+        )
+
+        renewals: list[bool] = []
+        original_update = cmd._update_lease_heartbeat
+
+        def tracked_update() -> bool:
+            renewals.append(True)
+            return original_update()
+
+        monkeypatch.setattr(cmd, "_update_lease_heartbeat", tracked_update)
+
+        cmd._reconnect_ray()
+
+        # 2s + 5s + 10s + 20s + 40s = 77s total wait across 15s heartbeat cadence
+        assert len(renewals) >= 4
+        assert stale_marks == [True]
+        assert cmd.ray_core_runner is None
+        assert cmd._ray_reconnect_backoff_until > 0.0
+        assert "pause claiming new Ray Core tasks" in cmd.stdout.getvalue()
+
+        # Active cooldown prevents immediate back-to-back 5-attempt reconnect loops.
+        reconnect_invocations: list[bool] = []
+        monkeypatch.setattr(cmd, "_reconnect_ray", lambda: reconnect_invocations.append(True))
+        cmd._check_ray_connection()
+        assert reconnect_invocations == []
+
+    @pytest.mark.parametrize("abort_reason", ["signal", "lease_loss"])
+    def test_reconnect_ray_aborts_early_on_shutdown_or_lease_loss(
+        self,
+        monkeypatch,
+        abort_reason: str,
+    ) -> None:
+        cmd = _make_command()
+        cmd.worker_id = f"reconnect-abort-{abort_reason}"
+        cmd.execution_mode = "local"
+        cmd._create_lease("default")
+
+        attempts: list[int] = []
+        monkeypatch.setitem(
+            sys.modules,
+            "ray",
+            SimpleNamespace(
+                is_initialized=lambda: False,
+                shutdown=lambda: None,
+                cluster_resources=lambda: {"CPU": 1},
+            ),
+        )
+
+        def fail_and_trigger() -> None:
+            attempts.append(1)
+            if abort_reason == "signal":
+                cmd.shutdown_requested = True
+                cmd._shutdown_event.set()
+            raise RuntimeError("connect failed")
+
+        monkeypatch.setattr(cmd, "_init_local_ray", fail_and_trigger)
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.time.sleep",
+            lambda *_: None,
+        )
+        monkeypatch.setattr(
+            "django_ray.management.commands.django_ray_worker.get_heartbeat_interval",
+            lambda: timedelta(seconds=3),
+        )
+        if abort_reason == "lease_loss":
+            monkeypatch.setattr(
+                cmd,
+                "_update_lease_heartbeat",
+                lambda: cmd._request_shutdown_for_lease_loss("lost lease") or False,
+            )
+
+        cmd._reconnect_ray()
+
+        assert len(attempts) == 1
+        assert cmd.shutdown_requested is True

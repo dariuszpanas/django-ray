@@ -100,6 +100,8 @@ from django_ray.runtime.runtime_env import (
 
 _WORKER_ID_ALLOCATION_ATTEMPTS = 3
 _SHUTDOWN_WAIT_SLICE_SECONDS = 0.1
+_RAY_RECONNECT_INITIAL_DELAY_SECONDS = 5.0
+_RAY_RECONNECT_MAX_DELAY_SECONDS = 60.0
 
 
 class _WorkerIdReservedByTaskError(Exception):
@@ -185,6 +187,8 @@ class Command(BaseCommand):
         self.sync_mode = False
         self.local_mode = False
         self.cluster_address: str | None = None
+        self._ray_reconnect_backoff_until = 0.0
+        self._ray_reconnect_delay = _RAY_RECONNECT_INITIAL_DELAY_SECONDS
         self._ray_backend_queue_configuration: _RayBackendQueueConfiguration | None = None
         self._ray_job_queue_affinity: _RayJobQueueAffinity | None = None
 
@@ -361,7 +365,10 @@ class Command(BaseCommand):
                 self._init_local_ray()
                 with self._preserve_shutdown_signal_handlers():
                     self.ray_core_runner = self._create_ray_core_runner()
+                self._reset_ray_reconnect_backoff()
             except Exception as error:
+                self.ray_core_runner = None
+                self._schedule_ray_reconnect_backoff()
                 diagnostic = render_console_diagnostic(error)
                 self.stdout.write(self.style.WARNING(f"Initial Ray init failed: {diagnostic}"))
                 self.stdout.write("Will retry connection during operation...")
@@ -371,7 +378,10 @@ class Command(BaseCommand):
                 self._init_cluster_ray(self.cluster_address)
                 with self._preserve_shutdown_signal_handlers():
                     self.ray_core_runner = self._create_ray_core_runner()
+                self._reset_ray_reconnect_backoff()
             except Exception as error:
+                self.ray_core_runner = None
+                self._schedule_ray_reconnect_backoff()
                 diagnostic = render_console_diagnostic(error)
                 self.stdout.write(
                     self.style.WARNING(f"Initial cluster connection failed: {diagnostic}")
@@ -1445,6 +1455,82 @@ class Command(BaseCommand):
             raise payload
         return payload
 
+    def _is_ray_core_initialized(self) -> bool:
+        """Return whether the process-wide Ray Core driver is initialized."""
+        import ray
+
+        return bool(ray.is_initialized())
+
+    def _reset_ray_reconnect_backoff(self) -> None:
+        """Clear reconnect cooldown after a verified Ray Core connection."""
+        self._ray_reconnect_backoff_until = 0.0
+        self._ray_reconnect_delay = _RAY_RECONNECT_INITIAL_DELAY_SECONDS
+
+    def _schedule_ray_reconnect_backoff(self) -> float:
+        """Advance exponential cooldown before the next reconnect cycle."""
+        delay = self._ray_reconnect_delay
+        self._ray_reconnect_backoff_until = time.monotonic() + delay
+        self._ray_reconnect_delay = min(delay * 2.0, _RAY_RECONNECT_MAX_DELAY_SECONDS)
+        return delay
+
+    def _maybe_renew_lease_during_reconnect(
+        self,
+        *,
+        last_renewal_monotonic: float,
+        elapsed_since_renewal: float,
+        heartbeat_interval: float,
+    ) -> tuple[float, float] | None:
+        """Keep an owned worker lease fresh across multi-step Ray reconnect waits."""
+        if self.lease_identity is None:
+            return last_renewal_monotonic, elapsed_since_renewal
+        wall_elapsed = max(0.0, time.monotonic() - last_renewal_monotonic)
+        if max(wall_elapsed, elapsed_since_renewal) < heartbeat_interval:
+            return last_renewal_monotonic, elapsed_since_renewal
+        if not self._update_lease_heartbeat() or self.shutdown_requested:
+            return None
+        return time.monotonic(), 0.0
+
+    def _wait_for_reconnect_delay(
+        self,
+        delay: float,
+        *,
+        last_renewal_monotonic: float,
+        elapsed_since_renewal: float,
+        heartbeat_interval: float,
+    ) -> tuple[float, float] | None:
+        """Sleep in signal- and lease-heartbeat-safe slices during reconnect."""
+        current_monotonic = last_renewal_monotonic
+        current_elapsed = elapsed_since_renewal
+        remaining = float(delay)
+        while remaining > 0:
+            if self.shutdown_requested or self._shutdown_event.is_set():
+                return None
+            renewal_state = self._maybe_renew_lease_during_reconnect(
+                last_renewal_monotonic=current_monotonic,
+                elapsed_since_renewal=current_elapsed,
+                heartbeat_interval=heartbeat_interval,
+            )
+            if renewal_state is None:
+                return None
+            current_monotonic, current_elapsed = renewal_state
+            step = min(remaining, _SHUTDOWN_WAIT_SLICE_SECONDS)
+            before = time.monotonic()
+            time.sleep(step)
+            actual = max(0.0, time.monotonic() - before)
+            # Advance by at least ``step`` so unit tests that monkeypatch
+            # ``time.sleep`` to a no-op do not spin for real wall-clock ``delay``.
+            advanced = max(actual, step)
+            remaining -= advanced
+            current_elapsed += advanced
+
+        if self.shutdown_requested or self._shutdown_event.is_set():
+            return None
+        return self._maybe_renew_lease_during_reconnect(
+            last_renewal_monotonic=current_monotonic,
+            elapsed_since_renewal=current_elapsed,
+            heartbeat_interval=heartbeat_interval,
+        )
+
     def _check_ray_connection(self) -> None:
         """Check if Ray connection is healthy and reconnect if needed."""
         import ray
@@ -1454,8 +1540,11 @@ class Command(BaseCommand):
             if ray.is_initialized():
                 resources = self._get_ray_cluster_resources_with_timeout(timeout_seconds=10)
                 if resources is not None:
+                    self._reset_ray_reconnect_backoff()
                     return  # Connection is healthy
                 self.stdout.write(self.style.WARNING("\nRay health check timed out"))
+            elif time.monotonic() < self._ray_reconnect_backoff_until:
+                return
         except Exception as e:
             diagnostic = render_console_diagnostic(e)
             self.stdout.write(self.style.WARNING(f"\nRay connection lost: {diagnostic}"))
@@ -1467,6 +1556,7 @@ class Command(BaseCommand):
         """Attempt to reconnect to Ray cluster."""
         import ray
 
+        reconnect_started = time.monotonic()
         self.stdout.write(self.style.WARNING("\nAttempting to reconnect to Ray..."))
 
         # First, shutdown existing connection if any
@@ -1477,14 +1567,44 @@ class Command(BaseCommand):
         except Exception as e:
             self.stdout.write(f"  Error during shutdown: {render_console_diagnostic(e)}")
 
-        # Wait a moment before reconnecting
-        time.sleep(2)
+        # Clear any stale Ray task references from the broken session immediately
+        # so in-flight work can retry on healthy workers even if reconnect fails.
+        if self.ray_core_runner and self.ray_core_runner.pending_count > 0:
+            stale_count = self.ray_core_runner.pending_count
+            self.stdout.write(
+                self.style.WARNING(f"  Clearing {stale_count} stale Ray task references")
+            )
+            self._mark_stale_ray_core_tasks_as_lost()
+        self.ray_core_runner = None
+
+        heartbeat_interval = max(1.0, get_heartbeat_interval().total_seconds())
+        renewal_state = self._wait_for_reconnect_delay(
+            2,
+            last_renewal_monotonic=reconnect_started,
+            elapsed_since_renewal=0.0,
+            heartbeat_interval=heartbeat_interval,
+        )
+        if renewal_state is None:
+            return
+        last_renewal_monotonic, elapsed_since_renewal = renewal_state
 
         # Reconnect based on execution mode
         max_retries = 5
         retry_delay = 5  # seconds
 
         for attempt in range(1, max_retries + 1):
+            if self.shutdown_requested or self._shutdown_event.is_set():
+                return
+            renewal_state = self._maybe_renew_lease_during_reconnect(
+                last_renewal_monotonic=last_renewal_monotonic,
+                elapsed_since_renewal=elapsed_since_renewal,
+                heartbeat_interval=heartbeat_interval,
+            )
+            if renewal_state is None:
+                return
+            last_renewal_monotonic, elapsed_since_renewal = renewal_state
+
+            attempt_started = time.monotonic()
             try:
                 if self.execution_mode == "local":
                     self._init_local_ray()
@@ -1503,24 +1623,15 @@ class Command(BaseCommand):
                         f"  Cluster resources: {render_console_resource_summary(resources)}"
                     )
 
-                    # Clear any stale Ray task references - they're invalid now
-                    if self.ray_core_runner and self.ray_core_runner.pending_count > 0:
-                        stale_count = self.ray_core_runner.pending_count
-                        self.stdout.write(
-                            self.style.WARNING(
-                                f"  Clearing {stale_count} stale Ray task references"
-                            )
-                        )
-                        # Mark these tasks as LOST so they can be retried
-                        self._mark_stale_ray_core_tasks_as_lost()
-
                     # Reinitialize the runner with the new connection
                     with self._preserve_shutdown_signal_handlers():
                         self.ray_core_runner = self._create_ray_core_runner()
+                    self._reset_ray_reconnect_backoff()
 
                     return  # Success!
 
             except Exception as e:
+                elapsed_since_renewal += max(0.0, time.monotonic() - attempt_started)
                 diagnostic = render_console_diagnostic(e)
                 self.stdout.write(
                     self.style.WARNING(
@@ -1529,13 +1640,22 @@ class Command(BaseCommand):
                 )
                 if attempt < max_retries:
                     self.stdout.write(f"  Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
+                    renewal_state = self._wait_for_reconnect_delay(
+                        retry_delay,
+                        last_renewal_monotonic=last_renewal_monotonic,
+                        elapsed_since_renewal=elapsed_since_renewal,
+                        heartbeat_interval=heartbeat_interval,
+                    )
+                    if renewal_state is None:
+                        return
+                    last_renewal_monotonic, elapsed_since_renewal = renewal_state
                     retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
 
+        self._schedule_ray_reconnect_backoff()
         self.stdout.write(
             self.style.ERROR(
                 f"\n  Failed to reconnect after {max_retries} attempts. "
-                "Worker will continue but Ray tasks will fail."
+                "Worker will pause claiming new Ray Core tasks until reconnected."
             )
         )
 
@@ -1695,6 +1815,9 @@ class Command(BaseCommand):
         ray_core_pending = self.ray_core_runner.pending_count if self.ray_core_runner else 0
         active_count = len(self.active_tasks) + ray_core_pending
         available_slots = concurrency - active_count
+        ray_core_claim_ready = (
+            self.execution_mode not in ("local", "cluster") or self._is_ray_core_initialized()
+        )
 
         # Claim tasks from any of the specified queues
         from django.db.models import Q
@@ -1722,7 +1845,7 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.WARNING(f"  Expired {len(expired)} stale queued task(s)")
                 )
-            if available_slots <= 0:
+            if available_slots <= 0 or not ray_core_claim_ready:
                 return len(expired)
 
             # Re-read the clock after attempt archival for the bounded expiry
@@ -1802,8 +1925,12 @@ class Command(BaseCommand):
                 )
 
         # Process each claimed task
-        for task in tasks:
-            if self.shutdown_requested:
+        for index, task in enumerate(tasks):
+            if self.shutdown_requested or (
+                index > 0
+                and self.execution_mode in ("local", "cluster")
+                and not self._is_ray_core_initialized()
+            ):
                 if not self.lease_ownership_lost:
                     self._handoff_unsubmitted_task(task)
                 continue

@@ -172,6 +172,7 @@ class TestWorkerSync:
         cmd = Command()
         cmd.stdout = StringIO()
         cmd.execution_mode = "local"
+        monkeypatch.setattr(cmd, "_is_ray_core_initialized", lambda: True)
         cmd.worker_id = "deadline-race-worker"
         cmd.active_tasks = {}
         processed: list[int] = []
@@ -219,6 +220,7 @@ class TestWorkerSync:
         cmd = Command()
         cmd.stdout = StringIO()
         cmd.execution_mode = "local"
+        monkeypatch.setattr(cmd, "_is_ray_core_initialized", lambda: True)
         cmd.worker_id = "bounded-expiry-worker"
         cmd.active_tasks = {}
         processed: list[int] = []
@@ -351,6 +353,7 @@ class TestWorkerSync:
         cmd = Command()
         cmd.stdout = StringIO()
         cmd.execution_mode = execution_mode
+        monkeypatch.setattr(cmd, "_is_ray_core_initialized", lambda: True)
         cmd.worker_id = "encrypted-snapshot-failure-worker"
         cmd.active_tasks = {}
 
@@ -398,6 +401,7 @@ class TestWorkerSync:
         cmd = Command()
         cmd.stdout = StringIO()
         cmd.execution_mode = execution_mode
+        monkeypatch.setattr(cmd, "_is_ray_core_initialized", lambda: True)
         cmd.worker_id = "runtime-env-integrity-worker"
         cmd.active_tasks = {}
 
@@ -2470,6 +2474,7 @@ def test_claim_observes_tasks_created_after_selection_clock(monkeypatch, expires
     command = Command()
     command.stdout = StringIO()
     command.execution_mode = "local"
+    monkeypatch.setattr(command, "_is_ray_core_initialized", lambda: True)
     command.worker_id = "claim-clock-regression"
     command.active_tasks = {}
     command._create_lease("default")
