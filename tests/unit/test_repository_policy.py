@@ -28,7 +28,7 @@ def candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for key in ("YAGA_REVISION", "YAGA_BASE", "YAGA_BRANCH", "YAGA_FORMAT"):
         monkeypatch.delenv(key, raising=False)
     calls: list[list[str]] = []
-    outcomes = [0, 0, 0]
+    outcomes = [0, 0, 0, 0]
     original_run = subprocess.run
 
     def run(command, **kwargs):
@@ -48,6 +48,8 @@ def test_candidate_uses_exact_git_identity(candidate):
     assert calls[0][calls[0].index("--revision") + 1] == head
     assert calls[1][calls[1].index("--name") + 1] == "chore/policies"
     assert calls[2][calls[2].index("--range") + 1] == f"{head}...{head}"
+    policy_index = calls[3].index("policy")
+    assert calls[3][policy_index : policy_index + 3] == ["policy", "check", "--strict"]
 
 
 @pytest.mark.parametrize("staged", [False, True])
@@ -87,12 +89,15 @@ def test_untrusted_branch_is_one_literal_argument(candidate, monkeypatch):
     assert calls[1][calls[1].index("--name") + 1] == branch
 
 
-@pytest.mark.parametrize("results,expected", [([1, 0, 0], 1), ([1, 2, 0], 2), ([0, -9, 1], 2)])
+@pytest.mark.parametrize(
+    "results,expected",
+    [([1, 0, 0, 0], 1), ([0, 0, 0, 1], 1), ([1, 2, 0, 0], 2), ([0, -9, 1, 0], 2)],
+)
 def test_all_checks_run_and_preserve_failure_severity(candidate, results, expected):
     _, calls, outcomes = candidate
     outcomes[:] = results
     assert policy.main() == expected
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_missing_base_is_an_input_error(candidate, monkeypatch):

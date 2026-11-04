@@ -104,7 +104,7 @@ def test_image_receipt_records_observed_tools_and_exact_build_inputs(
     assert receipt["inputs"]["source.tar"] == hashlib.sha256(b"source.tar").hexdigest()
     assert receipt["tools"]["kubectl"] == "tool"
     monkeypatch.setattr(image_support, "MAX_BUILD_CACHE_BYTES", 4)
-    with pytest.raises(ValueError, match="128 MiB"):
+    with pytest.raises(ValueError, match="192 MiB"):
         image_support.record_environment(tmp_path / "oversized.json")
 
 

@@ -74,7 +74,7 @@ make test
 
 Run `make workflow-check` to check immutable Actions/container references and the
 YAGA `recommended-v3` workflow security profile. This uses the pinned released
-`yaga-cli==0.3.0` through uvx; it does not add a package runtime dependency.
+`yaga-cli==0.5.0` through uvx; it does not add a package runtime dependency.
 `make check` and the Linux `make ci` run these workflow checks too. The required
 CI lint job includes them in `.yaga/checks/repository.toml` alongside the committed
 tree policies described below.
@@ -99,9 +99,11 @@ the ordinary quality checks, retained commit checks, and `make repository-check`
   PostgreSQL benchmark JSON has one explicit 3 MiB exception.
 - Branch names matching the documented prefixes, including `perf/` and `ci/`, or
   the existing `main` and Dependabot namespaces.
-- Changes to YAGA policy files accompanied by contributor-guidance changes. YAGA's
-  path-only coupling does not prove test coverage or dependency-lock consistency;
-  tests and locked dependency validation remain separate checks.
+- Changes to YAGA policy files accompanied by contributor-guidance changes, plus
+  strict schema and `required-version = ">=0.5.0"` verification across every tracked
+  YAGA policy file (`yaga policy check --strict`). YAGA's path-only coupling does
+  not prove test coverage or dependency-lock consistency; tests and locked
+  dependency validation remain separate checks.
 
 `repository-check` requires a clean tracked checkout. Tree and change providers
 inspect committed Git objects, not untracked files or ignored output. It requires
@@ -112,7 +114,7 @@ HEAD so workflow files and committed checks describe the same candidate. Detache
 checkouts require an explicit branch. CI supplies exact event SHAs and the source
 branch through environment variables, without shell interpolation.
 
-The released YAGA 0.3.0 CLI provides these checks; no development checkout is needed.
+The released YAGA 0.5.0 CLI provides these checks; no development checkout is needed.
 CI also runs `make workflow-lint` through YAGA's digest-pinned actionlint container,
 with bounded resources and verified cleanup. It is not part of the resource-free
 local gate: run it locally only with an explicitly admitted Docker daemon. These
@@ -203,12 +205,13 @@ check and hosted required check. Compose the message in the configured editor wi
 prepare a complete message file and use `git commit --file <path>`. Do not assemble prose with
 repeated `-m` flags, which create separate paragraphs, and do not bypass the hook with `--no-verify`.
 
-The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit for ordinary pull requests. Trusted same-repository Dependabot pull requests keep the
-required check but are excluded from title and commit-message linting; the workflow still fetches and
-verifies their exact event head, and the required `CI Gate` validates their complete change. For
-ordinary pull requests, the hosted commit check runs the same authoritative `.yaga.toml` configuration
-as the tracked local hook and `make commit-check`.
+The required `Commit Messages` GitHub Actions check validates the PR title, the full message of
+every commit, and the PR description (`.yaga/description-policy.toml`) for ordinary pull requests.
+Trusted same-repository Dependabot pull requests keep the required check but are excluded from title,
+commit-message, and PR-description linting; the workflow still fetches and verifies their exact event
+head, and the required `CI Gate` validates their complete change. For ordinary pull requests, the
+hosted commit check runs the same authoritative `.yaga.toml` configuration as the tracked local hook
+and `make commit-check`.
 
 Before editing, inspect `git status --short`, the current branch, and `HEAD`. Preserve unrelated work,
 stage explicit paths instead of `git add .`, and review both the working and staged diffs. Repository
@@ -716,6 +719,12 @@ Native shutdown sampling is diagnostic and does not replace CI Gate. The bounded
 its failure remains visible, and a successful sample does not establish a crash repair.
 Review its evidence when investigating issue #557 before release acceptance.
 
+Automated pull-request review verdicts publish GitHub review states without replacing CI Gate.
+The `Pull Request Review Verdict` (`pr-review.yml`) and `Pull Request Review Wake`
+(`pr-review-wake.yml`) workflows evaluate `.yaga/agent-review-policy.toml` (`codex` lens) from a
+trusted default-branch checkout and submit approving or change-requesting GitHub reviews without
+checking out untrusted pull-request refs.
+
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:
 
@@ -1102,8 +1111,10 @@ By contributing, you agree that your contributions will be licensed under the BS
 ### YAGA commit policy
 
 The required `Commit Messages` check and local hook/Make commands use released
-YAGA 0.3.0 with the structural policy in `.yaga.toml`. The migration preserves
-existing commit and title rules; spelling with pinned Typos 1.50.2 is an explicit
+YAGA 0.5.0 with the structural policy in `.yaga.toml` and PR description rules in
+`.yaga/description-policy.toml`. Every tracked YAGA policy declares
+`required-version = ">=0.5.0"` and passes `yaga policy check --strict` during
+`make repository-check`. Spelling with pinned Typos 1.50.2 is an explicit
 additional check. Node.js and npm are no longer development prerequisites.
 
 `make commit-check` checks non-merge commits in the selected range. An empty

@@ -2,7 +2,7 @@ name: Commit Messages
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
 
 permissions:
   contents: read
@@ -44,6 +44,14 @@ jobs:
           tar -xzf "$archive" -C "$tool_dir" ./typos
           "$tool_dir/typos" --version
           echo "$tool_dir" >> "$GITHUB_PATH"
-      - uses: dariuszpanas/yaga/actions/commit-check@24a76f21d075d8ed3a96b2d174fe79f6980f07fd # v0.4.1
+      - uses: dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3 # v0.5.0
         with:
           trusted-config: .yaga.toml
+      - name: Check pull-request description
+        if: >-
+          github.event.pull_request.user.login != 'dependabot[bot]' ||
+          github.event.pull_request.user.type != 'Bot'
+        uses: dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3 # v0.5.0
+        with:
+          check: pr-description
+          policy: .yaga/description-policy.toml

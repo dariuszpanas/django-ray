@@ -52,6 +52,14 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ("upgrade-qualification.yml", "data"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
+    ("pr-review.yml", "resolve"): (
+        "Automated pull-request review verdicts publish GitHub review states"
+        " without replacing CI Gate"
+    ),
+    ("pr-review.yml", "publish-review"): (
+        "Automated pull-request review verdicts publish GitHub review states"
+        " without replacing CI Gate"
+    ),
 }
 
 
@@ -1315,10 +1323,57 @@ def test_yaga_required_reads_trusted_policy_without_pr_checkout() -> None:
     fetch = steps[1]
     assert "refs/pull/${PR_NUMBER}/head:${pr_ref}" in fetch["run"]
     assert 'test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"' in fetch["run"]
+    yaga_action = "dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3"
     assert steps[3]["with"] == {"trusted-config": ".yaga.toml"}
-    assert steps[3]["uses"] == (
-        "dariuszpanas/yaga/actions/commit-check@24a76f21d075d8ed3a96b2d174fe79f6980f07fd"
+    assert steps[3]["uses"] == yaga_action
+    assert steps[4]["uses"] == yaga_action
+    assert steps[4]["with"] == {
+        "check": "pr-description",
+        "policy": ".yaga/description-policy.toml",
+    }
+    assert "dependabot[bot]" in steps[4]["if"]
+
+
+def test_yaga_pr_review_verdict_uses_pinned_action_without_pr_checkout() -> None:
+    yaga_action = "dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3"
+    review_policy = tomllib.loads(
+        (PROJECT_ROOT / ".yaga" / "agent-review-policy.toml").read_text(encoding="utf-8")
+    )["agent-review"]
+    assert review_policy == {
+        "version": 1,
+        "required-version": ">=0.5.0",
+        "required": ["codex"],
+    }
+    description_policy = tomllib.loads(
+        (PROJECT_ROOT / ".yaga" / "description-policy.toml").read_text(encoding="utf-8")
     )
+    assert description_policy["description-policy-version"] == 1
+    assert description_policy["required-version"] == ">=0.5.0"
+
+    verdict = _workflow(WORKFLOWS / "pr-review.yml")
+    assert set(verdict["on"]) == {"pull_request_target", "workflow_run"}
+    assert verdict["permissions"] == {"contents": "read"}
+    jobs = verdict["jobs"]
+    assert jobs["resolve"]["permissions"] == {}
+    publish = jobs["publish-review"]
+    assert publish["permissions"] == {
+        "contents": "read",
+        "pull-requests": "write",
+        "issues": "read",
+        "checks": "read",
+    }
+    checkout, evaluate = publish["steps"]
+    assert "ref" not in checkout["with"]
+    assert checkout["with"]["persist-credentials"] == "false"
+    assert evaluate["uses"] == yaga_action
+    assert evaluate["with"]["check"] == "pr-review"
+    assert evaluate["with"]["policy"] == ".yaga/agent-review-policy.toml"
+    assert evaluate["with"]["submit-review"] == "both"
+
+    wake = _workflow(WORKFLOWS / "pr-review-wake.yml")
+    assert set(wake["on"]) == {"issue_comment", "workflow_dispatch"}
+    assert wake["permissions"] == {}
+    assert wake["jobs"]["wake"]["permissions"] == {}
 
 
 def test_yaga_required_explicitly_skips_trusted_dependabot_policy() -> None:

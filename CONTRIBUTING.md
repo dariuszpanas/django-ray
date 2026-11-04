@@ -102,10 +102,11 @@ independently. PR descriptions use natural Markdown rather than 72-column hard w
 logical commits as the change needs; one large atomic commit is valid, while unrelated cleanup belongs
 in a separate change.
 
-The required `Commit Messages` GitHub Actions check validates the PR title and the full message of
-every commit for ordinary pull requests. Trusted same-repository Dependabot pull requests keep the
-required check but are excluded from title and commit-message linting; the workflow still fetches and
-verifies their exact event head, and the separate required `CI Gate` validates their complete change.
+The required `Commit Messages` GitHub Actions check validates the PR title, the full message of
+every commit, and the PR description (`.yaga/description-policy.toml`) for ordinary pull requests.
+Trusted same-repository Dependabot pull requests keep the required check but are excluded from title,
+commit-message, and PR-description linting; the workflow still fetches and verifies their exact event
+head, and the separate required `CI Gate` validates their complete change.
 `CI Gate` fails unless lint, docs, typing, supported-Python tests, PostgreSQL, live-cluster faults,
 testproject, the tracked Docker Compose smoke, minimum/latest dependencies, and package build all
 succeed. For ordinary pull requests, the hosted commit check runs the same authoritative `.yaga.toml`
@@ -139,6 +140,11 @@ Native shutdown sampling is diagnostic and does not replace CI Gate. The bounded
 `Native Shutdown Investigation` workflow runs for its affected PR paths or manual dispatch;
 its failure remains visible, and a successful sample does not establish a crash repair.
 Review its evidence when investigating issue #557 before release acceptance.
+
+Automated pull-request review verdicts publish GitHub review states without replacing CI Gate.
+The `Pull Request Review Verdict` and `Pull Request Review Wake` workflows evaluate the trusted
+`.yaga/agent-review-policy.toml` (`codex` lens) against default-branch code and submit an
+approving or change-requesting GitHub review without checking out untrusted pull-request code.
 
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
@@ -286,8 +292,10 @@ or tests and must not contain secrets. Work must continue normally when Obsidian
 ### YAGA commit policy
 
 The required `Commit Messages` check and local hook/Make commands use released
-YAGA 0.3.0 with the structural policy in `.yaga.toml`. The migration preserves
-existing commit and title rules; spelling with pinned Typos 1.50.2 is an explicit
+YAGA 0.5.0 with the structural policy in `.yaga.toml` and PR description rules in
+`.yaga/description-policy.toml`. All tracked YAGA policies declare
+`required-version = ">=0.5.0"` and are audited by `yaga policy check --strict`
+during `make repository-check`. Spelling with pinned Typos 1.50.2 is an explicit
 additional check. Node.js and npm are no longer development prerequisites.
 
 `make commit-check` checks non-merge commits in the selected range. An empty

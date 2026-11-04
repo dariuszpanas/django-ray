@@ -46,16 +46,16 @@ jobs:
         run: |
           set -euo pipefail
           export UV_CACHE_DIR="$RUNNER_TEMP/policy-cache-prepared"
-          uvx --from yaga-cli==0.3.0 --with typos==1.50.2 yaga --version
+          uvx --from yaga-cli==0.5.0 --with typos==1.50.2 yaga --version
           uvx --from typos==1.50.2 typos --version
           python - <<'PYTHON'
           import os
           from pathlib import Path
 
-          from testing.linux.image_support import tree_bytes
+          from testing.linux.image_support import MAX_BUILD_CACHE_BYTES, tree_bytes
 
           size = tree_bytes(Path(os.environ["UV_CACHE_DIR"]))
-          assert size < 128 * 1024 * 1024, f"tool cache exceeds the sealed Linux image allowance: {size}"
+          assert size <= MAX_BUILD_CACHE_BYTES, f"tool cache exceeds the sealed Linux image allowance: {size}"
           PYTHON
           cp -a "$UV_CACHE_DIR" "$RUNNER_TEMP/policy-cache-runtime"
           mv "$UV_CACHE_DIR" "$RUNNER_TEMP/policy-cache-unavailable"

@@ -166,7 +166,7 @@ hashes. Reuse that exact file for repeated builds. The image constrains both
 editable installation and package builds, then warms the isolated backend
 cache with `uv build --require-hashes`. It removes the earlier dependency cache,
 warms the pinned YAGA/Typos tools for offline execution,
-and caps the retained build and tool cache at 128 MiB. Test dependencies remain selected
+and caps the retained build and tool cache at 192 MiB. Test dependencies remain selected
 from the unchanged frozen lock.
 
 Supply full digest references for a Python slim-trixie image and a compatible uv image. Supply a fixed Debian

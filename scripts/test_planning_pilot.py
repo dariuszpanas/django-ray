@@ -21,7 +21,7 @@ from scripts.test_planning_shadow import (
 )
 
 ARMS = ("current", "proposed", "full")
-YAGA_SOURCE = "yaga-cli==0.3.0"
+YAGA_SOURCE = "yaga-cli==0.5.0"
 
 
 def selected_cells(plan: dict) -> list[dict[str, str]]:

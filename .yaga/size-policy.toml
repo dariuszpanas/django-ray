@@ -1,3 +1,4 @@
+required-version = ">=0.5.0"
 size-policy-version = 1
 default-max-blob-bytes = 1048576
 max-total-blob-bytes = 25165824

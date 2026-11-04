@@ -16,7 +16,7 @@ def test_commit_tools_are_pinned_and_node_assets_are_retired() -> None:
     assert check_commits.YAGA_COMMAND[:6] == (
         "uvx",
         "--from",
-        "yaga-cli==0.3.0",
+        "yaga-cli==0.5.0",
         "--with",
         "typos==1.50.2",
         "yaga",
@@ -38,7 +38,9 @@ def test_commit_tools_are_pinned_and_node_assets_are_retired() -> None:
 
 
 def test_explicit_consumer_policy_preserves_structural_boundaries() -> None:
-    policy = tomllib.loads(_read(".yaga.toml"))["commit"]
+    root = tomllib.loads(_read(".yaga.toml"))
+    assert root["required-version"] == ">=0.5.0"
+    policy = root["commit"]
     assert policy["header-max-length"] == policy["body-max-line-length"] == 72
     assert policy["description-min-length"] == 10
     assert policy["body-policy"] == "required" and policy["body-min-length"] == 100
@@ -106,7 +108,7 @@ def test_linux_image_warms_offline_tools_after_cache_cleanup() -> None:
     image = _read("testing/linux/Dockerfile")
     assert "COPY --from=uv /uv /uvx /usr/local/bin/" in image
     assert "NODE_IMAGE" not in image and "npm ci" not in image
-    assert image.index("uv cache clean") < image.index("uvx --from yaga-cli==0.3.0")
+    assert image.index("uv cache clean") < image.index("uvx --from yaga-cli==0.5.0")
     assert image.index("uvx --from typos==1.50.2") < image.index("image_support.py record")
     assert "ENV UV_NO_SYNC=1 UV_OFFLINE=1" in image
     workflow = _read(".github/workflows/ci.yml")

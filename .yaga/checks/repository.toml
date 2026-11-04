@@ -1,3 +1,4 @@
+required-version = ">=0.5.0"
 plan-version = 2
 checks = ["workflow", "workflow-security", "mode", "path", "size", "tree"]
 workflow-paths = [".github/workflows"]
