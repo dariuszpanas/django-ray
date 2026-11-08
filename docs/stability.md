@@ -15,9 +15,12 @@ Ray Jobs remains a supported current execution mode.
 Released 0.7.1 is the baseline for ongoing candidate qualification in the
 [upgrade recipes](https://github.com/dariuszpanas/django-ray/blob/main/qualification/upgrade/README.md).
 Their data matrix also retains 0.4.0, 0.5.0, 0.6.0 and 0.7.0 historical coverage.
-The unreleased 0.8.0 candidate raises the Ray minimum to 2.60.0; the released
+The 0.8.0 baseline raises the Ray minimum to 2.60.0; the released
 0.7.1 source and locked environment remain the earlier side of that rehearsal.
 Selecting a baseline does not supply passing evidence or accept a later release.
+The [0.7.1 to 0.8.0 candidate guide](deployment/upgrading-from-0.7.md) documents
+the coordinated Ray update, unchanged migration leaf and rollback decision
+boundary. Its final versioned source still requires release qualification.
 The [0.6.0 to 0.7.0 upgrade guide](deployment/upgrading-from-0.6.md) records that
 released Beta boundary and its qualification requirements. The
 [0.5.0 to 0.6.0 guide](deployment/upgrading-from-0.5.md) and

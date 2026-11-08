@@ -23,7 +23,7 @@ profile and blocking probe pin Ray 2.60.0:
 uv add "ray[data]==2.60.0"
 ```
 
-The unreleased django-ray 0.8.0 baseline requires Ray 2.60 or newer, and this recipe
+The django-ray 0.8.0 baseline requires Ray 2.60 or newer, and this recipe
 must use that same or a newer reviewed cluster version. Ray 2.60 extends the earlier
 [nested Parquet object and Lance defenses](https://github.com/ray-project/ray/pull/64881)
 to [additional external Arrow readers](https://github.com/ray-project/ray/pull/66042).

@@ -44,6 +44,7 @@ project resources, task stats, and a smoke-task trigger:
 
 ## Deployment
 
+- [Upgrade from 0.7.1 to 0.8.0](deployment/upgrading-from-0.7.md) - Coordinated candidate upgrade and rollback boundaries
 - [Kubernetes Deployment](deployment/kubernetes.md) - Deploy to Kubernetes
 - [Docker](deployment/docker.md) - Running with Docker
 - [TLS Configuration](deployment/tls.md) - Securing Ray cluster communication

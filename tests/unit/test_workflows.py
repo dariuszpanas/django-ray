@@ -3099,15 +3099,19 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
         **settings.DJANGO_RAY,
     }
 
-    policies = ("terminal_only", "disabled")
+    cases = [
+        (policy, requested_strategy)
+        for policy in ("terminal_only", "disabled")
+        for requested_strategy in (None, "auto", "dynamic_tasks")
+    ]
     executions = {
-        policy: RayTaskExecution.objects.create(
-            task_id=f"real-ray-{policy}-progress",
+        (policy, requested_strategy): RayTaskExecution.objects.create(
+            task_id=f"real-ray-{policy}-{requested_strategy or 'per-call'}-progress",
             callable_path=f"{__name__}.report_and_increment",
             state=TaskState.RUNNING,
             execution_generation=1,
         )
-        for policy in policies
+        for policy, requested_strategy in cases
     }
     actor_creation_attempts: list[str] = []
 
@@ -3127,27 +3131,36 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
             lambda: (remote_step, remote_collect, ForbiddenProgressActor),
         )
         results = {}
-        for policy, execution in executions.items():
+        for (policy, requested_strategy), execution in executions.items():
+            settings.DJANGO_RAY = {
+                **settings.DJANGO_RAY,
+                "WORKFLOW_PROGRESS_REPORTING_POLICY": (
+                    policy if requested_strategy is not None else "full"
+                ),
+            }
+            workflow = step(report_and_increment)
+            configured = (
+                workflow.with_progress_reporting(policy)
+                if requested_strategy is None
+                else workflow.with_execution_strategy(requested_strategy)
+            )
             with durable_task_execution(
                 execution.pk,
                 attempt_number=execution.attempt_number,
                 execution_generation=execution.execution_generation,
                 **_strict_workflow_fixture_identity(execution),
             ):
-                results[policy] = (
-                    step(report_and_increment).with_progress_reporting(policy).run(5, use_ray=True)
-                )
+                results[policy, requested_strategy] = configured.run(5, use_ray=True)
     finally:
         ray.shutdown(wait_for_processes=True)
 
     assert actor_creation_attempts == []
-    assert results == {
-        "terminal_only": (False, 6),
-        "disabled": (False, 6),
-    }
-    for policy, execution in executions.items():
+    assert results == dict.fromkeys(cases, (False, 6))
+    for (policy, requested_strategy), execution in executions.items():
         execution.refresh_from_db()
         selection = json.loads(execution.workflow_plan_selection)
+        assert selection["requested_policy"] == (requested_strategy or "dynamic_tasks")
+        assert selection["selected_strategy"] == "dynamic_tasks"
         assert selection["reporting_policy"] == policy
         assert execution.progress_data is None
         assert execution.workflow_progress_summary_json is None

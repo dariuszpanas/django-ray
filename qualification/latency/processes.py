@@ -8,10 +8,18 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_OUTPUT = 64 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep fixture authentication on the explicitly owned dashboard endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class Manager:
@@ -62,10 +70,23 @@ class Manager:
 
 class JobsProxy:
     def __init__(self, upstream):
-        if not upstream.startswith("http://127.0.0.1:"):
+        parsed = urllib.parse.urlsplit(upstream)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.port is None
+            or parsed.port == 0
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
             raise ValueError("qualification proxy requires its owned loopback Ray dashboard")
+        upstream = upstream.rstrip("/")
         self.unavailable = threading.Event()
         self.requests = []
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -81,20 +102,36 @@ class JobsProxy:
                 if owner.unavailable.is_set():
                     status, data = 503, b'{"error":"qualification outage"}'
                 else:
+                    headers = {"Content-Type": "application/json"}
+                    for name in ("Authorization", "X-Ray-Authorization"):
+                        value = self.headers.get(name)
+                        if value is not None:
+                            headers[name] = value
                     request = urllib.request.Request(
                         upstream + self.path,
                         data=body,
                         method=self.command,
-                        headers={"Content-Type": "application/json"},
+                        headers=headers,
                     )
                     try:
-                        response = urllib.request.urlopen(request, timeout=5)
-                    except urllib.error.HTTPError as error:
-                        response = error
-                    with response:
-                        status, data = response.status, response.read(1024 * 1024 + 1)
+                        try:
+                            response = owner.opener.open(request, timeout=5)
+                        except urllib.error.HTTPError as error:
+                            response = error
+                        with response:
+                            status, data = response.status, response.read(1024 * 1024 + 1)
+                    except (urllib.error.URLError, TimeoutError, ConnectionError):
+                        status, data = 502, b'{"error":"qualification upstream unavailable"}'
                     if len(data) > 1024 * 1024:
                         status, data = 502, b"{}"
+                    if (
+                        not isinstance(status, int)
+                        or isinstance(status, bool)
+                        or not 100 <= status <= 599
+                    ):
+                        status, data = 502, b"{}"
+                    if not 200 <= status < 300:
+                        data = b'{"error":"qualification upstream request failed"}'
                 owner.requests.append(
                     {
                         "method": self.command,
@@ -107,7 +144,10 @@ class JobsProxy:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
             do_GET = forward  # noqa: N815 - stdlib handler names
             do_POST = forward  # noqa: N815 - stdlib handler names
@@ -117,6 +157,14 @@ class JobsProxy:
         self.address = f"http://127.0.0.1:{self.server.server_port}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+
+    def failure_diagnostics(self):
+        """Retain bounded HTTP status counts without headers, bodies or error text."""
+        statuses = {}
+        for request in self.requests[:512]:
+            status = str(request["status"])
+            statuses[status] = statuses.get(status, 0) + 1
+        return {"observed_requests": sum(statuses.values()), "http_status_counts": statuses}
 
     def close(self):
         self.server.shutdown()

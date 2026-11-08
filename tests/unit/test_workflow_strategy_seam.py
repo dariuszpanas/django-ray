@@ -239,6 +239,94 @@ def test_observability_preserves_selection_and_rejections_when_reporting_disable
     assert "DYNAMIC_TOPOLOGY" in rejection_codes
 
 
+@pytest.mark.parametrize("requested_policy", ["auto", "dynamic_tasks"])
+@pytest.mark.parametrize(
+    ("configured_policy", "override"),
+    [
+        ("disabled", None),
+        ("terminal_only", None),
+        ("disabled", "full"),
+        ("full", "disabled"),
+        ("full", "terminal_only"),
+    ],
+)
+def test_dynamic_strategy_reporting_matches_inspection_and_configuration(
+    settings, monkeypatch, requested_policy, configured_policy, override
+) -> None:
+    settings.DJANGO_RAY = {
+        **getattr(settings, "DJANGO_RAY", {}),
+        "WORKFLOW_PROGRESS_REPORTING_POLICY": configured_policy,
+    }
+    bindings: list[dict[str, str]] = []
+
+    class ReportingExecutor:
+        def bind_plan(self, _plan, **options) -> None:
+            bindings.append(options)
+
+        def submit_step(self, _step, args, _kwargs, *_context) -> int:
+            return _add_one(*args)
+
+        def resolve(self, value):
+            return value
+
+        def finish_progress(self, **_options) -> None:
+            pass
+
+        def track_cleanup(self, _value) -> None:
+            pass
+
+    monkeypatch.setattr("django_ray.workflows._get_executor", lambda _use_ray: ReportingExecutor())
+    wf = step(_add_one)
+    inspected = wf.inspect_strategy(
+        3,
+        use_ray=True,
+        requested_policy=requested_policy,
+        reporting_policy=override,
+    ).as_dict()["plan_selection"]
+    configured = wf.with_execution_strategy(requested_policy)
+    if override is not None:
+        configured = configured.with_progress_reporting(override)
+
+    assert configured.run(3, use_ray=True) == 4
+    expected_policy = override if override is not None else configured_policy
+    assert inspected["reporting_policy"] == expected_policy
+    assert bindings == [{"requested_policy": requested_policy, "reporting_policy": expected_policy}]
+
+
+@pytest.mark.parametrize("configured_policy", ["full", "terminal_only", "disabled"])
+@pytest.mark.parametrize("requested_policy", [None, "local", "auto"])
+def test_local_strategy_default_reporting_matches_inspection(
+    settings, configured_policy, requested_policy
+) -> None:
+    settings.DJANGO_RAY = {
+        **getattr(settings, "DJANGO_RAY", {}),
+        "WORKFLOW_PROGRESS_REPORTING_POLICY": configured_policy,
+    }
+    wf = step(_add_one)
+    inspected = wf.inspect_strategy(
+        3,
+        use_ray=False,
+        requested_policy=requested_policy,
+    ).as_dict()["plan_selection"]
+
+    assert inspected["selected_strategy"] == "local"
+    assert inspected["reporting_policy"] == "disabled"
+    configured = wf if requested_policy is None else wf.with_execution_strategy(requested_policy)
+    assert configured.run(3, use_ray=False) == 4
+
+
+def test_explicit_local_strategy_still_rejects_full_reporting(settings) -> None:
+    settings.DJANGO_RAY = {
+        **getattr(settings, "DJANGO_RAY", {}),
+        "WORKFLOW_PROGRESS_REPORTING_POLICY": "disabled",
+    }
+    wf = step(_add_one)
+    with pytest.raises(ValueError, match="requires disabled progress reporting"):
+        wf.inspect_strategy(3, requested_policy="local", reporting_policy="full")
+    with pytest.raises(ValueError, match="requires disabled progress reporting"):
+        wf.with_progress_reporting("full").with_execution_strategy("local").run(3)
+
+
 def test_explicit_region_spec_validates_whole_plan_and_rejects_mixed_regions(settings) -> None:
     settings.DJANGO_RAY = {
         **getattr(settings, "DJANGO_RAY", {}),

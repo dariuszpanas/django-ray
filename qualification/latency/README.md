@@ -53,6 +53,14 @@ database and filesystem request store:
   path. A fresh manager process adopts the same running Job and finishes it without
   another submission, attempt or generation.
 
+The loopback proxy preserves the caller's `Authorization` and
+`X-Ray-Authorization` headers for Ray token authentication. It uses only its
+validated owned dashboard endpoint, refuses redirects and ignores environment
+HTTP proxies. Request receipts contain no headers or bodies. Failed probes retain
+bounded HTTP status counts, including connection failures as 502, without raw
+upstream error responses or credentials. Authentication remains enabled, and the
+intentional outage still returns 503 without contacting the dashboard.
+
 The ordinary cases retain the production 250-ms fast receipt interval, 30-second
 recovery interval, and an adaptive claim backoff up to five seconds. Every ordinary
 receipt must become terminal within five seconds, including the replacement case.

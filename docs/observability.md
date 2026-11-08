@@ -589,13 +589,32 @@ Django task manager and Ray execution path.
 Protect the database, admin, metrics route, Ray dashboard, State API, and storage
 backends independently. Never expose live log access by default.
 
-## Optional OpenTelemetry Correlation
+## Tracing Helpers and Integration Boundary
 
-`django_ray.tracing` provides opt-in, fail-open distributed trace correlation (`TaskTracingCoordinator`, `TraceContextEnvelope`, `AttemptAuthorityToken`) across task enqueue, worker claim, Ray submission, remote execution, workflow execution, retry reconciliation, and terminal persistence without requiring OpenTelemetry packages in the base installation.
+`django_ray.tracing` provides manually invoked tracing primitives
+(`TaskTracingCoordinator`, `TraceContextEnvelope`, `AttemptAuthorityToken`).
+Applications must supply a `TracerProtocol` adapter, propagate context, and call
+the helpers at the relevant lifecycle boundaries. Automatic instrumentation of
+enqueue, worker claim, Ray submission and execution, workflow execution, retry
+reconciliation, and terminal persistence remains pending. The package includes
+no built-in OpenTelemetry adapter or exporter configuration; installing an
+OpenTelemetry exporter does not connect these helpers to task execution.
 
-- **Strict redaction and cardinality bounds**: Task arguments, keyword arguments, results, serialized payloads, `RuntimeEnv` contents, credentials, raw error messages, and tracebacks are stripped before span emission.
-- **Stale-attempt fencing**: Superseded attempts (`stale_generation` or `lease_lost`) are fenced by `AttemptAuthorityToken` and cannot emit an authoritative `django_ray.task.terminal_persist` span.
-- **Bounded workflow fan-out**: Per-run child node spans are capped by `max_workflow_node_spans_per_run` (default 32) and summarized on `django_ray.workflow.execute`.
+The helpers use the standard library, while the package's runtime dependencies
+already include `opentelemetry-api`. Their current unit-tested behavior covers:
+
+- **Redaction and cardinality bounds**: The attribute allowlist excludes task
+  arguments, results, serialized payloads, `RuntimeEnv` contents, credentials,
+  raw error messages, and tracebacks from helper-emitted spans.
+- **Stale-attempt fencing**: `record_terminal_persist()` compares caller-supplied
+  authority tokens and lease ownership before emitting a terminal span. The
+  caller is responsible for obtaining the current database authority.
+- **Bounded workflow fan-out**: Each `trace_workflow_execution()` call caps child
+  node spans at `max_workflow_node_spans_per_run` (default 32). It immediately
+  ends the generated spans; it does not measure actual node execution durations.
+- **Tracer failure isolation**: Exceptions while starting, updating, or ending
+  spans are caught by the helper. Runtime integration and distributed propagation
+  still need their own qualification.
 
 ## See Also
 

@@ -326,7 +326,7 @@ make k8s-deploy-kuberay-kind K8S_CONTEXT=docker-desktop
 The co-resident target pins the KubeRay chart and image tag to v1.6.2, applies
 the bounded `kuberay-system` quota before the Helm upgrade, deletes only the
 named full-profile Deployments, Services, routes, monitoring configuration, and
-completed setup Job, and then applies the five-pod render. It requires an
+setup Job, and then applies the five-pod render. It requires an
 explicit `docker-desktop` or `kind-<name>` context and passes that context to
 every cluster command. On first install it requires separately prepared random
 component Secrets; later transitions detect and preserve the complete live Secret set
@@ -341,6 +341,13 @@ the guarded gate and `k8s-deploy-kuberay-kind` explicitly remove the
 co-resident application ResourceQuota and LimitRange that Kustomize omission
 cannot prune. The Kong local target does the same before applying its larger
 profile. All three preserve existing Secrets and render no credential values.
+
+Local deployment targets replace the named `django-setup` Job before applying
+the next profile because Kubernetes Job pod templates are immutable. This also
+allows returning from co-resident to full while the completed setup Job still
+exists. Replacement preserves the Namespace, component Secrets and PVCs. Each
+setup PostgreSQL connection attempt has a two-second timeout before retrying;
+the co-resident setup completion deadline remains 240 seconds.
 
 The direct target leaves any existing Kong release and ingress routes untouched. It does not invoke
 the Kong uninstall target because a release named `kong` in the `kong` namespace may belong to a

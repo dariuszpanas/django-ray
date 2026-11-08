@@ -5,6 +5,7 @@
 .PHONY: k8s-check-prometheus-targets k8s-final-gate-preflight k8s-final-gate
 .PHONY: k8s-require-local-context k8s-install-kuberay k8s-install-kuberay-co-resident k8s-uninstall-kuberay k8s-kind-load k8s-prepare-kuberay-kind k8s-delete-local-raycluster k8s-deploy-kuberay-kind k8s-delete-kuberay-kind
 .PHONY: k8s-bootstrap-django-ray-secret k8s-prepare-co-resident k8s-delete-co-resident-policy k8s-delete-co-resident-superseded k8s-deploy-co-resident
+.PHONY: k8s-delete-local-setup-job
 .PHONY: k8s-install-kong-local k8s-uninstall-kong-local k8s-deploy-kong-local
 .PHONY: k8s-logs k8s-logs-web k8s-logs-worker k8s-logs-ray k8s-logs-ray-head k8s-logs-ray-workers
 .PHONY: k8s-evaluation-warning
@@ -64,6 +65,7 @@ k8s-build:
 
 # Deploy to Kubernetes cluster (dev overlay)
 k8s-deploy: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secret
+	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/dev
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
@@ -77,6 +79,7 @@ k8s-deploy: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secret
 
 # Deploy with full resources (16+ CPUs, 32GB+ RAM)
 k8s-deploy-local: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secret
+	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/local
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
@@ -90,6 +93,7 @@ k8s-deploy-local: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secr
 
 # Deploy with TLS enabled
 k8s-deploy-tls: k8s-evaluation-warning k8s-build k8s-create-tls-secret k8s-bootstrap-django-ray-secret
+	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/dev-tls
 	@echo "Waiting for deployments..."
 	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
@@ -143,11 +147,17 @@ k8s-delete-local-raycluster: k8s-evaluation-warning
 	kubectl $(KUBECTL_CONTEXT_ARG) delete raycluster/ray -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=240s
 	kubectl $(KUBECTL_CONTEXT_ARG) delete service/ray-head-svc -n django-ray --ignore-not-found --wait=true
 
+# Job pod templates are immutable across local profiles. Replace only the
+# package setup Job, retaining its namespace, credentials, and shared volumes.
+k8s-delete-local-setup-job: k8s-evaluation-warning k8s-require-local-context
+	kubectl --context "$(K8S_CONTEXT)" delete job/django-setup -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=180s
+
 # Deploy using KubeRay operator on kind. Leave any existing Kong release and
 # routes untouched because this target cannot prove that it owns them.
 k8s-deploy-kuberay-kind: k8s-evaluation-warning k8s-require-local-context k8s-prepare-kuberay-kind k8s-bootstrap-django-ray-secret
 	$(MAKE) --no-print-directory k8s-delete-co-resident-policy K8S_CONTEXT="$(K8S_CONTEXT)"
 	$(MAKE) --no-print-directory k8s-delete-local-raycluster K8S_CONTEXT="$(K8S_CONTEXT)"
+	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/kuberay-kind
 	@echo "Waiting for deployments and Ray pods..."
 	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
@@ -175,7 +185,7 @@ k8s-delete-co-resident-superseded: k8s-evaluation-warning k8s-require-local-cont
 	kubectl --context "$(K8S_CONTEXT)" delete ingress/django-ray-ingress ingress/grafana-ingress ingress/prometheus-ingress ingress/ray-dashboard-ingress -n django-ray --ignore-not-found --wait=true
 	kubectl --context "$(K8S_CONTEXT)" delete configmap/prometheus-config configmap/grafana-datasources configmap/grafana-dashboards-provider configmap/grafana-dashboards configmap/grafana-dashboard-import-script -n django-ray --ignore-not-found --wait=true
 	kubectl --context "$(K8S_CONTEXT)" delete serviceaccount/prometheus role/prometheus-django-ray rolebinding/prometheus-django-ray -n django-ray --ignore-not-found --wait=true
-	kubectl --context "$(K8S_CONTEXT)" delete job/django-setup -n django-ray --ignore-not-found --cascade=foreground --wait=true --timeout=180s
+	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 
 # Generate credentials explicitly, without printing or applying them.
 .PHONY: k8s-prepare-secrets k8s-forward-web k8s-forward-ray k8s-forward-grafana k8s-forward-prometheus
@@ -228,6 +238,7 @@ k8s-uninstall-kong-local: k8s-evaluation-warning k8s-require-local-context
 k8s-deploy-kong-local: k8s-evaluation-warning k8s-require-local-context k8s-prepare-kuberay-kind k8s-bootstrap-django-ray-secret
 	$(MAKE) --no-print-directory k8s-delete-co-resident-policy K8S_CONTEXT="$(K8S_CONTEXT)"
 	$(MAKE) --no-print-directory k8s-delete-local-raycluster K8S_CONTEXT="$(K8S_CONTEXT)"
+	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/kong-local
 	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=120s
 	kubectl --context "$(K8S_CONTEXT)" wait --for=create service/ray-head-svc -n django-ray --timeout=240s

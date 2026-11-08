@@ -38,11 +38,17 @@ different reconnect path and does not establish a startup repair.
 
 ### Ray 2.60.0 baseline for 0.8.0
 
-The unreleased django-ray 0.8.0 baseline requires Ray 2.60.0 or a newer compatible
+The django-ray 0.8.0 baseline requires Ray 2.60.0 or a newer compatible
 release. The contributor lock, deployment images, Ray Data recipe, and CI minimum
 move together from 2.58.0 to 2.60.0. Released django-ray 0.7.x retains its 2.58.0
 minimum. This source update is not a release or a claim that upgrade qualification
 has passed.
+
+Follow the [0.7.1 to 0.8.0 candidate upgrade guide](deployment/upgrading-from-0.7.md)
+for the stopped-writer sequence and rollback decisions. There is no migration
+delta after 0.7.1, but managers, node images and RuntimeEnv dependencies must move
+together. Selected Ray 2.60 PR qualification does not replace the final versioned
+candidate's complete applicable release evidence.
 
 The [Ray 2.60.0 release](https://github.com/ray-project/ray/releases/tag/ray-2.60.0)
 was reviewed on November 7, 2026. Changes relevant to django-ray include:
@@ -140,7 +146,7 @@ Beta users that imported those private modules must move to the canonical packag
 |---|---|
 | Python | 3.12, 3.13, 3.14 |
 | Django | 6.0.8 or newer compatible release |
-| Ray | 2.60.0 or newer compatible release (unreleased 0.8.0 baseline) |
+| Ray | 2.60.0 or newer compatible release (0.8.0 baseline) |
 | Production operating system | Linux |
 
 Python 3.12 is the floor because Django 6.0 requires Python 3.12+, not because Ray does.
@@ -180,7 +186,7 @@ Compiled Graph retains its separate exact-tuple capability policy.
 Django 6.0.8 is the django-ray security floor. Django 6.0.0 through 6.0.7 are not
 supported; newer compatible releases are exercised by the latest-dependency lane.
 
-Ray 2.60.0 is the security and runtime baseline for unreleased django-ray 0.8.0.
+Ray 2.60.0 is the security and runtime baseline for django-ray 0.8.0.
 The released 0.7.x baseline was 2.58.0, unchanged from 0.5.0 and 0.6.0. Ray 2.57 added
 [Dashboard log-path validation](https://github.com/ray-project/ray/pull/64701),
 which is absent from 2.56.0 and 2.56.1. Ray 2.58 additionally fixes
