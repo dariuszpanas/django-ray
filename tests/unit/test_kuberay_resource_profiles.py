@@ -527,7 +527,7 @@ def test_direct_profile_retains_per_pod_resource_contracts(
         ),
         ("grafana", "grafana"): (
             {"cpu": "50m", "memory": "128Mi"},
-            {"cpu": "200m", "memory": "256Mi"},
+            {"cpu": "200m", "memory": "512Mi"},
         ),
     }
     for (deployment, container_name), (requests, limits) in expected_deployments.items():
@@ -574,14 +574,14 @@ def test_local_profile_resource_totals_match_documented_baselines(
         "requested_millicores": 3300,
         "requested_mibibytes": 5056,
         "limit_millicores": 9800,
-        "limit_mibibytes": 16256,
+        "limit_mibibytes": 16512,
     }
     assert _profile_totals(rendered_profiles["kong"]) == {
         "pods": 17,
         "requested_millicores": 10200,
         "requested_mibibytes": 17088,
         "limit_millicores": 27300,
-        "limit_mibibytes": 38272,
+        "limit_mibibytes": 38528,
     }
 
 

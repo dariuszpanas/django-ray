@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import runpy
 import sqlite3
 import subprocess
 import sys
@@ -247,7 +248,7 @@ def test_archive_failure_retains_failed_manifest_without_rehashing_missing_file(
     assert ElementTree.fromstring(output["junit.xml"]).attrib["failures"] == "1"
 
 
-@pytest.mark.parametrize("baseline", ["0.4.0", "0.5.0", "0.6.0", "0.7.0"])
+@pytest.mark.parametrize("baseline", ["0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.7.1"])
 def test_reviewed_baseline_selection_matches_candidate_source(baseline):
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
@@ -285,6 +286,7 @@ def test_baseline_defaults_and_image_allowlist_preserve_reviewed_history():
     )
     assert result.stdout.strip() == "0.4.0"
     assert contract.BASELINES["0.7.0"] == "d8204c9e368336077396679a3019f7f300211e06"
+    assert contract.BASELINES["0.7.1"] == "e72aaaa3cc7c15074b1f191c6e845a8008369b5d"
     dockerfile = (root / "qualification/upgrade/Dockerfile").read_text()
     assert set(re.findall(r"'([0-9a-f]{40})'", dockerfile)) == set(contract.BASELINES.values())
     compose = yaml.safe_load((root / "qualification/upgrade/data.yaml").read_text())
@@ -348,11 +350,23 @@ def test_equal_version_baseline_and_candidate_keep_distinct_verified_sources(
 
 
 @pytest.mark.parametrize("phase", ["baseline-run", "candidate-run", "baseline-post-write"])
-def test_native_equal_versions_select_phase_owned_environment(tmp_path, monkeypatch, phase):
+@pytest.mark.parametrize(
+    "baseline,baseline_ray",
+    [
+        ("0.4.0", "2.56.0"),
+        ("0.5.0", "2.58.0"),
+        ("0.6.0", "2.58.0"),
+        ("0.7.0", "2.58.0"),
+        ("0.7.1", "2.58.0"),
+    ],
+)
+def test_native_equal_versions_select_phase_owned_environment(
+    tmp_path, monkeypatch, phase, baseline, baseline_ray
+):
     from qualification.upgrade import native_scenario
 
-    monkeypatch.setattr(native_scenario, "BASELINE_VERSION", "0.7.0")
-    monkeypatch.setattr(native_scenario, "CANDIDATE_VERSION", "0.7.0")
+    monkeypatch.setattr(native_scenario, "BASELINE_VERSION", baseline)
+    monkeypatch.setattr(native_scenario, "CANDIDATE_VERSION", baseline)
     target = tmp_path / ("released" if phase.startswith("baseline") else "candidate")
     module = str((target / "django_ray/__init__.py").resolve())
 
@@ -363,8 +377,12 @@ def test_native_equal_versions_select_phase_owned_environment(tmp_path, monkeypa
         assert command[0] == expected_python
         assert command[-2] == module
         assert kwargs["environment"]["PYTHONPATH"].split(os.pathsep)[0] == str(target)
+        config = json.loads(kwargs["environment"]["DJANGO_RAY_UPGRADE_CONFIG"])
+        assert config["expected_ray_version"] == (
+            baseline_ray if phase.startswith("baseline") else "2.60.0"
+        )
         command[-1].write_text(
-            json.dumps({"phase": phase, "module": module, "version": "0.7.0", "observations": {}})
+            json.dumps({"phase": phase, "module": module, "version": baseline, "observations": {}})
         )
 
     monkeypatch.setattr(scenario, "_run", run)
@@ -378,6 +396,43 @@ def test_native_equal_versions_select_phase_owned_environment(tmp_path, monkeypa
         runner="ray_core",
     )
     assert observed["module"] == module and observed["phase"] == phase
+
+
+@pytest.mark.parametrize("expected", [None, "2.59.0", "2.60", True, ["2.60.0"]])
+def test_native_settings_reject_missing_or_unreviewed_ray_version(tmp_path, monkeypatch, expected):
+    config = {
+        "database": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
+        "artifacts": str(tmp_path),
+    }
+    if expected is not None:
+        config["expected_ray_version"] = expected
+    monkeypatch.setenv("DJANGO_RAY_UPGRADE_ROOT", str(tmp_path))
+    monkeypatch.setenv("DJANGO_RAY_UPGRADE_CONFIG", json.dumps(config))
+    with pytest.raises(KeyError if expected is None else ValueError):
+        runpy.run_module("qualification.upgrade.native_settings")
+
+
+@pytest.mark.parametrize("expected", ["2.56.0", "2.58.0", "2.60.0"])
+@pytest.mark.parametrize("matches", [True, False])
+def test_native_task_refuses_ray_mismatch_before_effects(
+    settings, monkeypatch, tmp_path, expected, matches
+):
+    from qualification.upgrade.native_tasks import controlled
+
+    settings.EXPECTED_RAY_VERSION = expected
+    settings.RUNNER, settings.ROOT = "ray_core", tmp_path
+    monkeypatch.setitem(
+        sys.modules, "ray", SimpleNamespace(__version__=expected if matches else "2.59.0")
+    )
+    marker = tmp_path / "encoding-invocations"
+    if matches:
+        value = controlled.func("completion-encoding", None)
+        assert value != value  # The completion-encoding fixture deliberately returns NaN.
+        assert marker.read_text() == "x"
+    else:
+        with pytest.raises(AssertionError):
+            controlled.func("completion-encoding", None)
+        assert not marker.exists()
 
 
 def test_unreviewed_baseline_fails_before_fixture_execution():
@@ -420,7 +475,7 @@ def test_sqlite_restore_checks_django_constraints_and_closes_connections(tmp_pat
     (tmp_path / "backup").unlink()
 
 
-@pytest.mark.parametrize("version", ["0.4.0", "0.5.0", "0.6.0", "0.7.0"])
+@pytest.mark.parametrize("version", ["0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.7.1"])
 @pytest.mark.parametrize("refusal", ["25006", "unexpected-error", "accepted"])
 def test_native_graph_read_only_fence_is_independent_of_module_layout(
     monkeypatch, version, refusal

@@ -88,7 +88,7 @@ def _install_current_target(
     caller = probe_module._RuntimeObservation(
         node_id=_NODE_ID,
         session_name=request.target_expectation.cluster_session,
-        ray_version="2.58.0",
+        ray_version="2.60.0",
         python_implementation=runtime.python_implementation,
         python_version=(
             runtime.python_major,
@@ -104,7 +104,7 @@ def _install_current_target(
         ),
     )
     monkeypatch.setattr(ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(ray, "__version__", "2.58.0")
+    monkeypatch.setattr(ray, "__version__", "2.60.0")
     monkeypatch.setattr(probe_module, "_current_caller_observation", lambda _ray: caller)
     monkeypatch.setattr(
         probe_module,
@@ -190,6 +190,30 @@ def test_per_invocation_verifier_accepts_fresh_exact_membership(monkeypatch) -> 
     assert observed.observed_runtime == request.target_expectation.runtime
     assert observed.observed_membership_digest == request.claim_attestation.membership_digest
     assert observed.observed_proof_digest.startswith("sha256:")
+
+
+@pytest.mark.parametrize("ray_version", ["2.58.0", "2.59.0", "2.60.1", "2.61.0"])
+def test_per_invocation_verifier_rejects_unqualified_ray_before_observation(
+    monkeypatch,
+    ray_version: str,
+) -> None:
+    import ray
+
+    request = _fresh_request()
+    _install_current_target(monkeypatch, request)
+    monkeypatch.setattr(ray, "__version__", ray_version)
+    monkeypatch.setenv("RAY_IGNORE_VERSION_MISMATCH", "1")
+
+    def unexpected_observation(*_args, **_kwargs):
+        pytest.fail("unqualified Ray must be rejected before observing runtime or private state")
+
+    monkeypatch.setattr(probe_module, "_current_caller_observation", unexpected_observation)
+    monkeypatch.setattr(probe_module, "_current_resource_state_snapshot", unexpected_observation)
+
+    with pytest.raises(RayTargetProbeError) as error:
+        verify_ray_target_execution(request)
+
+    assert error.value.classification is RayTargetProbeFailure.UNSUPPORTED_RAY_VERSION
 
 
 def test_per_invocation_membership_change_returns_proven_rejection(monkeypatch) -> None:

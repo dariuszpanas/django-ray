@@ -7,7 +7,7 @@ metadata:
     app: ray
     component: cluster
 spec:
-  rayVersion: "2.58.0"
+  rayVersion: "2.60.0"
   enableInTreeAutoscaling: false
   headGroupSpec:
     serviceType: ClusterIP
@@ -29,7 +29,7 @@ spec:
       spec:
         containers:
           - name: ray-head
-            image: rayproject/ray:2.58.0-py312
+            image: rayproject/ray:2.60.0-py312
             imagePullPolicy: IfNotPresent
             ports:
               - containerPort: 6379
@@ -160,7 +160,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: rayproject/ray:2.58.0-py312
+              image: rayproject/ray:2.60.0-py312
               imagePullPolicy: IfNotPresent
               ports:
                 - containerPort: 8080

@@ -58,6 +58,18 @@ def test_render_preserves_shipped_discovery_auth_and_probes(shipped):
     source_web = original["Deployment", "django-web"]["spec"]["template"]["spec"]
     for key in ("readinessProbe", "livenessProbe"):
         assert web["containers"][0][key] == source_web["containers"][0][key]
+    grafana = by_id["Deployment", "grafana"]["spec"]["template"]["spec"]["containers"][0]
+    source_grafana = original["Deployment", "grafana"]["spec"]["template"]["spec"]["containers"][0]
+    for key in ("startupProbe", "readinessProbe", "livenessProbe", "resources"):
+        assert grafana[key] == source_grafana[key]
+    assert grafana["resources"] == {
+        "requests": {"cpu": "50m", "memory": "128Mi"},
+        "limits": {"cpu": "200m", "memory": "512Mi"},
+    }
+    startup = grafana["startupProbe"]
+    assert startup["httpGet"] == grafana["readinessProbe"]["httpGet"]
+    assert startup["failureThreshold"] * startup["periodSeconds"] == 180
+    assert startup["timeoutSeconds"] == 2
     assert all(
         doc["kind"] not in {"Secret", "PersistentVolumeClaim", "Ingress"} for doc in documents
     )
@@ -89,7 +101,7 @@ def test_render_has_fixed_resources_no_foreign_storage_and_generic_ray(shipped):
             cpu += int(limits["cpu"].removesuffix("m"))
             memory += int(limits["memory"].removesuffix("Mi"))
     assert cpu + 100 == 2850  # separately installed operator
-    assert memory + 512 == 9344
+    assert memory + 512 == 9600
 
 
 @pytest.mark.parametrize("bad", ["default", "monitoring-x", "monitoring-1/other"])
@@ -382,7 +394,7 @@ def test_resource_drift_and_unbounded_injected_init_fail_closed(shipped):
     assert documents[0]["kind"] == "ResourceQuota"
     assert render.validate_resources(documents) == {
         "cpu_millicores": 2750,
-        "memory_mib": 8832,
+        "memory_mib": 9088,
         "pods": 6,
     }
     web = next(

@@ -14,8 +14,8 @@ with preserved-data evidence, rather than removed by this documentation change.
 
 ## Ray Client startup limitation
 
-Ray 2.58 does not resolve the intermittent Linux Client startup race tracked in
-[Ray #63202](https://github.com/ray-project/ray/issues/63202). Native investigation
+Ray 2.60 does not resolve the intermittent Linux Client startup race tracked in
+[Ray #63202](https://github.com/ray-project/ray/issues/63202). Earlier native investigation
 reproduced the matching gRPC assertion with stock Ray Client; different Python
 matrix lanes failed on different runs. This is not evidence of a deterministic
 Python-version incompatibility.
@@ -26,19 +26,69 @@ Client connection and remains subject to the limitation. A passing retry does
 not establish that the race is fixed, and an ambiguous task submission must not
 be replayed merely because connection setup failed.
 
-[Upstream PR #65982](https://github.com/ray-project/ray/pull/65982) was unmerged
-when reviewed on 2026-10-17; it has not been adopted or backported here. Further
+[Upstream PR #65982](https://github.com/ray-project/ray/pull/65982) remained unmerged
+when reviewed on 2026-11-07; its process-spawn change is absent from the Ray 2.60.0
+tag and has not been adopted or backported here. Further
 investigation and requalification require an available upstream fix; the 0.7.x
 releases do not establish a repair. Verify startup and abrupt-parent-death cleanup before
 removing this warning: the proposed patch changes child fate sharing. This is
-not a promise that a particular upstream release will contain the fix.
+not a promise that a particular upstream release will contain the fix. Ray 2.60's
+[completed-chunk replay fix](https://github.com/ray-project/ray/pull/66476) repairs a
+different reconnect path and does not establish a startup repair.
+
+### Ray 2.60.0 baseline for 0.8.0
+
+The unreleased django-ray 0.8.0 baseline requires Ray 2.60.0 or a newer compatible
+release. The contributor lock, deployment images, Ray Data recipe, and CI minimum
+move together from 2.58.0 to 2.60.0. Released django-ray 0.7.x retains its 2.58.0
+minimum. This source update is not a release or a claim that upgrade qualification
+has passed.
+
+The [Ray 2.60.0 release](https://github.com/ray-project/ray/releases/tag/ray-2.60.0)
+was reviewed on November 7, 2026. Changes relevant to django-ray include:
+
+- Ray 2.59 enabled token authentication for newly started local clusters, and
+  2.60 retains that behavior. Isolate token-file state when testing repeated
+  `ray.init()` and shutdown. Explicit-address clients and joining workers still
+  need `RAY_AUTH_MODE=token` and the cluster's matching token. The bundled
+  Kubernetes manifests already distribute both. The tagged
+  [authentication guide](https://github.com/ray-project/ray/blob/ray-2.60.0/doc/source/ray-security/token-auth.md)
+  schedules the broader default for remote clusters in Ray 2.61.
+- RuntimeEnv adds `local://` URIs, `.tar.xz` archives, and environment-variable
+  expansion in uv package inputs. django-ray retains its existing immutable
+  source and dependency identities; a new upstream input form does not bypass
+  those checks or become a qualified django-ray delivery path automatically.
+- Core repairs include runtime-env-agent file-handle cleanup, object-reference
+  and lineage handling, and use of the worker-local GCS client in JobSupervisor.
+  Retain cancellation, durable completion, reconnect, and shutdown regression
+  checks rather than inferring that these changes resolve django-ray's open
+  investigations.
+- Ray Data rejects pickled-object columns in more external Arrow readers and
+  changes shuffle, Parquet read planning, and actor-pool autoscaling defaults.
+  Re-run the bounded Data Job recipe; its JSON/scalar-Parquet contract does not
+  qualify arbitrary connectors or application deserializers. Ray's refreshed
+  wheels/images also carry dependency security updates; django-ray keeps its
+  own stricter dependency floors and audits.
+- Ray's RuntimeEnv agent bundles its own `aiohttp`: 2.60 upgrades that copy
+  from 3.14.3 to 3.14.4 in the tagged
+  [wheel build configuration](https://github.com/ray-project/ray/blob/ray-2.60.0/python/setup.py#L39).
+  Updating the application's external `aiohttp` lock does not replace this
+  vendored copy, so upgrading Ray itself carries a separate security benefit.
+
+Before release acceptance, run the Linux checkpoint and the full applicable
+[deployment and coordinated upgrade gates](deployment/local-kuberay-gate.md),
+including cold Ray startup, authenticated Core/Jobs control, task/workflow
+execution, cancellation, and preservation checks with matching managers, head,
+and workers. Existing 2.58 receipts are historical evidence, not 2.60 product
+qualification. Python 3.15 and native Compiled Graph remain unqualified.
 
 ### Ray 2.59.0 review
 
 The [Ray 2.59.0 release](https://github.com/ray-project/ray/releases/tag/ray-2.59.0)
-was reviewed on October 10, 2026. The declared compatible range permits it and the
-latest-dependency CI lane can exercise it, but the reproducible lock, minimum
-version, and deployment baseline remain 2.58.0 in this change.
+was reviewed on October 10, 2026, while django-ray's reproducible lock, minimum
+version, and deployment baseline remained 2.58.0. That historical review allowed
+the latest-dependency lane to exercise 2.59 without advancing the baseline; the
+0.8.0 baseline above supersedes that minimum-version decision.
 
 - New local clusters enable token authentication. Token-file persistence and
   inherited process environment affect repeated `ray.init()` and child startup;
@@ -90,7 +140,7 @@ Beta users that imported those private modules must move to the canonical packag
 |---|---|
 | Python | 3.12, 3.13, 3.14 |
 | Django | 6.0.8 or newer compatible release |
-| Ray | 2.58.0 or newer compatible release |
+| Ray | 2.60.0 or newer compatible release (unreleased 0.8.0 baseline) |
 | Production operating system | Linux |
 
 Python 3.12 is the floor because Django 6.0 requires Python 3.12+, not because Ray does.
@@ -99,7 +149,7 @@ Current [Ray releases support a wider Python range](https://pypi.org/project/ray
 ### Python 3.15 preparation
 
 [Python 3.15.0 was released on October 9, 2026](https://www.python.org/downloads/release/python-3150/).
-As reviewed on October 10, [Ray 2.59.0's files](https://pypi.org/project/ray/2.59.0/#files)
+As reviewed on November 7, [Ray 2.60.0's files](https://pypi.org/project/ray/2.60.0/#files)
 still include no CPython 3.15 Core wheel.
 Python 3.15 is therefore a compatibility preparation target, not a supported
 django-ray runtime. The ordinary test, dependency, release, and container matrices
@@ -130,19 +180,20 @@ Compiled Graph retains its separate exact-tuple capability policy.
 Django 6.0.8 is the django-ray security floor. Django 6.0.0 through 6.0.7 are not
 supported; newer compatible releases are exercised by the latest-dependency lane.
 
-Ray 2.58.0 remains the security and runtime baseline for django-ray 0.7.x,
-unchanged from 0.5.0 and 0.6.0. Ray 2.57 added
+Ray 2.60.0 is the security and runtime baseline for unreleased django-ray 0.8.0.
+The released 0.7.x baseline was 2.58.0, unchanged from 0.5.0 and 0.6.0. Ray 2.57 added
 [Dashboard log-path validation](https://github.com/ray-project/ray/pull/64701),
 which is absent from 2.56.0 and 2.56.1. Ray 2.58 additionally fixes
 [nested Parquet/Lance pickle handling](https://github.com/ray-project/ray/pull/64881)
 and the [Serve internal authentication/TLS boundary](https://github.com/ray-project/ray/pull/65189).
 The latter fixes concern optional application-owned Data and Serve workloads; the
 bundled Data recipe reads JSON, not Lance or nested pickle data. These extend the
-earlier fixes behind django-ray 0.4's Ray 2.56.0 floor.
+earlier fixes behind django-ray 0.4's Ray 2.56.0 floor. Ray 2.60 extends the Data
+reader defenses to additional external Arrow input paths; see the review above.
 
 Keep the task managers, Ray head, and Ray workers on one compatible tuple when
-installing django-ray 0.7.x; follow the [coordinated Beta upgrade
-procedure](deployment/upgrading-from-0.6.md). Do not use a mixed Ray minor-version
+installing django-ray; follow the [coordinated Beta upgrade
+procedure](stability.md#coordinated-beta-upgrades). Do not use a mixed Ray minor-version
 cluster as a rolling-upgrade shortcut. The Ray upgrade does not activate Compiled
 Graph, task-event migration, Sandbox, or a new execution protocol. Existing
 cancellation, ownership and durable completion fences remain necessary.
@@ -152,9 +203,10 @@ runtime tuples. A target-attested task-manager cohort must match the configured 
 version and the Python implementation plus `major.minor.patch` exactly across the
 manager and every live schedulable cluster node. Ray's connection-time warning or
 `RAY_IGNORE_VERSION_MISMATCH` does not weaken that django-ray rule. The initial bounded
-attestation codec and Ray 2.58.0 probe are dormant infrastructure: current workers do
-not yet advertise target capacity or fence claims with their output. The additive
-target-persistence schema likewise records only immutable target intent, append-only
+attestation codec and exact Ray 2.60.0 probe are dormant infrastructure: current workers do
+not yet advertise target capacity or fence claims with their output. Updating that
+private adapter does not activate target routing or qualify a different Ray version.
+The additive target-persistence schema likewise records only immutable target intent, append-only
 policy revisions, and verified canonical observation history. Verified versus expired
 is derived from the latest matching proof and its bounded expiry; mismatch,
 unreachable, identity-drift, malformed, and expired probe outcomes are not fabricated

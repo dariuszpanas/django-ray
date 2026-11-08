@@ -175,9 +175,9 @@ def _verify_ray_security_floor(requirements: list[str], *, source: str) -> None:
         .replace("_", "-")
         .startswith("ray[default]")
     ]
-    if ray_requirements != ["ray[default]>=2.58.0"]:
+    if ray_requirements != ["ray[default]>=2.60.0"]:
         raise RuntimeError(
-            f"{source} must contain exactly one ray[default]>=2.58.0 runtime security floor"
+            f"{source} must contain exactly one ray[default]>=2.60.0 runtime security floor"
         )
 
 
@@ -555,8 +555,8 @@ def verify_installed_wheel(expected_version: str) -> None:
         source="installed wheel metadata",
     )
     installed_ray = Version(importlib.metadata.version("ray"))
-    if installed_ray < Version("2.58.0"):
-        raise RuntimeError(f"installed Ray {installed_ray} is below the 2.58.0 security floor")
+    if installed_ray < Version("2.60.0"):
+        raise RuntimeError(f"installed Ray {installed_ray} is below the 2.60.0 security floor")
 
     _verify_transitive_security_floors(
         list(distribution.requires or ()),

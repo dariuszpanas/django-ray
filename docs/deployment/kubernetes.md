@@ -296,7 +296,8 @@ intended to fit beside django-ray-testing under its documented 50% host policy;
 the other local profiles do not fit that envelope. The application namespace
 also has a 9 GiB memory-limit ceiling, including a 6 GiB Ray-head
 limit, while the operator namespace is capped at 1 GiB.
-The head allowance includes Ray 2.58 dashboard subprocess startup; a ready Ray
+The head allowance was established for Ray 2.58 dashboard subprocess startup and
+must be requalified for the Ray 2.60 baseline; a ready Ray
 pod alone does not prove the Dashboard and Jobs services are available.
 
 Rendered steady-state totals exclude the completed setup Job, the KubeRay
@@ -305,8 +306,8 @@ operator, the Kong controller/gateway, and Kubernetes/Docker overhead:
 | Profile | `django-ray` pods | CPU requests | Memory requests | CPU limits | Memory limits |
 |---|---:|---:|---:|---:|---:|
 | Co-resident | 5 | 0.5 | 2,176 MiB | 1.45 | 8,832 MiB |
-| Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 16,256 MiB |
-| Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,272 MiB |
+| Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 16,512 MiB |
+| Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,528 MiB |
 
 ### 1. Install Operator + Deploy
 

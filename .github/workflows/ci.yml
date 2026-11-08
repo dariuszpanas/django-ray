@@ -435,14 +435,14 @@ jobs:
             --network django-ray-live-cluster \
             --shm-size=1g \
             --publish 127.0.0.1:10001:10001 \
-            rayproject/ray:2.58.0-py312 \
+            rayproject/ray:2.60.0-py312 \
             bash -lc 'ray start --head --port=6379 \
               --ray-client-server-port=10001 --num-cpus=0 \
               --disable-usage-stats --block'
           docker run --detach --name ray-worker \
             --network django-ray-live-cluster \
             --shm-size=1g \
-            rayproject/ray:2.58.0-py312 \
+            rayproject/ray:2.60.0-py312 \
             bash -lc 'ray start --address=ray-head:6379 --num-cpus=1 \
               --disable-usage-stats --block'
 
@@ -774,7 +774,7 @@ jobs:
             "multidict==6.9.1" \
             "opentelemetry-api==1.45.1" \
             "pyasn1==0.6.5" \
-            "ray[default]==2.58.0" \
+            "ray[default]==2.60.0" \
             "sqlparse==0.6.0" \
             "urllib3==2.8.0" \
             "virtualenv==21.14.13" \
@@ -810,10 +810,10 @@ jobs:
         include:
           - profile: supported-min-python
             python-version: "3.12"
-            ray-version: "2.58.0"
+            ray-version: "2.60.0"
           - profile: newest-python
             python-version: "3.14"
-            ray-version: "2.58.0"
+            ray-version: "2.60.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

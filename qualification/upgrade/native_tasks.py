@@ -13,9 +13,7 @@ from django.tasks import task
 def controlled(case, payload):
     import ray
 
-    import django_ray
-
-    assert ray.__version__ == ("2.56.0" if django_ray.__version__ == "0.4.0" else "2.58.0")
+    assert ray.__version__ == settings.EXPECTED_RAY_VERSION
     if settings.RUNNER == "ray_job":
         assert os.environ.get("QUALIFICATION_RUNTIME_MARKER") == "delivered"
         bundle = importlib.import_module("upgrade_bundle")

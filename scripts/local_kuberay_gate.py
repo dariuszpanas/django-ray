@@ -1001,12 +1001,14 @@ class GateEvidence:
     ray_job_processes_clear: bool = False
     ray_job_logs_clear: bool = False
     ray_job_manager_reconciled_same_job: bool = False
+    ray_job_manager_no_resubmit: bool = False
     ray_job_missing_reference_no_marker: bool = False
     ray_job_missing_reference_no_retry: bool = False
     protocol_legacy_cohort_visible: bool = False
     protocol_explicit_cohort_visible: bool = False
-    protocol_v1_handoff_same_job: bool = False
-    protocol_v1_handoff_no_resubmit: bool = False
+    protocol_legacy_inline_refused: bool = False
+    protocol_legacy_inline_no_marker: bool = False
+    protocol_legacy_inline_single_attempt: bool = False
     protocol_v1_queued_survived_handoff: bool = False
     protocol_v2_queued_unchanged: bool = False
     protocol_v2_unsupported_visible: bool = False
@@ -2921,6 +2923,7 @@ class LocalKubeRayGate:
         self.setup_pod_images: PodImageContract | None = None
         self.deployment_contracts: dict[str, DeploymentContract] = {}
         self._released_v040_worker_id: str | None = None
+        self._released_v040_refusal_marker: str | None = None
         self._released_v040_hostname: str | None = None
         self._protocol_v1_survival_fixture: Mapping[str, Any] | None = None
         self._protocol_v2_fixture: Mapping[str, Any] | None = None
@@ -3575,7 +3578,7 @@ class LocalKubeRayGate:
         dockerfile.write_text(
             released_dockerfile.read_text(encoding="utf-8")
             + "\n# The handoff tests old application code on the current Ray cluster.\n"
-            + f"RUN python -m pip install --no-cache-dir --no-deps ray=={ray_version} "
+            + f'RUN python -m pip install --no-cache-dir "ray[default]=={ray_version}" '
             + "&& python -m pip check\n",
             encoding="utf-8",
             newline="\n",
@@ -5498,8 +5501,6 @@ else:
             or reconciled.get("submission_count") != 1
         ):
             raise ValueError("rq2 manager replacement did not retain the exact submitted job")
-        self.evidence.ray_job_manager_reconciled_same_job = True
-
         terminal = self._wait_for_ray_job_gate_task(
             task_id,
             accepted_states=frozenset({"SUCCEEDED"}),
@@ -5507,6 +5508,9 @@ else:
         )
         if (
             terminal.get("durable_state") != "SUCCEEDED"
+            or terminal.get("job_id") != running["job_id"]
+            or terminal.get("attempt_number") != 1
+            or terminal.get("execution_generation") != running.get("execution_generation")
             or terminal.get("carrier_ok") is not True
             or terminal.get("binding_ok") is not True
             or terminal.get("request_ok") is not True
@@ -5518,6 +5522,8 @@ else:
         self.evidence.ray_job_request_reference_carrier = True
         self.evidence.ray_job_raw_info_clear = True
         self.evidence.ray_job_logs_clear = True
+        self.evidence.ray_job_manager_reconciled_same_job = True
+        self.evidence.ray_job_manager_no_resubmit = True
 
         self._verify_missing_ray_job_request_reference()
 
@@ -5758,6 +5764,9 @@ else:
                                 + [
                                     {"name": "RAY_AUTH_MODE", "value": "token"},
                                     {"name": "DJANGO_API_ENABLED", "value": "false"},
+                                    # The retired carrier is a one-attempt negative fixture;
+                                    # v0.4 predates the current non-retryable refusal fence.
+                                    {"name": "RAY_MAX_RETRIES", "value": "1"},
                                     {
                                         "name": "RAY_ADDRESS",
                                         "value": "ray://ray-head-svc:10001",
@@ -5985,12 +5994,37 @@ print(json.dumps({
         return self._sensitive_django_shell(script, field_name="protocol cohort observation")
 
     def _enqueue_released_v040_handoff_task(self) -> str:
-        """Enqueue one marker-free protocol-v1 task for the released manager."""
+        """Bind an observable callable to the retired carrier's negative fixture."""
 
-        return self._enqueue_ray_job_gate_task()
+        marker = "django-ray-legacy-refusal-" + uuid4().hex
+        self._released_v040_refusal_marker = marker
+        self._register_ray_job_gate_value(marker)
+        self._register_ray_job_gate_value("builtins.print")
+        script = f"""
+import json
+
+from django.db import transaction
+
+from django_ray.models import RayTaskExecution
+from testproject.tasks import echo_task
+
+with transaction.atomic():
+    result = echo_task.using(
+        backend={RAY_JOB_GATE_QUEUE!r},
+        queue_name={RAY_JOB_GATE_QUEUE!r},
+    ).enqueue({marker!r})
+    row = RayTaskExecution.objects.get(task_id=result.id)
+    row.callable_path = "builtins.print"
+    row.save(update_fields=["callable_path"])
+print(json.dumps({{"task_id": result.id}}))
+""".strip()
+        result = self._sensitive_django_shell(script, field_name="legacy refusal task enqueue")
+        task_id = self._canonical_uuid4(result.get("task_id"), field_name="legacy refusal task id")
+        self._register_ray_job_gate_value(task_id)
+        return task_id
 
     def _enqueue_protocol_v1_survival_task(self) -> Mapping[str, Any]:
-        """Enqueue one deferred protocol-v1 row while the released manager is busy."""
+        """Enqueue one deferred protocol-v1 row before removing the released manager."""
 
         marker = "protocol_v1_handoff_queued_" + uuid4().hex
         self._register_ray_job_gate_value(marker)
@@ -6349,10 +6383,11 @@ print(json.dumps({{
         """Observe the durable row and the released payload-carrier Ray Job."""
 
         script = f"""
+import base64
 import json
 import shlex
 
-from django_ray.models import RayTaskExecution
+from django_ray.models import RayTaskExecution, TaskAttempt
 from django_ray.runner.ray_job import _address_pinned_job_client
 
 row = RayTaskExecution.objects.get(task_id={task_id!r})
@@ -6384,6 +6419,19 @@ else:
             ]
             and {RAY_JOB_REQUEST_REFERENCE_CARRIER!r} not in parts
         )
+        marker = {self._released_v040_refusal_marker!r}
+        payload = {{}}
+        if released_carrier and len(parts[4]) <= 16384:
+            try:
+                decoded = json.loads(base64.b64decode(parts[4], altchars=b"-_", validate=True))
+                if isinstance(decoded, dict):
+                    payload = decoded
+            except (ValueError, UnicodeError):
+                pass
+        logs = str(client.get_job_logs(row.ray_job_id) or "")
+        attempts = list(TaskAttempt.objects.filter(execution=row).values(
+            "attempt_number", "state", "result_data", "result_reference"
+        ))
         print(json.dumps({{
             "ready": True,
             "state": status,
@@ -6395,6 +6443,34 @@ else:
             "released_carrier": released_carrier,
             "request_reference_absent": row.ray_job_request_reference is None,
             "submission_count": submissions,
+            "driver_exit_code": getattr(info, "driver_exit_code", None),
+            "fixed_refusal": (
+                "django-ray task failed: execution request rejected: legacy_request"
+                in logs.splitlines()
+            ),
+            "callable_marker_bound": (
+                bool(marker)
+                and row.callable_path == "builtins.print"
+                and json.loads(row.args_json) == [marker]
+                and json.loads(row.kwargs_json) == {{}}
+                and payload.get("callable_path") == row.callable_path
+                and payload.get("serialized_args") == row.args_json
+                and payload.get("serialized_kwargs") == row.kwargs_json
+                and payload.get("task_id") == row.task_id
+                and payload.get("task_execution_pk") == row.pk
+                and payload.get("attempt_number") == row.attempt_number
+                and payload.get("execution_generation") == row.execution_generation
+            ),
+            "marker_absent": bool(marker) and marker not in logs,
+            "completion_is_none": row.completion_data is None,
+            "result_is_none": row.result_data is None and row.result_reference is None,
+            "run_after_is_none": row.run_after is None,
+            "single_failed_attempt": attempts == [{{
+                "attempt_number": 1,
+                "state": "FAILED",
+                "result_data": None,
+                "result_reference": None,
+            }}],
         }}, sort_keys=True, separators=(",", ":")))
 """.strip()
         return self._sensitive_django_shell(
@@ -6402,6 +6478,55 @@ else:
             field_name="released v0.4.0 handoff task observation",
             ray_authorized=True,
         )
+
+    def _require_released_v040_refusal(
+        self,
+        observation: Mapping[str, Any],
+        *,
+        prior: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Require a terminal, marker-free refusal from the one-attempt fixture."""
+
+        job_id = observation.get("job_id")
+        generation = observation.get("execution_generation")
+        if (
+            observation.get("ready") is not True
+            or observation.get("state") != "FAILED"
+            or observation.get("durable_state") != "FAILED"
+            or observation.get("worker_id") != self._released_v040_worker_id
+            or type(observation.get("attempt_number")) is not int
+            or observation.get("attempt_number") != 1
+            or type(generation) is not int
+            or generation < 0
+            or not isinstance(job_id, str)
+            or re.fullmatch(r"raysubmit_django_ray_v1_[0-9a-f]{64}", job_id) is None
+            or type(observation.get("submission_count")) is not int
+            or observation.get("submission_count") != 1
+            or type(observation.get("driver_exit_code")) is not int
+            or observation.get("driver_exit_code") != 78
+            or any(
+                observation.get(field) is not True
+                for field in (
+                    "released_carrier",
+                    "request_reference_absent",
+                    "fixed_refusal",
+                    "callable_marker_bound",
+                    "marker_absent",
+                    "completion_is_none",
+                    "result_is_none",
+                    "run_after_is_none",
+                    "single_failed_attempt",
+                )
+            )
+            or (
+                prior is not None
+                and any(
+                    observation.get(field) != prior.get(field)
+                    for field in ("job_id", "attempt_number", "execution_generation", "worker_id")
+                )
+            )
+        ):
+            raise ValueError("released inline fixture did not retain its exact one-attempt refusal")
 
     def _wait_for_protocol_handoff_task(
         self,
@@ -7628,7 +7753,7 @@ def await_target_result(runner, submission):
 context = ray.get_runtime_context()
 runtime = RayRuntimeVersion(
     ray_major=2,
-    ray_minor=58,
+    ray_minor=60,
     ray_patch=0,
     python_implementation=platform.python_implementation().strip().lower(),
     python_major=sys.version_info.major,
@@ -8009,7 +8134,13 @@ print(json.dumps({{
         return result
 
     def _verify_protocol_handoff_certification(self) -> None:
-        """Certify released-v1 handoff and current-build protocol fencing live."""
+        """Certify retired-carrier refusal, queued-v1 survival and protocol fencing."""
+
+        if (
+            self.evidence.ray_job_manager_reconciled_same_job is not True
+            or self.evidence.ray_job_manager_no_resubmit is not True
+        ):
+            raise ValueError("current rq2 same-job recovery evidence is incomplete")
 
         failure: BaseException | None = None
         cleanup_errors: list[tuple[str, object]] = []
@@ -8071,29 +8202,11 @@ print(json.dumps({{
             task_id = self._enqueue_released_v040_handoff_task()
             released = self._wait_for_protocol_handoff_task(
                 task_id,
-                accepted_states=frozenset({"RUNNING"}),
-                durable_state="RUNNING",
+                accepted_states=frozenset({"FAILED"}),
+                durable_state="FAILED",
             )
-            released_worker = released.get("worker_id")
-            generation = released.get("execution_generation")
-            job_id = released.get("job_id")
-            released_attempt = released.get("attempt_number")
-            released_submission_count = released.get("submission_count")
-            if (
-                released_worker != self._released_v040_worker_id
-                or type(released_attempt) is not int
-                or released_attempt != 1
-                or type(generation) is not int
-                or generation < 0
-                or not isinstance(job_id, str)
-                or re.fullmatch(r"raysubmit_django_ray_v1_[0-9a-f]{64}", job_id) is None
-                or released.get("released_carrier") is not True
-                or released.get("request_reference_absent") is not True
-                or type(released_submission_count) is not int
-                or released_submission_count != 1
-            ):
-                raise ValueError("released v0.4.0 manager lost the exact v1 submission contract")
-            self._register_ray_job_gate_value(job_id)
+            self._require_released_v040_refusal(released)
+            self._register_ray_job_gate_value(str(released["job_id"]))
             queued_fixture = self._enqueue_protocol_v1_survival_task()
             self._require_protocol_v1_survival_unchanged(queued_fixture)
 
@@ -8103,48 +8216,8 @@ print(json.dumps({{
             released_lease_absent = True
             self._scale_ray_job_manager(1)
 
-            adopted = self._wait_for_protocol_handoff_task(
-                task_id,
-                accepted_states=frozenset({"RUNNING"}),
-                different_worker=str(released_worker),
-                durable_state="RUNNING",
-            )
-            adopted_attempt = adopted.get("attempt_number")
-            adopted_submission_count = adopted.get("submission_count")
-            if (
-                adopted.get("job_id") != job_id
-                or type(adopted_attempt) is not int
-                or adopted_attempt != 1
-                or adopted.get("execution_generation") != generation
-                or adopted.get("released_carrier") is not True
-                or adopted.get("request_reference_absent") is not True
-                or type(adopted_submission_count) is not int
-                or adopted_submission_count != 1
-            ):
-                raise ValueError("current manager did not adopt the released v1 Ray Job exactly")
-            self.evidence.protocol_v1_handoff_same_job = True
-            self.evidence.protocol_v1_handoff_no_resubmit = True
             self._require_protocol_v1_survival_unchanged(queued_fixture)
             self._release_protocol_v1_survival_task(queued_fixture)
-
-            terminal = self._wait_for_protocol_handoff_task(
-                task_id,
-                accepted_states=frozenset({"SUCCEEDED"}),
-                durable_state="SUCCEEDED",
-            )
-            terminal_attempt = terminal.get("attempt_number")
-            terminal_submission_count = terminal.get("submission_count")
-            if (
-                terminal.get("job_id") != job_id
-                or type(terminal_attempt) is not int
-                or terminal_attempt != 1
-                or terminal.get("execution_generation") != generation
-                or terminal.get("released_carrier") is not True
-                or terminal.get("request_reference_absent") is not True
-                or type(terminal_submission_count) is not int
-                or terminal_submission_count != 1
-            ):
-                raise ValueError("released v1 handoff did not finish on the exact adopted job")
 
             queued_terminal = self._wait_for_ray_job_gate_task(
                 str(queued_fixture["task_id"]),
@@ -8182,6 +8255,14 @@ print(json.dumps({{
             self._register_ray_job_gate_value(queued_job_id)
             self.evidence.protocol_v1_queued_survived_handoff = True
             self._protocol_v1_survival_fixture = None
+            # The restored current manager must leave the refused historical row
+            # terminal, with the same Job and generation and no scheduled retry.
+            self._require_released_v040_refusal(
+                self._observe_protocol_handoff_task(task_id), prior=released
+            )
+            self.evidence.protocol_legacy_inline_refused = True
+            self.evidence.protocol_legacy_inline_no_marker = True
+            self.evidence.protocol_legacy_inline_single_attempt = True
             handoff_completed = True
 
             baseline_metrics = self._protocol_metric_counts()
@@ -8751,6 +8832,13 @@ print(json.dumps({{
         heads = [pod for pod in pods if self._rendered_ray_pod_contract(pod)[0] == "head"]
         if len(heads) != 1:
             raise ValueError("authentication probe requires exactly one verified Ray head")
+        self._kubectl(
+            "rollout",
+            "status",
+            "deployment/grafana",
+            f"--timeout={self.config.rollout_timeout}s",
+            timeout=self._rollout_command_timeout(),
+        )
         grafana_receipt = self._authentication_probe(
             grafana_auth_probe_script(),
             resource=f"pod/{_metadata(heads[0])['name']}",
@@ -11302,10 +11390,13 @@ print(json.dumps({{
         if released_image_id != self.evidence.released_v040_image_id:
             raise ValueError("released v0.4.0 image identity changed after certification")
         protocol_evidence = (
+            self.evidence.ray_job_manager_reconciled_same_job,
+            self.evidence.ray_job_manager_no_resubmit,
             self.evidence.protocol_legacy_cohort_visible,
             self.evidence.protocol_explicit_cohort_visible,
-            self.evidence.protocol_v1_handoff_same_job,
-            self.evidence.protocol_v1_handoff_no_resubmit,
+            self.evidence.protocol_legacy_inline_refused,
+            self.evidence.protocol_legacy_inline_no_marker,
+            self.evidence.protocol_legacy_inline_single_attempt,
             self.evidence.protocol_v1_queued_survived_handoff,
             self.evidence.protocol_v2_queued_unchanged,
             self.evidence.protocol_v2_unsupported_visible,
@@ -11472,6 +11563,7 @@ print(json.dumps({{
                 "ray_job_manager_reconciled_same_job",
                 self.evidence.ray_job_manager_reconciled_same_job,
             ),
+            ("ray_job_manager_no_resubmit", self.evidence.ray_job_manager_no_resubmit),
             (
                 "ray_job_missing_reference_no_marker",
                 self.evidence.ray_job_missing_reference_no_marker,
@@ -11489,12 +11581,16 @@ print(json.dumps({{
                 self.evidence.protocol_explicit_cohort_visible,
             ),
             (
-                "protocol_v1_handoff_same_job",
-                self.evidence.protocol_v1_handoff_same_job,
+                "protocol_legacy_inline_refused",
+                self.evidence.protocol_legacy_inline_refused,
             ),
             (
-                "protocol_v1_handoff_no_resubmit",
-                self.evidence.protocol_v1_handoff_no_resubmit,
+                "protocol_legacy_inline_no_marker",
+                self.evidence.protocol_legacy_inline_no_marker,
+            ),
+            (
+                "protocol_legacy_inline_single_attempt",
+                self.evidence.protocol_legacy_inline_single_attempt,
             ),
             (
                 "protocol_v1_queued_survived_handoff",

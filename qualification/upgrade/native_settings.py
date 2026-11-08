@@ -8,6 +8,9 @@ from django_ray.conf.defaults import DEFAULTS
 
 ROOT = Path(os.environ["DJANGO_RAY_UPGRADE_ROOT"])
 CONFIG = json.loads(os.environ["DJANGO_RAY_UPGRADE_CONFIG"])
+EXPECTED_RAY_VERSION = CONFIG["expected_ray_version"]
+if EXPECTED_RAY_VERSION not in ("2.56.0", "2.58.0", "2.60.0"):
+    raise ValueError("The native upgrade phase requires a reviewed Ray version")
 SECRET_KEY = "disposable-native-upgrade"
 USE_TZ = True
 INSTALLED_APPS = ["django_ray"]

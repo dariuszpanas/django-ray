@@ -23,9 +23,19 @@ NODE_A = "1" * 56
 NODE_B = "2" * 56
 NODE_C = "3" * 56
 SESSION = "session_probe_test"
+UNSUPPORTED_RAY_VERSIONS = (
+    "2.56.0",
+    "2.56.1",
+    "2.57.0",
+    "2.58.0",
+    "2.58.1",
+    "2.59.0",
+    "2.60.1",
+    "2.61.0",
+)
 RUNTIME = RayRuntimeVersion(
     ray_major=2,
-    ray_minor=58,
+    ray_minor=60,
     ray_patch=0,
     python_implementation="cpython",
     python_major=3,
@@ -38,7 +48,7 @@ def _runtime_mapping(
     node_id: str = NODE_A,
     *,
     session_name: str = SESSION,
-    ray_version: str = "2.58.0",
+    ray_version: str = "2.60.0",
     python_implementation: str = "cpython",
     python_version: str = "3.12.12",
 ) -> dict[str, object]:
@@ -119,7 +129,7 @@ def _raw_observation() -> probe._RawClusterObservation:
     caller = probe._RuntimeObservation(
         node_id=NODE_A,
         session_name=SESSION,
-        ray_version="2.58.0",
+        ray_version="2.60.0",
         python_implementation="cpython",
         python_version=(3, 12, 12),
     )
@@ -140,7 +150,7 @@ def _raw_observation() -> probe._RawClusterObservation:
             probe._RuntimeObservation(
                 node_id=NODE_B,
                 session_name=SESSION,
-                ray_version="2.58.0",
+                ray_version="2.60.0",
                 python_implementation="cpython",
                 python_version=(3, 12, 12),
             ),
@@ -432,7 +442,7 @@ def _install_remote_ray_modules(
 
     ray_module = ModuleType("ray")
     ray_module.__path__ = []  # type: ignore[attr-defined]
-    ray_module.__version__ = "2.58.0"
+    ray_module.__version__ = "2.60.0"
     ray_module.get_runtime_context = lambda: SimpleNamespace(
         get_node_id=lambda: NODE_A,
         get_session_name=lambda: SESSION,
@@ -671,7 +681,7 @@ def test_remote_coordinator_fails_closed_when_private_adapter_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ray_module = ModuleType("ray")
-    ray_module.__version__ = "2.58.0"
+    ray_module.__version__ = "2.60.0"
     ray_module.get_runtime_context = lambda: SimpleNamespace(
         get_node_id=lambda: NODE_A,
         get_session_name=lambda: SESSION,
@@ -882,7 +892,7 @@ def test_remote_coordinator_rejects_invalid_operational_bounds(
     max_bytes: int,
 ) -> None:
     ray_module = ModuleType("ray")
-    ray_module.__version__ = "2.58.0"
+    ray_module.__version__ = "2.60.0"
     monkeypatch.setitem(sys.modules, "ray", ray_module)
 
     result = probe._make_cluster_probe_coordinator()(
@@ -894,7 +904,7 @@ def test_remote_coordinator_rejects_invalid_operational_bounds(
     assert result == {"ok": False, "classification": "invalid_configuration"}
 
 
-@pytest.mark.parametrize("ray_version", ["2.56.0", "2.56.1", "2.57.0", "2.58.1", "2.59.0"])
+@pytest.mark.parametrize("ray_version", UNSUPPORTED_RAY_VERSIONS)
 def test_remote_coordinator_checks_exact_version_before_private_import(
     monkeypatch: pytest.MonkeyPatch,
     ray_version: str,
@@ -920,7 +930,7 @@ def test_remote_coordinator_is_by_value_and_invocable_without_django_ray_import(
     payload = ray_cloudpickle.dumps(probe._make_cluster_probe_coordinator())
     original_import = builtins.__import__
     fake_ray = ModuleType("ray")
-    fake_ray.__version__ = "2.58.0"
+    fake_ray.__version__ = "2.60.0"
     fake_ray.get_runtime_context = lambda: (_ for _ in ()).throw(RuntimeError("unavailable"))
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
 
@@ -1131,7 +1141,7 @@ def test_outer_propagates_its_own_deadline_rejection(
     assert fake_ray.cancelled == [(fake_ray.ref, True, True)]
 
 
-@pytest.mark.parametrize("ray_version", ["2.56.0", "2.56.1", "2.57.0", "2.58.1", "2.59.0"])
+@pytest.mark.parametrize("ray_version", UNSUPPORTED_RAY_VERSIONS)
 def test_ambient_ray_version_bypass_does_not_weaken_exact_version(
     monkeypatch: pytest.MonkeyPatch,
     ray_version: str,
@@ -1149,7 +1159,7 @@ def test_ambient_ray_version_bypass_does_not_weaken_exact_version(
     _assert_probe_failure(error, probe.RayTargetProbeFailure.UNSUPPORTED_RAY_VERSION)
 
 
-@pytest.mark.parametrize("ray_version", ["2.56.0", "2.56.1", "2.57.0", "2.58.1", "2.59.0"])
+@pytest.mark.parametrize("ray_version", UNSUPPORTED_RAY_VERSIONS)
 def test_local_resource_snapshot_rejects_unqualified_ray_before_private_import(
     monkeypatch: pytest.MonkeyPatch,
     ray_version: str,
@@ -1173,8 +1183,9 @@ def test_local_resource_snapshot_rejects_unqualified_ray_before_private_import(
     _assert_probe_failure(error, probe.RayTargetProbeFailure.UNSUPPORTED_RAY_VERSION)
 
 
-def test_probe_rejects_old_ray_on_one_node_of_current_cluster() -> None:
-    old_node = _runtime_mapping(node_id=NODE_B, ray_version="2.56.0")
+@pytest.mark.parametrize("ray_version", UNSUPPORTED_RAY_VERSIONS)
+def test_probe_rejects_unqualified_ray_on_one_node_of_current_cluster(ray_version: str) -> None:
+    old_node = _runtime_mapping(node_id=NODE_B, ray_version=ray_version)
     interval = _interval_envelope(before_ids=(NODE_A, NODE_B))
     interval["nodes"] = [_runtime_mapping(), old_node]
 
@@ -1189,7 +1200,7 @@ def test_probe_rejects_old_ray_on_one_node_of_current_cluster() -> None:
 
 def test_current_caller_observation_success_and_fixed_failures() -> None:
     good_ray = SimpleNamespace(
-        __version__="2.58.0",
+        __version__="2.60.0",
         get_runtime_context=lambda: SimpleNamespace(
             get_node_id=lambda: NODE_A,
             get_session_name=lambda: SESSION,
@@ -1198,7 +1209,7 @@ def test_current_caller_observation_success_and_fixed_failures() -> None:
     assert probe._current_caller_observation(good_ray).session_name == SESSION
 
     broken_context = SimpleNamespace(
-        __version__="2.58.0",
+        __version__="2.60.0",
         get_runtime_context=lambda: (_ for _ in ()).throw(RuntimeError("context poison")),
     )
     with pytest.raises(probe.RayTargetProbeError) as unavailable:
@@ -1206,7 +1217,7 @@ def test_current_caller_observation_success_and_fixed_failures() -> None:
     _assert_probe_failure(unavailable, probe.RayTargetProbeFailure.PUBLIC_RUNTIME_UNAVAILABLE)
 
     invalid_public_value = SimpleNamespace(
-        __version__="2.58.0",
+        __version__="2.60.0",
         get_runtime_context=lambda: SimpleNamespace(
             get_node_id=lambda: "bad",
             get_session_name=lambda: SESSION,
@@ -1237,7 +1248,7 @@ def test_raw_collection_maps_import_and_initialization_failures(
         sys.modules,
         "ray",
         SimpleNamespace(
-            __version__="2.58.0",
+            __version__="2.60.0",
             is_initialized=lambda: (_ for _ in ()).throw(RuntimeError("init poison")),
         ),
     )
@@ -1248,7 +1259,7 @@ def test_raw_collection_maps_import_and_initialization_failures(
     monkeypatch.setitem(
         sys.modules,
         "ray",
-        SimpleNamespace(__version__="2.58.0", is_initialized=lambda: False),
+        SimpleNamespace(__version__="2.60.0", is_initialized=lambda: False),
     )
     with pytest.raises(probe.RayTargetProbeError) as stopped:
         probe._collect_raw_cluster_observation(timeout_seconds=1.0, max_nodes=1)
@@ -1258,13 +1269,13 @@ def test_raw_collection_maps_import_and_initialization_failures(
 def test_raw_collection_requires_caller_on_a_schedulable_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_ray = SimpleNamespace(__version__="2.58.0", is_initialized=lambda: True)
+    fake_ray = SimpleNamespace(__version__="2.60.0", is_initialized=lambda: True)
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     raw = _raw_observation()
     caller = probe._RuntimeObservation(
         node_id=NODE_C,
         session_name=SESSION,
-        ray_version="2.58.0",
+        ray_version="2.60.0",
         python_implementation="cpython",
         python_version=(3, 12, 12),
     )
@@ -1286,7 +1297,7 @@ def test_raw_collection_rejects_caller_coordinator_identity_mismatch(
     monkeypatch: pytest.MonkeyPatch,
     mismatch: str,
 ) -> None:
-    fake_ray = SimpleNamespace(__version__="2.58.0", is_initialized=lambda: True)
+    fake_ray = SimpleNamespace(__version__="2.60.0", is_initialized=lambda: True)
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     raw = _raw_observation()
     caller = raw.caller
@@ -1294,7 +1305,7 @@ def test_raw_collection_rejects_caller_coordinator_identity_mismatch(
         caller = probe._RuntimeObservation(
             node_id=NODE_A,
             session_name="session_other",
-            ray_version="2.58.0",
+            ray_version="2.60.0",
             python_implementation="cpython",
             python_version=(3, 12, 12),
         )
@@ -1303,7 +1314,7 @@ def test_raw_collection_rejects_caller_coordinator_identity_mismatch(
         caller = probe._RuntimeObservation(
             node_id=NODE_A,
             session_name=SESSION,
-            ray_version="2.58.0",
+            ray_version="2.60.0",
             python_implementation="cpython",
             python_version=(3, 12, 13),
         )
@@ -1452,7 +1463,7 @@ def test_public_probe_maps_canonical_builder_failure(
             _expectation(
                 runtime=RayRuntimeVersion(
                     ray_major=2,
-                    ray_minor=58,
+                    ray_minor=60,
                     ray_patch=0,
                     python_implementation="cpython",
                     python_major=3,
@@ -1493,7 +1504,7 @@ def test_real_local_ray_probe_allows_advancing_revisions_and_preserves_runtime(
         policy_revision=1,
         runtime=RayRuntimeVersion(
             ray_major=2,
-            ray_minor=58,
+            ray_minor=60,
             ray_patch=0,
             python_implementation=platform.python_implementation().lower(),
             python_major=sys.version_info.major,

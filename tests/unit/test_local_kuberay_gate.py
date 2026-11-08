@@ -650,7 +650,7 @@ def _ray_cluster(
     metadata: dict[str, object] = {"name": RAY_CLUSTER_NAME, "namespace": namespace}
     if uid is not None:
         metadata["uid"] = uid
-    head_containers = [{"name": "ray-head", "image": "rayproject/ray:2.58.0-py312"}]
+    head_containers = [{"name": "ray-head", "image": "rayproject/ray:2.60.0-py312"}]
     if head_sidecar:
         head_containers.append({"name": "dashboard-importer", "image": "python:3.12-slim"})
     return {
@@ -658,7 +658,7 @@ def _ray_cluster(
         "kind": "RayCluster",
         "metadata": metadata,
         "spec": {
-            "rayVersion": "2.58.0",
+            "rayVersion": "2.60.0",
             "enableInTreeAutoscaling": False,
             "headGroupSpec": {
                 "serviceType": "ClusterIP",
@@ -677,7 +677,7 @@ def _ray_cluster(
                             "containers": [
                                 {
                                     "name": "ray-worker",
-                                    "image": "rayproject/ray:2.58.0-py312",
+                                    "image": "rayproject/ray:2.60.0-py312",
                                 }
                             ]
                         }
@@ -808,7 +808,7 @@ def _ray_pod(
     component: str,
     uid: str,
     *,
-    image: str = "rayproject/ray:2.58.0-py312",
+    image: str = "rayproject/ray:2.60.0-py312",
     head_sidecar: bool = False,
 ) -> dict[str, object]:
     container_name = "ray-head" if component == "head" else "ray-worker"
@@ -1729,15 +1729,27 @@ def test_authentication_gate_uses_existing_credential_owners_and_requires_comple
     gate._ray_cluster_uid = "verified-cluster"
     calls: list[tuple[str, str]] = []
     identity_checks: list[bool] = []
+    readiness_checks: list[bool] = []
     monkeypatch.setattr(gate, "_verify_ray_identity", lambda: identity_checks.append(True))
     head = {"metadata": {"name": "verified-ray-head"}}
     monkeypatch.setattr(gate, "_ray_pods", lambda **kwargs: ("verified-cluster", [head]))
     monkeypatch.setattr(gate, "_rendered_ray_pod_contract", lambda pod: ("head", None))
 
+    def kubectl(*args: str, **kwargs: Any) -> CommandResult:
+        assert args == ("rollout", "status", "deployment/grafana", "--timeout=300s")
+        assert kwargs == {"timeout": gate._rollout_command_timeout()}
+        assert calls == [("deployment/django-ray-worker", "django-ray-worker")]
+        readiness_checks.append(True)
+        return CommandResult("", "", 0)
+
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+
     def probe(script: str, *, resource: str, container: str) -> Mapping[str, Any]:
         compile(script, "<authentication-probe>", "exec")
         calls.append((resource, container))
         surface = "ray" if container == "django-ray-worker" else "grafana"
+        if surface == "grafana":
+            assert readiness_checks == [True]
         keys = RAY_AUTH_RECEIPT_KEYS if surface == "ray" else GRAFANA_AUTH_RECEIPT_KEYS
         receipt: dict[str, object] = {"schema_version": 1, **dict.fromkeys(keys, True)}
         if surface == invalid_surface:
@@ -1755,7 +1767,39 @@ def test_authentication_gate_uses_existing_credential_owners_and_requires_comple
     assert gate.evidence.grafana_auth_boundary_verified is (invalid_surface is None)
     if invalid_surface != "ray":
         assert calls[1] == ("pod/verified-ray-head", "dashboard-importer")
+    assert readiness_checks == ([] if invalid_surface == "ray" else [True])
     assert len(identity_checks) == (2 if invalid_surface is None else 1)
+
+
+def test_grafana_rollout_timeout_prevents_authentication_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config(rollout_timeout=7))
+    gate._ray_cluster_uid = "verified-cluster"
+    gate.evidence.grafana_auth_boundary_verified = True
+    monkeypatch.setattr(gate, "_verify_ray_identity", lambda: None)
+    head = {"metadata": {"name": "verified-ray-head"}}
+    monkeypatch.setattr(gate, "_ray_pods", lambda **kwargs: ("verified-cluster", [head]))
+    monkeypatch.setattr(gate, "_rendered_ray_pod_contract", lambda pod: ("head", None))
+    probes: list[str] = []
+
+    def probe(script: str, *, resource: str, container: str) -> Mapping[str, Any]:
+        probes.append(container)
+        assert container == "django-ray-worker"
+        return {"schema_version": 1, **dict.fromkeys(RAY_AUTH_RECEIPT_KEYS, True)}
+
+    def kubectl(*args: str, **kwargs: Any) -> CommandResult:
+        assert args == ("rollout", "status", "deployment/grafana", "--timeout=7s")
+        assert kwargs == {"timeout": gate._rollout_command_timeout()}
+        raise TimeoutError("Grafana rollout deadline expired")
+
+    monkeypatch.setattr(gate, "_authentication_probe", probe)
+    monkeypatch.setattr(gate, "_kubectl", kubectl)
+    with pytest.raises(TimeoutError, match="Grafana rollout deadline expired"):
+        gate._verify_authentication()
+    assert probes == ["django-ray-worker"]
+    assert gate.evidence.ray_auth_boundary_verified is True
+    assert gate.evidence.grafana_auth_boundary_verified is False
 
 
 @pytest.mark.parametrize("complete", [False, True])
@@ -2460,10 +2504,10 @@ def test_ray_runtime_image_reference_requires_one_shared_named_ray_image() -> No
     rendered = cast(dict[str, Any], _ray_cluster())
     topology = normalize_ray_topology(rendered)
 
-    assert ray_runtime_image_reference(topology) == "rayproject/ray:2.58.0-py312"
+    assert ray_runtime_image_reference(topology) == "rayproject/ray:2.60.0-py312"
 
     rendered["spec"]["workerGroupSpecs"][0]["template"]["spec"]["containers"][0]["image"] = (
-        "rayproject/ray:2.58.0-py312-drift"
+        "rayproject/ray:2.60.0-py312-drift"
     )
     with pytest.raises(ValueError):
         ray_runtime_image_reference(normalize_ray_topology(rendered))
@@ -2474,9 +2518,9 @@ def test_ray_runtime_image_reference_requires_one_shared_named_ray_image() -> No
     (
         "rayproject/ray:latest",
         "rayproject/ray",
-        " rayproject/ray:2.58.0-py312",
-        "-rayproject/ray:2.58.0-py312",
-        "rayproject/ray:2.58.0-py312-\N{SNOWMAN}",
+        " rayproject/ray:2.60.0-py312",
+        "-rayproject/ray:2.60.0-py312",
+        "rayproject/ray:2.60.0-py312-\N{SNOWMAN}",
         "r" * (gate_module.MAX_RAY_IMAGE_REFERENCE_CHARACTERS + 1) + ":tag",
     ),
 )
@@ -2864,6 +2908,7 @@ def test_released_v040_manager_manifest_is_ephemeral_exact_and_protocol_honest()
         "RAY_ADDRESS": "ray://ray-head-svc:10001",
         "RAY_AUTH_MODE": "token",
         "DJANGO_API_ENABLED": "false",
+        "RAY_MAX_RETRIES": "1",
         **gate_module.RUNTIME_ENV_ENCRYPTION_ENV,
     }
     references = {
@@ -3497,7 +3542,7 @@ def test_protocol_cohort_observer_reads_real_legacy_and_explicit_leases(
 def test_protocol_handoff_observer_waits_for_reserved_job_visibility(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], job_state: str | None
 ) -> None:
-    from django_ray.models import RayTaskExecution
+    from django_ray.models import RayTaskExecution, TaskAttempt
     from django_ray.runner import ray_job
 
     row = SimpleNamespace(
@@ -3508,6 +3553,10 @@ def test_protocol_handoff_observer_waits_for_reserved_job_visibility(
         execution_generation=1,
         claimed_by_worker="released-worker",
         ray_job_request_reference=None,
+        completion_data=None,
+        result_data=None,
+        result_reference=None,
+        run_after=None,
     )
     jobs = (
         []
@@ -3522,9 +3571,12 @@ def test_protocol_handoff_observer_waits_for_reserved_job_visibility(
     )
     monkeypatch.setattr(RayTaskExecution.objects, "get", lambda **_kwargs: row)
     monkeypatch.setattr(
+        TaskAttempt.objects, "filter", lambda **_kwargs: SimpleNamespace(values=lambda *_args: [])
+    )
+    monkeypatch.setattr(
         ray_job,
         "_address_pinned_job_client",
-        lambda _address: SimpleNamespace(list_jobs=lambda: jobs),
+        lambda _address: SimpleNamespace(list_jobs=lambda: jobs, get_job_logs=lambda _job_id: ""),
     )
     gate = LocalKubeRayGate(_config())
 
@@ -4239,7 +4291,7 @@ def test_protocol_v2_private_target_probe_proves_exact_and_mismatch_paths(
     assert "runner._submit_target_execution(" in observed["script"]
     assert "runner._poll_target_execution_results(" in observed["script"]
     assert "probe_ray_target(" in observed["script"]
-    assert "ray_minor=58," in observed["script"]
+    assert "ray_minor=60," in observed["script"]
     assert "build_ray_cluster_attestation(" in observed["script"]
     assert "RayTaskTargetExecutionEvidenceClaim(" in observed["script"]
     assert "ray_task_target_execution_evidence_digest(" in observed["script"]
@@ -4451,8 +4503,8 @@ def _protocol_handoff_observation(
     *,
     worker_id: str,
     job_id: str,
-    state: str = "RUNNING",
-    durable_state: str = "RUNNING",
+    state: str = "FAILED",
+    durable_state: str = "FAILED",
 ) -> dict[str, object]:
     return {
         "ready": True,
@@ -4465,6 +4517,14 @@ def _protocol_handoff_observation(
         "released_carrier": True,
         "request_reference_absent": True,
         "submission_count": 1,
+        "driver_exit_code": 78,
+        "fixed_refusal": True,
+        "callable_marker_bound": True,
+        "marker_absent": True,
+        "completion_is_none": True,
+        "result_is_none": True,
+        "run_after_is_none": True,
+        "single_failed_attempt": True,
     }
 
 
@@ -4486,12 +4546,195 @@ def _protocol_v1_survival_terminal(job_id: str) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("state", "SUCCEEDED"),
+        ("durable_state", "QUEUED"),
+        ("worker_id", "other-worker"),
+        ("job_id", "other-job"),
+        ("execution_generation", -1),
+        ("attempt_number", 2),
+        ("attempt_number", True),
+        ("submission_count", 2),
+        ("driver_exit_code", 1),
+        ("released_carrier", False),
+        ("request_reference_absent", False),
+        ("fixed_refusal", False),
+        ("callable_marker_bound", False),
+        ("marker_absent", False),
+        ("completion_is_none", False),
+        ("result_is_none", False),
+        ("run_after_is_none", False),
+        ("single_failed_attempt", False),
+    ],
+)
+def test_legacy_refusal_rejects_wrong_failure_invocation_and_retry(
+    field: str, value: object
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate._released_v040_worker_id = PRIOR_RELEASED_V040_WORKER_ID
+    observation = _protocol_handoff_observation(
+        worker_id=PRIOR_RELEASED_V040_WORKER_ID,
+        job_id=f"raysubmit_django_ray_v1_{'a' * 64}",
+    )
+    gate._require_released_v040_refusal(observation)
+    observation[field] = value
+    with pytest.raises(ValueError, match="exact one-attempt refusal"):
+        gate._require_released_v040_refusal(observation)
+
+
+@pytest.mark.parametrize("field", ["job_id", "execution_generation"])
+def test_legacy_refusal_must_retain_identity_after_current_manager_restores(field: str) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate._released_v040_worker_id = PRIOR_RELEASED_V040_WORKER_ID
+    prior = _protocol_handoff_observation(
+        worker_id=PRIOR_RELEASED_V040_WORKER_ID,
+        job_id=f"raysubmit_django_ray_v1_{'a' * 64}",
+    )
+    later = dict(prior)
+    later[field] = f"raysubmit_django_ray_v1_{'b' * 64}" if field == "job_id" else 5
+    with pytest.raises(ValueError, match="exact one-attempt refusal"):
+        gate._require_released_v040_refusal(later, prior=prior)
+
+
+@pytest.mark.parametrize(
+    "missing_fact", ["ray_job_manager_reconciled_same_job", "ray_job_manager_no_resubmit"]
+)
+def test_protocol_certification_requires_independent_current_rq2_recovery(
+    monkeypatch: pytest.MonkeyPatch, missing_fact: str
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_manager_no_resubmit = True
+    setattr(gate.evidence, missing_fact, False)
+    monkeypatch.setattr(
+        gate,
+        "_recover_protocol_handoff_residue",
+        lambda: pytest.fail("missing recovery proof must fail before fixture mutations"),
+    )
+    with pytest.raises(ValueError, match="current rq2 same-job recovery evidence is incomplete"):
+        gate._verify_protocol_handoff_certification()
+
+
+@pytest.mark.parametrize("mutation", [None, "payload", "row", "logs", "attempt"])
+def test_legacy_refusal_inspector_checks_submitted_callable_marker_and_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str | None,
+) -> None:
+    from django_ray.models import RayTaskExecution, TaskAttempt
+    from django_ray.runner import ray_job
+
+    marker = "private-callable-marker"
+    row = SimpleNamespace(
+        pk=41,
+        task_id=TASK_ID,
+        callable_path="builtins.print",
+        args_json=json.dumps([marker]),
+        kwargs_json="{}",
+        ray_job_id=f"raysubmit_django_ray_v1_{'a' * 64}",
+        ray_address="http://ray-head:8265",
+        state="FAILED",
+        attempt_number=1,
+        execution_generation=4,
+        claimed_by_worker=PRIOR_RELEASED_V040_WORKER_ID,
+        ray_job_request_reference=None,
+        completion_data=None,
+        result_data=None,
+        result_reference=None,
+        run_after=None,
+    )
+    payload = {
+        "callable_path": row.callable_path,
+        "task_execution_pk": row.pk,
+        "task_id": row.task_id,
+        "attempt_number": row.attempt_number,
+        "execution_generation": row.execution_generation,
+        "serialized_args": row.args_json,
+        "serialized_kwargs": row.kwargs_json,
+    }
+    if mutation == "payload":
+        payload["callable_path"] = "testproject.tasks.echo_task"
+    if mutation == "row":
+        row.args_json = '["different-marker"]'
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    info = SimpleNamespace(
+        submission_id=row.ray_job_id,
+        status="FAILED",
+        entrypoint=f"python -m django_ray.runtime.entrypoint --payload-b64 {encoded}",
+        driver_exit_code=78,
+    )
+    logs = "django-ray task failed: execution request rejected: legacy_request\n"
+    if mutation == "logs":
+        logs += marker + "\n"
+    attempts = [
+        {"attempt_number": 1, "state": "FAILED", "result_data": None, "result_reference": None}
+    ]
+    if mutation == "attempt":
+        attempts.append(dict(attempts[0], attempt_number=2))
+    monkeypatch.setattr(RayTaskExecution.objects, "get", lambda **_kwargs: row)
+    monkeypatch.setattr(
+        TaskAttempt.objects,
+        "filter",
+        lambda **_kwargs: SimpleNamespace(values=lambda *_args: attempts),
+    )
+    monkeypatch.setattr(
+        ray_job,
+        "_address_pinned_job_client",
+        lambda _address: SimpleNamespace(
+            list_jobs=lambda: [info], get_job_logs=lambda _job_id: logs
+        ),
+    )
+    gate = LocalKubeRayGate(_config())
+    gate._released_v040_worker_id = PRIOR_RELEASED_V040_WORKER_ID
+    gate._released_v040_refusal_marker = marker
+
+    def observe(script: str, **_kwargs: object) -> Mapping[str, Any]:
+        exec(compile(script, "<legacy-refusal-observer>", "exec"), {})
+        output = capsys.readouterr().out
+        assert marker not in output
+        assert encoded not in output
+        return json.loads(output)
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", observe)
+    observation = gate._observe_protocol_handoff_task(TASK_ID)
+    if mutation is None:
+        gate._require_released_v040_refusal(observation)
+    else:
+        with pytest.raises(ValueError, match="exact one-attempt refusal"):
+            gate._require_released_v040_refusal(observation)
+
+
+def test_legacy_refusal_enqueue_binds_marker_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    scripts: list[str] = []
+
+    def capture(script: str, **_kwargs: object) -> Mapping[str, Any]:
+        compile(script, "<legacy-refusal-enqueue>", "exec")
+        scripts.append(script)
+        return {"task_id": TASK_ID}
+
+    monkeypatch.setattr(gate, "_sensitive_django_shell", capture)
+    assert gate._enqueue_released_v040_handoff_task() == TASK_ID
+    assert len(scripts) == 1
+    assert "with transaction.atomic():" in scripts[0]
+    assert '    row.callable_path = "builtins.print"' in scripts[0]
+    assert '    row.save(update_fields=["callable_path"])' in scripts[0]
+    assert gate._released_v040_refusal_marker is not None
+    assert gate._released_v040_refusal_marker in scripts[0]
+    assert gate._released_v040_refusal_marker not in gate.redactor.clean(scripts[0])
+
+
 def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fixture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = LocalKubeRayGate(_config())
+    gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_manager_no_resubmit = True
     released_worker = "11111111-1111-4111-8111-111111111111"
-    current_worker = "22222222-2222-4222-8222-222222222222"
     job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
     survival_job_id = f"raysubmit_django_ray_rq2_{'b' * 64}"
     survival_fixture = _protocol_v1_survival_fixture()
@@ -4522,13 +4765,7 @@ def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fix
     handoff_observations = iter(
         (
             _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
-            _protocol_handoff_observation(worker_id=current_worker, job_id=job_id),
-            _protocol_handoff_observation(
-                worker_id=current_worker,
-                job_id=job_id,
-                state="SUCCEEDED",
-                durable_state="SUCCEEDED",
-            ),
+            _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
         )
     )
     events: list[str] = []
@@ -4584,6 +4821,9 @@ def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fix
         gate,
         "_wait_for_protocol_handoff_task",
         lambda *_args, **_kwargs: next(handoff_observations),
+    )
+    monkeypatch.setattr(
+        gate, "_observe_protocol_handoff_task", lambda _task_id: next(handoff_observations)
     )
     monkeypatch.setattr(
         gate,
@@ -4677,8 +4917,9 @@ def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fix
 
     assert gate.evidence.protocol_legacy_cohort_visible is True
     assert gate.evidence.protocol_explicit_cohort_visible is True
-    assert gate.evidence.protocol_v1_handoff_same_job is True
-    assert gate.evidence.protocol_v1_handoff_no_resubmit is True
+    assert gate.evidence.protocol_legacy_inline_refused is True
+    assert gate.evidence.protocol_legacy_inline_no_marker is True
+    assert gate.evidence.protocol_legacy_inline_single_attempt is True
     assert gate.evidence.protocol_v1_queued_survived_handoff is True
     assert gate.evidence.protocol_v2_queued_unchanged is True
     assert gate.evidence.protocol_v2_unsupported_visible is True
@@ -4720,8 +4961,9 @@ def test_protocol_handoff_failure_still_removes_fixture_and_restores_topology(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = LocalKubeRayGate(_config())
+    gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_manager_no_resubmit = True
     released_worker = "11111111-1111-4111-8111-111111111111"
-    current_worker = "22222222-2222-4222-8222-222222222222"
     job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
     survival_job_id = f"raysubmit_django_ray_rq2_{'b' * 64}"
     survival_fixture = _protocol_v1_survival_fixture()
@@ -4752,13 +4994,7 @@ def test_protocol_handoff_failure_still_removes_fixture_and_restores_topology(
     observations = iter(
         (
             _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
-            _protocol_handoff_observation(worker_id=current_worker, job_id=job_id),
-            _protocol_handoff_observation(
-                worker_id=current_worker,
-                job_id=job_id,
-                state="SUCCEEDED",
-                durable_state="SUCCEEDED",
-            ),
+            _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
         )
     )
     events: list[str] = []
@@ -4789,6 +5025,7 @@ def test_protocol_handoff_failure_still_removes_fixture_and_restores_topology(
         "_wait_for_protocol_handoff_task",
         lambda *_args, **_kwargs: next(observations),
     )
+    monkeypatch.setattr(gate, "_observe_protocol_handoff_task", lambda _task_id: next(observations))
     monkeypatch.setattr(gate, "_delete_released_v040_worker_lease", lambda: None)
 
     def enqueue_survival() -> Mapping[str, Any]:
@@ -4864,6 +5101,8 @@ def test_protocol_handoff_owner_failure_cleans_the_deferred_v1_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = LocalKubeRayGate(_config())
+    gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_manager_no_resubmit = True
     released_worker = "11111111-1111-4111-8111-111111111111"
     job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
     survival_fixture = _protocol_v1_survival_fixture()
@@ -4959,8 +5198,20 @@ def test_protocol_handoff_owner_failure_cleans_the_deferred_v1_row(
     ]
 
 
+@pytest.mark.parametrize(
+    ("terminal_field", "terminal_value"),
+    [
+        (None, None),
+        ("job_id", "replacement-job"),
+        ("attempt_number", 2),
+        ("execution_generation", 5),
+        ("submission_count", 2),
+    ],
+)
 def test_live_rq2_gate_reconciles_one_job_and_runs_negative_fixture(
     monkeypatch: pytest.MonkeyPatch,
+    terminal_field: str | None,
+    terminal_value: object,
 ) -> None:
     gate = LocalKubeRayGate(_config())
     job_id = f"raysubmit_django_ray_rq2_{'a' * 64}"
@@ -5023,16 +5274,29 @@ def test_live_rq2_gate_reconciles_one_job_and_runs_negative_fixture(
         "_restart_ray_job_manager",
         lambda: events.append("manager-restarted"),
     )
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_ray_job_gate_task",
-        lambda *_args, **_kwargs: next(observations),
-    )
+
+    def observe(*_args: object, **_kwargs: object) -> Mapping[str, object]:
+        observation = next(observations)
+        if terminal_field is not None and observation["state"] == "SUCCEEDED":
+            observation[terminal_field] = terminal_value
+        return observation
+
+    monkeypatch.setattr(gate, "_wait_for_ray_job_gate_task", observe)
     monkeypatch.setattr(
         gate,
         "_verify_missing_ray_job_request_reference",
         lambda: events.append("missing-reference-verified"),
     )
+
+    if terminal_field is not None:
+        with pytest.raises(
+            ValueError, match="terminal observation lost its strict request contract"
+        ):
+            gate._verify_ray_job_request_reference()
+        assert events == ["manager-restarted"]
+        assert gate.evidence.ray_job_manager_reconciled_same_job is False
+        assert gate.evidence.ray_job_manager_no_resubmit is False
+        return
 
     gate._verify_ray_job_request_reference()
 
@@ -5042,6 +5306,7 @@ def test_live_rq2_gate_reconciles_one_job_and_runs_negative_fixture(
     assert gate.evidence.ray_job_processes_clear is True
     assert gate.evidence.ray_job_logs_clear is True
     assert gate.evidence.ray_job_manager_reconciled_same_job is True
+    assert gate.evidence.ray_job_manager_no_resubmit is True
 
 
 def test_live_rq2_in_pod_inspectors_are_valid_python(
@@ -6802,7 +7067,8 @@ def test_released_v040_image_build_preserves_source_and_aligns_ray(
     )
     assert dockerfile.read_text(encoding="utf-8") == "FROM scratch\n"
     handoff_dockerfile = (tmp_path / "released-v040-handoff.Dockerfile").read_text(encoding="utf-8")
-    assert "--no-cache-dir --no-deps ray==2.58.0 && python -m pip check" in handoff_dockerfile
+    assert '--no-cache-dir "ray[default]==2.60.0" && python -m pip check' in handoff_dockerfile
+    assert "--no-deps" not in handoff_dockerfile
     assert (tmp_path / "released-v040-handoff.Dockerfile.dockerignore").read_text() == "*\n!src/\n"
     assert inspect_call == ("image", "inspect", gate.evidence.released_v040_image_tag)
     assert verify_call == (
@@ -6894,7 +7160,7 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
         "--entrypoint",
         "python",
         "--",
-        "rayproject/ray:2.58.0-py312",
+        "rayproject/ray:2.60.0-py312",
         "-I",
         "-S",
         "-B",
@@ -6910,7 +7176,7 @@ def test_image_builds_discover_one_ray_python_and_align_only_application_images(
     python_probes = [call for call in calls if call[0] == "run"]
     assert len(python_probes) == 3
     assert {call[call.index("--") + 1] for call in python_probes} == {
-        "rayproject/ray:2.58.0-py312",
+        "rayproject/ray:2.60.0-py312",
         gate.evidence.app_tag,
         gate.evidence.released_v040_image_tag,
     }
@@ -7158,12 +7424,14 @@ def test_every_evidence_field_passes_through_the_token_redactor(
     evidence.ray_job_processes_clear = cast(Any, token)
     evidence.ray_job_logs_clear = cast(Any, token)
     evidence.ray_job_manager_reconciled_same_job = cast(Any, token)
+    evidence.ray_job_manager_no_resubmit = cast(Any, token)
     evidence.ray_job_missing_reference_no_marker = cast(Any, token)
     evidence.ray_job_missing_reference_no_retry = cast(Any, token)
     evidence.protocol_legacy_cohort_visible = cast(Any, token)
     evidence.protocol_explicit_cohort_visible = cast(Any, token)
-    evidence.protocol_v1_handoff_same_job = cast(Any, token)
-    evidence.protocol_v1_handoff_no_resubmit = cast(Any, token)
+    evidence.protocol_legacy_inline_refused = cast(Any, token)
+    evidence.protocol_legacy_inline_no_marker = cast(Any, token)
+    evidence.protocol_legacy_inline_single_attempt = cast(Any, token)
     evidence.protocol_v1_queued_survived_handoff = cast(Any, token)
     evidence.protocol_v2_queued_unchanged = cast(Any, token)
     evidence.protocol_v2_unsupported_visible = cast(Any, token)
@@ -10190,12 +10458,14 @@ def test_evidence_binds_the_stable_source_tree_not_only_the_pre_amend_commit() -
     gate.evidence.ray_job_processes_clear = True
     gate.evidence.ray_job_logs_clear = True
     gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_manager_no_resubmit = True
     gate.evidence.ray_job_missing_reference_no_marker = True
     gate.evidence.ray_job_missing_reference_no_retry = True
     gate.evidence.protocol_legacy_cohort_visible = True
     gate.evidence.protocol_explicit_cohort_visible = True
-    gate.evidence.protocol_v1_handoff_same_job = True
-    gate.evidence.protocol_v1_handoff_no_resubmit = True
+    gate.evidence.protocol_legacy_inline_refused = True
+    gate.evidence.protocol_legacy_inline_no_marker = True
+    gate.evidence.protocol_legacy_inline_single_attempt = True
     gate.evidence.protocol_v1_queued_survived_handoff = True
     gate.evidence.protocol_v2_queued_unchanged = True
     gate.evidence.protocol_v2_unsupported_visible = True
@@ -10294,12 +10564,14 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     gate.evidence.ray_job_processes_clear = True
     gate.evidence.ray_job_logs_clear = True
     gate.evidence.ray_job_manager_reconciled_same_job = True
+    gate.evidence.ray_job_manager_no_resubmit = True
     gate.evidence.ray_job_missing_reference_no_marker = True
     gate.evidence.ray_job_missing_reference_no_retry = True
     gate.evidence.protocol_legacy_cohort_visible = True
     gate.evidence.protocol_explicit_cohort_visible = True
-    gate.evidence.protocol_v1_handoff_same_job = True
-    gate.evidence.protocol_v1_handoff_no_resubmit = True
+    gate.evidence.protocol_legacy_inline_refused = True
+    gate.evidence.protocol_legacy_inline_no_marker = True
+    gate.evidence.protocol_legacy_inline_single_attempt = True
     gate.evidence.protocol_v1_queued_survived_handoff = True
     gate.evidence.protocol_v2_queued_unchanged = True
     gate.evidence.protocol_v2_unsupported_visible = True
@@ -10387,12 +10659,14 @@ def test_complete_runtime_evidence_block_is_reconstructable_and_bounded() -> Non
     assert reconstructed("ray_job_processes_clear") == "True"
     assert reconstructed("ray_job_logs_clear") == "True"
     assert reconstructed("ray_job_manager_reconciled_same_job") == "True"
+    assert reconstructed("ray_job_manager_no_resubmit") == "True"
     assert reconstructed("ray_job_missing_reference_no_marker") == "True"
     assert reconstructed("ray_job_missing_reference_no_retry") == "True"
     assert reconstructed("protocol_legacy_cohort_visible") == "True"
     assert reconstructed("protocol_explicit_cohort_visible") == "True"
-    assert reconstructed("protocol_v1_handoff_same_job") == "True"
-    assert reconstructed("protocol_v1_handoff_no_resubmit") == "True"
+    assert reconstructed("protocol_legacy_inline_refused") == "True"
+    assert reconstructed("protocol_legacy_inline_no_marker") == "True"
+    assert reconstructed("protocol_legacy_inline_single_attempt") == "True"
     assert reconstructed("protocol_v1_queued_survived_handoff") == "True"
     assert reconstructed("protocol_v2_queued_unchanged") == "True"
     assert reconstructed("protocol_v2_unsupported_visible") == "True"
