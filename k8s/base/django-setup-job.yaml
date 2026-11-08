@@ -17,7 +17,7 @@ spec:
           command:
             - sh
             - -c
-            - until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;
+            - until nc -z -w 2 postgres-svc 5432; do echo waiting for postgres; sleep 2; done;
       containers:
         - name: django-setup
           image: django-ray:latest

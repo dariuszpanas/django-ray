@@ -65,11 +65,22 @@ task stats, project links, and smoke-task trigger:
 
 - Python 3.12, 3.13, or 3.14
 - Django 6.0.8+
-- Ray 2.60.0+ for the unreleased 0.8.0 baseline (released 0.7.x uses 2.58.0+)
+- Ray 2.60.0+ for the 0.8.0 baseline (released 0.7.x uses 2.58.0+)
 
 Python 3.15 has a preparatory compatibility check without Ray Core. Full runtime
 support remains blocked by upstream Ray wheels; use Python 3.12–3.14 for installation
 and execution. See the [Python 3.15 policy](https://django-ray.readthedocs.io/en/latest/compatibility/#python-315-preparation).
+
+## Preparing to upgrade to 0.8.0
+
+The 0.8.0 Beta candidate raises the Ray minimum from 2.58.0 to 2.60.0. Follow the
+[coordinated 0.7.1 to 0.8.0 upgrade guide](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.7/)
+to stop producers and cleanup, drain old work, verify independent database/artifact
+restoration, and replace the package, managers and Ray cluster together. There are
+no new django-ray migrations after 0.7.1, but a code-only downgrade still needs its
+own rehearsal. Python 3.15 remains preparation-only, native Compiled Graph remains
+unqualified, and the Ray Client startup limitation remains open. Candidate
+preparation does not establish publication or final release acceptance.
 
 ## Upgrading to 0.7.1
 

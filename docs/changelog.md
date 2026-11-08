@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-08
+
 ### Added
 
 - Add the whole-plan workflow execution-strategy seam in
@@ -39,15 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--max-inventory-pages`, and `--grace-seconds` bounds; reaping inserts a
   coordinated `PURGED` `TaskInputPayload` tombstone to fence concurrent producers
   and revalidates canonical payload envelope bytes before backend deletion (#406).
-- Add optional, fail-open OpenTelemetry task and workflow trace correlation in
+- Add manual, fail-open task and workflow tracing primitives in
   `django_ray.tracing` (`TaskTracingCoordinator`, `TracingConfig`,
-  `TraceContextEnvelope`, `AttemptAuthorityToken`) across task enqueue, worker
-  claim, Ray submission, remote execution, workflow execution, retry reconciliation,
-  and terminal persistence without requiring OpenTelemetry packages in the base
-  installation. Enforce W3C `traceparent` and `tracestate` validation, strict
+  `TraceContextEnvelope`, `AttemptAuthorityToken`) for callers that inject a tracer
+  and explicitly invoke lifecycle hooks. Automatic enqueue, worker, Ray, workflow,
+  and terminal-persistence instrumentation, distributed context propagation, and an
+  OpenTelemetry adapter remain unimplemented. Enforce W3C `traceparent` and
+  `tracestate` validation, strict
   redaction of arguments, results, `RuntimeEnv` payloads, credentials, and
-  tracebacks, stale-attempt fencing against superseded terminal spans, and bounded
-  per-run child workflow node spans (#369).
+  tracebacks, terminal-span fencing against caller-supplied current authority,
+  and bounded child workflow spans per helper call (#369).
 - Add bounded, chunked, k-ary tree-merged list-preserving workflow map result
   transport in `django_ray.workflow.map_transport`
   (`BoundedMapListTransportConfig`, `BoundedMapListAggregator`,
@@ -86,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Raise the upcoming 0.8.0 Ray minimum and contributor lock to 2.60.0, align
+- Raise the 0.8.0 Ray minimum and contributor lock to 2.60.0, align
   current deployment images, CI minimums, and the application-owned Data recipe,
   and update the dormant exact-version target probe without activating target
   routing. Preserve historical qualification artifacts and require fresh Linux,
@@ -96,8 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Python 3.15 remains preparation-only; the Ray Client startup limitation and
   empty native Compiled Graph capability set remain in force. See the
   [Ray 2.60 review](compatibility.md#ray-2600-baseline-for-080) for authentication,
-  RuntimeEnv, Data, and security changes. This does not publish 0.8.0 or establish
-  release acceptance.
+  RuntimeEnv, Data, and security changes. Release acceptance requires the final
+  candidate's applicable qualification evidence.
 - Upgrade repository YAGA tooling and GitHub Actions integration to released YAGA
   `0.5.0` (`yaga-cli==0.5.0` and SHA-pinned root `dariuszpanas/yaga` Marketplace
   Action), enforce `required-version = ">=0.5.0"` and `yaga policy check --strict`
@@ -120,6 +123,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve the configured workflow progress reporting policy when selecting
+  `auto` or `dynamic_tasks` execution explicitly. Global `disabled` and
+  `terminal_only` settings no longer silently become `full`; strategy inspection
+  and execution agree, explicit reporting overrides retain precedence, and local
+  execution keeps its disabled-reporting boundary.
+- Replace the local setup Job before applying a deployment profile so returning
+  from co-resident to full does not fail on an immutable Job template. Preserve
+  the Namespace, component Secrets and PVCs, and bound each setup PostgreSQL
+  connection attempt to two seconds without increasing deployment deadlines.
 - Align the guarded KubeRay protocol gate with the retired inline-carrier
   contract: require released v0.4 requests to fail before invocation and verify
   supported same-job recovery through current managers and rq2. Preserve the
@@ -163,6 +175,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry Go heap (`GOMEMLIMIT=64MiB`, `GOGC=25`) and page-cache pressure during
   `monitoring-qualification.yml` candidate image push before restoring the runtime
   `128 MiB` cgroup limit for Kind qualification (#695).
+
+### Upgrade notes and known limitations
+
+Follow the [0.7.1 to 0.8.0 upgrade guide](deployment/upgrading-from-0.7.md).
+Coordinate the package, task managers, and Ray cluster update after stopping
+producers and draining old work. This release adds no database migrations over
+0.7.1; database/artifact backups and a rehearsed rollback boundary remain required.
+
+Python 3.15 remains preparation-only, and native Compiled Graph retains an empty
+verified capability set. The [Ray Client startup limitation](compatibility.md#ray-client-startup-limitation)
+and [Python 3.13/3.14 shutdown investigation](https://github.com/dariuszpanas/django-ray/issues/557)
+remain unresolved; passing qualification samples do not establish repairs.
 
 ## [0.7.1] - 2026-10-27
 
@@ -2322,7 +2346,8 @@ Initial release.
 - Ray 2.53.0+
 - PostgreSQL (recommended) or SQLite
 
-[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/dariuszpanas/django-ray/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/dariuszpanas/django-ray/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/dariuszpanas/django-ray/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/dariuszpanas/django-ray/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dariuszpanas/django-ray/compare/v0.5.0...v0.6.0

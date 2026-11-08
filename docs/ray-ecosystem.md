@@ -1,6 +1,6 @@
 # Ray ecosystem support
 
-The unreleased django-ray 0.8.0 baseline requires `ray[default]>=2.60.0`, retaining
+The django-ray 0.8.0 baseline requires `ray[default]>=2.60.0`, retaining
 the existing ecosystem boundaries. That base dependency supports
 django-ray's Ray Core, Ray Client, Ray Jobs, Dashboard, and State API paths. It does
 not turn every optional Ray library into a tested django-ray integration.

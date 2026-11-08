@@ -566,6 +566,66 @@ def test_postgres_profile_transitions_never_surge_shared_volume_writers(
         assert postgres["spec"]["strategy"] == {"type": "Recreate"}
 
 
+def test_setup_database_wait_bounds_each_connection_attempt_in_every_profile(
+    rendered_profiles: dict[str, list[dict[str, Any]]],
+) -> None:
+    for resources in rendered_profiles.values():
+        job = _resource(resources, kind="Job", name="django-setup")
+        wait = next(
+            container
+            for container in job["spec"]["template"]["spec"]["initContainers"]
+            if container["name"] == "wait-for-postgres"
+        )
+        assert wait["image"] == "busybox:1.36"
+        assert wait["command"] == [
+            "sh",
+            "-c",
+            "until nc -z -w 2 postgres-svc 5432; do echo waiting for postgres; sleep 2; done;",
+        ]
+
+
+@pytest.mark.parametrize(
+    ("target", "overlay"),
+    (
+        ("k8s-deploy", "dev"),
+        ("k8s-deploy-local", "local"),
+        ("k8s-deploy-tls", "dev-tls"),
+        ("k8s-deploy-kuberay-kind", "kuberay-kind"),
+        ("k8s-deploy-kong-local", "kong-local"),
+    ),
+)
+def test_application_deploy_replaces_the_immutable_setup_job_before_applying(
+    target: str, overlay: str
+) -> None:
+    makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
+    recipe = _make_target_block(makefile, target)
+    replace = '$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"'
+    apply = f'kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/{overlay}'
+
+    assert recipe.count(replace) == 1
+    assert recipe.index(replace) < recipe.index(apply)
+
+
+def test_setup_job_replacement_is_scoped_bounded_and_shared_with_co_resident() -> None:
+    makefile = (ROOT / "mk/k8s.mk").read_text(encoding="utf-8")
+    recipe = _make_target_block(makefile, "k8s-delete-local-setup-job")
+    assert "k8s-require-local-context" in recipe.splitlines()[0]
+    assert recipe.splitlines()[1:] == [
+        '\tkubectl --context "$(K8S_CONTEXT)" delete job/django-setup -n django-ray '
+        "--ignore-not-found --cascade=foreground --wait=true --timeout=180s"
+    ]
+    cleanup = _make_target_block(makefile, "k8s-delete-co-resident-superseded")
+    assert (
+        '$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"'
+        in cleanup
+    )
+    deploy = _make_target_block(makefile, "k8s-deploy-co-resident")
+    assert deploy.index("k8s-delete-co-resident-superseded") < deploy.index(
+        "apply -k k8s/overlays/co-resident"
+    )
+    assert "wait --for=condition=complete job/django-setup -n django-ray --timeout=240s" in deploy
+
+
 def test_local_profile_resource_totals_match_documented_baselines(
     rendered_profiles: dict[str, list[dict[str, Any]]],
 ) -> None:

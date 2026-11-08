@@ -667,10 +667,13 @@ For example, portable commit validation can say:
   the rq2 Ray Job used only its request-reference carrier, survived a
   task-manager replacement without resubmission, and rejected a missing
   request before the marker callable without an automatic retry,
-  the released 0.4 schema-0 manager handed one protocol-1 Ray Job to
-  the current explicit schema-1 manager without resubmission, the
-  same replacement preserved and then processed a separate queued
-  protocol-1 row exactly once, the current 1..1 cohort left synthetic
+  the released 0.4 schema-0 manager submitted one retired inline
+  request that the current driver refused with legacy_request before
+  invocation, the one-attempt fixture failed without a scheduled retry
+  and remained terminal after the current schema-1 manager returned,
+  the replacement preserved and then processed a separate queued
+  protocol-1 row through one current request-reference submission,
+  the current 1..1 cohort left synthetic
   protocol-2 work queued and visible before its strict Ray Core executor
   rejected prior to callable invocation, the package-private protocol-2
   target boundary completed with exact current node-set and executor evidence

@@ -334,6 +334,12 @@ def run(root: Path, expected_module: str) -> dict:
     except Exception as error:
         import traceback
 
+        if proxy is not None:
+            print(
+                "latency failure_http_diagnostics="
+                + json.dumps(proxy.failure_diagnostics(), sort_keys=True),
+                flush=True,
+            )
         traceback.print_exc()
         failure = type(error).__name__
     finally:

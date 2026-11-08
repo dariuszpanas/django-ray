@@ -1,23 +1,19 @@
-"""Optional, fail-open OpenTelemetry task and workflow correlation (#369).
+"""Manually invoked task and workflow tracing primitives (#369).
 
-This module provides opt-in distributed tracing across Django enqueue, worker
-claim, Ray submission/execution, workflow coordination, retry reconciliation,
-and durable terminal persistence without adding a required OpenTelemetry
-dependency to the base ``django-ray`` installation.
+Callers supply a ``TracerProtocol`` adapter, propagate context, and invoke these
+helpers at lifecycle boundaries. Automatic Django/Ray instrumentation and a
+built-in OpenTelemetry adapter remain pending. This module uses only the standard
+library; the package itself already declares an ``opentelemetry-api`` dependency.
 
-Key invariants:
-- Zero required third-party dependencies: works with an injected tracer protocol,
-  optional ``opentelemetry-api`` when installed, or a zero-allocation no-op tracer.
-- Fail-open isolation: tracer, context propagation, or exporter exceptions never
-  fail, retry, block, or falsify authoritative PostgreSQL task state.
-- Redaction and cardinality safety: task arguments, keyword arguments, results,
-  serialized payloads, ``RuntimeEnv`` contents, credentials, raw error messages,
-  and tracebacks are never attached to spans.
-- Stale-attempt fencing: superseded attempts (stale ``execution_generation`` or
-  ``attempt_number`` after lease loss or retry) cannot emit an authoritative
-  terminal persistence span.
-- Bounded workflow fan-out: per-run child node spans are capped at a configurable
-  ceiling and summarized on the workflow execution span.
+Helper contracts:
+- Tracer failure isolation: exceptions during span start, update, and end are
+  caught. Callers retain responsibility for runtime integration and authority.
+- Redaction and cardinality bounds: the attribute allowlist excludes task payloads,
+  ``RuntimeEnv`` contents, credentials, raw error messages, and tracebacks.
+- Stale-attempt fencing: terminal span emission compares caller-supplied authority
+  tokens and lease ownership; the helper does not fetch database state.
+- Bounded workflow span creation: each helper call caps child spans and ends them
+  immediately, so these spans do not measure actual workflow execution durations.
 """
 
 from __future__ import annotations

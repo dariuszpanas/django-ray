@@ -19,7 +19,7 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Observability](https://django-ray.readthedocs.io/en/latest/observability/): use
   versioned task services, bounded metrics, live admin updates, and optional Ray data.
 - [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
-  supported Python, Django, Ray, CI, and platform policy; unreleased 0.8.0 raises
+  supported Python, Django, Ray, CI, and platform policy; 0.8.0 raises
   the Ray minimum to 2.60.0 while Python 3.15 remains preparation-only.
 - [Stability and deprecation](https://django-ray.readthedocs.io/en/latest/stability/):
   candidate 1.0 public contract, experimental boundary, and deprecation policy.
@@ -68,6 +68,7 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [API and UI integration](https://django-ray.readthedocs.io/en/latest/reference/api/)
 - [Kubernetes](https://django-ray.readthedocs.io/en/latest/deployment/kubernetes/)
 - [Upgrade from 0.6 to 0.7](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.6/)
+- [Upgrade from 0.7.1 to 0.8.0](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.7/)
 - [Operator runbook](https://django-ray.readthedocs.io/en/latest/runbook/)
 - [Architecture](https://django-ray.readthedocs.io/en/latest/architecture/)
 
@@ -110,8 +111,9 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   state machine and resume planner (ADR-0007).
 - `src/django_ray/workflow/progress/spill_capacity.py`: node-local spill workspace
   reservations, owner quotas, headroom checks, and stale-workspace janitor.
-- `src/django_ray/tracing.py`: optional, fail-open OpenTelemetry task and workflow trace
-  correlation with strict redaction and stale-attempt fencing.
+- `src/django_ray/tracing.py`: manually invoked tracing primitives with redaction,
+  caller-supplied authority fencing, and tracer failure isolation; automatic
+  lifecycle instrumentation and a built-in OpenTelemetry adapter remain pending.
 - `src/django_ray/runtime/runtime_env.py`: profile validation, inheritance, hashing,
   and local-path preparation.
 - `src/django_ray/runtime/runtime_env_encryption.py`: key validation, HKDF

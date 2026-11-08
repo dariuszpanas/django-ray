@@ -2162,6 +2162,10 @@ class WorkflowSignature(ABC):
         )
 
         effective_reporting = _workflow_progress_policy(reporting_policy)
+        if reporting_policy is None and (
+            requested_policy == "local" or (requested_policy is None and use_ray is False)
+        ):
+            effective_reporting = "disabled"
         materialized_plan = materialize_workflow_plan(
             self,
             invocation_args=args,
@@ -2203,10 +2207,7 @@ class WorkflowSignature(ABC):
         from django_ray.runtime.context import get_current_task_context
         from django_ray.workflow.plans import materialize_workflow_plan
 
-        explicit_reporting_policy = (
-            _workflow_progress_policy(reporting_policy) if reporting_policy is not None else None
-        )
-        reporting_policy = _workflow_progress_policy(reporting_policy)
+        effective_reporting_policy = _workflow_progress_policy(reporting_policy)
         task_context = get_current_task_context()
         materialized_plan = materialize_workflow_plan(
             self,
@@ -2222,7 +2223,15 @@ class WorkflowSignature(ABC):
                 materialized_plan,
                 use_ray=use_ray,
                 requested_policy=requested_strategy_policy,
-                reporting_policy=explicit_reporting_policy,
+                reporting_policy=(
+                    "disabled"
+                    if reporting_policy is None
+                    and (
+                        requested_strategy_policy == "local"
+                        or (requested_strategy_policy is None and use_ray is False)
+                    )
+                    else effective_reporting_policy
+                ),
                 regions=tuple(regions),
                 pool_specs=pool_specs,
                 compiled_graph_capability_decision=compiled_graph_capability_decision,
@@ -2254,7 +2263,7 @@ class WorkflowSignature(ABC):
                 "local" if use_ray is False else ("dynamic_tasks" if use_ray is True else "auto")
             ),
             reporting_policy=(
-                "disabled" if isinstance(executor, _LocalExecutor) else reporting_policy
+                "disabled" if isinstance(executor, _LocalExecutor) else effective_reporting_policy
             ),
         )
         try:

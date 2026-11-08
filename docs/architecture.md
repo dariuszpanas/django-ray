@@ -1044,16 +1044,20 @@ cohorts. Protocol fields deliberately do not encode Git commits or package Seman
 Versions. These historical notes do not authorize a rolling upgrade to 0.6.0:
 use the [coordinated stopped-writer procedure](deployment/upgrading-from-0.5.md).
 
-The guarded local KubeRay script retains a regression fixture for that older handoff.
-It checks real manager implementations rather than synthesized lease metadata;
-its presence does not establish a passing result for the current source. The fixture
-builds the pinned released `v0.4.0` tree on the current Ray/Python tuple, requires its
-manager to acquire a capability-schema-`0` lease, and submits a slow protocol-`1` Ray Job
-through the released transport. After that manager stops, the source under test's
-explicit schema-`1`, `1..1` lease must adopt the same persisted job,
-attempt, and generation without a second submission. A separately deferred protocol-`1`
-row must also remain byte-for-byte queued across the replacement, then complete from that
-same durable row through one current request-reference submission. A separate test-only
+The guarded local KubeRay script uses the pinned released `v0.4.0` tree as a
+retired-carrier refusal fixture on the current Ray/Python tuple. It checks real
+manager implementations; its presence does not establish a passing result for the
+current source. The released manager acquires a capability-schema-`0` lease and
+submits one marker task through its inline transport. The current driver must
+refuse that request with `legacy_request` before application invocation. Under
+the fixture's one-attempt retry budget, the durable row must fail without a
+result, completion, invocation marker, or scheduled retry. Restoring the current
+explicit schema-`1`, `1..1` manager must leave that row terminal without another
+submission. A separately deferred protocol-`1` row must remain byte-for-byte
+queued across the replacement, then complete from that same durable row through
+one current request-reference submission. Supported same-job recovery is tested
+separately with current managers and the stored rq2 carrier; no retired request
+is adopted or executed. A separate test-only
 protocol-`2` row is first staged in a terminal state while legacy admission is open. After
 the released manager and its exact schema-`0` lease are removed, the gate revision-checks
 and closes legacy admission and moves that exact row to `QUEUED`; active write protocol
@@ -1073,7 +1077,7 @@ emitted. The terminal staging row and reserved release-manager hostname also let
 run identify and recover only its exact interrupted residue; missing ownership, foreign
 residue, an orphan live lease, or ambiguity fails closed. That recovery runs after the current
 application image identity is pinned but before any live task submission, and repeats
-immediately before the historical handoff check.
+immediately before the retired-carrier refusal check.
 
 `TaskWorkerLease.queue_name` remains informational and is not parsed as a durable queue
 capability. Likewise, an execution-protocol-capable lease proves only task-manager
@@ -1344,11 +1348,12 @@ and quiescence.
 - Worker logs for claim/submit/reconcile/retry events.
 - Structured workflow-leaf logs correlated by durable task, workflow node, and Ray IDs.
 - Optional Ray State API lookup for live task attempts and bounded stdout/stderr tails.
-- Optional, fail-open OpenTelemetry trace correlation (`django_ray.tracing`) across
-  enqueue, claim, Ray submission, remote execution, workflow execution, retry
-  reconciliation, and terminal persistence with W3C `traceparent` validation, strict
-  payload/credential/traceback redaction, `AttemptAuthorityToken` stale-attempt
-  fencing, and bounded per-run child workflow node spans.
+- Manually invoked tracing primitives (`django_ray.tracing`) with W3C
+  `traceparent` validation, attribute redaction, caller-supplied
+  `AttemptAuthorityToken` fencing, bounded child span creation, and tracer
+  failure isolation. Automatic task/workflow lifecycle instrumentation and a
+  built-in OpenTelemetry adapter remain pending; see the
+  [tracing integration boundary](observability.md#tracing-helpers-and-integration-boundary).
 - Optional authenticated HTTP adapters in the `testproject` example app.
 
 ## See Also
