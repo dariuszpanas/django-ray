@@ -2398,12 +2398,19 @@ class TestRayJobRunnerSubmit:
         assert "runtime_env_profile" not in metadata
         assert "runtime_env_hash" not in metadata
 
+    @pytest.mark.parametrize(
+        "auth_headers",
+        [{}, {"authorization": "Bearer deterministic-sdk-test-token"}],
+        ids=["anonymous", "token"],
+    )
     def test_get_client_pins_configured_address_against_ray_environment(
         self,
         monkeypatch,
+        auth_headers,
     ) -> None:
-        """Ambient Ray variables must not replace durable django-ray routing."""
+        """Pin routing while preserving Ray SDK authentication in either mode."""
         from ray import __version__ as ray_version
+        from ray.dashboard.modules import dashboard_sdk
         from ray.dashboard.modules.job import sdk as job_sdk
 
         resolved: list[str] = []
@@ -2421,6 +2428,13 @@ class TestRayJobRunnerSubmit:
             "_check_connection_and_version",
             lambda *_args, **_kwargs: None,
         )
+        # Ray 2.60 local initialization can leave process-wide token state.
+        # Exercise both SDK header outcomes without consulting that state.
+        monkeypatch.setattr(
+            dashboard_sdk,
+            "get_auth_headers_if_auth_enabled",
+            lambda _headers: auth_headers.copy(),
+        )
         monkeypatch.setenv("RAY_ADDRESS", "http://global-dashboard:8265")
         monkeypatch.setenv("RAY_API_SERVER_ADDRESS", "http://api-override:8265")
         monkeypatch.setattr(
@@ -2435,7 +2449,7 @@ class TestRayJobRunnerSubmit:
         assert client._address == "http://alias-dashboard:8265"
         assert client._cookies is None
         assert client._default_metadata == {}
-        assert client._headers == {}
+        assert client._headers == auth_headers
         assert client._verify is True
         assert client._ssl_context is None
         assert client._client_ray_version == ray_version

@@ -51,8 +51,8 @@ Version sources:
 - [Ray 2.56.1 on PyPI](https://pypi.org/project/ray/2.56.1/) and the
   [Ray 2.56.1 release](https://github.com/ray-project/ray/releases/tag/ray-2.56.1)
 
-The general django-ray dependency is `ray[default]>=2.58.0`. That broader range
-does not imply Compiled Graph eligibility. Ray 2.58 is not a native candidate or a
+The general django-ray dependency is `ray[default]>=2.60.0`. That broader range
+does not imply Compiled Graph eligibility. Ray 2.60 is not a native candidate or a
 verified capability. The retained policy-v4 candidates and pinned pilot below are
 historical investigation tools, not supported current-package installation targets.
 The package-floor update neither re-runs nor promotes their evidence. Issue #154's

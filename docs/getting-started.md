@@ -7,7 +7,7 @@ name used below is either imported in the snippet or defined in the indicated fi
 
 - Python 3.12, 3.13, or 3.14
 - Django 6.0.8+
-- Ray 2.58.0+
+- Ray 2.60.0+ for the unreleased 0.8.0 baseline (released 0.7.x uses 2.58.0+)
 - PostgreSQL for production; SQLite is sufficient for a local walkthrough
 
 Python 3.12 is the minimum because Django 6.0 requires it. See

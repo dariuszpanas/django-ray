@@ -59,6 +59,9 @@ def phase(root, backend, name, target, *, database, artifacts, runner, crash_man
                 "database": db,
                 "artifacts": str(artifacts),
                 "runner": runner,
+                "expected_ray_version": ("2.56.0" if BASELINE_VERSION == "0.4.0" else "2.58.0")
+                if released
+                else "2.60.0",
                 "crash_manager": crash_manager and name == "candidate-run",
                 "legacy_failure_probe": name == "candidate-legacy-failure",
                 "worker_mode_probe": name == "candidate-run"

@@ -24,6 +24,7 @@ def test_mode_task_imports_with_real_native_settings_without_database_or_ray(tmp
                 "database": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
                 "artifacts": str(tmp_path),
                 "runner": "ray_core",
+                "expected_ray_version": "2.60.0",
                 "worker_mode_probe": True,
             }
         ),

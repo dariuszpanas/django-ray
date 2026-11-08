@@ -19,7 +19,7 @@ assert (
     panel["targets"][0]["expr"]
     == 'avg(ray_node_cpu_utilization{instance=~"$Instance",SessionName=~"$SessionName",ray_io_cluster=~"$Cluster"})'
 )
-assert ray.__version__ == "2.58.0"
+assert ray.__version__ == "2.60.0"
 ray.init(address="auto", logging_level="ERROR", log_to_driver=False)
 try:
     nodes = [node for node in ray.nodes() if node["Alive"]]

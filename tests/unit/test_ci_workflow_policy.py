@@ -579,7 +579,7 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     )
 
     assert '"pyasn1==0.6.5"' in minimum_install["run"]
-    assert '"ray[default]==2.58.0"' in minimum_install["run"]
+    assert '"ray[default]==2.60.0"' in minimum_install["run"]
     assert '"django==6.0.8"' in minimum_install["run"]
     assert '"certifi==2026.10.19"' in minimum_install["run"]
     assert '"multidict==6.9.1"' in minimum_install["run"]
@@ -827,12 +827,12 @@ def test_ray_data_golden_path_runs_real_optional_dependency_endpoints() -> None:
                 {
                     "profile": "supported-min-python",
                     "python-version": "3.12",
-                    "ray-version": "2.58.0",
+                    "ray-version": "2.60.0",
                 },
                 {
                     "profile": "newest-python",
                     "python-version": "3.14",
-                    "ray-version": "2.58.0",
+                    "ray-version": "2.60.0",
                 },
             ]
         },
@@ -1408,7 +1408,7 @@ def test_native_upgrade_runs_bounded_recipes_after_exact_source_checkpoint() -> 
         {"recipe": "jobs-crash", "service": "jobs"},
         {"recipe": "core-loss", "service": "native"},
     ]
-    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "0.7.0"
+    assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "0.7.1"
     steps = job["steps"]
     checkout = steps[0]["with"]
     assert checkout["ref"] == job["env"]["SOURCE_SHA"]

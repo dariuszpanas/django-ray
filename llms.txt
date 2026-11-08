@@ -19,7 +19,8 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 - [Observability](https://django-ray.readthedocs.io/en/latest/observability/): use
   versioned task services, bounded metrics, live admin updates, and optional Ray data.
 - [Compatibility](https://django-ray.readthedocs.io/en/latest/compatibility/):
-  supported Python, Django, Ray, CI, and platform policy.
+  supported Python, Django, Ray, CI, and platform policy; unreleased 0.8.0 raises
+  the Ray minimum to 2.60.0 while Python 3.15 remains preparation-only.
 - [Stability and deprecation](https://django-ray.readthedocs.io/en/latest/stability/):
   candidate 1.0 public contract, experimental boundary, and deprecation policy.
 - [1.0 readiness](https://django-ray.readthedocs.io/en/latest/one-zero-readiness/):

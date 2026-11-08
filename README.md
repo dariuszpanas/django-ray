@@ -65,7 +65,7 @@ task stats, project links, and smoke-task trigger:
 
 - Python 3.12, 3.13, or 3.14
 - Django 6.0.8+
-- Ray 2.58.0+
+- Ray 2.60.0+ for the unreleased 0.8.0 baseline (released 0.7.x uses 2.58.0+)
 
 Python 3.15 has a preparatory compatibility check without Ray Core. Full runtime
 support remains blocked by upstream Ray wheels; use Python 3.12–3.14 for installation

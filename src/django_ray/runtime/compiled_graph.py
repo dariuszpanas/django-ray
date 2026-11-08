@@ -198,8 +198,8 @@ class _CapabilityIdentity:
 # Exact versions are intentional. Compiled Graph is beta, and a future patch release is
 # not silently treated as equivalent until its subprocess canary has passed. These
 # policy-v4 candidates are retained only to interpret historical probes and the blocked
-# pilot; both predate the package's Ray 2.58 floor. This does not authorize installing
-# either version with the current package or add 2.58 to the native probe path.
+# pilot; both predate the package's Ray 2.60 floor. This does not authorize installing
+# either version with the current package or add 2.60 to the native probe path.
 _CANDIDATE_RUNTIMES = frozenset(
     {
         _CandidateRuntime("2.56.0", (3, 12)),

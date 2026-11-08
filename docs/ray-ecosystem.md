@@ -1,7 +1,7 @@
 # Ray ecosystem support
 
-django-ray 0.7.0 requires `ray[default]>=2.58.0`, retaining the
-0.6.0 dependency and ecosystem boundaries. That base dependency supports
+The unreleased django-ray 0.8.0 baseline requires `ray[default]>=2.60.0`, retaining
+the existing ecosystem boundaries. That base dependency supports
 django-ray's Ray Core, Ray Client, Ray Jobs, Dashboard, and State API paths. It does
 not turn every optional Ray library into a tested django-ray integration.
 
@@ -17,7 +17,27 @@ pass-through extras, component adapters, models, migrations, or public APIs. Ins
 optional Ray components in the application-owned image or RuntimeEnv that executes
 them, using the same Ray version as the cluster.
 
-## Ray 2.58 changes and limits
+## Ray 2.60 changes and limits
+
+The package minimum, contributor lock, deployment images, and Data recipe advance
+together to Ray 2.60.0. Keep task managers, Job drivers, head, and workers on matching
+Ray/Python versions and follow the coordinated Beta upgrade procedure. This baseline
+update does not certify the new tuple; current-source Linux and deployed qualification
+must pass before release acceptance. See the [Ray 2.60 review](compatibility.md#ray-2600-baseline-for-080).
+
+Ray 2.60 adds RuntimeEnv delivery forms and repairs Core object/lineage handling,
+runtime-env-agent cleanup, and Client reconnect chunk replay. Its Data defaults change
+shuffle, read planning, and autoscaling, and its external Arrow readers receive further
+pickle defenses. These require the existing task, cancellation, Jobs, RuntimeEnv, and
+bounded Data regression evidence. The Client initial-startup race remains open; Python
+3.15 Core wheels are still absent and Compiled Graph is still unqualified.
+
+Serve remains application-owned. Applications upgrading Serve separately should review
+the new default thread-pool execution of synchronous methods and the ASGI `root_path`
+change in the [upstream release notes](https://github.com/ray-project/ray/releases/tag/ray-2.60.0).
+The Django gateway recipe does not deploy Serve or qualify those behavior changes.
+
+### Retained earlier Core boundaries
 
 The 0.5 baseline includes upstream repeated-cancellation safeguards, child-process
 cleanup, and graceful-shutdown owner handling. These support the existing Core and
@@ -64,7 +84,7 @@ namespace which happens to import has all dependencies required for real work.
 | **Ray Jobs** | **Install:** `ray[default]`; base import **yes**.<br>**Status:** First-class django-ray execution path. |
 | **Dashboard and State APIs** | **Install:** `ray[default]`; base import **yes**.<br>**Status:** Live diagnostics only. |
 | **Ray Workflows** | **Install:** no supported install; **removed upstream**.<br>**Status:** Unrelated to django-ray workflows. |
-| **Ray Data** | **Install:** the bundled recipe pins `ray[data]==2.58.0`; base does not guarantee a usable path.<br>**Status:** Shipped application-owned Ray Job recipe with bounded Linux evidence. |
+| **Ray Data** | **Install:** the bundled recipe pins `ray[data]==2.60.0`; base does not guarantee a usable path.<br>**Status:** Shipped application-owned Ray Job recipe; the new tuple needs current-source Linux qualification. |
 | **Ray Train** | **Install:** matching `ray[train]` plus a framework; base does not guarantee a usable path.<br>**Status:** Documented application-owned workload; untested. |
 | **Ray Tune** | **Install:** matching `ray[tune]` plus trainable/search dependencies; base does not guarantee a usable path.<br>**Status:** Documented application-owned workload; untested. |
 | **RLlib** | **Install:** matching `ray[rllib]` plus framework/environment dependencies; base does not guarantee a usable path.<br>**Status:** Documented application-owned workload; untested. |
@@ -219,8 +239,9 @@ recomputes into a new attempt namespace rather than selectively resuming partiti
 
 **Evidence and limit.** The [Ray Data batch-job guide](ray-data.md) and
 `testproject/apps/cluster_tasks/ray_data_job.py` provide a tested application-owned
-recipe. Hermetic contracts, blocking real-Ray Linux probes on Python 3.12 and 3.14,
-and a bounded Debian Python 3.12 rehearsal pass. The Windows rehearsal is recorded as
+recipe. Hermetic contracts and blocking real-Ray Linux probes on Python 3.12 and 3.14
+define its current validation. The earlier bounded Debian Python 3.12 rehearsal passed;
+that historical evidence does not qualify the Ray 2.60 tuple. The Windows rehearsal is recorded as
 failing native evidence. This is not generic Dataset/connector support, and multi-node
 shared-storage behavior remains unproven.
 

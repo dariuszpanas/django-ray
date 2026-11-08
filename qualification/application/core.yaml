@@ -438,7 +438,7 @@ spec:
           metadata:
             name: ray
           spec:
-            rayVersion: 2.58.0
+            rayVersion: 2.60.0
             enableInTreeAutoscaling: false
             headGroupSpec:
               serviceType: ClusterIP
@@ -466,7 +466,7 @@ spec:
                       type: RuntimeDefault
                   initContainers:
                   - name: ray-tmp
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     command:
                     - python
                     - -c
@@ -498,7 +498,7 @@ spec:
                       readOnly: false
                   containers:
                   - name: ray-head
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     resources:
                       requests:
                         cpu: ($values.rayHeadCPU)
@@ -593,7 +593,7 @@ spec:
                       type: RuntimeDefault
                   initContainers:
                   - name: ray-tmp
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     command:
                     - python
                     - -c
@@ -625,7 +625,7 @@ spec:
                       readOnly: false
                   containers:
                   - name: ray-worker
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     resources:
                       requests:
                         cpu: ($values.rayWorkerCPU)
@@ -971,7 +971,7 @@ spec:
           metadata:
             name: ray
           spec:
-            rayVersion: 2.58.0
+            rayVersion: 2.60.0
             enableInTreeAutoscaling: false
             headGroupSpec:
               serviceType: ClusterIP
@@ -999,7 +999,7 @@ spec:
                       type: RuntimeDefault
                   initContainers:
                   - name: ray-tmp
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     command:
                     - python
                     - -c
@@ -1031,7 +1031,7 @@ spec:
                       readOnly: false
                   containers:
                   - name: ray-head
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     resources:
                       requests:
                         cpu: ($values.rayHeadCPU)
@@ -1126,7 +1126,7 @@ spec:
                       type: RuntimeDefault
                   initContainers:
                   - name: ray-tmp
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     command:
                     - python
                     - -c
@@ -1158,7 +1158,7 @@ spec:
                       readOnly: false
                   containers:
                   - name: ray-worker
-                    image: rayproject/ray@sha256:507464fe56b3d24cec2e812a25850db91b97d52752d63119fecf6914f7b0a37a
+                    image: rayproject/ray@sha256:911594414a0d7206c56f52dc19406eddfe636b8c38306525290525ae1bd76232
                     resources:
                       requests:
                         cpu: ($values.rayWorkerCPU)

@@ -128,7 +128,7 @@ def render(documents: list[dict], namespace: str, images: dict[str, str]) -> lis
             "apiVersion": "v1",
             "kind": "ResourceQuota",
             "metadata": {"name": "monitoring-envelope", "namespace": namespace},
-            "spec": {"hard": {"limits.cpu": "2750m", "limits.memory": "8832Mi", "pods": "6"}},
+            "spec": {"hard": {"limits.cpu": "2750m", "limits.memory": "9088Mi", "pods": "6"}},
         },
     )
     return selected
@@ -174,7 +174,7 @@ def validate_resources(documents: list[dict]) -> dict:
             pods.extend(group["template"]["spec"] for group in doc["spec"]["workerGroupSpecs"])
     limits = [pod_limits(pod) for pod in pods]
     cpu, memory = sum(item[0] for item in limits), sum(item[1] for item in limits)
-    if len(pods) != 6 or cpu > 2750 or memory > 8832:
+    if len(pods) != 6 or cpu > 2750 or memory > 9088:
         raise ValueError("Rendered or live pods exceed the admitted monitoring envelope")
     return {"cpu_millicores": cpu, "memory_mib": memory, "pods": len(pods)}
 
@@ -189,7 +189,7 @@ def _owned_volumes(pod: dict) -> None:
 
 
 def _ray(spec: dict, images: dict[str, str]) -> None:
-    if spec["rayVersion"] != "2.58.0" or len(spec["workerGroupSpecs"]) != 1:
+    if spec["rayVersion"] != "2.60.0" or len(spec["workerGroupSpecs"]) != 1:
         raise ValueError("Review the standard Ray profile before qualification")
     groups = [spec["headGroupSpec"], spec["workerGroupSpecs"][0]]
     groups[1].update(replicas=1, minReplicas=1, maxReplicas=1)

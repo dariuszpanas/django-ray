@@ -57,13 +57,13 @@ GitHub Actions matrix. It exercises the Docker Desktop or Kind deployment bounda
 disposable CI clusters cannot reproduce: locally built images, Kustomize, the setup Job, the shared
 RuntimeEnv archive, generic Ray nodes, application task managers, protected HTTP APIs, kubelet
 probes, encrypted durable RuntimeEnv storage, full and terminal-only schema-v3 workflow progress,
-multi-attempt recovery, the released-to-current execution-protocol handoff, authenticated admin
+multi-attempt recovery, current-version manager recovery, retired-carrier refusal, authenticated admin
 presentation, and live Prometheus discovery.
 
-The retained script still executes its historical released-to-current handoff when
-run in full; its implementation is unchanged. The instructions below describe that
-explicit full run. They do not make every historical scenario a per-PR requirement
-or claim that a partial DRT workload completed the full script.
+The released `v0.4.0` cohort is a negative fixture: current code must refuse its retired
+inline carrier before application invocation. It does not certify mixed-version execution.
+The supported same-job recovery assertion uses current managers and the stored rq2 carrier.
+The instructions below describe the full run; a partial DRT workload does not complete it.
 
 This is a maintainer integration-validation gate for the checked-in local profile. A passing run
 is not deployment certification, a threat-model review, or evidence that the sample manifests form
@@ -78,8 +78,8 @@ Dockerfiles have deny-by-default context allowlists. Recursive local-environment
 and SQLite sidecar exclusions follow the broad source-directory exceptions so untracked nested
 `.env`, `.env.*`, `*.sqlite3`, and `*.sqlite3-*` files are not restored to either image context.
 The same one-time archive is the only source for the rendered Kubernetes manifests. The separately
-archived v0.4.0 handoff baseline is
-accepted under its historical context policy only when both its pinned commit and reviewed tree
+archived v0.4.0 refusal baseline is accepted under its historical context policy only when both its
+pinned commit and reviewed tree
 match exactly; because it is a Git archive, local untracked files cannot enter that baseline.
 Preflight also creates a private, flattened kubeconfig snapshot;
 every later Kubernetes command uses that immutable file, and every Docker daemon command uses the
@@ -170,15 +170,24 @@ The gate renders the direct `kuberay-kind` exploratory profile: one default
 task-manager replica consuming `default,high-priority,low-priority`, one sync
 replica, one ML replica, one isolated Ray Job manager consuming `ray-data`, one
 Ray head, and two fixed Ray workers. The rendered steady state is 11 running
-workload pods with 3.3 CPU and 5,056 MiB requested and 9.8 CPU and 16,256 MiB
+workload pods with 3.3 CPU and 5,056 MiB requested and 9.8 CPU and 16,512 MiB
 limited. These totals exclude the completed setup Job, the cluster-wide
 KubeRay operator, and Docker Desktop/Kubernetes overhead.
 
-The execution-protocol handoff layer adds one ephemeral task-manager Deployment built from the
+Grafana retains its 200m CPU limit and 50m/128 MiB requests, with a 512 MiB memory
+limit. A bounded local diagnostic at 256 MiB observed direct memory reclaim,
+file refaults, and dashboard import timeouts. Raising only that memory limit
+restored all eight generated dashboards and preserved importer stability for
+more than 60 seconds, with no memory-pressure or reclaim events. This diagnostic
+does not replace the full gate on the current committed source.
+
+The execution-protocol layer adds one ephemeral task-manager Deployment built from the
 exact released `v0.4.0` source. It is not part of the rendered steady-state topology or a sample
-rollout manifest. The layer temporarily scales the current Ray Job manager only as required to
-establish unambiguous ownership, then removes the release cohort and restores the rendered replica
-count even when validation fails. Final convergence and evidence reject any surviving ephemeral
+rollout manifest. Its retry budget is restricted to one attempt for the bounded retired-carrier
+refusal fixture; this does not change or qualify the released manager's default retry policy.
+The layer temporarily scales the current Ray Job manager to establish unambiguous ownership,
+then removes the release cohort and restores the rendered replica count even when validation fails.
+Final convergence and evidence reject any surviving ephemeral
 Deployment, fixture, replica drift, or inconsistent legacy-admission token state.
 
 Preflight derives the application replica contracts and complete static Ray
@@ -298,12 +307,14 @@ The gate performs these bounded layers:
    containers to use one exact shared image reference, then runs that image's Python interpreter to
    discover its canonical `3.12.X` patch. The gate passes that exact patch as the `PYTHON_VERSION`
    build argument to the current and released-`v0.4.0` application images; it does not pass the
-   argument to `Dockerfile.ray`. The legacy handoff fixture also replaces only its installed Ray
-   distribution with the rendered cluster's exact version and runs `pip check`. Its generated
-   Dockerfile retains the released application source and Dockerfile-specific context policy.
+   argument to `Dockerfile.ray`. The legacy refusal fixture also installs `ray[default]` at
+   the rendered cluster's exact version, resolves that version's default-extra dependencies,
+   and runs `pip check`. Its generated Dockerfile retains the released application source and
+   Dockerfile-specific context policy. This derived fixture image does not alter the released
+   source or lock; ordinary released-baseline upgrade environments remain frozen separately.
    This tests the released package's reader on the current Ray/Python tuple, not its original
    frozen dependency environment or a coordinated cluster upgrade. Ray rejects a 2.56 manager
-   talking to a 2.58 cluster before application submission. The root `Dockerfile` and ordinary Compose path remain
+   talking to a 2.60 cluster before application submission. The root `Dockerfile` and ordinary Compose path remain
    patch-flexible on Python `3.12`. This discovery does not run during non-mutating preflight, and a
    future supported `py312` Ray image patch refresh automatically rediscovers its local Docker
    image patch before it can pass the cold proof. Kubernetes cache divergence remains fail-closed:
@@ -361,7 +372,10 @@ The gate performs these bounded layers:
     importer. Ray Dashboard/Jobs must return their exact missing-token `401` and invalid-token `403`
     responses, and accept the configured token. Raw Ray Client/GCS RPCs require token-specific
     `UNAUTHENTICATED` responses and successful authorized reads; explicit metadata avoids cached
-    credentials and GCS wrong-cluster errors cannot count as token denial. Grafana search must
+    credentials and GCS wrong-cluster errors cannot count as token denial. Before checking Grafana,
+    the gate waits for its Deployment rollout within the configured rollout deadline. Its startup
+    probe allows up to 180 seconds for initialization before ordinary readiness/liveness checks;
+    a rollout timeout fails the gate without a Grafana authentication receipt. Grafana search must
     reject anonymous access and a bad password, while its user endpoint must identify the configured
     administrator. No connection error, timeout, redirect, or incomplete receipt passes. Only complete
     receipts set `ray_auth_boundary_verified` and `grafana_auth_boundary_verified`.
@@ -404,20 +418,22 @@ The gate performs these bounded layers:
     disposable row past the completion-envelope grace period and requires one
     fixed attempt-1 failure, one archived attempt, no result or completion, no
     scheduled retry, and exactly one Ray submission.
-11. Certifies the supported task-manager rolling boundary with two real code cohorts. While the
-    rendered current Ray Job manager remains ready, the gate dynamically starts one ephemeral
+11. Verifies retired-carrier refusal with two real code cohorts, separately from the current-version
+    rq2 recovery above. While the rendered current Ray Job manager remains ready, the gate starts one ephemeral
     manager built from the exact released `v0.4.0` tree and requires the read-only protocol report
     to observe both its active capability-schema-`0` legacy lease and the current active explicit
     schema-`1`, `1..1` lease. It then scales the current manager to zero, and the release manager
-    must submit one deliberately slow protocol-`1` Ray Job through the released marker-free
-    transport. While that manager is occupied, a separately deferred protocol-`1` task must remain
-    byte-for-byte `QUEUED`. The gate deletes the release Deployment and its exact schema-`0` lease,
-    restores the current task-manager Deployment, and requires that explicit lease to adopt the same
-    durable job ID, attempt, and generation without a second submission. The deferred row must still
-    be unchanged after adoption, then complete from the same durable identity through exactly one
-    current request-reference submission.
+    must submit one marker task through the retired inline transport. The current driver must
+    exit with the fixed `legacy_request` refusal before invoking the callable. With this fixture's
+    one-attempt retry budget, the durable row must fail without a result, completion, invocation
+    marker, or scheduled retry. The gate retains the exact job, attempt, and generation and requires
+    only one submission. A separately deferred protocol-`1` task must remain byte-for-byte `QUEUED`.
+    The gate deletes the release Deployment and its exact schema-`0` lease and restores the current
+    task-manager Deployment. The refused row must remain terminal without resubmission; the deferred
+    row must remain unchanged and then complete from the same durable identity through exactly one
+    current request-reference submission. No retired request is adopted or executed.
 
-    After the handoff succeeds, the layer creates one bounded, test-only terminal protocol-`2`
+    After those assertions pass, the layer creates one bounded, test-only terminal protocol-`2`
     staging row outside every production producer. It then revision-checks and closes legacy
     admission before moving that exact row to `QUEUED`. This ordering leaves a durable,
     gate-identifiable marker through every closed-policy interval while satisfying the migration
@@ -584,8 +600,9 @@ The runtime block records:
   request reference, request hash, locator, application marker, or request
   bytes;
 - scalar booleans for the released `v0.4.0` schema-`0` and current schema-`1` cohort observations,
-  the protocol-`1` same-job handoff without resubmission, a distinct compatible queued row surviving
-  that replacement and completing through one current submission, synthetic protocol-`2`
+  retired-carrier refusal without invocation or retry, current-version protocol-`1` same-job recovery
+  without resubmission, a distinct compatible queued row surviving the cohort replacement and
+  completing through one current submission, synthetic protocol-`2`
   queued-row preservation and unsupported visibility, strict pre-invocation rejection, marker
   absence, package-private target-execution exact completion, authenticated target mismatch,
   mismatch marker absence, and revision-checked legacy-admission/token plus replica restoration. No
@@ -624,7 +641,8 @@ After a full pass, retain a concise semantic summary in the material commit and 
   and deterministic failure, the three-attempt replay-to-success recovery sequence, authenticated
   sanitized Admin graphs for current and archived attempts, probes, Prometheus targets, preserved
   Ray topology, Secret, PostgreSQL data, or PVCs. For an execution-protocol change, also record the
-  released-0.4-to-current protocol-`1` same-job handoff, unchanged unsupported protocol-`2` fixture,
+  current-version rq2 same-job recovery without resubmission, bounded one-attempt legacy inline
+  refusal without invocation, deferred protocol-`1` row survival, unchanged unsupported protocol-`2` fixture,
   production-default pre-invocation rejection, package-private protocol-`2` exact target completion,
   authenticated target mismatch with no application invocation, absence of any live `1..2`
   capability or durable protocol-`2` writer, reopened legacy admission with a consistent token, and
@@ -709,7 +727,7 @@ local images. The gate itself never performs those actions. It only:
 - temporarily scales only `django-ray-worker-ray-job` to zero, deletes only the
   disposable request object created for the missing-reference fixture, and
   restores that Deployment to its rendered single replica before continuing; and
-- dynamically creates and deletes only the exact released-0.4 handoff Deployment, removes only the
+- dynamically creates and deletes only the exact released-0.4 refusal Deployment, removes only the
   schema-`0` lease and protocol fixtures that the layer created, revision-checks and closes legacy
   admission only for the bounded protocol-`2` negative check, then reopens it with a consistent
   token at the next monotonic revision and unconditionally restores the current Ray Job manager to

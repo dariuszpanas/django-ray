@@ -3,6 +3,14 @@
 This directory contains Kustomize manifests for local django-ray evaluation and maintainer
 integration validation.
 
+The unreleased 0.8.0 deployment baseline uses Ray 2.60.0 on Python 3.12. Keep the
+task-manager package, Ray head, workers, and Ray Data profile on the same reviewed
+tuple. The manifests set `RAY_AUTH_MODE=token` and supply the same existing Secret
+to participating processes; preserve both when customizing the topology. A version
+bump does not establish a passing deployment or coordinated upgrade. Follow the
+[Ray 2.60 review](../docs/compatibility.md#ray-2600-baseline-for-080) and
+[qualification trigger matrix](../docs/deployment/local-kuberay-gate.md).
+
 > **Evaluation only:** `k8s/base` and every tracked overlay are not production-ready. All
 > `kubectl apply` and `make k8s-deploy...` commands below must target a trusted, disposable local
 > environment. Replacing placeholders does not turn the bundled topology into a production
@@ -191,8 +199,8 @@ Desktop/Kubernetes overhead:
 | Profile | Pods in `django-ray` | CPU requests | Memory requests | CPU limits | Memory limits |
 |---|---:|---:|---:|---:|---:|
 | Co-resident | 5 | 0.5 | 2,176 MiB | 1.45 | 8,832 MiB |
-| Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 16,256 MiB |
-| Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,272 MiB |
+| Direct `kuberay-kind` | 11 | 3.3 | 5,056 MiB | 9.8 | 16,512 MiB |
+| Heavier `kong-local` | 17 | 10.2 | 17,088 MiB | 27.3 | 38,528 MiB |
 
 ```bash
 # Preserve the existing Secret and PVCs while converging to five pods.

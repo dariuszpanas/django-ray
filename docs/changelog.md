@@ -86,6 +86,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Raise the upcoming 0.8.0 Ray minimum and contributor lock to 2.60.0, align
+  current deployment images, CI minimums, and the application-owned Data recipe,
+  and update the dormant exact-version target probe without activating target
+  routing. Preserve historical qualification artifacts and require fresh Linux,
+  cold-Ray application, and coordinated upgrade evidence for the new tuple.
+  Add released 0.7.1 to database preservation coverage and select it for all four
+  native upgrade scenarios, retaining older baseline and receipt history.
+  Python 3.15 remains preparation-only; the Ray Client startup limitation and
+  empty native Compiled Graph capability set remain in force. See the
+  [Ray 2.60 review](compatibility.md#ray-2600-baseline-for-080) for authentication,
+  RuntimeEnv, Data, and security changes. This does not publish 0.8.0 or establish
+  release acceptance.
 - Upgrade repository YAGA tooling and GitHub Actions integration to released YAGA
   `0.5.0` (`yaga-cli==0.5.0` and SHA-pinned root `dariuszpanas/yaga` Marketplace
   Action), enforce `required-version = ">=0.5.0"` and `yaga policy check --strict`
@@ -108,6 +120,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Align the guarded KubeRay protocol gate with the retired inline-carrier
+  contract: require released v0.4 requests to fail before invocation and verify
+  supported same-job recovery through current managers and rq2. Preserve the
+  deferred-row, unsupported-protocol, target-authentication, and cleanup checks;
+  mixed-version execution remains unsupported (#703).
+- Give sample Grafana a 180-second startup-probe budget and wait for its rollout
+  before the guarded KubeRay gate checks authentication. Raise its memory limit
+  from 256 MiB to 512 MiB after bounded cgroup diagnostics showed reclaim pressure
+  and dashboard import timeouts; changing only memory restored all eight imports.
+  Retain the 200m CPU limit, resource requests, and steady-state readiness/liveness
+  probes, and align the monitoring qualification envelope and profile totals (#703).
 - Prevent disconnected `ray_core` (`--local` and `--cluster`) workers from claiming
   `QUEUED` tasks while `ray.is_initialized()` is false, hand back remaining unsubmitted
   claim-batch items if the Ray driver disconnects mid-batch, clear stale Ray Core task

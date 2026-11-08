@@ -34,12 +34,12 @@ Kind. Failure refuses allocation; it does not resize another environment.
 | Ray dashboard importer | 100m | 128 MiB |
 | PostgreSQL | 200m | 512 MiB |
 | Web and in-container observer | 250m | 768 MiB |
-| Prometheus and Grafana | 700m | 768 MiB |
+| Prometheus and Grafana | 700m | 1024 MiB |
 | KubeRay operator | 100m | 512 MiB |
-| All admitted pods | 2850m | 9344 MiB |
+| All admitted pods | 2850m | 9600 MiB |
 
 Prometheus/Grafana retain their shipped requests of 150m/384 MiB combined.
-The Kind cgroup is capped at 3.25 CPUs/12 GiB, leaving 400m/2944 MiB for its
+The Kind cgroup is capped at 3.25 CPUs/12 GiB, leaving 400m/2688 MiB for its
 control plane. A separate loopback-only registry is capped at 250m/128 MiB.
 The host browser container is capped at 250m/512 MiB/256 PIDs, including its
 96 MiB temporary filesystem and 128 MiB shared-memory ceiling. Combined caps
