@@ -281,6 +281,49 @@ Python 3.12 package imports, distribution builds, and dependency advisories unde
 It starts no Ray runtime and does not block `CI Gate` or release certification. Linux is the supported
 execution target; Windows/macOS remain useful hosts for editing and explicitly admitted Linux workloads.
 
+### Native pytest exit investigation
+
+The observer preserves pytest's return value and distinguishes a numeric exit from a native
+signal. Lifecycle markers bypass pytest FD capture, and a fixed 1 KiB journal retains the last
+phase and test ordinal without recording test parameters or printing a line for every test.
+An atexit checkpoint does not prove that native finalization completed.
+
+The `Native Shutdown Investigation` workflow normally samples fresh interpreter shutdowns for
+issue #557. Its manual `distributed` and `prefix` probes investigate issue #707 separately:
+
+```bash
+gh workflow run native-shutdown-investigation.yml --ref <reviewed-branch> \
+  -f probe=distributed -f source=historical -f trace-native-exit=true
+```
+
+Native exit controls are manual diagnostics and do not replace CI Gate.
+
+Each hook setting gets its own disposable Linux VM. Historical mode fixes the source to the
+November 4 failure and uses its frozen dependencies, Python 3.14.10 and uv 0.13.7; only the
+reviewed observer and GDB helper overlay that checkout. The launcher deliberately omits
+`--no-sync`, since Ray forwards that option into worker environments and it would alter the
+mechanism being investigated. Current mode uses the dispatched source and lock.
+
+`distributed` runs the ordered module containing the last reported test; `prefix` runs the
+non-live-cluster suite so earlier resource accumulation remains observable. It omits the
+superseded observer contract tests, which require the historical four-marker format, and
+retains the normal coverage floor. Both have an 18-minute supervisor deadline, bounded log
+tails, resource measurements and owned-descendant cleanup. They retain exact source and
+diagnostic overlay identities. The workflow does not allocate shared Docker or Kubernetes.
+
+Opt-in `trace-native-exit` stops at Linux x86-64 libc `_exit` entry (also `_Exit` on glibc) and
+records bounded native symbols for nonzero status before resuming the original exit. It does
+not collect arguments, locals, environment variables or core dumps. A direct exit syscall can
+bypass this function breakpoint: the observer reports the missing caller evidence and preserves
+the actual exit status. The hosted smoke verifies ordinary and multithreaded libc exits.
+
+The function breakpoint avoids intercepting every syscall. The initial syscall catchpoint caused
+GDB to lose the process during multithreaded final exit after successful tests; that debugger
+failure was retained, never converted to success. Debugger attachment still perturbs execution,
+so compare a short control before interpreting a full-suite trace. Ordinary CI keeps signal
+observation without enabling exit tracing. Failed observations remain failures; a passing sample
+is not a root-cause repair, a replacement for `CI Gate`, or release acceptance.
+
 ### Python 3.15 compatibility check
 
 The blocking Linux job **Python 3.15 Compatibility (without Ray Core)** checks

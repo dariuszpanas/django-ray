@@ -2,16 +2,34 @@ name: Native Shutdown Investigation
 
 on:
   workflow_dispatch:
+    inputs:
+      probe:
+        description: Diagnostic workload (a passing sample is not a crash repair)
+        type: choice
+        default: shutdown
+        options: [shutdown, distributed, prefix]
+      source:
+        description: Source and locked dependencies for the native-exit comparison
+        type: choice
+        default: current
+        options: [current, historical]
+      trace-native-exit:
+        description: Observe libc _exit callers (direct syscalls can bypass this)
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
     paths:
       - .github/workflows/native-shutdown-investigation.yml
       - scripts/investigate_pytest_shutdown.py
+      - scripts/investigate_native_exit.py
       - scripts/observe_pytest_exit.py
       - scripts/pytest_exit_gdb.py
       - scripts/install_ci_debugger.py
       - tests/unit/test_install_ci_debugger.py
       - tests/unit/test_native_shutdown_investigation.py
+      - tests/unit/test_native_exit_investigation.py
+      - tests/unit/test_observe_pytest_exit.py
 
 permissions:
   contents: read
@@ -22,6 +40,7 @@ concurrency:
 
 jobs:
   investigate:
+    if: github.event_name != 'workflow_dispatch' || inputs.probe == 'shutdown'
     name: Shutdown diagnostic (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     # Interpreter 4m + debugger 3m + smoke 2m + sampler 21m + control 10m + artifacts.
@@ -104,5 +123,100 @@ jobs:
         with:
           name: native-shutdown-python-${{ matrix.python-version }}
           path: artifacts/native-shutdown-investigation/
+          retention-days: 14
+          if-no-files-found: warn
+
+  native-exit:
+    if: github.event_name == 'workflow_dispatch' && inputs.probe != 'shutdown'
+    name: Native exit (${{ inputs.source }}, hook ${{ matrix.hook }})
+    runs-on: ubuntu-latest
+    # Dedicated disposable VM per cell; no shared Docker, Ray, or Kubernetes.
+    # Setup 4m + debugger 3m + smoke 2m + probe/cleanup 18m + artifacts.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        hook: [historical, disabled]
+    env:
+      PYTHONFAULTHANDLER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Exact source of run 41778969422; never a contributor-supplied ref.
+          ref: ${{ inputs.source == 'historical' && '803ea9655917e351b61511d595b7f48c970e8f12' || github.sha }}
+          path: probe-source
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Match the historical launcher; the lock supplies package versions.
+          version: "0.13.7"
+          enable-cache: "false"
+
+      - name: Prepare admitted disposable Linux observation
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(nproc)" -ge 4
+          awk '/MemTotal/ { exit ($2 < 14000000) }' /proc/meminfo
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 5000000
+          mkdir -p "$RUNNER_TEMP/native-exit-evidence"
+          git -C harness rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/native-exit-evidence/harness-source.txt"
+          # Only these two diagnostic files overlay the selected source tree.
+          cp harness/scripts/observe_pytest_exit.py probe-source/scripts/observe_pytest_exit.py
+          cp harness/scripts/pytest_exit_gdb.py probe-source/scripts/pytest_exit_gdb.py
+          cd probe-source
+          uv python install 3.14.10
+          uv sync --frozen --python 3.14.10
+
+      - name: Install native debugger
+        timeout-minutes: 3
+        run: sudo --non-interactive python3 harness/scripts/install_ci_debugger.py
+
+      - name: Verify native exit attribution
+        timeout-minutes: 2
+        env:
+          DJANGO_RAY_REQUIRE_NATIVE_DEBUGGER: "1"
+        run: >-
+          probe-source/.venv/bin/python -m pytest
+          harness/tests/unit/test_observe_pytest_exit.py
+          harness/tests/unit/test_native_exit_investigation.py -q
+
+      - name: Observe bounded historical mechanism control
+        timeout-minutes: 19
+        env:
+          PROBE: ${{ inputs.probe }}
+          HOOK_MODE: ${{ matrix.hook }}
+          TRACE_NATIVE_EXIT: ${{ inputs.trace-native-exit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          trace=()
+          if [[ "$TRACE_NATIVE_EXIT" == "true" ]]; then trace=(--trace-native-exit); fi
+          # Do not wrap this supervisor in uv run. The child launcher must own
+          # the historical uv options; --no-sync would change the hook's effect.
+          probe-source/.venv/bin/python harness/scripts/investigate_native_exit.py \
+            --source "$GITHUB_WORKSPACE/probe-source" \
+            --output "$RUNNER_TEMP/native-exit-evidence" \
+            --probe "$PROBE" --hook-mode "$HOOK_MODE" \
+            --timeout-seconds 1080 "${trace[@]}"
+
+      - name: Retain bounded native-exit evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-exit-${{ inputs.source }}-${{ inputs.probe }}-${{ matrix.hook }}
+          path: |
+            ${{ runner.temp }}/native-exit-evidence/*.json
+            ${{ runner.temp }}/native-exit-evidence/*.log
+            ${{ runner.temp }}/native-exit-evidence/*.txt
+            ${{ runner.temp }}/native-exit-evidence/ray-session-*
           retention-days: 14
           if-no-files-found: warn
