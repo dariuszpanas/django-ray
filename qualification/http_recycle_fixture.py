@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 # Gunicorn is installed only by the selected, locked Linux sample lane.
-from gunicorn.workers.gthread import ThreadWorker  # ty: ignore[unresolved-import]
+from gunicorn.workers.gthread import ThreadWorker  # ty: ignore[import-not-found]
 
 
 def root() -> Path:
