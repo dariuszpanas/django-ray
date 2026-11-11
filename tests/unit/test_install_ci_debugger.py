@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,13 @@ def ubuntu(monkeypatch, tmp_path):
     keyring.touch()
     monkeypatch.setattr(installer, "KEYRING", keyring)
     monkeypatch.setattr(installer.shutil, "which", lambda name: None)
+
+
+@pytest.fixture
+def monotonic_clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(installer, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    return now
 
 
 @pytest.mark.parametrize("code", [0, 1, 124])
@@ -99,7 +107,142 @@ def test_isolated_download_precedes_offline_install_and_failures_stop(
     assert [phase for phase, _, _ in calls] == expected_phases
     assert len(set(roots)) == 1
     assert not roots[0].exists()
-    assert sum(timeout for _, _, timeout in calls) + 2 * installer.CLEANUP_SECONDS < 170
+
+
+@pytest.mark.parametrize(
+    ("preparation", "update", "download", "install", "install_timeout"),
+    [
+        (0, 4, 3, 60, 149),
+        (0, 50, 50, 45, 56),
+        (40, 4, 3, 60, 109),
+    ],
+)
+def test_install_uses_remaining_deadline_after_preparation_and_network(
+    ubuntu, monkeypatch, monotonic_clock, preparation, update, download, install, install_timeout
+):
+    calls = []
+    release = installer.platform.freedesktop_os_release
+
+    def prepare():
+        monotonic_clock[0] += preparation
+        return release()
+
+    def run(phase, command, timeout):
+        durations = {
+            "update_https": update,
+            "download_https": download,
+            "install_offline": install,
+            "verify_installed": 1,
+        }
+        calls.append((phase, timeout))
+        assert durations[phase] <= timeout
+        monotonic_clock[0] += durations[phase]
+        if phase == "install_offline":
+            monkeypatch.setattr(installer.shutil, "which", lambda name: "/usr/bin/gdb")
+        return 0
+
+    monkeypatch.setattr(installer.platform, "freedesktop_os_release", prepare)
+    monkeypatch.setattr(installer, "run_phase", run)
+    assert installer.install_debugger() == 0
+    assert calls == [
+        ("update_https", 50),
+        ("download_https", 50),
+        ("install_offline", install_timeout),
+        ("verify_installed", 5),
+    ]
+    assert monotonic_clock[0] + 2 * installer.CLEANUP_SECONDS <= installer.BOOTSTRAP_SECONDS
+
+
+@pytest.mark.parametrize("phase", ["verify_existing", "verify_installed"])
+def test_verification_timeout_is_clipped_after_preparation(
+    ubuntu, monkeypatch, monotonic_clock, phase
+):
+    calls = []
+
+    def find_debugger(name):
+        if phase == "verify_existing" or calls:
+            monotonic_clock[0] = 159
+            return "/usr/bin/gdb"
+        return None
+
+    def run(current, command, timeout):
+        calls.append((current, timeout))
+        return 0
+
+    monkeypatch.setattr(installer.shutil, "which", find_debugger)
+    monkeypatch.setattr(installer, "run_phase", run)
+    assert installer.install_debugger() == 0
+    assert calls[-1] == (phase, 2)
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("update_https", []),
+        ("download_https", ["update_https"]),
+        ("install_offline", ["update_https", "download_https"]),
+        ("verify_installed", ["update_https", "download_https", "install_offline"]),
+        ("verify_existing", []),
+    ],
+)
+def test_exhausted_deadline_never_launches_next_phase(
+    ubuntu, monkeypatch, monotonic_clock, capsys, phase, expected
+):
+    calls = []
+    apt_command = installer.apt_command
+    reserve = 2 * installer.CLEANUP_SECONDS
+    if phase in {"update_https", "download_https", "install_offline"}:
+        reserve += installer.VERIFY_SECONDS
+
+    def exhaust():
+        monotonic_clock[0] = installer.BOOTSTRAP_SECONDS - reserve
+
+    def prepare(root, codename):
+        apt = apt_command(root, codename)
+        if phase == "update_https":
+            exhaust()
+        return apt
+
+    def find_debugger(name):
+        if phase == "verify_existing":
+            exhaust()
+            return "/usr/bin/gdb"
+        return "/usr/bin/gdb" if calls else None
+
+    def run(current, command, timeout):
+        calls.append(current)
+        if calls == expected:
+            # Time can pass after a successful child exits but before the next launch.
+            exhaust()
+        return 0
+
+    monkeypatch.setattr(installer, "apt_command", prepare)
+    monkeypatch.setattr(installer.shutil, "which", find_debugger)
+    monkeypatch.setattr(installer, "run_phase", run)
+    assert installer.install_debugger() == 124
+    assert calls == expected
+    assert json.loads(capsys.readouterr().out) == {
+        "ci_debugger": phase,
+        "event": "budget_exhausted",
+        "returncode": 124,
+    }
+
+
+def test_install_timeout_is_terminal_within_shared_deadline(ubuntu, monkeypatch, monotonic_clock):
+    calls = []
+
+    def run(phase, command, timeout):
+        calls.append(phase)
+        if phase == "install_offline":
+            monotonic_clock[0] += timeout + 2 * installer.CLEANUP_SECONDS
+            return 124
+        monotonic_clock[0] += 5
+        return 0
+
+    monkeypatch.setattr(installer, "run_phase", run)
+    assert installer.install_debugger() == 124
+    assert calls == ["update_https", "download_https", "install_offline"]
+    assert monotonic_clock[0] == installer.BOOTSTRAP_SECONDS - installer.VERIFY_SECONDS
 
 
 @pytest.mark.parametrize("missing", ["root", "keyring", "installed_binary"])

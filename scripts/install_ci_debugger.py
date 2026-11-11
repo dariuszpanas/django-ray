@@ -1,10 +1,12 @@
 """Provision required GDB on a disposable Ubuntu x86-64 CI runner.
 
 Run with sudo when GDB is absent. Canonical HTTPS sources and package caches
-are temporary; no host source configuration is rewritten. Whole-phase limits
-bound APT's cumulative requests. Download failures cannot start dpkg, and an
-offline install failure is terminal: discard the disposable runner, never retry
-the install against a different source or suppress the diagnostic requirement.
+are temporary; no host source configuration is rewritten. Preparation consumes
+the shared phase budget, which lends unused network time to dpkg. The workflow
+timeout also bounds overhead outside the supervised subprocess waits.
+Download failures cannot start dpkg. An offline install failure is terminal:
+discard the disposable runner, never retry the install against a different
+source or suppress the diagnostic requirement.
 """
 
 from __future__ import annotations
@@ -22,9 +24,9 @@ import time
 from pathlib import Path
 
 KEYRING = Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg")
+BOOTSTRAP_SECONDS = 165
 UPDATE_SECONDS = 50
 DOWNLOAD_SECONDS = 50
-INSTALL_SECONDS = 35
 VERIFY_SECONDS = 5
 CLEANUP_SECONDS = 2
 
@@ -84,6 +86,25 @@ def run_phase(phase: str, command: list[str], timeout: float) -> int:
     return code
 
 
+def run_before_deadline(
+    phase: str,
+    command: list[str],
+    deadline: float,
+    maximum: float | None,
+    *,
+    reserve_verification: bool = False,
+) -> int:
+    """Leave time to stop a hung process group and verify a successful install."""
+    remaining = deadline - time.monotonic() - 2 * CLEANUP_SECONDS
+    if reserve_verification:
+        remaining -= VERIFY_SECONDS
+    if remaining <= 0:
+        emit(phase, "budget_exhausted", returncode=124)
+        return 124
+    timeout = remaining if maximum is None else min(maximum, remaining)
+    return run_phase(phase, command, timeout)
+
+
 def apt_command(root: Path, codename: str) -> list[str]:
     """Use signed Ubuntu metadata in one isolated configuration for all phases."""
     # APT's unprivileged download user needs to traverse the temporary parent.
@@ -127,6 +148,7 @@ def apt_command(root: Path, codename: str) -> list[str]:
 
 def install_debugger() -> int:
     """Require a working debugger; never turn failed provisioning into a pass."""
+    deadline = time.monotonic() + BOOTSTRAP_SECONDS
     if sys.platform != "linux" or platform.machine() != "x86_64":
         emit("platform", "unsupported", returncode=2)
         return 2
@@ -141,7 +163,9 @@ def install_debugger() -> int:
         return 2
     debugger = shutil.which("gdb")
     if debugger is not None:
-        return run_phase("verify_existing", [debugger, "--version"], VERIFY_SECONDS)
+        return run_before_deadline(
+            "verify_existing", [debugger, "--version"], deadline, VERIFY_SECONDS
+        )
     if os.geteuid() != 0 or not KEYRING.is_file():
         emit("prerequisites", "unavailable", returncode=2)
         return 2
@@ -151,17 +175,19 @@ def install_debugger() -> int:
         phases = (
             ("update_https", [*apt, "update"], UPDATE_SECONDS),
             ("download_https", [*apt, "--download-only", *install], DOWNLOAD_SECONDS),
-            ("install_offline", [*apt, "--no-download", *install], INSTALL_SECONDS),
+            ("install_offline", [*apt, "--no-download", *install], None),
         )
         for phase, command, timeout in phases:
-            code = run_phase(phase, command, timeout)
+            code = run_before_deadline(phase, command, deadline, timeout, reserve_verification=True)
             if code:
                 return code
         debugger = shutil.which("gdb")
         if debugger is None:
             emit("verify_installed", "unavailable", returncode=2)
             return 2
-        return run_phase("verify_installed", [debugger, "--version"], VERIFY_SECONDS)
+        return run_before_deadline(
+            "verify_installed", [debugger, "--version"], deadline, VERIFY_SECONDS
+        )
 
 
 if __name__ == "__main__":
