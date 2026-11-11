@@ -122,8 +122,8 @@ gh pr merge --auto --rebase <PR-number>
 ```
 
 Auto-merge waits for `Commit Messages`, `CI Gate`, `Qualification Gate`, one approving review
-(dismissed on new pushes), and resolved review threads. On ordinary pull requests, `Pull Request
-Review Verdict` (`github-actions[bot]`) submits that approving review once the `.yaga/agent-review-policy.toml`
+(dismissed on new pushes), and resolved review threads. On owner-authored same-repository pull requests,
+`Pull Request Review Verdict` (`github-actions[bot]`) submits that approving review once the `.yaga/agent-review-policy.toml`
 `codex` lens passes on the current head; on trusted `dependabot[bot]` pull requests, the maintainer
 approves after CI succeeds. The rebase method preserves each descriptive
 commit on `main`. The `Commit Messages` workflow validates ordinary PR titles and commit messages from
@@ -148,6 +148,14 @@ Automated pull-request review verdicts publish GitHub review states without repl
 The `Pull Request Review Verdict` and `Pull Request Review Wake` workflows evaluate the trusted
 `.yaga/agent-review-policy.toml` (`codex` lens) against default-branch code and submit an
 approving or change-requesting GitHub review without checking out untrusted pull-request code.
+Before every publisher path, `scripts/check_pr_review_admission.py` fetches current PR metadata and
+admits only repository owner user ID `15094983` with a head branch in the same repository. Other
+PRs receive a bounded hold summary and no automated review. A bot comment that wakes the workflow
+does not authorize approval. External PRs need maintainer review; agents must obtain the current
+user's explicit authorization for the specific PR and current head before workflow approval,
+formal approval, auto-merge or merge, as required by `AGENTS.md`. Bulk maintenance instructions do
+not grant that authorization. This publisher safeguard does not prevent contributors opening PRs
+or replace the existing required checks and review rules.
 
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant

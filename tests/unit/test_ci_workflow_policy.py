@@ -1374,9 +1374,17 @@ def test_yaga_pr_review_verdict_uses_pinned_action_without_pr_checkout() -> None
         "issues": "read",
         "checks": "read",
     }
-    checkout, evaluate = publish["steps"]
+    checkout, admission, evaluate = publish["steps"]
     assert "ref" not in checkout["with"]
     assert checkout["with"]["persist-credentials"] == "false"
+    assert admission["id"] == "admission"
+    assert "if" not in admission
+    assert admission["run"] == "python3 -I -S scripts/check_pr_review_admission.py"
+    assert admission["env"] == {
+        "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+        "PR_NUMBER": "${{ needs.resolve.outputs.pull_request_number }}",
+    }
+    assert evaluate["if"] == "steps.admission.outputs.allowed == 'true'"
     assert evaluate["uses"] == yaga_action
     assert evaluate["with"]["check"] == "pr-review"
     assert evaluate["with"]["policy"] == ".yaga/agent-review-policy.toml"

@@ -148,10 +148,18 @@ jobs:
       issues: read
       checks: read
     steps:
+      # Both event paths use trusted base/default-branch code, never the PR head.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Verify current publisher admission
+        id: admission
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pull_request_number }}
+        run: python3 -I -S scripts/check_pr_review_admission.py
       - name: Evaluate and submit pull-request review
+        if: steps.admission.outputs.allowed == 'true'
         uses: dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3 # v0.5.0
         with:
           check: pr-review
