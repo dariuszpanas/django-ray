@@ -1,0 +1,8 @@
+# Trusted workflow-only policy; validated by the pinned triage Action.
+# Repository-wide quality checks remain on released YAGA 0.5.0.
+triage-policy-version = 1
+host = "github.com"
+repository-id = 790856348
+maintainer-user-ids = [15094983]
+comment-author-id = 41898282
+duplicate-candidates = 5

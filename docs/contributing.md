@@ -778,6 +778,23 @@ user ID `15094983` and a head branch in the same repository. External authors an
 receive a hold summary, with no automated approval or change request. A clean Codex review or a bot
 comment that wakes the publisher does not admit an external PR.
 
+The trusted publisher posts one bounded triage comment using the pinned YAGA Action and
+`.github/pr-triage-policy.toml`. It reports sensitive paths and exact whole-tree matches among five
+recently updated closed PRs, while treating all PR content as data. These findings identify review
+surfaces and duplicates; they do not establish malicious intent. External admission needs the
+configured maintainer's current-head formal approval with the acknowledgment supplied by YAGA,
+which binds the repository, PR, head, base and trusted policy. The comment itself cannot grant it.
+New heads, edits, and submitted/edited/dismissed reviews refresh eligible default-branch PRs.
+Retargeting away from the default branch stops publication and can leave the older informational
+comment visible. A hold fails triage before the automatic review step; the separate owner-only
+publisher guard remains.
+
+This workflow does not revoke existing approvals or publish an authoritative current-head merge
+status. Its comment is informational, and GitHub's final-read/publication race still exists.
+Required CI, merge rules, and explicit user authorization remain independently enforced. The
+workflow-only triage policy is validated by its reviewed Action commit; repository-wide quality
+checks retain released YAGA 0.5.0 until a separate dependency update.
+
 External contributions remain welcome through normal PR creation and maintainer review. Before
 an agent approves workflow execution, submits an approving review, enables auto-merge or merges
 an external PR, the current user must explicitly authorize that PR and its exact current head.
