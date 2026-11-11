@@ -1350,7 +1350,7 @@ def test_yaga_required_reads_trusted_policy_without_pr_checkout() -> None:
 
 
 def test_yaga_pr_review_verdict_uses_pinned_action_without_pr_checkout() -> None:
-    yaga_action = "dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3"
+    yaga_action = "dariuszpanas/yaga@c4535c0b1db0de91e6ba0e17b802d83c9f803aa5"
     review_policy = tomllib.loads(
         (PROJECT_ROOT / ".yaga" / "agent-review-policy.toml").read_text(encoding="utf-8")
     )["agent-review"]
@@ -1374,10 +1374,10 @@ def test_yaga_pr_review_verdict_uses_pinned_action_without_pr_checkout() -> None
     assert publish["permissions"] == {
         "contents": "read",
         "pull-requests": "write",
-        "issues": "read",
+        "issues": "write",
         "checks": "read",
     }
-    checkout, admission, evaluate = publish["steps"]
+    checkout, admission, triage, evaluate = publish["steps"]
     assert "ref" not in checkout["with"]
     assert checkout["with"]["persist-credentials"] == "false"
     assert admission["id"] == "admission"
@@ -1387,16 +1387,52 @@ def test_yaga_pr_review_verdict_uses_pinned_action_without_pr_checkout() -> None
         "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
         "PR_NUMBER": "${{ needs.resolve.outputs.pull_request_number }}",
     }
+    assert triage["uses"] == yaga_action
+    assert "if" not in triage
+    assert "continue-on-error" not in triage
+    assert triage["with"] == {
+        "check": "pr-triage",
+        "policy": ".github/pr-triage-policy.toml",
+        "pr": "${{ needs.resolve.outputs.pull_request_number }}",
+        "repo": "${{ github.repository }}",
+        "publish-comment": "true",
+        "github-token": "${{ secrets.GITHUB_TOKEN }}",
+    }
     assert evaluate["if"] == "steps.admission.outputs.allowed == 'true'"
     assert evaluate["uses"] == yaga_action
     assert evaluate["with"]["check"] == "pr-review"
     assert evaluate["with"]["policy"] == ".yaga/agent-review-policy.toml"
+    assert evaluate["with"]["triage-policy"] == ".github/pr-triage-policy.toml"
     assert evaluate["with"]["submit-review"] == "both"
 
     wake = _workflow(WORKFLOWS / "pr-review-wake.yml")
-    assert set(wake["on"]) == {"issue_comment", "workflow_dispatch"}
+    assert set(wake["on"]) == {"issue_comment", "pull_request_review", "workflow_dispatch"}
     assert wake["permissions"] == {}
     assert wake["jobs"]["wake"]["permissions"] == {}
+
+
+def test_triage_policy_binds_owner_repository_and_refreshes_review_decisions() -> None:
+    policy = tomllib.loads(
+        (PROJECT_ROOT / ".github" / "pr-triage-policy.toml").read_text(encoding="utf-8")
+    )
+    assert policy == {
+        "triage-policy-version": 1,
+        "host": "github.com",
+        "repository-id": 790856348,
+        "maintainer-user-ids": [15094983],
+        "comment-author-id": 41898282,
+        "duplicate-candidates": 5,
+    }
+    verdict = _workflow(WORKFLOWS / "pr-review.yml")
+    assert "edited" in verdict["on"]["pull_request_target"]["types"]
+    resolver = verdict["jobs"]["resolve"]["steps"][0]["run"]
+    assert '"pull_request_review"' in resolver
+    wake = _workflow(WORKFLOWS / "pr-review-wake.yml")
+    assert wake["on"]["pull_request_review"]["types"] == ["submitted", "edited", "dismissed"]
+    condition = wake["jobs"]["wake"]["if"]
+    assert "github.event.review.user.login != 'github-actions[bot]'" in condition
+    assert "github.event.review.user.type == 'User'" in condition
+    assert "actions/checkout" not in json.dumps(wake)
 
 
 def test_yaga_required_explicitly_skips_trusted_dependabot_policy() -> None:

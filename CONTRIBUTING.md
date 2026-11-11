@@ -160,6 +160,16 @@ formal approval, auto-merge or merge, as required by `AGENTS.md`. Bulk maintenan
 not grant that authorization. This publisher safeguard does not prevent contributors opening PRs
 or replace the existing required checks and review rules.
 
+The trusted publisher also posts one bounded YAGA triage comment using
+`.github/pr-triage-policy.toml`. It reports sensitive paths and exact tree matches among five recent
+closed PRs, classifies author/source identity, and holds external changes without an explicit
+maintainer acknowledgment of the current head, base and policy. Findings are review evidence, not
+claims about intent. A hold fails the triage step and prevents automatic review publication. The
+owner-only publisher guard still applies after acknowledgment. Triage comments do not approve
+workflow execution, revoke existing reviews, supply a required current-head merge status or grant
+an agent permission to merge. The Action is pinned to a reviewed source commit; other YAGA quality
+checks retain the released version.
+
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
 changes. Its passing current-source result is required when the enqueue-only gate row applies,

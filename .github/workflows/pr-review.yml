@@ -6,7 +6,7 @@ run-name: >-
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   workflow_run:
     workflows: [CI, "Pull Request Review Wake"]
     types: [completed]
@@ -119,7 +119,7 @@ jobs:
                   elif (
                       path == ".github/workflows/pr-review-wake.yml"
                       and run.get("conclusion") == "success"
-                      and run.get("event") in {"issue_comment", "workflow_dispatch"}
+                      and run.get("event") in {"issue_comment", "pull_request_review", "workflow_dispatch"}
                       and isinstance(title, str)
                   ):
                       match = re.fullmatch(r"YAGA review wake for #([1-9][0-9]{0,18})", title)
@@ -141,11 +141,11 @@ jobs:
       group: yaga-pr-review-${{ needs.resolve.outputs.pull_request_number }}
       cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     permissions:
       contents: read
       pull-requests: write
-      issues: read
+      issues: write
       checks: read
     steps:
       # Both event paths use trusted base/default-branch code, never the PR head.
@@ -158,12 +158,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ needs.resolve.outputs.pull_request_number }}
         run: python3 -I -S scripts/check_pr_review_admission.py
+      - name: Publish bounded pull-request triage
+        uses: dariuszpanas/yaga@c4535c0b1db0de91e6ba0e17b802d83c9f803aa5 # PR trust triage
+        with:
+          check: pr-triage
+          policy: .github/pr-triage-policy.toml
+          pr: ${{ needs.resolve.outputs.pull_request_number }}
+          repo: ${{ github.repository }}
+          publish-comment: "true"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Evaluate and submit pull-request review
         if: steps.admission.outputs.allowed == 'true'
-        uses: dariuszpanas/yaga@2648f832d4e61cf7f7fc721156fff02e54e01cc3 # v0.5.0
+        uses: dariuszpanas/yaga@c4535c0b1db0de91e6ba0e17b802d83c9f803aa5 # PR trust triage
         with:
           check: pr-review
           policy: .yaga/agent-review-policy.toml
+          triage-policy: .github/pr-triage-policy.toml
           pr: ${{ needs.resolve.outputs.pull_request_number }}
           repo: ${{ github.repository }}
           wait-seconds: ${{ needs.resolve.outputs.wait_seconds }}
