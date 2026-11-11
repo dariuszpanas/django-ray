@@ -706,7 +706,8 @@ report `success`. Its `always()` condition makes a failed, cancelled, timed-out,
 visible as a failed gate instead of a successful skip. This repository uses rebase auto-merge rather
 than a merge queue: auto-merge
 waits for `Commit Messages`, `CI Gate`, `Qualification Gate`, one approving review (dismissed on
-new pushes), and resolved review threads, then applies the rebase method. On ordinary pull requests,
+new pushes), and resolved review threads, then applies the rebase method. On owner-authored
+same-repository pull requests,
 `Pull Request Review Verdict` (`github-actions[bot]`) submits that approving review once the
 `.yaga/agent-review-policy.toml` `codex` lens passes on the current head; on trusted
 `dependabot[bot]` pull requests, the maintainer approves after CI succeeds.
@@ -727,6 +728,21 @@ The `Pull Request Review Verdict` (`pr-review.yml`) and `Pull Request Review Wak
 (`pr-review-wake.yml`) workflows evaluate `.yaga/agent-review-policy.toml` (`codex` lens) from a
 trusted default-branch checkout and submit approving or change-requesting GitHub reviews without
 checking out untrusted pull-request refs.
+
+Every publisher trigger first fetches current PR metadata through
+`scripts/check_pr_review_admission.py`. Automated publication is restricted to repository owner
+user ID `15094983` and a head branch in the same repository. External authors and fork branches
+receive a hold summary, with no automated approval or change request. A clean Codex review or a bot
+comment that wakes the publisher does not admit an external PR.
+
+External contributions remain welcome through normal PR creation and maintainer review. Before
+an agent approves workflow execution, submits an approving review, enables auto-merge or merges
+an external PR, the current user must explicitly authorize that PR and its exact current head.
+The agent first reports the author, source repository, changed scope and unresolved provenance
+concerns. A new head needs new authorization; bulk maintenance instructions, prior contributions
+and agent-created comments or labels do not supply it. GitHub sees an agent using owner credentials
+as the owner, so this user-authorization boundary also lives in `AGENTS.md`. The publisher guard
+does not add a required status or weaken the existing review and merge checks.
 
 Before each push and again before enabling auto-merge, inspect and validate the exact commit range that
 will be retained:
