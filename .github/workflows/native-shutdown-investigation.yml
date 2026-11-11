@@ -9,6 +9,8 @@ on:
       - scripts/investigate_pytest_shutdown.py
       - scripts/observe_pytest_exit.py
       - scripts/pytest_exit_gdb.py
+      - scripts/install_ci_debugger.py
+      - tests/unit/test_install_ci_debugger.py
       - tests/unit/test_native_shutdown_investigation.py
 
 permissions:
@@ -22,8 +24,8 @@ jobs:
   investigate:
     name: Shutdown diagnostic (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # Setup 4m + smoke 2m + sampler 21m + actor control 10m + artifact margin.
-    timeout-minutes: 40
+    # Interpreter 4m + debugger 3m + smoke 2m + sampler 21m + control 10m + artifacts.
+    timeout-minutes: 43
     strategy:
       fail-fast: false
       matrix:
@@ -42,13 +44,15 @@ jobs:
           version: latest
           enable-cache: "false"
 
-      - name: Install locked interpreter and debugger
+      - name: Install locked interpreter
         timeout-minutes: 4
         run: |
           uv python install ${{ matrix.python-version }}
           uv sync --frozen --python ${{ matrix.python-version }}
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y gdb
+
+      - name: Install native shutdown debugger
+        timeout-minutes: 3
+        run: sudo --non-interactive python3 scripts/install_ci_debugger.py
 
       - name: Verify diagnostic machinery
         timeout-minutes: 2

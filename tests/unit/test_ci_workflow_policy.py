@@ -381,7 +381,16 @@ def test_native_shutdown_actor_control_keeps_fixed_selection_and_deadlines() -> 
     run = control["run"]
 
     assert workflow["permissions"] == {"contents": "read"}
-    assert job["timeout-minutes"] == "40"
+    debugger = steps["Install native shutdown debugger"]
+    assert debugger["run"] == "sudo --non-interactive python3 scripts/install_ci_debugger.py"
+    assert debugger["timeout-minutes"] == "3"
+    assert "scripts/install_ci_debugger.py" in workflow["on"]["pull_request"]["paths"]
+    assert "tests/unit/test_install_ci_debugger.py" in workflow["on"]["pull_request"]["paths"]
+    assert "continue-on-error" not in debugger
+    assert list(steps).index("Install native shutdown debugger") < list(steps).index(
+        "Verify diagnostic machinery"
+    )
+    assert job["timeout-minutes"] == "43"
     assert steps[sampler_name]["timeout-minutes"] == "21"
     assert control["timeout-minutes"] == "10"
     assert list(steps).index(sampler_name) < list(steps).index(control_name)
@@ -754,7 +763,8 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     smoke = steps["Verify native shutdown diagnostics"]
     assert debugger["if"] == smoke["if"] == "matrix.python-version != '3.12'"
     assert debugger["timeout-minutes"] == "3"
-    assert "--no-install-recommends gdb" in debugger["run"]
+    assert debugger["run"] == "sudo --non-interactive python3 scripts/install_ci_debugger.py"
+    assert "continue-on-error" not in debugger
     assert smoke["timeout-minutes"] == "2"
     assert smoke["env"]["DJANGO_RAY_REQUIRE_NATIVE_DEBUGGER"] == "1"
     assert "tests/unit/test_observe_pytest_exit.py" in smoke["run"]

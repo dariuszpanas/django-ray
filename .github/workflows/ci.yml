@@ -216,10 +216,7 @@ jobs:
       - name: Install native shutdown debugger
         if: matrix.python-version != '3.12'
         timeout-minutes: 3
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install --yes --no-install-recommends gdb
-          gdb --version
+        run: sudo --non-interactive python3 scripts/install_ci_debugger.py
 
       - name: Verify native shutdown diagnostics
         if: matrix.python-version != '3.12'
