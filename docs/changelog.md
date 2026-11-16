@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject overfull source pages in the opt-in paged workflow input helper before
+  they can exceed its item accounting. Honor bounded `Retry-After` delays with
+  real sleep by default, and close the source if backoff is interrupted (#715).
+
 - Retry transient non-JSON Admin status failures and clear temporary error
   feedback when unchanged task status recovers (#716).
 
