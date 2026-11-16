@@ -194,6 +194,9 @@ reviewed profile change before execution. Each replacement repetition requires
 caller/substage, phase/status/transport, configured/effective timeout and retry
 policy, and remaining observer/outer budgets. Raw URLs, headers, bodies, exception
 messages, credentials, and task contents are excluded by the fixed schema.
+An eligible attempt has a positive effective timeout no greater than its
+configured timeout or either remaining budget. Exhausted budgets or an attempt
+that exceeds them remain retainable observations but prevent eligibility.
 
 ## Contract checks
 

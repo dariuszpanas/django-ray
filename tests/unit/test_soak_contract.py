@@ -418,6 +418,29 @@ def test_reviewed_false_eligibility_regressions(evidence, change, code):
         eligible(evidence)
 
 
+@pytest.mark.parametrize("field", ["outer_remaining_seconds", "observer_remaining_seconds"])
+@pytest.mark.parametrize("remaining", [0, 9.5])
+def test_http_attempt_exceeding_remaining_budget_is_retained_but_ineligible(
+    evidence, field, remaining
+):
+    evidence["http"]["observations"][0][field] = remaining
+    evidence.update(status="failed", failure_codes=["http"])
+    assert contract.parse_report(json.dumps(evidence).encode()) == evidence
+    evidence.update(status="passed", failure_codes=[])
+    with pytest.raises(contract.ContractError, match="http-timeout-budget"):
+        eligible(evidence)
+
+
+@pytest.mark.parametrize("timeout", [0.5, 10])
+def test_http_effective_timeout_can_equal_both_remaining_budgets(evidence, timeout):
+    evidence["http"]["observations"][0].update(
+        attempt_timeout_seconds=timeout,
+        outer_remaining_seconds=timeout,
+        observer_remaining_seconds=timeout,
+    )
+    assert eligible(evidence) is evidence
+
+
 @pytest.mark.parametrize("field", ["injected_seconds", "recovered_seconds"])
 def test_missing_fault_milestones_are_retained_without_inventing_success(evidence, field):
     evidence["faults"][-1][field] = None
