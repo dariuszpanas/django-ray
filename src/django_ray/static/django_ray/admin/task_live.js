@@ -11,6 +11,7 @@
   const attemptNode = panel.querySelector('[data-field="attempt"]');
   const workflowNode = panel.querySelector('[data-field="workflow"]');
   const statusNode = panel.querySelector('[data-field="status"]');
+  const requestDeadlineMs = 15000;
   const terminalStates = new Set([
     "SUCCEEDED",
     "FAILED",
@@ -60,28 +61,68 @@
     if (stopped || document.hidden || inFlight) {
       return;
     }
-    inFlight = true;
+    let controller;
     try {
-      const response = await window.fetch(endpoint, {
-        method: "GET",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: { Accept: "application/json" },
+      controller = new window.AbortController();
+    } catch (error) {
+      stopped = true;
+      statusNode.textContent =
+        "Live updates unavailable in this browser; reload the page for current status.";
+      return;
+    }
+    inFlight = true;
+    let deadlineTimer = null;
+    let expired = false;
+    try {
+      // Keep every response effect outside this operation: an expired request
+      // may still settle after a replacement poll if cancellation is delayed.
+      const readUpdate = (async () => {
+        const response = await window.fetch(endpoint, {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (expired) {
+          return null;
+        }
+        const contentType = response.headers.get("content-type") ?? "";
+        if (
+          response.redirected ||
+          [401, 403, 404].includes(response.status) ||
+          (response.ok && !contentType.includes("application/json"))
+        ) {
+          return { stop: true };
+        }
+        if (!response.ok) {
+          throw new Error(`status ${response.status}`);
+        }
+        return { stop: false, payload: await response.json() };
+      })();
+      // This scheduled deadline covers headers and body. Browser suspension
+      // can delay timers; it is not a physical wall-clock guarantee.
+      const deadline = new Promise((_, reject) => {
+        deadlineTimer = window.setTimeout(() => {
+          expired = true;
+          reject(new Error("request deadline"));
+          try {
+            controller.abort();
+          } catch (error) {
+            // The deadline still releases polling if browser cancellation fails.
+          }
+        }, requestDeadlineMs);
       });
-      const contentType = response.headers.get("content-type") ?? "";
-      if (
-        response.redirected ||
-        [401, 403, 404].includes(response.status) ||
-        (response.ok && !contentType.includes("application/json"))
-      ) {
+      const update = await Promise.race([readUpdate, deadline]);
+      if (expired) {
+        return;
+      }
+      if (update.stop) {
         stopped = true;
         statusNode.textContent = "Live updates stopped; reload after signing in again.";
         return;
       }
-      if (!response.ok) {
-        throw new Error(`status ${response.status}`);
-      }
-      const payload = await response.json();
+      const payload = update.payload;
       const task = payload.task ?? payload;
       const state = String(task.state ?? "UNKNOWN");
       stateNode.textContent = state;
@@ -108,6 +149,9 @@
       lastAnnouncementKey = null;
       statusNode.textContent = "Status update unavailable; durable page data is unchanged.";
     } finally {
+      if (deadlineTimer !== null) {
+        window.clearTimeout(deadlineTimer);
+      }
       inFlight = false;
       schedule();
     }
