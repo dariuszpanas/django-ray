@@ -113,8 +113,7 @@ def should_retry(
             reason=f"Exception type '{exception_type}' matched denylist entry '{matched_entry}'",
         )
 
-    next_attempt = attempt_number + 1
-    backoff = calculate_backoff(next_attempt)
+    backoff = calculate_backoff(attempt_number)
     next_attempt_at = datetime.now(UTC) + backoff
 
     return RetryDecision(

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Match automatic retry delays to the configured base after attempt one, then
+  double each later delay up to one hour. Previously the first retry waited
+  twice the documented base. Existing queued schedules remain unchanged (#721).
+
 - Reject overfull source pages in the opt-in paged workflow input helper before
   they can exceed its item accounting. Honor bounded `Retry-After` delays with
   real sleep by default, and close the source if backoff is interrupted (#715).

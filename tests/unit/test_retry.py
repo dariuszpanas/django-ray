@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+
+import pytest
 
 from django_ray.runner import retry as retry_module
 
@@ -23,6 +26,41 @@ def _patch_settings(
             "RETRY_EXCEPTION_DENYLIST": denylist or [],
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("failed_attempt", "base_seconds", "expected_seconds"),
+    [
+        (1, 60, 60),
+        (2, 60, 120),
+        (3, 60, 240),
+        (8, 60, 3600),
+        (1, 3600, 3600),
+        (2, 3600, 3600),
+        (1, 0, 0),
+        (8, 0, 0),
+    ],
+)
+def test_retry_schedule_uses_the_failed_attempt_and_preserves_caps(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_attempt: int,
+    base_seconds: int,
+    expected_seconds: int,
+) -> None:
+    observed_at = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return observed_at
+
+    monkeypatch.setattr(retry_module, "datetime", FixedClock)
+    _patch_settings(monkeypatch, max_attempts=10, backoff_seconds=base_seconds)
+
+    decision = retry_module.should_retry(SimpleNamespace(attempt_number=failed_attempt))
+
+    assert decision.should_retry
+    assert decision.next_attempt_at == observed_at + timedelta(seconds=expected_seconds)
 
 
 class TestRetryDenylistNormalization:
