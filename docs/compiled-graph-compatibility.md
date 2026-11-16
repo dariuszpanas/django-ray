@@ -545,6 +545,11 @@ requires a separately reviewed immutable local profile; a future self-hosted or 
 path likewise requires its own issue and may not inherit support from generic hosted
 runner observations.
 
+The Ray-free lifecycle model retains representable finite nonnegative integer and
+float clocks. Nonrepresentable event or state timestamps use the existing
+`INVALID_CLOCK` or `INVALID_STATE` rejection; invalid initialization deadlines and
+snapshots raise bounded `ValueError` messages without changing immutable state.
+
 Review the capability candidate table and pinned KubeRay pilot profile whenever Ray,
 Python, operating-system images, channel APIs, `ray[cgraph]` dependencies, immutable
 deployment/image identity, shared-memory or object-store configuration, or the workflow

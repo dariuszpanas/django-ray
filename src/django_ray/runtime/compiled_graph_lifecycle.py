@@ -1458,6 +1458,16 @@ def _stage_deadline(
     }[kind]
 
 
+def _valid_clock_value(value: object) -> bool:
+    """Keep nonrepresentable integers inside the ordinary rejection path."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return value >= 0 and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _validate_event(
     state: CompiledGraphLifecycleState,
     event: LifecycleEvent,
@@ -1480,12 +1490,7 @@ def _validate_event(
             LifecycleRejectionCode.STALE_SESSION_IDENTITY,
             "event run identity does not own this session",
         )
-    if (
-        isinstance(event.observed_at, bool)
-        or not isinstance(event.observed_at, int | float)
-        or not math.isfinite(event.observed_at)
-        or event.observed_at < 0
-    ):
+    if not _valid_clock_value(event.observed_at):
         return _reject(
             LifecycleRejectionCode.INVALID_CLOCK,
             "observed_at must be a finite non-negative absolute timestamp",
@@ -1644,12 +1649,7 @@ def _validate_deadlines(deadlines: object) -> None:
     if not isinstance(deadlines, LifecycleDeadlines):
         raise TypeError("deadlines must be a LifecycleDeadlines instance")
     for name, value in deadlines.as_dict().items():
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int | float)
-            or not math.isfinite(value)
-            or value < 0
-        ):
+        if not _valid_clock_value(value):
             raise ValueError(f"{name} deadline must be a finite non-negative timestamp")
 
 
@@ -1713,12 +1713,7 @@ def _state_invariant_error(state: object) -> str | None:
         not isinstance(diagnostic, LifecycleCleanupCode) for diagnostic in state.cleanup_diagnostics
     ):
         return "cleanup diagnostics contain an unsupported code"
-    if state.last_observed_at is not None and (
-        isinstance(state.last_observed_at, bool)
-        or not isinstance(state.last_observed_at, int | float)
-        or not math.isfinite(state.last_observed_at)
-        or state.last_observed_at < 0
-    ):
+    if state.last_observed_at is not None and not _valid_clock_value(state.last_observed_at):
         return "last observed timestamp is invalid"
     if (
         isinstance(state.next_action_sequence, bool)
@@ -1820,12 +1815,7 @@ def _state_invariant_error(state: object) -> str | None:
             or len(state.pending_action.token) > _MAX_ID_CHARS
         ):
             return "pending action token is invalid"
-        if (
-            isinstance(state.pending_action.deadline, bool)
-            or not isinstance(state.pending_action.deadline, int | float)
-            or not math.isfinite(state.pending_action.deadline)
-            or state.pending_action.deadline < 0
-        ):
+        if not _valid_clock_value(state.pending_action.deadline):
             return "pending action deadline is invalid"
         if state.pending_action.session_identity != state.session_identity:
             return "pending action belongs to another session"
