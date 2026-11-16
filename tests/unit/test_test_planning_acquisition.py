@@ -171,6 +171,17 @@ def test_acquisition_accepts_same_source_selected_jobs_while_parent_is_running(t
     assert saved == result.evidence
 
 
+def test_additional_execution_witness_does_not_replace_the_selected_receipt_artifact(tmp_path):
+    cell = Cell("qualification.application", "default", "application-qualification")
+    github = GithubFixture((cell,))
+    extra = dict(github.artifacts[0], id=999, name=f"application-execution-witness-{RUN}-1")
+    github.artifacts.append(extra)
+    github.replies[github.artifacts_route]["total_count"] = len(github.artifacts)
+    result = acquisition.acquire_receipts(expected((cell,)), tmp_path / "extra", github=github)
+    assert len(result.evidence["artifacts"]) == 1
+    assert not any("/artifacts/999" in endpoint for endpoint in github.calls)
+
+
 def test_empty_selection_is_authenticated_without_claiming_full_qualification(tmp_path):
     github = GithubFixture(())
     result = acquisition.acquire_receipts(expected(()), tmp_path / "empty", github=github)
