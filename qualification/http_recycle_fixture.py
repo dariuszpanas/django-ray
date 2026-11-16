@@ -6,8 +6,10 @@ import os
 import time
 from pathlib import Path
 
-# Gunicorn is installed only by the selected, locked Linux sample lane.
-from gunicorn.workers.gthread import ThreadWorker  # ty: ignore[import-not-found]
+import pytest
+
+# This test-only fixture is loaded by the selected, locked Linux pytest lane.
+ThreadWorker = pytest.importorskip("gunicorn.workers.gthread", exc_type=ImportError).ThreadWorker
 
 
 def root() -> Path:

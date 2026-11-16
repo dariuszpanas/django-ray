@@ -6,6 +6,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import runpy
 import signal
 import subprocess
 import sys
@@ -148,6 +149,63 @@ def test_setup_failure_receipt_has_fixed_attribution(tmp_path, monkeypatch, caps
         "failure_phase": "startup",
         "failure_kind": "os_error",
     }
+
+
+def test_fixture_observes_worker_transitions_after_delegation(monkeypatch):
+    calls = []
+
+    class ThreadWorker:
+        def __init__(self):
+            self._accepting = False
+
+        def set_accept_enabled(self, enabled):
+            calls.append(("base", enabled))
+            self._accepting = enabled
+
+    optional_import = Mock(return_value=SimpleNamespace(ThreadWorker=ThreadWorker))
+    monkeypatch.setattr(pytest, "importorskip", optional_import)
+    fixture = runpy.run_path(str(Path(probe.__file__).with_name("http_recycle_fixture.py")))
+    optional_import.assert_called_once_with("gunicorn.workers.gthread", exc_type=ImportError)
+    worker = fixture["ObservedThreadWorker"]()
+    monkeypatch.setitem(
+        worker.set_accept_enabled.__globals__,
+        "event",
+        lambda name: calls.append((name, worker._accepting)),
+    )
+    for enabled in (False, True, True, False):
+        worker.set_accept_enabled(enabled)
+    assert calls == [
+        ("base", False),
+        ("base", True),
+        ("ready", True),
+        ("base", True),
+        ("base", False),
+        ("listener-disabled", False),
+    ]
+
+
+def test_fixture_requires_its_optional_worker_without_importing_gunicorn(monkeypatch):
+    optional_import = Mock(side_effect=pytest.skip.Exception("Controlled unavailable worker"))
+    monkeypatch.setattr(pytest, "importorskip", optional_import)
+    with pytest.raises(pytest.skip.Exception, match="Controlled unavailable worker"):
+        runpy.run_path(str(Path(probe.__file__).with_name("http_recycle_fixture.py")))
+    optional_import.assert_called_once_with("gunicorn.workers.gthread", exc_type=ImportError)
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_unavailable_native_admission_skips_only_when_proof_is_not_required(
+    tmp_path, monkeypatch, required
+):
+    with monkeypatch.context() as context:
+        context.setattr(sys, "platform", "not-linux")
+        context.setenv("REQUIRE_HTTP_RECYCLE_PROOF", "1" if required else "0")
+        process = Mock(side_effect=AssertionError("Native process is not admitted"))
+        context.setattr(subprocess, "Popen", process)
+        exception = pytest.fail.Exception if required else pytest.skip.Exception
+        message = "Required Linux experiment" if required else "Selected Linux sample lane"
+        with pytest.raises(exception, match=message):
+            test_single_worker_recycle_gap_and_no_recycle_control(tmp_path)
+        process.assert_not_called()
 
 
 def test_single_worker_recycle_gap_and_no_recycle_control(tmp_path):
