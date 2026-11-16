@@ -845,6 +845,9 @@ def discover_and_reap_unregistered_payloads(
             .order_by("reference")
             .values_list("reference", flat=True)[: max_objects + 1]
         )
+        # The reverse registry scan has its own bound, even after the backend
+        # listing completed. Uninspected registry rows cannot imply success.
+        has_more = len(active_refs) > max_objects
         for active_ref in active_refs[:max_objects]:
             try:
                 active_aliases = _payload_registry_references(active_ref, resolved_config)
