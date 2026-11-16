@@ -267,7 +267,7 @@ def test_qualification_callers_preserve_workload_time_after_the_bounded_ci_wait(
     # existing post-checkpoint allowance. Application additionally covers all
     # its setup, native-workload and cleanup step ceilings without truncation.
     minimum_workload_minutes = {
-        ("application-qualification.yml", "application-core"): 94,
+        ("application-qualification.yml", "application-core"): 96,
         ("upgrade-native-qualification.yml", "native"): 40,
         ("latency-qualification.yml", "latency"): 25,
         ("cancellation-qualification.yml", "cancellation"): 20,

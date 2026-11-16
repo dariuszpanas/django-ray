@@ -29,19 +29,21 @@ jobs:
     if: github.event_name != 'pull_request_target'
     name: Application Core (Linux)
     runs-on: ubuntu-latest
-    # 36m CI prerequisite + 90m bounded setup/workload/cleanup + 4m overhead.
-    timeout-minutes: 130
+    # 36m CI prerequisite + 90m setup/workload/cleanup + 2m witness + 4m overhead.
+    timeout-minutes: 132
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       VALIDATION_INTENT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'diagnostic' && 'diagnostic' || 'acceptance' }}
       RESOURCE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.resource_profile || 'standard' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Validate the fixed resource profile before allocating capacity
+        id: profile
         run: |
           python - <<'PY'
           import os
@@ -50,6 +52,7 @@ jobs:
           PY
 
       - name: Require the current source Linux CI checkpoint
+        id: ci
         if: env.VALIDATION_INTENT == 'acceptance'
         timeout-minutes: 36
         env:
@@ -57,6 +60,7 @@ jobs:
         run: python scripts/wait_for_ci_checkpoint.py
 
       - name: Install pinned public test tools
+        id: tools
         timeout-minutes: 5
         working-directory: ${{ runner.temp }}
         run: |
@@ -74,6 +78,7 @@ jobs:
           sudo install kind chainsaw kubectl linux-amd64/helm /usr/local/bin/
 
       - name: Build the committed candidate with a disposable local registry
+        id: build
         timeout-minutes: 15
         run: |
           # The hosted VM is the 4-CPU/16-GiB build boundary; no cluster exists yet.
@@ -113,6 +118,7 @@ jobs:
           PY
 
       - name: Create a bounded disposable Kind cluster
+        id: cluster
         timeout-minutes: 10
         run: |
           kind create cluster --name application-core --wait 180s \
@@ -133,6 +139,7 @@ jobs:
             --wait --timeout 180s
 
       - name: Run the native application core test
+        id: native
         # 2820s cold workload + 180s worker images; retain the existing 300s
         # allowance for startup, receipt collection and namespace cleanup.
         timeout-minutes: 55
@@ -142,6 +149,7 @@ jobs:
             --validation-intent "$VALIDATION_INTENT" --resource-profile "$RESOURCE_PROFILE"
 
       - name: Remove only this job's disposable infrastructure
+        id: cleanup
         if: always()
         timeout-minutes: 5
         run: |
@@ -149,6 +157,7 @@ jobs:
           if docker container inspect application-registry >/dev/null 2>&1; then docker rm -f application-registry; fi
 
       - name: Upload application receipts and build identity
+        id: receipts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -161,4 +170,31 @@ jobs:
             ${{ runner.temp }}/application-build/validation-intent.txt
             ${{ runner.temp }}/application-build/resource-profile.txt
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: Record bounded direct execution facts
+        if: always()
+        timeout-minutes: 1
+        env:
+          WITNESS_STEP_CHECKOUT: ${{ steps.checkout.outcome }}
+          WITNESS_STEP_PROFILE: ${{ steps.profile.outcome }}
+          WITNESS_STEP_CI: ${{ steps.ci.outcome }}
+          WITNESS_STEP_TOOLS: ${{ steps.tools.outcome }}
+          WITNESS_STEP_BUILD: ${{ steps.build.outcome }}
+          WITNESS_STEP_CLUSTER: ${{ steps.cluster.outcome }}
+          WITNESS_STEP_NATIVE: ${{ steps.native.outcome }}
+          WITNESS_STEP_CLEANUP: ${{ steps.cleanup.outcome }}
+          WITNESS_STEP_RECEIPTS: ${{ steps.receipts.outcome }}
+          WITNESS_ARTIFACT_ID: ${{ steps.receipts.outputs.artifact-id }}
+          WITNESS_ARTIFACT_DIGEST: ${{ steps.receipts.outputs.artifact-digest }}
+        run: python -m qualification.application.execution_witness
+
+      - name: Retain the attempt-qualified execution witness
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: application-execution-witness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/application-witness/execution-witness.json
+          if-no-files-found: error
           retention-days: 14

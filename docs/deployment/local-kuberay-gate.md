@@ -24,6 +24,20 @@ proof only when the source tree is unchanged; relevant executable/image changes
 require new affected proof. Record the scenario mapping and semantic results in
 the retained commit and PR using the evidence rules below.
 
+Hosted Application qualification also writes a bounded direct-execution witness
+after the workload, owned cleanup and receipt upload. The separate
+`application-execution-witness-<run>-<attempt>` artifact records fixed run/attempt,
+source and workflow context, observed image digests, receipt-file identities,
+step outcomes and the receipt upload's immutable artifact ID and digest. It does
+not authenticate its own assertions, accept previous artifacts or enable reuse;
+every selected recipe still executes after current-head Linux CI. Failed or
+missing observations remain an incomplete witness, without raw errors or logs.
+Cancellation can prevent final artifact publication. The existing
+`application-core-<run>` receipt name remains unchanged; replacement or deletion
+can make an earlier receipt ID unavailable. The witness does not promise that
+all attempts' receipts remain available. See repository-only proposed ADR-0008
+for the partial implementation and unresolved reuse contract.
+
 Release candidates and changes spanning the deployment stack require the full
 applicable application matrix and supported preserved-data upgrade rehearsal.
 Remaining Beta releases use [coordinated upgrades](../stability.md#coordinated-beta-upgrades).

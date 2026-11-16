@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Retain a bounded direct Application qualification witness with run/attempt,
+  source, image, step and receipt-upload identities. This records provenance
+  inputs for #469; it does not authenticate old results or enable reuse.
+
 ### Fixed
 
 - Retain the bounded registered-purge report when optional unregistered inventory
