@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -410,6 +411,55 @@ def test_timeout_terminates_and_reaps_probe_process(monkeypatch) -> None:
 def test_timeout_must_be_positive() -> None:
     with pytest.raises(ValueError, match="greater than zero"):
         run_compiled_graph_probe(_request(), timeout_seconds=0)
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+        pytest.param(10**400, id="integer-float-overflow"),
+        pytest.param(True, id="true"),
+        pytest.param(False, id="false"),
+        pytest.param(None, id="none"),
+        pytest.param("1", id="string"),
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+    ],
+)
+def test_timeout_validation_precedes_policy_and_side_effects(timeout, monkeypatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("invalid timeout reached policy, clock, allocation or process setup")
+
+    monkeypatch.setattr(probe, "evaluate_compiled_graph_support", forbidden)
+    monkeypatch.setattr(probe, "time", SimpleNamespace(monotonic=forbidden))
+    monkeypatch.setattr(probe, "tempfile", SimpleNamespace(TemporaryDirectory=forbidden))
+    monkeypatch.setattr(probe, "subprocess", SimpleNamespace(Popen=forbidden))
+    with pytest.raises(ValueError, match="^timeout_seconds must be finite and greater than zero$"):
+        run_compiled_graph_probe(
+            _request(candidate_native=True, unsafe_native=True),
+            timeout_seconds=timeout,
+            _environment={probe.UNSAFE_PROBE_ENV: "1"},
+        )
+
+
+@pytest.mark.parametrize("timeout", [1, 0.5, 60.0])
+def test_finite_timeout_preserves_guarded_outcome(timeout, monkeypatch) -> None:
+    decision = _decision(eligible=False, reason=CompiledGraphReason.UNSUPPORTED_OPERATING_SYSTEM)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a finite timeout bypassed the existing admission guard")
+
+    clock = iter([1.0, 1.25])
+    monkeypatch.setattr(probe, "evaluate_compiled_graph_support", lambda *_a, **_k: decision)
+    monkeypatch.setattr(probe, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(probe, "tempfile", SimpleNamespace(TemporaryDirectory=forbidden))
+    monkeypatch.setattr(probe, "subprocess", SimpleNamespace(Popen=forbidden))
+    outcome = run_compiled_graph_probe(_request(), timeout_seconds=timeout)
+    assert outcome.status is CompiledGraphProbeStatus.UNSUPPORTED_GUARD
+    assert outcome.decision is decision
+    assert outcome.duration_seconds == 0.25
 
 
 def test_linux_process_group_cleanup_runs_after_root_already_exited(monkeypatch) -> None:
