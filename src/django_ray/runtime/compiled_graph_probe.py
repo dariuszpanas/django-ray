@@ -1,6 +1,6 @@
 """Subprocess-isolated smoke probe for Ray Compiled Graph.
 
-The parent process always evaluates :mod:`django_ray.runtime.compiled_graph` first.
+After timeout validation, the parent evaluates :mod:`django_ray.runtime.compiled_graph`.
 Unsupported combinations return a structured guard result without starting a child.
 Native compilation is only attempted in a disposable subprocess with a hard timeout.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import signal
 import subprocess
@@ -148,8 +149,15 @@ def run_compiled_graph_probe(
     _environment: dict[str, str] | None = None,
 ) -> CompiledGraphProbeOutcome:
     """Run one hard-bounded native probe, or return before spawn when guarded."""
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be greater than zero")
+    timeout_error = "timeout_seconds must be finite and greater than zero"
+    if not isinstance(timeout_seconds, int | float) or isinstance(timeout_seconds, bool):
+        raise ValueError(timeout_error)
+    try:
+        timeout_seconds = float(timeout_seconds)
+    except OverflowError:
+        raise ValueError(timeout_error) from None
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError(timeout_error)
 
     started_at = time.monotonic()
     decision = evaluate_compiled_graph_support(

@@ -357,7 +357,12 @@ not make the incomplete identity eligible or promotable.
 
 ## Isolated smoke probe
 
-The probe always consults the adapter first. A normal invocation on Windows, a Ray
+The timeout (`timeout_seconds` in Python or `--timeout-seconds` on the CLI) must be
+a finite, strictly positive number representable as a float. Invalid Python values,
+including booleans, NaN, either infinity and overflowing integers, raise `ValueError`
+before adapter evaluation or resource setup. Infinity is not an unlimited budget.
+
+After timeout validation, the probe consults the adapter. A normal invocation on Windows, a Ray
 Client driver, GPU, an unknown version, or any other unsupported tuple returns
 `unsupported_guard` without spawning a child or importing Ray.
 

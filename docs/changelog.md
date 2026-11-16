@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject invalid Compiled Graph diagnostic timeout budgets before policy or
+  process setup: require finite positive numbers and report conversion overflow
+  as a bounded input error. Existing admission and cleanup guards remain in force;
+  Compiled Graph remains disabled and unqualified (#731).
+
 - Reject nonfinite spill lock timeouts and stale-owner grace periods before root
   or lock access. Convert overflowing duration integers into field-specific
   configuration errors while retaining zero grace, finite timeout refusal, and
