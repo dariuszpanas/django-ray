@@ -836,6 +836,55 @@ Administrator privileges are not a configured exception to the required checks.
 Any separately authorized infrastructure recovery must preserve and restore the exact
 original ruleset, record its validation evidence and verify the resulting history.
 
+### Actions event policies for trusted metadata workflows
+
+Repository Actions settings contain two active event-only policies for the existing trusted
+metadata workflows. Their scope is the exact workflow path, rather than every workflow:
+
+| Workflow path | Allowed events |
+|---|---|
+| `.github/workflows/commit-messages.yml` | `pull_request_target` |
+| `.github/workflows/pr-review.yml` | `pull_request_target`, `workflow_run` |
+
+`Commit Messages` reads trusted base configuration and verifies the fetched event head without
+checking out or executing PR code. The review publisher also uses trusted default-branch code,
+current PR metadata admission and the pinned YAGA triage/review action. Its `workflow_run` path
+refreshes eligible CI reruns and completed `Pull Request Review Wake` runs; retain both event
+families. The permissionless wake workflow keeps its existing comment, review and manual triggers.
+Neither metadata publisher may execute untrusted PR code or uploaded artifacts.
+
+These policies implement GitHub's documented explicit event allowance for necessary
+[`pull_request_target` metadata automation](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
+They add no actor rules, authorize no external PR or current head, and change neither fork approval
+for all external contributors nor the default read-only workflow permissions and existing bot
+review permission. Owner/source admission, Dependabot handling, native validation, required merge
+checks and reviews remain separate. Actor restrictions are a different policy dimension; if one is
+introduced later, review bot identities needed by custom workflows as described in
+[GitHub's execution-policy guide](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution).
+
+Maintainers can inspect configured policies in **Settings > Actions > Policies**, or read all pages
+through the [Actions policies API](https://docs.github.com/en/rest/actions/policies):
+
+```bash
+gh api --hostname github.com --method GET --paginate \
+  'repos/OWNER/REPO/actions/policies?has_parents=true&per_page=100'
+gh api --hostname github.com --method GET \
+  'repos/OWNER/REPO/actions/policies/POLICY_ID'
+```
+
+Replace the repository and policy placeholders with authenticated readback values. Include parent
+policies and follow their returned detail links at the owning account level. Inspect enforcement,
+source, workflow-path includes/excludes and every actor/event rule; an empty configured-policy list
+does not establish that GitHub's built-in default is absent. Policies layer with other protections.
+
+After a workflow rename or trigger change, compare its current path and complete `on` event list
+with the applicable policy, then read back the exact updated scope. Keep explicit path targeting:
+omitting `workflow_path` when creating a policy targets all workflows, while omission on update
+preserves the existing target. Retain configuration readback and a subsequent real owner-PR flow
+in [issue #744](https://github.com/dariuszpanas/django-ray/issues/744). Settings readback or a run
+before the setting changed is not execution proof, and a successful flow does not demonstrate
+future default-enforcement behavior.
+
 ### Commit and PR Titles
 
 Use Conventional Commit syntax for both commits and PR titles:
