@@ -132,10 +132,12 @@ function response(status, payload) {
 
 function deferred() {
   let resolve;
-  const promise = new Promise((complete) => {
+  let reject;
+  const promise = new Promise((complete, fail) => {
     resolve = complete;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function loadDashboard({
@@ -327,15 +329,16 @@ test("a stale 401 cannot clear a newer verified credential", async () => {
 test("a stale successful check cannot overwrite a newer verified credential", async () => {
   const dashboard = loadDashboard();
   const oldResponse = deferred();
-  dashboard.fetchResponses.push(oldResponse.promise, response(200, stats));
+  dashboard.fetchResponses.push(oldResponse.promise, response(200, { ...stats, total: 2 }));
 
   dashboard.elements.get("api-token").value = "old-success-token";
   const oldAttempt = dashboard.click("use-token");
   dashboard.elements.get("api-token").value = "new-success-token";
   await dashboard.click("use-token");
 
-  oldResponse.resolve(response(200, stats));
+  oldResponse.resolve(response(200, { ...stats, total: 99 }));
   await oldAttempt;
+  assert.equal(dashboard.elements.get("stat-total").textContent, 2);
   assert.equal(
     dashboard.elements.get("credential-status").textContent,
     "Authenticated for this loaded page. Reloading clears the token.",
@@ -375,9 +378,191 @@ test("forgetting a credential wins over an in-flight successful check", async ()
   assert.equal(dashboard.sessionStorage.removedKeys.at(-1), legacySessionCredentialKey);
   assert.equal(dashboard.sessionStorage.getCount, 0);
   assert.equal(dashboard.sessionStorage.setCount, 0);
+  assert.equal(dashboard.elements.get("stat-total").textContent, "");
   const fetchCount = dashboard.fetchCalls.length;
   await dashboard.click("trigger");
   assert.equal(dashboard.fetchCalls.length, fetchCount);
+});
+
+test("credential changes while reading statistics fence the decoded body", async () => {
+  const dashboard = loadDashboard();
+  const oldBody = deferred();
+  const bodyStarted = deferred();
+  dashboard.fetchResponses.push({
+    ...response(200, stats),
+    json() {
+      bodyStarted.resolve();
+      return oldBody.promise;
+    },
+  });
+  dashboard.elements.get("api-token").value = "old-body-token";
+  const oldAttempt = dashboard.click("use-token");
+  await bodyStarted.promise;
+
+  dashboard.fetchResponses.push(response(200, { ...stats, total: 2 }));
+  dashboard.elements.get("api-token").value = "new-body-token";
+  await dashboard.click("use-token");
+  oldBody.resolve({ ...stats, total: 99 });
+  await oldAttempt;
+
+  assert.equal(dashboard.elements.get("stat-total").textContent, 2);
+});
+
+test("a queued post-enqueue refresh does not use a replacement credential", async () => {
+  const dashboard = loadDashboard();
+  dashboard.fetchResponses.push(response(200, stats));
+  dashboard.elements.get("api-token").value = "enqueue-refresh-token";
+  await dashboard.click("use-token");
+  dashboard.fetchResponses.push(response(200, { task_id: "old-task", status: "READY" }));
+  await dashboard.click("trigger");
+
+  dashboard.fetchResponses.push(response(200, { ...stats, total: 2 }));
+  dashboard.elements.get("api-token").value = "replacement-refresh-token";
+  await dashboard.click("use-token");
+  const fetchCount = dashboard.fetchCalls.length;
+  await dashboard.scheduled.shift()();
+
+  assert.equal(dashboard.fetchCalls.length, fetchCount);
+  assert.equal(dashboard.elements.get("stat-total").textContent, 2);
+});
+
+test("a queued post-enqueue refresh cannot overwrite the forget message", async () => {
+  const dashboard = loadDashboard();
+  dashboard.fetchResponses.push(response(200, stats));
+  dashboard.elements.get("api-token").value = "forgotten-refresh-token";
+  await dashboard.click("use-token");
+  dashboard.fetchResponses.push(response(200, { task_id: "old-task", status: "READY" }));
+  await dashboard.click("trigger");
+  await dashboard.click("forget-token");
+  const fetchCount = dashboard.fetchCalls.length;
+  await dashboard.scheduled.shift()();
+
+  assert.equal(dashboard.fetchCalls.length, fetchCount);
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "Browser API token forgotten for this loaded page.",
+  );
+  assert.equal(
+    dashboard.elements.get("credential-status").textContent,
+    "Not authenticated. The page-memory API token was forgotten.",
+  );
+});
+
+test("an in-flight post-enqueue refresh failure cannot overwrite a newer check", async () => {
+  const dashboard = loadDashboard();
+  dashboard.fetchResponses.push(response(200, stats));
+  dashboard.elements.get("api-token").value = "old-refresh-failure-token";
+  await dashboard.click("use-token");
+  dashboard.fetchResponses.push(response(200, { task_id: "old-task", status: "READY" }));
+  await dashboard.click("trigger");
+  const oldResponse = deferred();
+  dashboard.fetchResponses.push(oldResponse.promise);
+  const refresh = dashboard.scheduled.shift()();
+
+  dashboard.fetchResponses.push(response(200, { ...stats, total: 2 }));
+  dashboard.elements.get("api-token").value = "new-refresh-failure-token";
+  await dashboard.click("use-token");
+  oldResponse.resolve(response(503, {}));
+  await refresh;
+
+  assert.equal(dashboard.elements.get("stat-total").textContent, 2);
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "Authenticated task statistics refreshed.",
+  );
+});
+
+test("a current post-enqueue refresh still reports credential rejection", async () => {
+  const dashboard = loadDashboard();
+  dashboard.fetchResponses.push(response(200, stats));
+  dashboard.elements.get("api-token").value = "rejected-refresh-token";
+  await dashboard.click("use-token");
+  dashboard.fetchResponses.push(response(200, { task_id: "current-task", status: "READY" }));
+  await dashboard.click("trigger");
+  dashboard.fetchResponses.push(response(401, {}));
+  await dashboard.scheduled.shift()();
+
+  assert.equal(
+    dashboard.elements.get("credential-status").textContent,
+    "The API token was rejected. Paste a valid token and try again.",
+  );
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "The browser API token was rejected.",
+  );
+});
+
+for (const action of ["trigger", "view-executions"]) {
+  for (const credentialChange of ["replace", "forget"]) {
+    for (const failure of ["401", "503", "network", "body"]) {
+      test(`stale ${action} ${failure} failure preserves ${credentialChange} feedback`, async () => {
+        const dashboard = loadDashboard();
+        dashboard.fetchResponses.push(response(200, stats));
+        dashboard.elements.get("api-token").value = "old-action-token";
+        await dashboard.click("use-token");
+        const oldResponse = deferred();
+        const oldBody = deferred();
+        const bodyStarted = deferred();
+        dashboard.fetchResponses.push(oldResponse.promise);
+        const oldAction = dashboard.click(action);
+
+        if (failure === "body") {
+          oldResponse.resolve({
+            ...response(200, {}),
+            json() {
+              bodyStarted.resolve();
+              return oldBody.promise;
+            },
+          });
+          await bodyStarted.promise;
+        }
+
+        if (credentialChange === "replace") {
+          dashboard.fetchResponses.push(response(200, { ...stats, total: 2 }));
+          dashboard.elements.get("api-token").value = "new-action-token";
+          await dashboard.click("use-token");
+        } else {
+          await dashboard.click("forget-token");
+        }
+        const expectedOutput = dashboard.elements.get("output").textContent;
+        const expectedCredential = dashboard.elements.get("credential-status").textContent;
+
+        if (failure === "network") {
+          oldResponse.reject(new Error("old request network failure"));
+        } else if (failure === "body") {
+          oldBody.reject(new Error("old response body failure"));
+        } else {
+          oldResponse.resolve(response(Number(failure), {}));
+        }
+        await oldAction;
+
+        assert.equal(dashboard.elements.get("output").textContent, expectedOutput);
+        assert.equal(
+          dashboard.elements.get("credential-status").textContent,
+          expectedCredential,
+        );
+        assert.equal(dashboard.elements.get("protected-response").hidden, true);
+      });
+    }
+  }
+}
+
+test("a current protected-response rejection still clears the credential", async () => {
+  const dashboard = loadDashboard();
+  dashboard.fetchResponses.push(response(200, stats));
+  dashboard.elements.get("api-token").value = "current-protected-token";
+  await dashboard.click("use-token");
+  dashboard.fetchResponses.push(response(401, {}));
+  await dashboard.click("view-executions");
+
+  assert.equal(
+    dashboard.elements.get("credential-status").textContent,
+    "The API token was rejected. Paste a valid token and try again.",
+  );
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "The browser API token was rejected.",
+  );
 });
 
 test("forgetting a credential fences an in-flight protected response", async () => {
