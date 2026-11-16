@@ -784,6 +784,10 @@ Optimizing only the function body can miss the dominant cost.
 
 ## Benchmark Worker Polling
 
+For PostgreSQL plans of maintenance candidate scans, see the
+[manual query-plan diagnostic](testing/maintenance-query-plans.md).
+Its synthetic plans are separate from the claim-latency benchmark below.
+
 Run the polling benchmark against a disposable PostgreSQL database with no production
 workers consuming the generated benchmark queue:
 

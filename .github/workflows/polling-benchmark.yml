@@ -2,12 +2,19 @@ name: Polling Benchmark
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Fixed diagnostic workload
+        type: choice
+        options: [claim, maintenance]
+        default: claim
 
 permissions:
   contents: read
 
 jobs:
   benchmark:
+    if: inputs.mode != 'maintenance'
     name: PostgreSQL Polling Benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -121,3 +128,135 @@ jobs:
           except Exception as error:
               print("diagnostics unavailable:", error)
           PY
+
+  maintenance:
+    if: >-
+      inputs.mode == 'maintenance' &&
+      github.repository_id == '790856348' &&
+      github.repository_owner_id == '15094983' &&
+      github.actor_id == '15094983'
+    name: PostgreSQL Maintenance Query Plans
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DJANGO_SETTINGS_MODULE: tests.postgres_settings
+      DJANGO_RAY_MAINTENANCE_PLANS: owned-disposable-v1
+      DATABASE_NAME: maintenance_plans
+      DATABASE_USER: django_ray
+      DATABASE_PASSWORD: django_ray
+      DATABASE_HOST: 127.0.0.1
+      DATABASE_PORT: "5432"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Admit the owner source and disposable runner
+        run: python -m qualification.maintenance_plans --preflight
+
+      - name: Require the exact-source Linux CI checkpoint
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m qualification.maintenance_plans --checkpoint
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Install only frozen tracked PostgreSQL dependencies
+        timeout-minutes: 3
+        run: uv sync --frozen --extra postgres --python 3.12
+
+      - name: Create only this job's private PostgreSQL container
+        id: postgres
+        timeout-minutes: 2
+        run: |
+          refuse() { printf '%s\n' 'MAINTENANCE_POSTGRES_CREATE_FAILED' >&2; exit 1; }
+          unset DOCKER_CONTEXT DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_VERSION
+          python -m qualification.maintenance_plans --preflight
+          cid_file="$RUNNER_TEMP/maintenance-postgres.cid"
+          test ! -e "$cid_file" || refuse
+          docker --host unix:///var/run/docker.sock create \
+            --cidfile "$cid_file" \
+            --cpus 1 --memory 1g --memory-swap 1g --pids-limit 128 \
+            --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_DB=maintenance_plans \
+            --env POSTGRES_USER=django_ray \
+            --env POSTGRES_PASSWORD=django_ray \
+            --health-cmd "pg_isready -U django_ray -d maintenance_plans" \
+            --health-interval 5s --health-timeout 5s --health-retries 10 \
+            postgres:17@sha256:f4c66b820c6f974249089d3d16d86a3698eae11e8746eb6644b2271031e91232 \
+            >/dev/null 2>&1 || refuse
+          container_id="$(cat "$cid_file" 2>/dev/null)" || refuse
+          [[ "$container_id" =~ ^[a-f0-9]{64}$ ]] || refuse
+          printf 'container_id=%s\n' "$container_id" >> "$GITHUB_OUTPUT"
+
+      - name: Start and wait for only the owned PostgreSQL container
+        timeout-minutes: 2
+        env:
+          DIAGNOSTIC_POSTGRES_ID: ${{ steps.postgres.outputs.container_id }}
+        run: |
+          refuse() { printf '%s\n' 'MAINTENANCE_POSTGRES_START_FAILED' >&2; exit 1; }
+          unset DOCKER_CONTEXT DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_VERSION
+          [[ "$DIAGNOSTIC_POSTGRES_ID" =~ ^[a-f0-9]{64}$ ]] || refuse
+          actual_id="$(docker --host unix:///var/run/docker.sock inspect --format '{{.Id}}' "$DIAGNOSTIC_POSTGRES_ID" 2>/dev/null)" || refuse
+          test "$actual_id" = "$DIAGNOSTIC_POSTGRES_ID" || refuse
+          docker --host unix:///var/run/docker.sock start "$DIAGNOSTIC_POSTGRES_ID" >/dev/null 2>&1 || refuse
+          for _attempt in {1..10}; do
+            health="$(docker --host unix:///var/run/docker.sock inspect --format '{{.State.Health.Status}}' "$DIAGNOSTIC_POSTGRES_ID" 2>/dev/null)" || refuse
+            case "$health" in
+              healthy) exit 0 ;;
+              starting) sleep 5 ;;
+              *) refuse ;;
+            esac
+          done
+          refuse
+
+      - name: Capture fixed migrated-schema maintenance query plans
+        timeout-minutes: 7
+        run: |
+          ulimit -v 2097152
+          ulimit -t 300
+          ulimit -f 4096
+          timeout --signal=TERM --kill-after=10s 360s \
+            uv run --no-sync --python 3.12 python -m qualification.maintenance_plans \
+            --output "$RUNNER_TEMP/maintenance-plans/report.json"
+
+      - name: Remove only this job's PostgreSQL container and anonymous volume
+        if: always() && steps.postgres.outputs.container_id != ''
+        timeout-minutes: 1
+        env:
+          DIAGNOSTIC_POSTGRES_ID: ${{ steps.postgres.outputs.container_id }}
+        run: |
+          refuse() { printf '%s\n' 'MAINTENANCE_POSTGRES_CLEANUP_FAILED' >&2; exit 1; }
+          unset DOCKER_CONTEXT DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_VERSION
+          [[ "$DIAGNOSTIC_POSTGRES_ID" =~ ^[a-f0-9]{64}$ ]] || refuse
+          actual_id="$(docker --host unix:///var/run/docker.sock inspect --format '{{.Id}}' "$DIAGNOSTIC_POSTGRES_ID" 2>/dev/null)" || refuse
+          test "$actual_id" = "$DIAGNOSTIC_POSTGRES_ID" || refuse
+          docker --host unix:///var/run/docker.sock rm --force --volumes "$DIAGNOSTIC_POSTGRES_ID" >/dev/null 2>&1 || refuse
+          if docker --host unix:///var/run/docker.sock inspect --format '{{.Id}}' "$DIAGNOSTIC_POSTGRES_ID" >/dev/null 2>&1; then
+            refuse
+          fi
+          remaining="$(docker --host unix:///var/run/docker.sock container ls --all --quiet --no-trunc --filter "id=$DIAGNOSTIC_POSTGRES_ID" 2>/dev/null)" || refuse
+          test -z "$remaining" || refuse
+          mkdir -p "$RUNNER_TEMP/maintenance-plans"
+          printf '%s\n' '{"owned_postgres_removed":true}' > "$RUNNER_TEMP/maintenance-plans/cleanup.json"
+
+      - name: Retain bounded maintenance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maintenance-query-plans-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/maintenance-plans/report.json
+            ${{ runner.temp }}/maintenance-plans/cleanup.json
+          if-no-files-found: error
+          retention-days: 14
