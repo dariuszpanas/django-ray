@@ -1,17 +1,20 @@
 """Actual-model SQLite candidate bounds; no Ray or external services."""
 
+import sqlite3
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from django.db import connection
+from django.db.models import TextField
+from django.db.models.functions import Cast, Substr
 from django.test.utils import CaptureQueriesContext
 
 from django_ray.execution_protocol import SUPPORTED_EXECUTION_PROTOCOL_RANGE as PROTOCOLS
 from django_ray.management.commands.django_ray_worker import Command
 from django_ray.models import RayTaskExecution, TaskState, TaskWorkerLease
-from django_ray.runner.maintenance import MaintenanceScan
+from django_ray.runner.maintenance import MaintenanceScan, _MaintenanceIdentity
 
 pytestmark = pytest.mark.django_db
 
@@ -75,6 +78,90 @@ def test_projection_bounds_corrupt_sqlite_owner_and_avoids_all_payloads():
     ):
         assert field not in projection
     assert "LIMIT 33" in captured[-1]["sql"]
+
+
+def test_identity_default_compiler_keeps_original_bounded_projection():
+    query = RayTaskExecution.objects.all().query
+    compiler = query.get_compiler(connection=connection)
+    projected = _MaintenanceIdentity("attempt_number").resolve_expression(query)
+    original = Substr(Cast("attempt_number", TextField()), 1, 21).resolve_expression(query)
+    assert projected.as_sql(compiler, connection) == compiler.compile(original)
+    sqlite_sql, _ = projected.as_sqlite(compiler, connection)
+    assert "CASE WHEN TYPEOF(" in sqlite_sql
+
+
+@pytest.mark.parametrize("field", ["attempt_number", "execution_generation"])
+@pytest.mark.parametrize("value", [b"\xff", b"7"])
+def test_sqlite_blob_identity_is_skipped_before_text_cast(monkeypatch, field, value):
+    monkeypatch.setattr("django_ray.runner.maintenance.MAINTENANCE_PAGE_SIZE", 2)
+    created = rows(3)
+    table = connection.ops.quote_name(RayTaskExecution._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f'UPDATE {table} SET "{field}"=%s WHERE id=%s',
+            [sqlite3.Binary(value), created[0].pk],
+        )
+        cursor.execute(f'SELECT typeof("{field}") FROM {table} WHERE id=%s', [created[0].pk])
+        assert cursor.fetchone() == ("blob",)
+    query = RayTaskExecution.objects.filter(
+        state=TaskState.RUNNING,
+        execution_protocol_version__gte=PROTOCOLS.minimum,
+        execution_protocol_version__lte=PROTOCOLS.maximum,
+    )
+    command = Command()
+    with CaptureQueriesContext(connection) as captured:
+        page = command._maintenance_scan_page("running", query, ["default"], PROTOCOLS)
+    assert [candidate.pk for candidate in page] == [row.pk for row in created[:2]]
+    assert not page[0].identity_complete and not page[0].usable
+    assert page[1].usable
+    assert "CASE WHEN TYPEOF(" in captured[-1]["sql"]
+    assert "LIMIT 3" in captured[-1]["sql"]
+    assert command._maintenance_snapshot("running", query, page[0]) is None
+    assert command._maintenance_scans["running"].after == created[0].pk
+    assert command._maintenance_snapshot("running", query, page[1]).pk == created[1].pk
+    tail = command._maintenance_scan_page("running", query, ["default"], PROTOCOLS)
+    assert [candidate.pk for candidate in tail] == [created[2].pk]
+    assert tail[0].usable
+    command._maintenance_snapshot("running", query, tail[0])
+    assert not command._maintenance_scans["running"].pending
+    with connection.cursor() as cursor:
+        cursor.execute(f'SELECT typeof("{field}") FROM {table} WHERE id=%s', [created[0].pk])
+        assert cursor.fetchone() == ("blob",)  # The scan never repairs stored payloads.
+
+
+@pytest.mark.parametrize(
+    "field", ["attempt_number", "execution_generation", "execution_protocol_version"]
+)
+def test_normal_orm_rejects_invalid_utf8_integer_input(field):
+    created = rows(1)
+    with pytest.raises(ValueError):
+        RayTaskExecution.objects.filter(pk=created[0].pk).update(**{field: b"\xff"})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("attempt_number", b"7"),
+        ("execution_generation", b"7"),
+        ("execution_protocol_version", b"1"),
+    ],
+)
+def test_orm_coercible_integer_bytes_remain_usable(field, value):
+    task = RayTaskExecution.objects.create(
+        task_id=f"coercible-{field}",
+        callable_path="testproject.tasks.add_numbers",
+        state=TaskState.RUNNING,
+        **{field: value},
+    )
+    table = connection.ops.quote_name(RayTaskExecution._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(f'SELECT typeof("{field}") FROM {table} WHERE id=%s', [task.pk])
+        assert cursor.fetchone() == ("integer",)
+    (candidate,) = MaintenanceScan().page(
+        RayTaskExecution.objects.filter(pk=task.pk), scope=("default",)
+    )
+    assert candidate.usable and type(getattr(candidate, field)) is int
+    assert getattr(candidate, field) == int(value)
 
 
 def test_cursor_handles_deletion_state_flip_error_and_partial_page(monkeypatch):

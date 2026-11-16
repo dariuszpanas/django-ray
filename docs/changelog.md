@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Skip malformed SQLite integer identities before text conversion, so these
+  cells cannot abort a worker-maintenance page and block later executions.
+  Normal ORM integer coercion and PostgreSQL projections remain unchanged; no
+  stored data is repaired (#738). Broader worker resource work remains open (#718).
+
 - Require ty 0.0.102 for development and preserve optional-member checks while updating the
   Python dependency group. Narrow prepared state, result variants, ORM fields
   and test fixtures; retain unconfirmed cleanup when an expected doctor pipe is

@@ -9,11 +9,48 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from django.db.models import Case, F, TextField, Value, When
+from django.db.models import Case, F, Func, TextField, Value, When
 from django.db.models.functions import Cast, Substr
+from django.db.models.lookups import Exact
 
 MAINTENANCE_PAGE_SIZE = 32
 MAINTENANCE_CONTINUATION_SECONDS = 0.1
+
+
+class _MaintenanceIdentity(Func):
+    """Select storage guards using the connection that compiles the query."""
+
+    def __init__(self, field):
+        super().__init__(F(field), output_field=TextField())
+
+    def bounded(self):
+        return Substr(Cast(self.get_source_expressions()[0], TextField()), 1, 21)
+
+    def as_sql(
+        self, compiler, connection, function=None, template=None, arg_joiner=None, **extra_context
+    ):
+        return compiler.compile(self.bounded())
+
+    def as_sqlite(self, compiler, connection, **extra_context):
+        # SQLite CASE is lazy: reject BLOB/TEXT storage before CAST can expose
+        # invalid UTF-8 to the driver, without hydrating the malformed cell.
+        return compiler.compile(
+            Case(
+                When(
+                    Exact(
+                        Func(
+                            self.get_source_expressions()[0],
+                            function="TYPEOF",
+                            output_field=TextField(),
+                        ),
+                        Value("integer"),
+                    ),
+                    then=self.bounded(),
+                ),
+                default=Value(None),
+                output_field=TextField(),
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +108,7 @@ class MaintenanceScan:
         for field in identity_fields:
             # Integer affinity is not a type guarantee on SQLite. A malformed
             # text cell must not turn this small projection into a payload read.
-            window = window.annotate(
-                **{f"_maintenance_{field}": Substr(Cast(field, TextField()), 1, 21)}
-            )
+            window = window.annotate(**{f"_maintenance_{field}": _MaintenanceIdentity(field)})
         rows = list(
             window.order_by("pk")
             .annotate(_maintenance_owner=Substr("claimed_by_worker", 1, 256))
