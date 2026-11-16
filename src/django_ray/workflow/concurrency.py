@@ -11,6 +11,7 @@ This module provides strategy-neutral coordination for:
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -75,6 +76,19 @@ def validate_scope_key(key: str, *, field_name: str = "scope_key") -> str:
     return key
 
 
+def _positive_finite_float(value: object, *, field_name: str) -> float:
+    message = f"{field_name} must be finite and > 0"
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise WorkflowConcurrencyConfigurationError(message)
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise WorkflowConcurrencyConfigurationError(message) from None
+    if not math.isfinite(normalized) or normalized <= 0.0:
+        raise WorkflowConcurrencyConfigurationError(message)
+    return normalized
+
+
 @dataclass(frozen=True)
 class ConcurrencyScopeSpec:
     """Policy specification for a cross-run workflow concurrency scope."""
@@ -105,18 +119,15 @@ class ConcurrencyScopeSpec:
             raise WorkflowConcurrencyConfigurationError(
                 f"max_queued_runs must be between 0 and {MAX_QUEUED_RUNS_CEILING}"
             )
-        if (
-            not isinstance(self.lease_ttl_seconds, int | float)
-            or isinstance(self.lease_ttl_seconds, bool)
-            or float(self.lease_ttl_seconds) <= 0.0
-        ):
-            raise WorkflowConcurrencyConfigurationError("lease_ttl_seconds must be > 0")
+        lease_ttl_seconds = _positive_finite_float(
+            self.lease_ttl_seconds, field_name="lease_ttl_seconds"
+        )
         return ConcurrencyScopeSpec(
             scope_key=self.scope_key,
             overlap_policy=self.overlap_policy,
             max_concurrent_runs=self.max_concurrent_runs,
             max_queued_runs=self.max_queued_runs,
-            lease_ttl_seconds=float(self.lease_ttl_seconds),
+            lease_ttl_seconds=lease_ttl_seconds,
         )
 
 
@@ -367,19 +378,16 @@ class ExternalServiceBudgetSpec:
             raise WorkflowConcurrencyConfigurationError(
                 "max_in_flight_per_run must be between 1 and max_in_flight"
             )
-        if (
-            not isinstance(self.rate_tokens_per_second, int | float)
-            or isinstance(self.rate_tokens_per_second, bool)
-            or float(self.rate_tokens_per_second) <= 0.0
-        ):
-            raise WorkflowConcurrencyConfigurationError("rate_tokens_per_second must be > 0")
+        rate_tokens_per_second = _positive_finite_float(
+            self.rate_tokens_per_second, field_name="rate_tokens_per_second"
+        )
         if type(self.burst_capacity) is not int or self.burst_capacity < 1:
             raise WorkflowConcurrencyConfigurationError("burst_capacity must be >= 1")
         return ExternalServiceBudgetSpec(
             service_key=self.service_key,
             max_in_flight=self.max_in_flight,
             max_in_flight_per_run=self.max_in_flight_per_run,
-            rate_tokens_per_second=float(self.rate_tokens_per_second),
+            rate_tokens_per_second=rate_tokens_per_second,
             burst_capacity=self.burst_capacity,
         )
 

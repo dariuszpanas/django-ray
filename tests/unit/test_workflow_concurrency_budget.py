@@ -245,6 +245,116 @@ def test_zero_queue_capacity_rejects_waiting_without_affecting_active_admission(
     assert coord.request_admission(scope, _owner(2), now_monotonic=4.0).status == "admitted"
 
 
+_INVALID_POSITIVE_FLOATS = [
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="positive-infinity"),
+    pytest.param(float("-inf"), id="negative-infinity"),
+    pytest.param(10**400, id="integer-float-overflow"),
+    pytest.param(True, id="true"),
+    pytest.param(False, id="false"),
+    pytest.param("1", id="string"),
+    pytest.param(None, id="none"),
+    pytest.param(0, id="zero"),
+    pytest.param(-1, id="negative"),
+]
+
+
+@pytest.mark.parametrize("invalid", _INVALID_POSITIVE_FLOATS)
+def test_invalid_ttl_registration_preserves_scope_and_queued_expiry(invalid: object) -> None:
+    coord = WorkflowConcurrencyCoordinator()
+    scope = "finite/lease"
+    coord.register_scope(ConcurrencyScopeSpec(scope, lease_ttl_seconds=5))
+    original = coord.request_admission(scope, _owner(1), now_monotonic=0).lease
+    queued = coord.request_admission(scope, _owner(2), now_monotonic=1)
+    assert original is not None
+
+    for key in (scope, "finite/unregistered"):
+        with pytest.raises(WorkflowConcurrencyConfigurationError, match="lease_ttl_seconds"):
+            coord.register_scope(ConcurrencyScopeSpec(key, lease_ttl_seconds=invalid))  # type: ignore[arg-type]
+    with pytest.raises(WorkflowConcurrencyConfigurationError, match="Unregistered scope_key"):
+        coord.request_admission("finite/unregistered", _owner(3))
+
+    assert coord.request_admission(scope, _owner(1), now_monotonic=4).lease == original
+    assert coord.request_admission(scope, _owner(2), now_monotonic=4) == queued
+    promoted = coord.advance_queue(scope, now_monotonic=5)
+    assert len(promoted) == 1 and promoted[0].owner == _owner(2)
+    assert promoted[0].expires_at_monotonic == 10
+    with pytest.raises(StaleConcurrencyLeaseError):
+        coord.validate_fencing_token(original, now_monotonic=5)
+
+
+@pytest.mark.parametrize("invalid", _INVALID_POSITIVE_FLOATS)
+def test_invalid_rate_registration_preserves_grants_fairness_and_refill(invalid: object) -> None:
+    budget = SharedServiceBudgetController()
+    service = "finite/rate"
+    budget.register_service(
+        ExternalServiceBudgetSpec(
+            service,
+            max_in_flight=2,
+            max_in_flight_per_run=1,
+            rate_tokens_per_second=1,
+            burst_capacity=2,
+        )
+    )
+    first, status = budget.try_acquire(service, _owner(1), now_monotonic=0)
+    assert first is not None and status == "granted"
+    for key in (service, "finite/unregistered"):
+        with pytest.raises(WorkflowConcurrencyConfigurationError, match="rate_tokens_per_second"):
+            budget.register_service(
+                ExternalServiceBudgetSpec(key, rate_tokens_per_second=invalid),  # type: ignore[arg-type]
+                now_monotonic=100,
+            )
+    with pytest.raises(WorkflowConcurrencyConfigurationError, match="Unregistered service_key"):
+        budget.try_acquire("finite/unregistered", _owner(3))
+
+    assert budget.try_acquire(service, _owner(1), now_monotonic=0) == (None, "per_run_fairness_cap")
+    second, status = budget.try_acquire(service, _owner(2), now_monotonic=0)
+    assert second is not None and status == "granted"
+    assert budget.try_acquire(service, _owner(3), now_monotonic=0) == (
+        None,
+        "service_max_in_flight",
+    )
+    budget.release(first)
+    budget.release(second)
+    assert budget.try_acquire(service, _owner(3), now_monotonic=0) == (
+        None,
+        "rate_budget_exhausted",
+    )
+    refilled, status = budget.try_acquire(service, _owner(3), now_monotonic=1)
+    assert refilled is not None and status == "granted"
+
+
+@pytest.mark.parametrize("value", [1, 0.5])
+def test_positive_finite_integer_and_float_keep_expiry_and_rate_semantics(
+    value: int | float,
+) -> None:
+    coord = WorkflowConcurrencyCoordinator()
+    spec = coord.register_scope(ConcurrencyScopeSpec("finite/valid", lease_ttl_seconds=value))
+    assert type(spec.lease_ttl_seconds) is float and spec.lease_ttl_seconds == value
+    coord.request_admission(spec.scope_key, _owner(1), now_monotonic=0)
+    coord.request_admission(spec.scope_key, _owner(2), now_monotonic=0)
+    assert coord.advance_queue(spec.scope_key, now_monotonic=value / 2) == []
+    assert [lease.owner for lease in coord.advance_queue(spec.scope_key, now_monotonic=value)] == [
+        _owner(2)
+    ]
+
+    budget = SharedServiceBudgetController()
+    service = budget.register_service(
+        ExternalServiceBudgetSpec("finite/valid", rate_tokens_per_second=value, burst_capacity=1)
+    )
+    assert type(service.rate_tokens_per_second) is float
+    assert service.rate_tokens_per_second == value
+    first, status = budget.try_acquire(service.service_key, _owner(1), now_monotonic=0)
+    assert first is not None and status == "granted"
+    budget.release(first)
+    assert budget.try_acquire(service.service_key, _owner(2), now_monotonic=0.5 / value) == (
+        None,
+        "rate_budget_exhausted",
+    )
+    refilled, status = budget.try_acquire(service.service_key, _owner(2), now_monotonic=1 / value)
+    assert refilled is not None and status == "granted"
+
+
 def test_shared_external_service_budget_fairness_and_throttle_feedback() -> None:
     budget = SharedServiceBudgetController()
     budget.register_service(
