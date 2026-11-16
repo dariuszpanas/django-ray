@@ -370,6 +370,7 @@ def test_required_cleanup_and_upload_steps_must_succeed_exactly_once(tmp_path, m
         ("size_in_bytes", True),
         ("created_at", START),
         ("workflow_run", {"id": int(RUN) + 1}),
+        ("workflow_run", None),
     ],
 )
 def test_artifact_api_identity_digest_size_and_upload_window_are_bound(tmp_path, key, bad):
@@ -382,9 +383,9 @@ def test_artifact_api_identity_digest_size_and_upload_window_are_bound(tmp_path,
 def test_current_artifact_name_cannot_use_another_job_upload_log(tmp_path):
     github = GithubFixture()
     route = acquisition.PREFIX + "/actions/jobs/101/logs"
-    github.replies[route] = github.replies[route].replace(
-        b"Artifact ID is 201", b"Artifact ID is 202"
-    )
+    reply = github.replies[route]
+    assert isinstance(reply, bytes)
+    github.replies[route] = reply.replace(b"Artifact ID is 201", b"Artifact ID is 202")
     with pytest.raises(acquisition.AcquisitionError, match="artifact-upload-log-binding-missing"):
         acquisition.acquire_receipts(expected(), tmp_path / "bad", github=github)
 
@@ -445,7 +446,11 @@ def test_incomplete_or_duplicated_api_inventory_is_not_a_partial_success(tmp_pat
     if field == "total_count":
         github.replies[github.jobs_route][field] = 101
     else:
-        github.replies[github.jobs_route][field].append(copy.deepcopy(github.jobs[0]))
+        reply = github.replies[github.jobs_route]
+        assert isinstance(reply, dict)
+        jobs = reply[field]
+        assert isinstance(jobs, list)
+        jobs.append(copy.deepcopy(github.jobs[0]))
         github.replies[github.jobs_route]["total_count"] = 2
     with pytest.raises(acquisition.AcquisitionError):
         acquisition.acquire_receipts(expected(), tmp_path / "bad", github=github)

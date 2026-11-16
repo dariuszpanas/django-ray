@@ -22,7 +22,7 @@ import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 from scripts.test_planning_results import (
     CONTRACT_PROFILE,
@@ -331,12 +331,14 @@ class Github:
             raise AcquisitionError(
                 failure_code if probe else "github-request-unavailable"
             ) from None
+        # Popen owns a binary stdout stream because stdout=PIPE above.
+        stdout = cast(BinaryIO, process.stdout)
         output = bytearray()
         failures = []
 
         def consume():
             try:
-                while chunk := process.stdout.read(65536):
+                while chunk := stdout.read(65536):
                     if len(output) + len(chunk) > maximum:
                         raise AcquisitionError(byte_code)
                     output.extend(chunk)
@@ -367,7 +369,7 @@ class Github:
                 process.kill()
             process.wait(timeout=5)
             reader.join(timeout=5)
-            process.stdout.close()
+            stdout.close()
 
     def json(self, endpoint: str) -> dict:
         """Read one bounded object on the same fixed GitHub GET route boundary."""
@@ -602,7 +604,8 @@ def validate_artifact_metadata(value: dict, expected: ExpectedRun, upload: dict,
         "invalid-artifact-digest-or-size",
     )
     identity = value.get("workflow_run")
-    require(type(identity) is dict, "missing-artifact-source")
+    if type(identity) is not dict:
+        raise AcquisitionError("missing-artifact-source")
     for key, wanted in {
         "id": int(expected.run_id),
         "repository_id": REPOSITORY_ID,

@@ -272,6 +272,7 @@ class TestLiveFailureInjection:
         )
 
         object_ref = _submit_live_sleep_task(live_ray_cluster, sleep_seconds=30)
+        assert cmd.ray_core_runner is not None
         cmd.ray_core_runner._pending_tasks[task.pk] = RayCoreHandle(
             task_pk=task.pk,
             object_ref=object_ref,
@@ -289,6 +290,7 @@ class TestLiveFailureInjection:
         assert task.attempt_number == 2
         assert task.run_after is not None
         assert "Ray connection lost" in (task.error_message or "")
+        assert cmd.ray_core_runner is not None
         assert cmd.ray_core_runner._pending_tasks == {}
 
     def test_cancellation_finalizes_live_pending_task(self, live_ray_cluster):
@@ -387,6 +389,7 @@ class TestLiveFailureInjection:
                     claimed_by_worker=cmd.worker_id,
                 )
                 identity = (task.task_id, task.attempt_number, task.execution_generation)
+                assert cmd.ray_core_runner is not None
                 cmd.ray_core_runner._pending_tasks[task.pk] = RayCoreHandle(
                     task_pk=task.pk,
                     object_ref=object_ref,
@@ -411,6 +414,7 @@ class TestLiveFailureInjection:
                 assert task.completion_data is None and task.result_data is None
                 assert task.result_reference is None and task.run_after is None
                 assert task.pk not in cmd.active_tasks
+                assert cmd.ray_core_runner is not None
                 assert task.pk not in cmd.ray_core_runner._pending_tasks
                 attempt = TaskAttempt.objects.get(execution=task)
                 assert attempt.attempt_number == task.attempt_number

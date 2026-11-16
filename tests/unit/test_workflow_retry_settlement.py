@@ -516,7 +516,7 @@ def test_snapshot_requested_before_settlement_cannot_publish_old_failure():
     assert collector.snapshot()["graph"]["nodes"][0]["state"] == "SUCCEEDED"
 
 
-@pytest.mark.parametrize("failure", ["cancelled", "unavailable", "invalid"])
+@pytest.mark.parametrize("failure", ["cancelled", "unavailable", "invalid", "missing-identity"])
 def test_uncertain_outcome_disables_publication_without_cancelling_application(failure):
     from ray.exceptions import TaskCancelledError
 
@@ -531,6 +531,8 @@ def test_uncertain_outcome_disables_publication_without_cancelling_application(f
             raise TaskCancelledError(error_message="private cancellation detail")
         if failure == "unavailable":
             raise RuntimeError("private transport detail")
+        if failure == "missing-identity":
+            return _success_marker()
         return {"unexpected": "private metadata"}
 
     executor = _RayExecutor.__new__(_RayExecutor)
@@ -549,7 +551,11 @@ def test_uncertain_outcome_disables_publication_without_cancelling_application(f
     assert executor._pending_leaf_outcomes == {}
     assert disabled == [True]
     assert warnings == [
-        {"reason": "leaf_outcome_invalid" if failure == "invalid" else "leaf_outcome_unavailable"}
+        {
+            "reason": "leaf_outcome_invalid"
+            if failure in {"invalid", "missing-identity"}
+            else "leaf_outcome_unavailable"
+        }
     ]
     # No cancel method exists on this fake: observational failure must not cancel
     # the application's result reference or retry its callable.

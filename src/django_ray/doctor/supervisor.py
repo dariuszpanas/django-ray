@@ -201,6 +201,9 @@ def supervise(
             except OSError:
                 cleanup = False
             for stream in (process.stdout, process.stderr):
+                if stream is None:
+                    cleanup = False
+                    continue
                 try:
                     stream.close()
                 except OSError:

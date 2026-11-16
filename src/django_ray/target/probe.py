@@ -1017,7 +1017,7 @@ def validate_ray_target_execution_result_semantics(
     except Exception:
         raise RayTargetExecutionResultValidationError from None
 
-    if type(result) is TargetExecutionCompletion:
+    if isinstance(result, TargetExecutionCompletion):
         if reason is not None:
             raise RayTargetExecutionResultValidationError from None
     elif result.compatibility_reason is not reason:

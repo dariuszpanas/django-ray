@@ -591,6 +591,8 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="ray-core-authority-unavailable-worker")
+        lease = cmd.lease
+        assert lease is not None
         task.refresh_from_db()
         task_before = RayTaskExecution.objects.values().get(pk=task.pk)
         handle = _pending_handle(task)
@@ -618,7 +620,7 @@ class TestWorkerReconnectPollReconcile:
 
         assert cmd._partition_ray_core_handles(cast(Any, runner), ()) == ()
 
-        TaskWorkerLease.objects.filter(pk=cmd.lease.pk).update(is_active=False)
+        TaskWorkerLease.objects.filter(pk=lease.pk).update(is_active=False)
         cmd._mark_stale_ray_core_tasks_as_lost()
         monkeypatch.setitem(
             sys.modules,
@@ -703,9 +705,11 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="ray-core-cancellation-authority-loss-worker")
+        lease = cmd.lease
+        assert lease is not None
         task.refresh_from_db()
         task_before = RayTaskExecution.objects.values().get(pk=task.pk)
-        TaskWorkerLease.objects.filter(pk=cmd.lease.pk).update(is_active=False)
+        TaskWorkerLease.objects.filter(pk=lease.pk).update(is_active=False)
 
         assert (
             cmd._finalize_ray_core_cancellation(
@@ -1269,6 +1273,8 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="poll-lease-loss-worker")
+        lease = cmd.lease
+        assert lease is not None
         task.refresh_from_db()
         task_before = RayTaskExecution.objects.values().get(pk=task.pk)
         handle = _pending_handle(task)
@@ -1293,7 +1299,7 @@ class TestWorkerReconnectPollReconcile:
 
             def poll_completed(self, handles=None):
                 assert handles == (handle,)
-                TaskWorkerLease.objects.filter(pk=cmd.lease.pk).update(is_active=False)
+                TaskWorkerLease.objects.filter(pk=lease.pk).update(is_active=False)
                 self.retire_pending_handle(handle)
                 return [_completion(task, '{"success": true, "result": 3}')]
 

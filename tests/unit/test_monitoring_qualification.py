@@ -213,9 +213,13 @@ def test_probe_real_flow_checks_dashboards_queries_and_separate_tokens(
                 (200, b"django_ray_tasks_by_execution_protocol_total") if identity else (401, b"{}")
             )
         if url.endswith("/api/executions"):
-            identity = ApiTokenAuth().authenticate(
-                SimpleNamespace(path_info="/api/executions", method="GET"),
-                token.removeprefix("Bearer "),
+            identity = (
+                ApiTokenAuth().authenticate(
+                    SimpleNamespace(path_info="/api/executions", method="GET"),
+                    token.removeprefix("Bearer "),
+                )
+                if token
+                else None
             )
             return (200 if identity else 401), b"{}"
         if url.endswith("/api/search?limit=1"):
@@ -248,6 +252,15 @@ def test_probe_real_flow_checks_dashboards_queries_and_separate_tokens(
                 },
             }
         ).encode()
+
+    for token, expected_status in (
+        (None, 401),
+        ("", 401),
+        ("Bearer metrics-secret", 401),
+        ("Bearer api-secret", 200),
+    ):
+        status, _ = request("http://django-web-svc/api/executions", deadline=60, token=token)
+        assert status == expected_status
 
     monkeypatch.setattr(probe, "request", request)
     if anonymous_search == 200:

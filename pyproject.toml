@@ -84,7 +84,7 @@ dev = [
     "django-unfold==0.110.1",
     "whitenoise>=6.6",
     "ruff>=0.14.13",
-    "ty>=0.0.12",
+    "ty>=0.0.102",
     "pytest>=8.3.3",
     "pytest-django>=4.7",
     "pytest-cov>=4.0",
@@ -125,8 +125,9 @@ indent-style = "space"
 python-version = "3.12"
 
 [tool.ty.rules]
-# Django ORM-related errors - ty doesn't have Django stubs yet
-unresolved-attribute = "ignore"
+# Compatibility for dynamic Django ORM descriptors and generated attributes
+missing-attribute = "ignore"
+missing-union-attribute = "error"
 invalid-argument-type = "ignore"
 possibly-missing-attribute = "ignore"
 invalid-assignment = "ignore"

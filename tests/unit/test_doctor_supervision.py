@@ -508,9 +508,11 @@ def test_frame_reader_keeps_exited_leader_waitable_without_reaping():
         )
         assert process.returncode is None
         status = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        assert status is not None
         assert status.si_pid == process.pid and status.si_status == 0
     finally:
         process.wait(timeout=2)
+        assert process.stdout is not None and process.stderr is not None
         process.stdout.close()
         process.stderr.close()
 

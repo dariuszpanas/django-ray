@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import TypedDict
 from unittest.mock import Mock
 from xml.etree import ElementTree
 
@@ -220,7 +221,12 @@ def invocation(tmp_path, monkeypatch):
     monkeypatch.setattr(wheel, "_dependency_manifest", lambda candidate: {})
     monkeypatch.setattr(wheel, "_target_manifest", lambda *args: {"python": "3.12"})
     monkeypatch.setattr(wheel, "_package_tree_digest", lambda path: "a" * 64)
-    state = {"failure": None, "fixtures": []}
+
+    class InvocationState(TypedDict):
+        failure: str | None
+        fixtures: list[Path]
+
+    state: InvocationState = {"failure": None, "fixtures": []}
 
     def run(command, *, cwd, env, timeout):
         fixture = Path(command[-3])

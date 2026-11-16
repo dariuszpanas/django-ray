@@ -203,6 +203,7 @@ def test_successful_and_unrequested_inventory_keep_existing_report_fields(monkey
     assert report["counts"]["purged"] == 1
     assert len(calls) == int(discover)
     if discover:
+        assert inventory is not None
         assert report["unregistered_inventory"] == inventory.as_dict()
 
 

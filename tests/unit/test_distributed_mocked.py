@@ -273,8 +273,13 @@ class TestDistributedMocked:
             assert wire["callable_binding_kind"] == "digest"
             assert request.runtime_env_plan_identity == _runtime_env_identity()
 
-        assert [request.boundary_identity.item_index for request in requests] == [0, 1] * 3
-        operation_ids = [request.boundary_identity.operation_id for request in requests]
+        boundaries: list[NestedDistributedBoundaryIdentity] = []
+        for request in requests:
+            boundary = request.boundary_identity
+            assert isinstance(boundary, NestedDistributedBoundaryIdentity)
+            boundaries.append(boundary)
+        assert [boundary.item_index for boundary in boundaries] == [0, 1] * 3
+        operation_ids = [boundary.operation_id for boundary in boundaries]
         assert operation_ids[0] == operation_ids[1]
         assert operation_ids[2] == operation_ids[3]
         assert operation_ids[4] == operation_ids[5]
