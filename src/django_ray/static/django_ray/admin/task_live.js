@@ -72,7 +72,7 @@
       if (
         response.redirected ||
         [401, 403, 404].includes(response.status) ||
-        !contentType.includes("application/json")
+        (response.ok && !contentType.includes("application/json"))
       ) {
         stopped = true;
         statusNode.textContent = "Live updates stopped; reload after signing in again.";
@@ -105,6 +105,7 @@
       }
       stopped = terminalStates.has(state);
     } catch (error) {
+      lastAnnouncementKey = null;
       statusNode.textContent = "Status update unavailable; durable page data is unchanged.";
     } finally {
       inFlight = false;
