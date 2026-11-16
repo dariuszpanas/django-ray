@@ -105,7 +105,9 @@ coordinated upgrade, soak and external-contribution acceptance remain separate.
 | --- | --- | --- | --- |
 | Bounded direct Application witness and attempt-qualified artifact | Partial | `qualification/application/execution_witness.py`, `.github/workflows/application-qualification.yml` | Focused producer/workflow tests; source-specific hosted witness validation belongs to the delivery PR and #469 |
 | Existing receipt artifact compatibility | Implemented in candidate | Existing receipt name and acquisition adapter unchanged | Extra-witness artifact acquisition regression |
-| Authenticated artifact/run/attempt verifier and reuse | Not started | #469 | No consumer or reuse path exists |
+| Bounded read-only metadata/artifact/source binding diagnostic | Partial in candidate | `scripts/verify_application_witness.py`, `qualification/witness_binding/`, #469 | Focused mocked/host-Git controls and a historical owner-run binding; exit 3 and explicit semantic/admission false boundaries |
+| Trusted pure semantic bundle and qualification admission | Not started | #469 | Existing runner-module imports are not a standalone trusted semantic bundle; the binding diagnostic performs no product receipt validation |
+| Reuse consumer, complete failure-history policy and TTL | Not started | #469 | No reuse or authorization path exists |
 | Frozen build materials or retained reusable candidate images | Not started | #469, separate scope review | Not established by output image metadata |
 | Enforced OS budgets and measured validation savings | Not started here | #469 | No performance or resource-peak claim |
 
@@ -122,3 +124,4 @@ must retain all original receipt archives.
 | Date | Change | Evidence |
 | --- | --- | --- |
 | 2026-11-16 | Proposed provenance-first Application slice; reuse remains disabled | Candidate source and focused tests in this PR |
+| 2026-11-16 | Added candidate binding-only reader without accepting semantic validation or reuse | Isolated diagnostic, bounded mocked/host-Git controls and outside-Git original-run binding reports |
