@@ -258,6 +258,17 @@ fail-fast. This changes neither task retries nor worker/database timeout or jour
 settings. A recovered observation still needs every existing native-workload assertion;
 it does not identify the lock owner or explain the original contention.
 
+Worker-log diagnostics keep the last 8,000 decoded characters from an explicit
+binary window of at most 32,003 bytes at the observed end of the file. Later file
+growth cannot extend that read. UTF-8 replacement decoding and universal CRLF/lone-CR
+normalization preserve the text-tail behavior; short and empty logs remain valid,
+and unavailable logs retain the fixed fallback. A custom positive character cap
+uses a finite four-bytes-per-character window plus three boundary bytes. Zero
+returns an empty string without I/O; negative, boolean or non-integer private
+arguments raise a fixed `ValueError`. This bounds the requested diagnostic read,
+not synchronous file-I/O duration, RSS or worker output, and makes no claim about
+the earlier SQLite contention or native-exit causes.
+
 The probe requires two archived attempt outcomes and builds a bounded allowlist of rq2
 submission IDs from the known durable execution primary key/public ID, archived attempt
 protocols, and generation range. It matches JobInfo by ID before parsing metadata, then
