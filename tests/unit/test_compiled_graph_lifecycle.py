@@ -393,6 +393,68 @@ def test_initial_session_rejects_invalid_absolute_deadlines(
         initial_session(RUN_IDENTITY, deadlines)
 
 
+@pytest.mark.parametrize("value", [10**400, -(10**400)], ids=["huge-positive", "huge-negative"])
+def test_nonrepresentable_event_clock_is_rejected_without_state_change(value: int) -> None:
+    state = initial_session(RUN_IDENTITY, DEADLINES)
+    before = lifecycle_snapshot(state)
+    result = reduce_lifecycle(
+        state,
+        LifecycleEvent(LifecycleEventKind.VALIDATION_REQUESTED, RUN_IDENTITY, value),
+    )
+    assert isinstance(result, LifecycleRejection)
+    assert result.code is LifecycleRejectionCode.INVALID_CLOCK
+    assert lifecycle_snapshot(state) == before
+
+
+@pytest.mark.parametrize("field", tuple(DEADLINES.as_dict()))
+@pytest.mark.parametrize("value", [10**400, -(10**400)], ids=["huge-positive", "huge-negative"])
+def test_nonrepresentable_initial_deadlines_use_bounded_value_error(field: str, value: int) -> None:
+    with pytest.raises(
+        ValueError, match=rf"^{field} deadline must be a finite non-negative timestamp$"
+    ):
+        initial_session(RUN_IDENTITY, replace(DEADLINES, **{field: value}))
+
+
+@pytest.mark.parametrize("field", ["last_observed_at", "deadlines", "pending_action"])
+@pytest.mark.parametrize("value", [10**400, -(10**400)], ids=["huge-positive", "huge-negative"])
+def test_nonrepresentable_state_clocks_preserve_rejection_and_snapshot_errors(
+    field: str, value: int
+) -> None:
+    state = initial_session(RUN_IDENTITY, DEADLINES)
+    if field == "deadlines":
+        corrupted = replace(state, deadlines=replace(DEADLINES, outer=value))
+    elif field == "pending_action":
+        active = _command(state, LifecycleEventKind.VALIDATION_REQUESTED, 1.0).state
+        assert active.pending_action is not None
+        corrupted = replace(active, pending_action=replace(active.pending_action, deadline=value))
+    else:
+        corrupted = replace(state, last_observed_at=value)
+    before = replace(corrupted)
+    result = reduce_lifecycle(
+        corrupted,
+        LifecycleEvent(LifecycleEventKind.VALIDATION_REQUESTED, RUN_IDENTITY, 1.0),
+    )
+    assert isinstance(result, LifecycleRejection)
+    assert result.code is LifecycleRejectionCode.INVALID_STATE
+    assert corrupted == before
+    with pytest.raises(ValueError, match="(timestamp|deadline)"):
+        lifecycle_snapshot(corrupted)
+    assert state.last_observed_at is None and state.pending_action is None
+
+
+@pytest.mark.parametrize("value", [0, 1, 0.5, -0.0, 2**1023, 1e308])
+def test_finite_lifecycle_clock_values_keep_types_and_have_no_new_cap(value: int | float) -> None:
+    state = initial_session(RUN_IDENTITY, DEADLINES)
+    result = reduce_lifecycle(
+        state,
+        LifecycleEvent(LifecycleEventKind.VALIDATION_REQUESTED, RUN_IDENTITY, value),
+    )
+    assert isinstance(result, LifecycleTransition)
+    assert result.state.last_observed_at == value
+    assert type(result.state.last_observed_at) is type(value)
+    assert state.last_observed_at is None and state.pending_action is None
+
+
 def test_initial_session_rejects_wrong_deadline_and_capacity_records() -> None:
     with pytest.raises(TypeError, match="LifecycleDeadlines"):
         initial_session(RUN_IDENTITY, object())  # type: ignore[arg-type]
