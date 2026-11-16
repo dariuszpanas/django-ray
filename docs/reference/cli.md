@@ -391,6 +391,16 @@ tombstone under alias checks before revalidating canonical envelope bytes and
 deleting the backend object, so a concurrent producer cannot attach to an object
 being reaped.
 
+After a complete backend listing, the inventory checks at most
+`--max-inventory-objects` active registry references for missing objects. Overflow
+in either direction sets `unregistered_inventory.has_more` and makes the pass
+incomplete (status 2 unless a failure takes precedence). Counts describe only the
+inspected portion. The registered-purge `next_cursor`
+does not continue this separate inventory, which has no continuation token.
+Increasing the object limit may complete a smaller inventory, but its hard maximum
+is 1,000; larger inventories remain incomplete and need separate operational
+investigation. Repeating an unchanged bounded invocation does not advance it.
+
 ## django_ray_cleanup_workflow_progress
 
 Preview expired normalized detail, stale unpublished topology storage, and empty

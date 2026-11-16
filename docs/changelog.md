@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report payload inventory as incomplete when its reverse registry scan exceeds
+  the object limit, preserving partial counts and exit status 2 (#722).
+
 - Match automatic retry delays to the configured base after attempt one, then
   double each later delay up to one hour. Previously the first retry waited
   twice the documented base. Existing queued schedules remain unchanged (#721).
