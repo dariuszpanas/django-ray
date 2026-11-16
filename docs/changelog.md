@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails, with a fixed failure category and nonzero exit instead of lost partial
   outcomes (#723).
 
+- Balance opt-in map transport trees without repeatedly copying their accumulated
+  payloads. Preserve the configured outward-root cap with consuming compaction,
+  transfer downstream ownership, bound duplicate/release metadata, and retain
+  failed cleanup for an explicit retry (#717). Store adapters must implement
+  `compact_chunks`; overriding non-consuming merge alone is insufficient.
+
 - Report payload inventory as incomplete when its reverse registry scan exceeds
   the object limit, preserving partial counts and exit status 2 (#722).
 

@@ -1210,9 +1210,17 @@ checkpoint planning:
 - **List-preserving map result transport (`django_ray.workflow.map_transport`)**:
   `BoundedMapListTransportConfig`, `BoundedMapListAggregator`, and
   `DownstreamMapListHandoff` chunk contiguous leaf completions, bound out-of-order
-  buffers, k-ary tree-merge chunk handles when live coordinator references approach
-  `max_coordinator_live_refs`, hand downstream steps a single root reference, and
-  clean up pending leaf, chunk, and tree handles on failure or cancellation.
+  buffers, and compact batches of up to `branching_factor` handles into balanced
+  reference trees. The default `InMemoryChunkObjectStore` joins immutable trees
+  without copying payloads during compaction, including with
+  `max_coordinator_live_refs=2`. Duplicate detection uses the completed prefix and
+  bounded out-of-order buffer, rather than retaining every completed index.
+  `finalize_downstream_handoff()` transfers ownership of its single root to the
+  downstream caller; that caller must eventually call `store.release(root)`.
+  Aborting the original aggregator cannot release a transferred root. Stored
+  trees are balanced binary ropes; `branching_factor` controls the maximum
+  compaction batch size. A leaf chunk has `tree_level=0`, and a handoff's
+  `tree_depth` records the actual balanced tree height.
 - **Backpressure-bounded paged map inputs (`django_ray.workflow.paged_input`)**:
   `PagedMapInputConfig`, `BoundedPagedMapInputStream`, and `PagedSourceProtocol`
   pull paginated external sources (such as Kubernetes `continue` cursors or keyset
@@ -1237,6 +1245,39 @@ checkpoint planning:
   `WorkflowCheckpointResumePlanner` validate pinned plan fingerprints, strict
   prior-attempt/generation fences, side-effect dispositions, and transitive
   dependency-cone invalidation without importing Ray.
+
+The map store's `merge_chunks(children)` retains independently readable child
+handles. Aggregation instead requires `compact_chunks(children)`, which atomically
+replaces the child roots with a parent while retaining their descendant payloads.
+If compaction raises, its child handles must remain valid and no parent may be
+published. A store adapter must implement this consuming operation; replacing a
+subclass's storage or non-consuming merge requires updating its consuming operation
+as well. There is no materializing fallback for adapters that lack it. The handle
+cap counts valid outward roots owned by the aggregator, including compaction's
+result. Store-owned descendant nodes are reclaimed when their last root owner is
+released. Non-consuming aliases remain independent owners.
+Root publication copies the outward-handle mapping, bounded by the aggregator's
+handle cap when it exclusively owns its store. Shared stores and direct
+non-consuming callers can retain additional roots and do not receive that
+constant bound on publication work.
+
+The in-memory store retains only the most recent 128 `released_handle_ids`;
+`released_handle_count` records the full scalar total of roots actually released
+or consumed. Releases of already-consumed handles are idempotent. On a callback or
+store failure, aggregation aborts and attempts cleanup of its remaining resources.
+Failed releases remain visible through `current_live_refs` and
+`pending_leaf_releases`; explicit `abort()` can retry cleanup once the underlying
+failure is resolved. Leaf-release callbacks should therefore be idempotent. A
+cleanup failure does not replace the original operation error or count as a
+successful release.
+
+These helpers are opt-in building blocks; the shipped workflow executor does not
+call them. Byte budgets use the caller's supplied `byte_size` or the helper's JSON
+estimate, not a process-memory measurement. The default store retains output
+payloads in this process, and terminal list materialization still allocates the
+complete ordered output. A remote adapter owns its descendant storage and resource
+admission. The helper does not establish a complete executor memory bound or finish
+bounded initial workflow preparation.
 
 ## API Reference
 
