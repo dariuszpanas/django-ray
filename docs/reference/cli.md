@@ -298,6 +298,20 @@ precedence over status `2`. The report is emitted before a storage/incomplete
 error, so JSON consumers can still read the summary and continuation token.
 Output-detail omission alone does not make the pass incomplete.
 
+If the optional unregistered inventory fails, the command still emits registered
+counts, details and continuation before exiting with status `1`. JSON adds only
+`inventory_error: "inventory_failed"` and omits `unregistered_inventory`, whose
+outcomes are unavailable; no zero inventory counts are substituted. Text includes
+the same fixed failure category. Neither output includes the provider exception
+class or message. Registered counts still describe registered processing only,
+including any deletions already committed before inventory failed. Inventory may
+also have made progress before failing; its unavailable outcomes require separate
+inspection. The registered cursor cannot resume the optional inventory.
+
+Process interruption remains separate: `KeyboardInterrupt` and `SystemExit`
+propagate without a guaranteed report. Earlier tombstones can remain committed;
+inspect outcomes and start a fresh pass as described below.
+
 All counts and exit statuses describe **one invocation**. A cursor advances past
 failed and attachment-overflow candidates too. A later page returning status 0
 does not resolve errors or incomplete histories reported on earlier pages. Retain

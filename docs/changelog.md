@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retain the bounded registered-purge report when optional unregistered inventory
+  fails, with a fixed failure category and nonzero exit instead of lost partial
+  outcomes (#723).
+
 - Report payload inventory as incomplete when its reverse registry scan exceeds
   the object limit, preserving partial counts and exit status 2 (#722).
 

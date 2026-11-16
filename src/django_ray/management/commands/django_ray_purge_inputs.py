@@ -246,6 +246,7 @@ class Command(BaseCommand):
                     detail_bytes += size
 
         inventory_report = None
+        inventory_error = None
         if discover_unregistered:
             try:
                 inventory_report = discover_and_reap_unregistered_payloads(
@@ -255,10 +256,10 @@ class Command(BaseCommand):
                     max_details=detail_limit,
                     delete_unregistered=delete_unregistered,
                 )
-            except Exception as error:
-                raise CommandError(
-                    f"Unregistered payload inventory failed ({self._format_cleanup_error(error)})."
-                ) from None
+            except Exception:
+                # Registered mutations have already committed independently.
+                # Preserve their report without inventing unknown inventory counts.
+                inventory_error = "inventory_failed"
 
         mode = "delete" if delete else "dry-run"
         report: dict[str, Any] = {
@@ -280,6 +281,8 @@ class Command(BaseCommand):
         }
         if inventory_report is not None:
             report["unregistered_inventory"] = inventory_report.as_dict()
+        if inventory_error is not None:
+            report["inventory_error"] = inventory_error
         if options["format"] == "json":
             rendered = json.dumps(report, ensure_ascii=True, separators=(",", ":"))
         else:
@@ -307,6 +310,8 @@ class Command(BaseCommand):
                     f"missing {inv_counts['registered_missing']}, "
                     f"failed {inv_counts['failed']}."
                 )
+            if inventory_error is not None:
+                lines.append("Unregistered inventory: inventory_failed; outcomes unavailable.")
             if next_cursor is not None:
                 lines.append(f"Next cursor: {next_cursor}")
             rendered = "\n".join(lines)
@@ -315,6 +320,8 @@ class Command(BaseCommand):
         if len(rendered.encode("utf-8")) > OUTPUT_MAX_BYTES - 256:
             raise CommandError("Purge report exceeded its output bound.")
         self.stdout.write(rendered)
+        if inventory_error is not None:
+            raise CommandError("Unregistered payload inventory failed; inspect the partial report.")
         inventory_failed = inventory_report.counts["failed"] if inventory_report is not None else 0
         if counts["failed"] or inventory_failed:
             raise CommandError(
