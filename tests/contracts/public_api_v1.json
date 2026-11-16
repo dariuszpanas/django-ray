@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "contract": "django-ray-public-api-v1",
   "status": "candidate",
   "symbols": [
@@ -8,33 +8,178 @@
     {"module": "django_ray.lifecycle", "name": "TaskCancellationRequestStatus", "kind": "class"},
     {"module": "django_ray.lifecycle", "name": "TaskRetryRequestResult", "kind": "class"},
     {"module": "django_ray.lifecycle", "name": "TaskRetryRequestStatus", "kind": "class"},
-    {"module": "django_ray.lifecycle", "name": "request_task_cancellation", "kind": "function", "parameters": ["execution_id", "expected_attempt_number", "expected_execution_generation"]},
-    {"module": "django_ray.lifecycle", "name": "request_task_retry", "kind": "function", "parameters": ["execution", "allowed_states", "next_attempt_at", "expected_attempt_number", "expected_execution_generation", "expected_workflow_identity"]},
-    {"module": "django_ray.metrics", "name": "render_prometheus_metrics", "kind": "function", "parameters": ["queue_names", "observed_at"]},
+    {
+      "module": "django_ray.lifecycle",
+      "name": "request_task_cancellation",
+      "kind": "function",
+      "parameters": [
+        {"name": "execution_id", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "expected_attempt_number", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "expected_execution_generation", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.lifecycle",
+      "name": "request_task_retry",
+      "kind": "function",
+      "parameters": [
+        {"name": "execution", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "allowed_states", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "next_attempt_at", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "expected_attempt_number", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "expected_execution_generation", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "expected_workflow_identity", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.metrics",
+      "name": "render_prometheus_metrics",
+      "kind": "function",
+      "parameters": [
+        {"name": "queue_names", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "observed_at", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
     {"module": "django_ray.models", "name": "RayTaskExecution", "kind": "class"},
     {"module": "django_ray.models", "name": "TaskAttempt", "kind": "class"},
     {"module": "django_ray.models", "name": "TaskState", "kind": "class"},
     {"module": "django_ray.models", "name": "TaskWorkerLease", "kind": "class"},
-    {"module": "django_ray.observability", "name": "get_attempt_history", "kind": "function", "parameters": ["execution", "generated_at"]},
-    {"module": "django_ray.observability", "name": "get_queue_depths", "kind": "function", "parameters": ["generated_at"]},
-    {"module": "django_ray.observability", "name": "get_task_summary", "kind": "function", "parameters": ["execution", "generated_at", "include_workflow_plan_selection", "workflow_progress"]},
-    {"module": "django_ray.observability", "name": "get_workflow_snapshot", "kind": "function", "parameters": ["execution", "generated_at"]},
+    {
+      "module": "django_ray.observability",
+      "name": "get_attempt_history",
+      "kind": "function",
+      "parameters": [
+        {"name": "execution", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "generated_at", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.observability",
+      "name": "get_queue_depths",
+      "kind": "function",
+      "parameters": [
+        {"name": "generated_at", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.observability",
+      "name": "get_task_summary",
+      "kind": "function",
+      "parameters": [
+        {"name": "execution", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "generated_at", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "include_workflow_plan_selection", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "workflow_progress", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.observability",
+      "name": "get_workflow_snapshot",
+      "kind": "function",
+      "parameters": [
+        {"name": "execution", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "generated_at", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
     {"module": "django_ray.result_storage", "name": "ResultStorageBackend", "kind": "class"},
     {"module": "django_ray.result_storage", "name": "ResultStorageError", "kind": "class"},
-    {"module": "django_ray.result_storage", "name": "canonicalize_result_reference", "kind": "function", "parameters": ["reference", "config"]},
-    {"module": "django_ray.result_storage", "name": "get_result_storage_backend", "kind": "function", "parameters": ["config"]},
-    {"module": "django_ray.result_storage", "name": "load_result_reference", "kind": "function", "parameters": ["reference", "config"]},
-    {"module": "django_ray.runtime.distributed", "name": "parallel_map", "kind": "function", "parameters": ["func", "items", "num_cpus", "num_gpus", "max_concurrency", "kwargs"]},
+    {
+      "module": "django_ray.result_storage",
+      "name": "canonicalize_result_reference",
+      "kind": "function",
+      "parameters": [
+        {"name": "reference", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "config", "kind": "POSITIONAL_OR_KEYWORD", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.result_storage",
+      "name": "get_result_storage_backend",
+      "kind": "function",
+      "parameters": [
+        {"name": "config", "kind": "POSITIONAL_OR_KEYWORD", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.result_storage",
+      "name": "load_result_reference",
+      "kind": "function",
+      "parameters": [
+        {"name": "reference", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "config", "kind": "POSITIONAL_OR_KEYWORD", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.runtime.distributed",
+      "name": "parallel_map",
+      "kind": "function",
+      "parameters": [
+        {"name": "func", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "items", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "num_cpus", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "num_gpus", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "max_concurrency", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "kwargs", "kind": "VAR_KEYWORD", "has_default": false}
+      ]
+    },
     {"module": "django_ray.workflows", "name": "Chain", "kind": "class"},
     {"module": "django_ray.workflows", "name": "Group", "kind": "class"},
     {"module": "django_ray.workflows", "name": "Map", "kind": "class"},
     {"module": "django_ray.workflows", "name": "Step", "kind": "class"},
     {"module": "django_ray.workflows", "name": "WorkflowDefinitionError", "kind": "class"},
     {"module": "django_ray.workflows", "name": "WorkflowSignature", "kind": "class"},
-    {"module": "django_ray.workflows", "name": "chain", "kind": "function", "parameters": ["signatures"]},
-    {"module": "django_ray.workflows", "name": "group", "kind": "function", "parameters": ["signatures"]},
-    {"module": "django_ray.workflows", "name": "map_step", "kind": "function", "parameters": ["callable_or_signature", "bound_args", "django", "ray_options", "runtime_env", "bound_kwargs"]},
-    {"module": "django_ray.workflows", "name": "report_progress", "kind": "function", "parameters": ["current", "total", "message", "metrics"]},
-    {"module": "django_ray.workflows", "name": "step", "kind": "function", "parameters": ["callable_obj", "bound_args", "django", "ray_options", "runtime_env", "bound_kwargs"]}
+    {
+      "module": "django_ray.workflows",
+      "name": "chain",
+      "kind": "function",
+      "parameters": [
+        {"name": "signatures", "kind": "VAR_POSITIONAL", "has_default": false}
+      ]
+    },
+    {
+      "module": "django_ray.workflows",
+      "name": "group",
+      "kind": "function",
+      "parameters": [
+        {"name": "signatures", "kind": "VAR_POSITIONAL", "has_default": false}
+      ]
+    },
+    {
+      "module": "django_ray.workflows",
+      "name": "map_step",
+      "kind": "function",
+      "parameters": [
+        {"name": "callable_or_signature", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "bound_args", "kind": "VAR_POSITIONAL", "has_default": false},
+        {"name": "django", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "ray_options", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "runtime_env", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "bound_kwargs", "kind": "VAR_KEYWORD", "has_default": false}
+      ]
+    },
+    {
+      "module": "django_ray.workflows",
+      "name": "report_progress",
+      "kind": "function",
+      "parameters": [
+        {"name": "current", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "total", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "message", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "metrics", "kind": "KEYWORD_ONLY", "has_default": true}
+      ]
+    },
+    {
+      "module": "django_ray.workflows",
+      "name": "step",
+      "kind": "function",
+      "parameters": [
+        {"name": "callable_obj", "kind": "POSITIONAL_OR_KEYWORD", "has_default": false},
+        {"name": "bound_args", "kind": "VAR_POSITIONAL", "has_default": false},
+        {"name": "django", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "ray_options", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "runtime_env", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "bound_kwargs", "kind": "VAR_KEYWORD", "has_default": false}
+      ]
+    }
   ]
 }
