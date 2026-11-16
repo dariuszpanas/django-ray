@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep repeated opt-in workflow concurrency requests for an exact owner identity
+  in one queue position instead of granting duplicate leases later. Preserve
+  queue order and genuine coalescing, and honor zero queue capacity for
+  `COALESCE_LATEST` as well as other overlap policies (#727).
+
 - Retain the bounded registered-purge report when optional unregistered inventory
   fails, with a fixed failure category and nonzero exit instead of lost partial
   outcomes (#723).

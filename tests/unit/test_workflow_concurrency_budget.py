@@ -129,6 +129,122 @@ def test_expired_lease_reclamation_fences_stale_owner() -> None:
         coord.renew_lease(adm1.lease, now_monotonic=16.0)
 
 
+@pytest.mark.parametrize("policy", [OverlapPolicy.QUEUE, OverlapPolicy.ALLOW])
+def test_queued_owner_retry_cannot_acquire_duplicate_active_leases(policy: OverlapPolicy) -> None:
+    coord = WorkflowConcurrencyCoordinator()
+    scope = "retry/owner"
+    coord.register_scope(ConcurrencyScopeSpec(scope, overlap_policy=policy, max_concurrent_runs=2))
+    blockers = [coord.request_admission(scope, _owner(pk)).lease for pk in (1, 2)]
+    waiting_owner = _owner(3)
+    first = coord.request_admission(scope, waiting_owner, now_monotonic=1.0)
+    repeated = coord.request_admission(scope, waiting_owner, now_monotonic=2.0)
+    assert first == repeated
+    assert first.status == "queued" and first.queue_position == 1
+
+    assert blockers[0] is not None and blockers[1] is not None
+    promoted = coord.release_and_advance(blockers[0], now_monotonic=3.0)
+    assert len(promoted) == 1 and promoted[0].owner == waiting_owner
+    assert coord.release_and_advance(blockers[1], now_monotonic=4.0) == []
+    assert coord.request_admission(scope, waiting_owner, now_monotonic=5.0).lease == promoted[0]
+    coord.validate_fencing_token(promoted[0], now_monotonic=5.0)
+    # The unused slot can still admit a different run.
+    assert coord.request_admission(scope, _owner(4), now_monotonic=5.0).status == "admitted"
+
+
+@pytest.mark.parametrize(
+    "policy", [OverlapPolicy.QUEUE, OverlapPolicy.ALLOW, OverlapPolicy.COALESCE_LATEST]
+)
+def test_queued_retry_is_idempotent_even_when_queue_is_full(policy: OverlapPolicy) -> None:
+    coord = WorkflowConcurrencyCoordinator()
+    scope = "retry/full-queue"
+    coord.register_scope(ConcurrencyScopeSpec(scope, overlap_policy=policy, max_queued_runs=1))
+    active = coord.request_admission(scope, _owner(1)).lease
+    waiter = _owner(2, priority=7)
+    first = coord.request_admission(scope, waiter, now_monotonic=1.0)
+    original_waiter = coord._wait_queues[scope][0]
+    original_sequence = coord._enqueue_seq
+
+    assert coord.request_admission(scope, waiter, now_monotonic=2.0) == first
+    assert coord._wait_queues[scope] == [original_waiter]
+    assert coord._wait_queues[scope][0] is original_waiter
+    assert original_waiter.enqueued_at == 1.0
+    assert original_waiter.enqueue_seq == original_sequence
+    assert coord._enqueue_seq == original_sequence
+    assert coord.superseded_owners == []
+    assert active is not None
+    assert [lease.owner for lease in coord.release_and_advance(active)] == [waiter]
+
+
+@pytest.mark.parametrize("policy", [OverlapPolicy.QUEUE, OverlapPolicy.ALLOW])
+def test_queued_retry_preserves_priority_and_fifo_order(policy: OverlapPolicy) -> None:
+    coord = WorkflowConcurrencyCoordinator()
+    scope = "retry/fifo"
+    coord.register_scope(ConcurrencyScopeSpec(scope, overlap_policy=policy, max_queued_runs=3))
+    active = coord.request_admission(scope, _owner(1)).lease
+    first, second, high_priority = _owner(2), _owner(3), _owner(4, priority=5)
+    coord.request_admission(scope, first, now_monotonic=1.0)
+    coord.request_admission(scope, second, now_monotonic=2.0)
+    coord.request_admission(scope, high_priority, now_monotonic=3.0)
+    repeated = coord.request_admission(scope, first, now_monotonic=4.0)
+    assert repeated.status == "queued" and repeated.queue_position == 2
+
+    assert active is not None
+    for expected in (high_priority, first, second):
+        promoted = coord.release_and_advance(active, now_monotonic=5.0)
+        assert len(promoted) == 1 and promoted[0].owner == expected
+        active = promoted[0]
+    assert coord.release_and_advance(active, now_monotonic=5.0) == []
+
+
+@pytest.mark.parametrize(
+    "policy", [OverlapPolicy.QUEUE, OverlapPolicy.ALLOW, OverlapPolicy.COALESCE_LATEST]
+)
+@pytest.mark.parametrize("replacement", [_owner(2, attempt=2), _owner(2, gen=2)])
+def test_different_attempt_or_generation_is_a_distinct_waiter(
+    policy: OverlapPolicy, replacement: RunOwnerIdentity
+) -> None:
+    coord = WorkflowConcurrencyCoordinator()
+    scope = "retry/distinct-identity"
+    coord.register_scope(ConcurrencyScopeSpec(scope, overlap_policy=policy, max_queued_runs=2))
+    active = coord.request_admission(scope, _owner(1)).lease
+    original = _owner(2)
+    coord.request_admission(scope, original, now_monotonic=1.0)
+    changed = coord.request_admission(scope, replacement, now_monotonic=2.0)
+    assert active is not None
+    promoted = coord.release_and_advance(active, now_monotonic=3.0)
+    if policy == OverlapPolicy.COALESCE_LATEST:
+        assert changed.status == "coalesced" and changed.superseded_owner == original
+        assert coord.superseded_owners == [(scope, original)]
+        assert [lease.owner for lease in promoted] == [replacement]
+    else:
+        assert changed.status == "queued" and changed.queue_position == 2
+        assert [lease.owner for lease in promoted] == [original]
+        assert [
+            lease.owner for lease in coord.release_and_advance(promoted[0], now_monotonic=4.0)
+        ] == [replacement]
+
+
+@pytest.mark.parametrize(
+    "policy", [OverlapPolicy.QUEUE, OverlapPolicy.ALLOW, OverlapPolicy.COALESCE_LATEST]
+)
+def test_zero_queue_capacity_rejects_waiting_without_affecting_active_admission(
+    policy: OverlapPolicy,
+) -> None:
+    coord = WorkflowConcurrencyCoordinator()
+    scope = "no-waiters"
+    coord.register_scope(ConcurrencyScopeSpec(scope, overlap_policy=policy, max_queued_runs=0))
+    owner = _owner(1)
+    active = coord.request_admission(scope, owner, now_monotonic=1.0).lease
+    assert active is not None
+    assert coord.request_admission(scope, owner, now_monotonic=2.0).lease == active
+    with pytest.raises(WorkflowConcurrencyRejectedError, match="wait queue is full \\(0\\)"):
+        coord.request_admission(scope, _owner(2), now_monotonic=2.0)
+    assert coord._wait_queues[scope] == []
+    assert coord.superseded_owners == []
+    assert coord.release_and_advance(active, now_monotonic=3.0) == []
+    assert coord.request_admission(scope, _owner(2), now_monotonic=4.0).status == "admitted"
+
+
 def test_shared_external_service_budget_fairness_and_throttle_feedback() -> None:
     budget = SharedServiceBudgetController()
     budget.register_service(
