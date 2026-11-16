@@ -586,18 +586,29 @@ function loadTaskLive(payload) {
       return id === "django-ray-live-observability" ? panel : null;
     },
   };
+  const timers = new Map();
+  const clearedTimers = [];
+  let nextTimer = 0;
   const window = {
+    AbortController,
     async fetch(url, options) {
       fetchCalls.push({ options, url });
       return response(200, payload);
     },
-    setTimeout() {
-      throw new Error("terminal task live status must not schedule another poll");
+    setTimeout(callback, delay) {
+      assert.equal(delay, 15000, "terminal reads may only schedule their deadline");
+      const id = ++nextTimer;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      assert.equal(timers.delete(id), true, "clear only the owned deadline");
+      clearedTimers.push(id);
     },
   };
   const context = vm.createContext({ document, window });
   vm.runInContext(taskLiveScript, context, { filename: "task_live.js" });
-  return { fetchCalls, fields, panel };
+  return { clearedTimers, fetchCalls, fields, panel, timers };
 }
 
 async function settle() {
@@ -987,6 +998,9 @@ test("live task status labels terminal-only summary without fabricated node exec
   assert.equal(live.fields.workflow.textContent.includes("0/0 nodes"), false);
   assert.match(live.fields.status.textContent, /Terminal summary: SUCCEEDED/);
   assert.equal(live.fetchCalls.length, 1);
+  assert.equal(live.fetchCalls[0].options.signal.aborted, false);
+  assert.equal(live.timers.size, 0);
+  assert.equal(live.clearedTimers.length, 1);
 });
 
 test("a redacted fingerprint placeholder is never offered to the clipboard", async () => {

@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bound Admin live task polling with a 15-second scheduled deadline covering
+  response headers and JSON. Abort expired requests, preserve displayed values
+  and retry after three seconds while visible; late responses cannot overwrite
+  newer polls. Browsers without request cancellation keep the durable page and
+  report that live updates are unavailable. Browser suspension can delay the
+  deadline (#739).
+
 - Skip malformed SQLite integer identities before text conversion, so these
   cells cannot abort a worker-maintenance page and block later executions.
   Normal ORM integer coercion and PostgreSQL projections remain unchanged; no
