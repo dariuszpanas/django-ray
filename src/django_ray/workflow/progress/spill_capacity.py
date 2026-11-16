@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import errno
 import json
+import math
 import os
 import shutil
 import stat
@@ -130,22 +131,21 @@ class SpillCapacityConfig:
             raise WorkflowProgressSpillCapacityConfigurationError(
                 "min_free_headroom_bytes cannot be negative"
             )
-        if (
-            not isinstance(self.stale_lease_grace_seconds, int | float)
-            or isinstance(self.stale_lease_grace_seconds, bool)
-            or self.stale_lease_grace_seconds < 0
-        ):
-            raise WorkflowProgressSpillCapacityConfigurationError(
-                "stale_lease_grace_seconds must be a non-negative number"
-            )
-        if (
-            not isinstance(self.lock_timeout_seconds, int | float)
-            or isinstance(self.lock_timeout_seconds, bool)
-            or self.lock_timeout_seconds <= 0
-        ):
-            raise WorkflowProgressSpillCapacityConfigurationError(
-                "lock_timeout_seconds must be a positive number"
-            )
+        duration_fields = (
+            ("stale_lease_grace_seconds", self.stale_lease_grace_seconds, True),
+            ("lock_timeout_seconds", self.lock_timeout_seconds, False),
+        )
+        for name, value, allow_zero in duration_fields:
+            boundary = "non-negative" if allow_zero else "positive"
+            message = f"{name} must be a finite {boundary} number"
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise WorkflowProgressSpillCapacityConfigurationError(message)
+            try:
+                duration = float(value)
+            except OverflowError:
+                raise WorkflowProgressSpillCapacityConfigurationError(message) from None
+            if not math.isfinite(duration) or duration < 0 or (not allow_zero and duration == 0):
+                raise WorkflowProgressSpillCapacityConfigurationError(message)
         return self
 
 

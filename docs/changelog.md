@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject nonfinite spill lock timeouts and stale-owner grace periods before root
+  or lock access. Convert overflowing duration integers into field-specific
+  configuration errors while retaining zero grace, finite timeout refusal, and
+  conservative owner classification (#729).
+
 - Reject nonfinite workflow concurrency TTLs and service token rates before
   registration can replace valid state. Report integer-to-float overflow as a
   field-specific configuration error; finite positive values retain their normal
