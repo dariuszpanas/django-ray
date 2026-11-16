@@ -112,6 +112,56 @@ def _run_concurrently(*operations: Callable[[], object]) -> list[object]:
         return [future.result(timeout=20) for future in futures]
 
 
+def test_projected_attempt_archive_preserves_one_contested_cancellation_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = RayTaskExecution.objects.create(
+        task_id="projected-attempt-cancellation-contention",
+        callable_path="synthetic.task",
+        state=TaskState.CANCELLING,
+        attempt_number=2,
+        execution_generation=4,
+        error_traceback="current protected evidence",
+    )
+    original_created = datetime(2026, 1, 1, tzinfo=UTC)
+    TaskAttempt.objects.create(
+        execution=task,
+        attempt_number=2,
+        state=TaskState.FAILED,
+        created_at=original_created,
+        error_traceback="old-protected-" + "x" * 65536,
+        workflow_progress_summary_json="retained summary",
+    )
+    original_from_db = TaskAttempt.from_db
+    projections: list[set[str]] = []
+
+    def guarded_from_db(cls, database, field_names, values, **kwargs):
+        selected = set(field_names)
+        assert selected == {"id", "created_at"}
+        projections.append(selected)
+        return original_from_db(database, field_names, values, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(TaskAttempt, "from_db", classmethod(guarded_from_db))
+        outcomes = _run_concurrently(
+            lambda: finalize_cancellation(
+                task, expected_attempt_number=2, expected_execution_generation=4
+            ),
+            lambda: finalize_cancellation(
+                task, expected_attempt_number=2, expected_execution_generation=4
+            ),
+        )
+
+    assert sorted(outcomes) == [False, True]
+    assert projections == [{"id", "created_at"}]
+    archive = TaskAttempt.objects.get(execution=task, attempt_number=2)
+    assert archive.state == TaskState.CANCELLED
+    assert archive.error_traceback == "current protected evidence"
+    assert archive.created_at == original_created
+    assert archive.workflow_progress_summary_json == "retained summary"
+    assert TaskAttempt.objects.filter(execution=task, attempt_number=2).count() == 1
+
+
 def _wait_for_postgresql_lock(backend_pid: int) -> tuple[str | None, str | None]:
     """Require one recovery backend to block on the winner's transaction lock."""
     import time

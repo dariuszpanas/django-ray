@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ray Job status counts are bounded; lifecycle payload costs remain unchanged
   and broader resource acceptance remains open under #718.
 
+- Avoid reading an existing attempt's protected text again when archiving a
+  terminal execution. Keep normal Django save signals and the original creation
+  timestamp; trusted signal handlers can still load deferred fields. Current
+  execution reads and the remaining worker scan byte bounds are unchanged (#718).
+
 - Report payload inventory as incomplete when its reverse registry scan exceeds
   the object limit, preserving partial counts and exit status 2 (#722).
 
