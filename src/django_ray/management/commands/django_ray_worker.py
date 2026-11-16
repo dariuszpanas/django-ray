@@ -83,6 +83,12 @@ from django_ray.runner.leasing import (
     get_heartbeat_interval,
     is_worker_id_primary_key_collision,
 )
+from django_ray.runner.maintenance import (
+    MAINTENANCE_CONTINUATION_SECONDS,
+    MAINTENANCE_PAGE_SIZE,
+    MaintenanceCandidate,
+    MaintenanceScan,
+)
 from django_ray.runner.polling import AdaptivePollingPolicy
 from django_ray.runner.ray_core import RayCoreHandle, RayCoreRunner
 from django_ray.runner.reconciliation import (
@@ -175,6 +181,10 @@ class Command(BaseCommand):
         self.ray_job_completion_poll_interval = 0.25
         self._ray_job_completion_cursor = 0
         self._ray_job_completion_cycle_end = 0
+        self._maintenance_scans: dict[str, MaintenanceScan] = {}
+        self._active_reconciliation_cursor = 0
+        self._active_reconciliation_cycle_end = 0
+        self._active_reconciliation_pending = False
         self.poll_base_interval = 0.1
         self.poll_max_interval = 0.1
         self.polling_policy = self._new_polling_policy()
@@ -1024,20 +1034,26 @@ class Command(BaseCommand):
 
             if current_time >= next_cancellation:
                 activity = bool(self.process_cancellations(queues)) or activity
-                next_cancellation = current_time + self.cancellation_interval
+                next_cancellation = self._maintenance_deadline(
+                    "cancelling", self.cancellation_interval
+                )
             if self.shutdown_requested:
                 break
 
             if current_time >= next_reconciliation:
                 activity = bool(self.reconcile_tasks(queues)) or activity
                 self.last_reconciliation = current_time
-                next_reconciliation = current_time + self.reconciliation_interval
+                next_reconciliation = self._maintenance_deadline(
+                    "orphan", self.reconciliation_interval
+                )
             if self.shutdown_requested:
                 break
 
             if current_time >= next_timeout_check:
                 activity = bool(self.detect_stuck_tasks(queues)) or activity
-                next_timeout_check = current_time + self.timeout_check_interval
+                next_timeout_check = self._maintenance_deadline(
+                    "running", self.timeout_check_interval
+                )
             if self.shutdown_requested:
                 break
 
@@ -4480,6 +4496,10 @@ class Command(BaseCommand):
         "progress_data",
         "result_data",
         "error_traceback",
+        "error_message",
+        "cancellation_error",
+        "workflow_plan_selection",
+        "workflow_progress_summary_json",
     )
 
     @classmethod
@@ -4489,6 +4509,83 @@ class Command(BaseCommand):
         if isinstance(queryset, QuerySet):
             return queryset.defer(*cls._DEFERRED_MAINTENANCE_SCAN_FIELDS)
         return queryset
+
+    def _maintenance_scan_page(self, kind, queryset, queues, supported_protocols):
+        scan = self._maintenance_scans.setdefault(kind, MaintenanceScan())
+        scope = (
+            queryset.db,
+            None if queues is None else tuple(sorted(set(queues))),
+            supported_protocols.minimum,
+            supported_protocols.maximum,
+        )
+        return scan.page(queryset, scope=scope)
+
+    def _maintenance_deadline(self, kind: str, interval: float) -> float:
+        pending = self._maintenance_scans.get(kind)
+        continuing = bool(pending and pending.pending)
+        if kind == "orphan":
+            continuing = continuing or self._active_reconciliation_pending
+        return time.monotonic() + (MAINTENANCE_CONTINUATION_SECONDS if continuing else interval)
+
+    def _maintenance_active_workers(self, candidates) -> set[str]:
+        """Advisory liveness for only this page's bounded owner identities."""
+        from django_ray.lease_policy import lease_policy_observation
+
+        owners = {
+            candidate.owner for candidate in candidates if candidate.usable and candidate.owner
+        }
+        if not owners:
+            return set()
+        with lease_policy_observation() as policy:
+            return set(
+                TaskWorkerLease.objects.filter(
+                    worker_id__in=owners,
+                    is_active=True,
+                    last_heartbeat_at__gte=datetime.now(UTC) - policy.duration,
+                ).values_list("worker_id", flat=True)
+            )
+
+    def _maintenance_snapshot(self, kind, queryset, candidate: MaintenanceCandidate):
+        self._maintenance_scans[kind].advance(candidate)
+        if not candidate.usable:
+            return None
+        # No candidate page caches payload rows. One fresh snapshot may load
+        # an exact completion value; authoritative lifecycle costs are separate.
+        selected = self._defer_maintenance_scan_fields(queryset.filter(**candidate.filters()))
+        if kind == "running":
+            selected = selected.defer("completion_data")
+        try:
+            task = selected.first()
+        except Exception:
+            self.logger.warning(
+                "Maintenance candidate snapshot could not be read", extra={"task_pk": candidate.pk}
+            )
+            return None
+        if task is not None and kind == "running":
+            # This scan selects only SQL NULL. Publication after selection is
+            # still rejected by the unchanged authoritative completion fence.
+            task.completion_data = None
+        return task
+
+    def _active_reconciliation_page(self) -> list[int]:
+        """Bound RPC candidates; walking local tracking still costs O(active)."""
+        if not self.active_tasks:
+            self._active_reconciliation_pending = False
+            return []
+        task_ids = nsmallest(
+            MAINTENANCE_PAGE_SIZE + 1,
+            (
+                pk
+                for pk in self.active_tasks
+                if self._active_reconciliation_cursor < pk <= self._active_reconciliation_cycle_end
+            ),
+        )
+        if not task_ids:
+            self._active_reconciliation_cursor = 0
+            self._active_reconciliation_cycle_end = max(self.active_tasks)
+            task_ids = nsmallest(MAINTENANCE_PAGE_SIZE + 1, self.active_tasks)
+        self._active_reconciliation_pending = len(task_ids) > MAINTENANCE_PAGE_SIZE
+        return task_ids[:MAINTENANCE_PAGE_SIZE]
 
     def reconcile_tasks(self, queues: Sequence[str] | None = None) -> int:
         """Reconcile Ray Jobs, optionally fencing orphan adoption by queue.
@@ -4504,7 +4601,6 @@ class Command(BaseCommand):
         if supported_protocols is None:
             return 0
 
-        from django_ray.runner.leasing import get_active_workers
         from django_ray.runner.ray_job import RayJobRunner
 
         runner: RayJobRunner | None = None
@@ -4512,9 +4608,13 @@ class Command(BaseCommand):
         reconciled_task_ids: set[int] = set()
         active_task_ids_before = set(self.active_tasks)
 
-        for task_pk, ray_job_id in list(self.active_tasks.items()):
+        for task_pk in self._active_reconciliation_page():
             if self.shutdown_requested:
                 break
+            self._active_reconciliation_cursor = task_pk
+            ray_job_id = self.active_tasks.get(task_pk)
+            if ray_job_id is None:
+                continue
             tracked_identity = self.active_task_identities.get(task_pk)
             try:
                 if runner is None:
@@ -4552,7 +4652,6 @@ class Command(BaseCommand):
         if self.shutdown_requested:
             return len(completed_tasks)
 
-        active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
         orphaned_tasks = self._defer_maintenance_scan_fields(
             RayTaskExecution.objects.filter(
                 state=TaskState.RUNNING,
@@ -4563,10 +4662,19 @@ class Command(BaseCommand):
         )
         if queues is not None:
             orphaned_tasks = orphaned_tasks.filter(queue_name__in=queues)
-
-        for task in orphaned_tasks:
+        candidates = self._maintenance_scan_page(
+            "orphan", orphaned_tasks, queues, supported_protocols
+        )
+        active_worker_ids = self._maintenance_active_workers(candidates)
+        for candidate in candidates:
             if self.shutdown_requested:
                 break
+            if candidate.owner == self.worker_id or candidate.owner in active_worker_ids:
+                self._maintenance_scans["orphan"].advance(candidate)
+                continue
+            task = self._maintenance_snapshot("orphan", orphaned_tasks, candidate)
+            if task is None:
+                continue
             task_worker_id = str(task.claimed_by_worker) if task.claimed_by_worker else None
             if task_worker_id == self.worker_id:
                 continue
@@ -4607,8 +4715,6 @@ class Command(BaseCommand):
         The production loop supplies its selected queues; omitting them retains
         the all-queue administrative contract.
         """
-        from django_ray.runner.leasing import get_active_workers
-
         if self.shutdown_requested:
             return 0
 
@@ -4621,6 +4727,7 @@ class Command(BaseCommand):
         running_tasks = self._defer_maintenance_scan_fields(
             RayTaskExecution.objects.filter(
                 state=TaskState.RUNNING,
+                completion_data__isnull=True,
                 execution_protocol_version__gte=supported_protocols.minimum,
                 execution_protocol_version__lte=supported_protocols.maximum,
             )
@@ -4628,21 +4735,34 @@ class Command(BaseCommand):
         if queues is not None:
             running_tasks = running_tasks.filter(queue_name__in=queues)
 
-        active_worker_ids = {str(lease.worker_id) for lease in get_active_workers()}
-        ray_core_pending_handles = (
-            {handle.task_pk: handle for handle in self.ray_core_runner.pending_task_handles}
-            if self.ray_core_runner
-            else {}
+        candidates = self._maintenance_scan_page(
+            "running", running_tasks, queues, supported_protocols
         )
-
+        active_worker_ids = self._maintenance_active_workers(candidates)
         stuck_count = 0
         timeout_count = 0
         orphan_recovered_count = 0
-        for task in running_tasks:
+        for candidate in candidates:
+            if self.shutdown_requested:
+                break
+            if candidate.owner != self.worker_id and candidate.owner in active_worker_ids:
+                self._maintenance_scans["running"].advance(candidate)
+                continue
+            task = self._maintenance_snapshot("running", running_tasks, candidate)
+            if task is None:
+                continue
             task_worker_id = str(task.claimed_by_worker) if task.claimed_by_worker else None
             claimed_by_this_worker = task_worker_id == self.worker_id
             claimed_by_active_worker = bool(task_worker_id) and task_worker_id in active_worker_ids
-            pending_ray_core_handle = ray_core_pending_handles.get(task.pk)
+            pending_ray_core_handle = (
+                self.ray_core_runner.get_pending_handle(
+                    task.pk,
+                    attempt_number=int(task.attempt_number),
+                    execution_generation=int(task.execution_generation),
+                )
+                if self.ray_core_runner is not None and claimed_by_this_worker
+                else None
+            )
             pending_ray_core_identity_matches = bool(
                 pending_ray_core_handle
                 and task.attempt_number == pending_ray_core_handle.attempt_number
@@ -4933,7 +5053,15 @@ class Command(BaseCommand):
             cancelling_tasks = cancelling_tasks.filter(queue_name__in=queues)
         finalized_count = 0
 
-        for task in cancelling_tasks:
+        candidates = self._maintenance_scan_page(
+            "cancelling", cancelling_tasks, queues, supported_protocols
+        )
+        for candidate in candidates:
+            if self.shutdown_requested:
+                break
+            task = self._maintenance_snapshot("cancelling", cancelling_tasks, candidate)
+            if task is None:
+                continue
             finalized = False
             current: RayTaskExecution | None = None
             # The exact live adopter lease and task row remain locked through

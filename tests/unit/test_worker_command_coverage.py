@@ -728,6 +728,8 @@ class TestWorkerCommandCoverage:
     def test_reconciliation_skips_healthy_owners_and_logs_orphan_errors(self, monkeypatch) -> None:
         cmd = _make_command()
         cmd._create_lease("default")
+        healthy_owner = _make_command(worker_id="active-worker")
+        healthy_owner._create_lease("default")
         own_task = RayTaskExecution.objects.create(
             task_id="coverage-reconcile-own-001",
             callable_path="testproject.tasks.add_numbers",
@@ -764,10 +766,6 @@ class TestWorkerCommandCoverage:
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRayJobRunner)
         monkeypatch.setattr(
-            "django_ray.runner.leasing.get_active_workers",
-            lambda: [SimpleNamespace(worker_id="active-worker")],
-        )
-        monkeypatch.setattr(
             cmd,
             "_reconcile_ray_job_task",
             lambda task, *_args, **_kwargs: (
@@ -799,9 +797,11 @@ class TestWorkerCommandCoverage:
             pending_task_ids = (task.pk,)
             pending_task_handles = (_pending_handle(task),)
 
+            def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> object:
+                return self.pending_task_handles[0]
+
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, RayCoreRunner())
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.is_task_timed_out",
             lambda _task: False,
@@ -833,9 +833,11 @@ class TestWorkerCommandCoverage:
             pending_task_ids = (task.pk,)
             pending_task_handles = (pending_handle,)
 
+            def get_pending_handle(self, *_args: Any, **_kwargs: Any) -> object:
+                return pending_handle
+
         cmd = _make_command()
         cmd.ray_core_runner = cast(Any, RayCoreRunner())
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
         monkeypatch.setattr(
             "django_ray.management.commands.django_ray_worker.is_task_timed_out",
             lambda _task: False,

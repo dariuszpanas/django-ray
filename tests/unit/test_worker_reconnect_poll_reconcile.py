@@ -3895,8 +3895,6 @@ class TestWorkerReconnectPollReconcile:
         cmd = _make_command(worker_id="adopting-worker")
         metadata = _strict_ray_job_metadata(task)
 
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
-
         class FakeRunner:
             def get_status(self, _handle):
                 return JobInfo(
@@ -3945,8 +3943,6 @@ class TestWorkerReconnectPollReconcile:
         )
         task.save(update_fields=["completion_data"])
         cmd = _make_command(worker_id="adopting-worker")
-
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         class FakeRunner:
             def get_status(self, _handle):
@@ -4261,7 +4257,6 @@ class TestWorkerReconnectPollReconcile:
                 )
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         cmd.reconcile_tasks()
 
@@ -4424,7 +4419,6 @@ class TestWorkerReconnectPollReconcile:
                 pytest.fail("stale active tracking must be rejected before the status RPC")
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         cmd.reconcile_tasks()
 
@@ -5096,8 +5090,6 @@ class TestWorkerReconnectPollReconcile:
         )
         cmd = _make_command(worker_id="adopting-worker")
 
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
-
         class FakeRunner:
             def get_status(self, _handle):
                 return JobInfo(job_id=orphan.ray_job_id or "", status=JobStatus.RUNNING)
@@ -5137,8 +5129,6 @@ class TestWorkerReconnectPollReconcile:
         )
         cmd = _make_command(worker_id="ml-worker")
 
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
-
         class FakeRunner:
             def get_status(self, _handle):
                 pytest.fail("an out-of-queue orphan must not reach Ray Job status")
@@ -5160,8 +5150,6 @@ class TestWorkerReconnectPollReconcile:
         monkeypatch,
     ) -> None:
         cmd = _make_command(worker_id="ray-core-worker")
-
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         class UnexpectedRunner:
             def __init__(self) -> None:
@@ -5255,8 +5243,6 @@ class TestWorkerReconnectPollReconcile:
             completion_data='{"success": true, "result": 3}',
         )
         cmd = _make_command(worker_id="adopting-worker")
-
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         class FakeRunner:
             def get_status(self, _handle):
@@ -5371,7 +5357,6 @@ class TestWorkerReconnectPollReconcile:
                 return JobInfo(job_id=task.ray_job_id or "", status=JobStatus.SUCCEEDED)
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         cmd.reconcile_tasks()
 
@@ -5765,7 +5750,6 @@ class TestWorkerReconnectPollReconcile:
                 )
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         cmd.reconcile_tasks()
 
@@ -5812,7 +5796,6 @@ class TestWorkerReconnectPollReconcile:
                 pytest.fail("a valid durable completion must be consumed before UNKNOWN recovery")
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         getattr(cmd, poll_method)()
 
@@ -5906,8 +5889,9 @@ class TestWorkerReconnectPollReconcile:
             lambda: pytest.fail("fast receipt polling must not construct a Ray control client"),
         )
         monkeypatch.setattr(
-            "django_ray.runner.leasing.get_active_workers",
-            lambda: pytest.fail("fast receipt polling must not scan for orphans"),
+            cmd,
+            "_maintenance_scan_page",
+            lambda *_args, **_kwargs: pytest.fail("fast receipt polling must not scan for orphans"),
         )
 
         assert cmd.poll_ray_job_completions() == 1
@@ -6229,7 +6213,6 @@ class TestWorkerReconnectPollReconcile:
                 return True
 
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         cmd.reconcile_tasks()
 
@@ -6272,7 +6255,6 @@ class TestWorkerReconnectPollReconcile:
             lambda runner: setattr(runner, "ray_address", "ray://cluster:10001"),
         )
         monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner._get_client", unavailable)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         cmd.reconcile_tasks()
 
@@ -6293,7 +6275,6 @@ class TestWorkerReconnectPollReconcile:
             kwargs_json="{}",
         )
         cmd = _make_command(worker_id="adopting-worker", claim_ownerless_tasks=False)
-        monkeypatch.setattr("django_ray.runner.leasing.get_active_workers", list)
 
         class FakeRunner:
             def get_status(self, _handle):

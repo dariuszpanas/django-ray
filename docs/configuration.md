@@ -202,6 +202,28 @@ reconciliation, timeout checks, cancellation recovery, and lease cleanup use ind
 monotonic schedules; idle claim backoff does not postpone them. Graceful-shutdown signals
 interrupt the current idle wait, so an opted-in maximum does not extend worker handoff.
 
+Global orphan, running-timeout and cancellation maintenance select at most 32
+candidate identities per turn, plus one overflow sentinel. Each independent scan
+walks increasing primary keys below a frozen cycle maximum. Skipped healthy owners
+still advance the cursor; new inserts and rows becoming eligible behind the cursor
+are reconsidered in the next cycle. Changing the queue/protocol selection resets
+that scan. A pending page schedules a 100 ms continuation through the normal loop,
+after heartbeat and claim handling, without counting pending work as task activity.
+
+The candidate projection contains a primary key, three integer identities each
+limited to 21 text characters, and at most 256 owner characters. Invalid integer
+cells and truncated or overlength owners cannot authorize an operation. Advisory
+live-owner lookup and exact local Ray Core handle lookups are restricted to the
+selected page. Fresh per-row reads and the
+existing exact lease, state, attempt, generation, job and completion fences still
+decide every operation. Ray Job status reconciliation also considers at most 32
+locally tracked identities per turn. This bounds candidate/RPC counts, not database
+execution time or whole-worker memory: local tracking traversal remains proportional
+to active tracking, and authoritative lifecycle operations still read full completion
+and archival fields one row at a time. Issue #718 remains open for those boundaries,
+measured scaling and end-to-end qualification; no index or memory-peak benefit is
+established by these limits.
+
 Active Ray Jobs also have a 250 ms durable-completion poll, independent of the slower
 status/orphan recovery schedule. Each pass inspects at most 32 tracked task identities
 with one candidate query; an idle worker performs no such query. Receipt consumption
