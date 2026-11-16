@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an opt-in, owner-admitted PostgreSQL maintenance query-plan diagnostic with
+  fixed synthetic profiles, source-derived query capture and bounded evidence.
+  This investigation does not close the broader worker resource work in #718.
+
 - Add isolated, read-only Application witness metadata/artifact binding
   diagnostics with bounded API/ZIP/Git readers and known definition inventories.
   Exit 3 records binding only; semantic validation, qualification/reuse admission
