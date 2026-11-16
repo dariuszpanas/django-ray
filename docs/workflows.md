@@ -1237,6 +1237,12 @@ checkpoint planning:
   `ConcurrencyScopeSpec` and `WorkflowConcurrencyCoordinator` coordinate overlapping
   runs on a logical `scope_key` (`ALLOW`, `QUEUE`, `REJECT`, `COALESCE_LATEST`) using
   monotonic fencing tokens, priority/FIFO queuing, and TTL lease reclamation.
+  Repeating an exact `RunOwnerIdentity` request returns its existing active lease
+  or queued position without changing its queue age or superseding itself. Identity
+  equality includes priority, attempt, and generation. A zero `max_queued_runs`
+  rejects waiting runs under every policy, including `COALESCE_LATEST`, while a
+  free active slot can still admit a run. These opt-in, in-process helpers are not
+  connected to executor admission and do not provide distributed coordination.
   `ExternalServiceBudgetSpec` and `SharedServiceBudgetController` enforce shared
   concurrency and token-bucket rate budgets with per-run anti-starvation caps and
   `Retry-After` cooldowns.

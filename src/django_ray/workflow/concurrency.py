@@ -203,7 +203,7 @@ class WorkflowConcurrencyCoordinator:
         *,
         now_monotonic: float = 0.0,
     ) -> ConcurrencyAdmissionResult:
-        """Request admission for ``owner`` under ``scope_key``."""
+        """Request admission idempotently for the exact ``owner`` identity."""
         owner.validate()
         spec = self._specs.get(scope_key)
         if spec is None:
@@ -217,7 +217,12 @@ class WorkflowConcurrencyCoordinator:
             if existing.owner == owner:
                 return ConcurrencyAdmissionResult(status="admitted", lease=existing)
 
-        if len(active) < spec.max_concurrent_runs and not self._wait_queues[scope_key]:
+        queue = self._wait_queues[scope_key]
+        for position, waiter in enumerate(queue, start=1):
+            if waiter.owner == owner:
+                return ConcurrencyAdmissionResult(status="queued", queue_position=position)
+
+        if len(active) < spec.max_concurrent_runs and not queue:
             lease = self._issue_lease(spec, owner, now_monotonic)
             return ConcurrencyAdmissionResult(status="admitted", lease=lease)
 
@@ -227,8 +232,11 @@ class WorkflowConcurrencyCoordinator:
                 "and uses OverlapPolicy.REJECT"
             )
 
-        queue = self._wait_queues[scope_key]
         if spec.overlap_policy == OverlapPolicy.COALESCE_LATEST:
+            if spec.max_queued_runs == 0:
+                raise WorkflowConcurrencyRejectedError(
+                    f"Scope {scope_key!r} wait queue is full ({spec.max_queued_runs})"
+                )
             superseded: RunOwnerIdentity | None = None
             if queue:
                 superseded = queue[-1].owner
