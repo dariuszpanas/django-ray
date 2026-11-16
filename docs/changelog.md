@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including malformed configured values, while preserving ASCII token comparison
   and operator, demo, and metrics credential separation (#725).
 
+- Remove two complete tracked-ID copies from Ray Job reconciliation activity
+  accounting. Retain only the selected active page and new orphan candidates,
+  preserving completion, retained-error, re-adoption and shutdown counts. Local
+  tracking traversal still scales with active work; this establishes no process
+  memory or throughput improvement (#718).
+
 - Report payload inventory as incomplete when its reverse registry scan exceeds
   the object limit, preserving partial counts and exit status 2 (#722).
 

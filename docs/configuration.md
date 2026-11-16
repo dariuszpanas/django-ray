@@ -217,7 +217,11 @@ live-owner lookup and exact local Ray Core handle lookups are restricted to the
 selected page. Fresh per-row reads and the
 existing exact lease, state, attempt, generation, job and completion fences still
 decide every operation. Ray Job status reconciliation also considers at most 32
-locally tracked identities per turn. This bounds candidate/RPC counts, not database
+locally tracked identities per turn. Its activity accounting retains only that
+original active page and at most 32 new orphan candidate IDs instead of copying
+every tracked ID twice. Completion counts and newly retained adoptions keep the
+same meaning, including immediate completion and re-adoption of an original ID.
+This bounds candidate/RPC counts and this bookkeeping, not database
 execution time or whole-worker memory: local tracking traversal remains proportional
 to active tracking, and authoritative lifecycle operations still read full completion
 and archival fields one row at a time. Issue #718 remains open for those boundaries,

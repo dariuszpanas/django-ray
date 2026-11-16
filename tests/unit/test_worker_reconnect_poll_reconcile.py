@@ -5108,6 +5108,161 @@ class TestWorkerReconnectPollReconcile:
         assert cmd.active_tasks[orphan.pk] == "raysubmit_orphan_running_001"
         assert activity_count == 1
 
+    @pytest.mark.parametrize("failure_stage", ["adoption", "status"])
+    def test_reconcile_tasks_counts_new_tracking_retained_after_error(
+        self, monkeypatch, failure_stage
+    ) -> None:
+        orphan = RayTaskExecution.objects.create(
+            task_id="reconcile-retained-error",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            ray_job_id="raysubmit_retained_error",
+            claimed_by_worker="dead-worker",
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command(worker_id="adopting-worker")
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                raise RuntimeError("status unavailable")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+        if failure_stage == "adoption":
+            adopt = cmd._adopt_orphaned_ray_job_task
+
+            def interrupted_adoption(task, *, now):
+                assert adopt(task, now=now)
+                raise RuntimeError("adoption interrupted after tracking")
+
+            monkeypatch.setattr(cmd, "_adopt_orphaned_ray_job_task", interrupted_adoption)
+
+        assert cmd.reconcile_tasks() == 1
+        assert cmd.active_tasks == {orphan.pk: orphan.ray_job_id}
+        orphan.refresh_from_db()
+        assert orphan.state == TaskState.RUNNING
+        assert orphan.claimed_by_worker == cmd.worker_id
+        assert not TaskAttempt.objects.filter(execution=orphan).exists()
+
+    def test_reconcile_tasks_excludes_original_tracking_retired_then_readopted(
+        self, monkeypatch
+    ) -> None:
+        orphan = RayTaskExecution.objects.create(
+            task_id="reconcile-retired-readopted",
+            callable_path="testproject.tasks.add_numbers",
+            state=TaskState.RUNNING,
+            ray_job_id="raysubmit_retired_readopted",
+            claimed_by_worker="dead-worker",
+            started_at=datetime.now(UTC),
+        )
+        cmd = _make_command(worker_id="adopting-worker")
+        cmd.active_tasks = {orphan.pk: str(orphan.ray_job_id)}
+        cmd.active_task_identities = {orphan.pk: (1, 0)}
+        query_type = type(RayTaskExecution.objects.all())
+        original_get = query_type.get
+        first_read = True
+
+        def unavailable_active_snapshot(query, *args, **kwargs):
+            nonlocal first_read
+            # Model a row becoming visible again between the active point read
+            # and the orphan page. The first read retires its old local handle.
+            if first_read and kwargs == {"pk": orphan.pk}:
+                first_read = False
+                raise RayTaskExecution.DoesNotExist
+            return original_get(query, *args, **kwargs)
+
+        monkeypatch.setattr(query_type, "get", unavailable_active_snapshot)
+
+        class FakeRunner:
+            def get_status(self, _handle):
+                return JobInfo(job_id=str(orphan.ray_job_id), status=JobStatus.RUNNING)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        # Retirement counts once; re-adopting an entry key adds no activity.
+        assert cmd.reconcile_tasks() == 1
+        assert not first_read
+        assert cmd.active_tasks == {orphan.pk: orphan.ray_job_id}
+        orphan.refresh_from_db()
+        assert orphan.claimed_by_worker == cmd.worker_id
+
+    def test_reconcile_tasks_excludes_original_tracking_outside_active_page(
+        self, monkeypatch
+    ) -> None:
+        cmd = _make_command(worker_id="adopting-worker")
+        tasks = RayTaskExecution.objects.bulk_create(
+            [
+                RayTaskExecution(
+                    task_id=f"reconcile-original-{index}",
+                    callable_path="testproject.tasks.add_numbers",
+                    state=TaskState.RUNNING,
+                    ray_job_id=f"raysubmit_original_{index}",
+                    claimed_by_worker=cmd.worker_id if index < 32 else "dead-worker",
+                    started_at=datetime.now(UTC),
+                )
+                for index in range(33)
+            ]
+        )
+        cmd.active_tasks = {task.pk: str(task.ray_job_id) for task in tasks}
+        cmd.active_task_identities = {task.pk: (1, 0) for task in tasks}
+        statuses = []
+
+        class FakeRunner:
+            def get_status(self, handle):
+                statuses.append(handle.ray_job_id)
+                return JobInfo(job_id=handle.ray_job_id, status=JobStatus.RUNNING)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == 0
+        assert statuses == [task.ray_job_id for task in tasks]
+        tasks[-1].refresh_from_db()
+        assert tasks[-1].claimed_by_worker == cmd.worker_id
+        assert cmd.reconcile_tasks() == 0
+        assert statuses == [task.ray_job_id for task in tasks] + [tasks[-1].ray_job_id]
+
+    @pytest.mark.parametrize("initially_tracked", [False, True])
+    def test_reconcile_tasks_preserves_activity_and_cursor_after_partial_shutdown(
+        self, monkeypatch, initially_tracked
+    ) -> None:
+        cmd = _make_command(worker_id="adopting-worker")
+        tasks = RayTaskExecution.objects.bulk_create(
+            [
+                RayTaskExecution(
+                    task_id=f"reconcile-shutdown-{index}",
+                    callable_path="testproject.tasks.add_numbers",
+                    state=TaskState.RUNNING,
+                    ray_job_id=f"raysubmit_shutdown_{index}",
+                    claimed_by_worker=cmd.worker_id if initially_tracked else "dead-worker",
+                    started_at=datetime.now(UTC),
+                )
+                for index in range(2)
+            ]
+        )
+        if initially_tracked:
+            cmd.active_tasks = {task.pk: str(task.ray_job_id) for task in tasks}
+            cmd.active_task_identities = {task.pk: (1, 0) for task in tasks}
+        statuses = []
+
+        class FakeRunner:
+            def get_status(self, handle):
+                statuses.append(handle.ray_job_id)
+                if len(statuses) == 1:
+                    cmd.shutdown_requested = True
+                return JobInfo(job_id=handle.ray_job_id, status=JobStatus.RUNNING)
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", FakeRunner)
+
+        assert cmd.reconcile_tasks() == (0 if initially_tracked else 1)
+        assert statuses == [tasks[0].ray_job_id]
+        assert len(cmd.active_tasks) == (2 if initially_tracked else 1)
+        cmd.shutdown_requested = False
+        assert cmd.reconcile_tasks() == (0 if initially_tracked else 1)
+        expected = [task.ray_job_id for task in tasks]
+        if not initially_tracked:
+            expected.insert(1, tasks[0].ray_job_id)
+        assert statuses == expected
+        assert cmd.active_tasks == {task.pk: task.ray_job_id for task in tasks}
+
     def test_reconcile_tasks_does_not_adopt_orphan_from_another_queue(
         self,
         monkeypatch,
@@ -5258,7 +5413,7 @@ class TestWorkerReconnectPollReconcile:
             lambda task, result: setattr(task, "result_data", str(result)),
         )
 
-        cmd.reconcile_tasks()
+        assert cmd.reconcile_tasks() == 1
 
         orphan.refresh_from_db()
         assert orphan.state == TaskState.SUCCEEDED

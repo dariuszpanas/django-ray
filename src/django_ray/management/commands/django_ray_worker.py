@@ -4606,9 +4606,10 @@ class Command(BaseCommand):
         runner: RayJobRunner | None = None
         completed_tasks: list[int] = []
         reconciled_task_ids: set[int] = set()
-        active_task_ids_before = set(self.active_tasks)
+        original_active_page = self._active_reconciliation_page()
+        new_orphan_task_ids: set[int] = set()
 
-        for task_pk in self._active_reconciliation_page():
+        for task_pk in original_active_page:
             if self.shutdown_requested:
                 break
             self._active_reconciliation_cursor = task_pk
@@ -4684,6 +4685,11 @@ class Command(BaseCommand):
             try:
                 if runner is None:
                     runner = RayJobRunner()
+                # Only the selected active page can retire entry tracking.
+                # Orphan adoption is the only source of new keys in this turn;
+                # classify before it can insert tracking and then raise.
+                if task.pk not in self.active_tasks and task.pk not in original_active_page:
+                    new_orphan_task_ids.add(task.pk)
                 if not self._adopt_orphaned_ray_job_task(task, now=datetime.now(UTC)):
                     continue
                 self.stdout.write(
@@ -4704,7 +4710,7 @@ class Command(BaseCommand):
                     self.style.ERROR(f"\nError reconciling orphaned task {task.pk}: {diagnostic}")
                 )
 
-        adopted_count = len(set(self.active_tasks) - active_task_ids_before)
+        adopted_count = sum(task_pk in self.active_tasks for task_pk in new_orphan_task_ids)
         return len(completed_tasks) + adopted_count
 
     def detect_stuck_tasks(self, queues: Sequence[str] | None = None) -> int:
