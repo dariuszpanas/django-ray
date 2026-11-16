@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add isolated, read-only Application witness metadata/artifact binding
+  diagnostics with bounded API/ZIP/Git readers and known definition inventories.
+  Exit 3 records binding only; semantic validation, qualification/reuse admission
+  and current-head execution remain false or not performed (#469).
+
 - Retain a bounded direct Application qualification witness with run/attempt,
   source, image, step and receipt-upload identities. This records provenance
   inputs for #469; it does not authenticate old results or enable reuse.
