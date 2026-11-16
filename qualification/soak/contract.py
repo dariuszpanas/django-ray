@@ -587,7 +587,13 @@ def require_eligible(value, *, expected_source, expected_profile):
             "unexpected-or-incomplete-http",
         )
         require(
-            0 < row["attempt_timeout_seconds"] <= row["configured_timeout_seconds"],
+            0
+            < row["attempt_timeout_seconds"]
+            <= min(
+                row["configured_timeout_seconds"],
+                row["outer_remaining_seconds"],
+                row["observer_remaining_seconds"],
+            ),
             "http-timeout-budget",
         )
     return value
