@@ -478,7 +478,7 @@ def _record_attempt(execution: RayTaskExecution) -> None:
     )
     if workflow_progress_summary is not None:
         defaults["workflow_progress_summary_json"] = workflow_progress_summary
-    TaskAttempt.objects.update_or_create(
+    TaskAttempt.objects.only("pk", "created_at").update_or_create(
         execution=execution,
         attempt_number=execution.attempt_number,
         defaults=defaults,

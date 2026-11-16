@@ -1072,7 +1072,7 @@ def test_attempt_storage_failure_rolls_back_projected_lifecycle_transition(
     def fail_attempt_storage(*_args: Any, **_kwargs: Any) -> None:
         raise DatabaseError("attempt storage unavailable")
 
-    monkeypatch.setattr(TaskAttempt.objects, "update_or_create", fail_attempt_storage)
+    monkeypatch.setattr(TaskAttempt.objects, "only", fail_attempt_storage)
     transition = retry_task if operation == "retry" else request_task_cancellation
 
     with pytest.raises(DatabaseError, match="attempt storage unavailable"):
@@ -1108,7 +1108,7 @@ def test_automatic_retry_attempt_archive_failure_rolls_back_provenance_clear(
     def fail_attempt_storage(*_args: Any, **_kwargs: Any) -> None:
         raise DatabaseError("attempt provenance archive unavailable")
 
-    monkeypatch.setattr(TaskAttempt.objects, "update_or_create", fail_attempt_storage)
+    monkeypatch.setattr(TaskAttempt.objects, "only", fail_attempt_storage)
 
     with pytest.raises(DatabaseError, match="attempt provenance archive unavailable"):
         record_failure(
