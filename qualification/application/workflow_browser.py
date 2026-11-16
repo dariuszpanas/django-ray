@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -9,12 +10,79 @@ import re
 import signal
 import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from qualification.application.run_api import ApplicationHttp
 
 BROWSER_PYTHON = "/opt/qualification-browser/bin/python"
 MAX_PACKET_BYTES = 4096
+MAX_ASSET_BYTES = 64 * 1024
+ADMIN_ASSETS = ("task_live.js", "workflow_diagnostics.js")
+ADMIN_CONTENT_TYPE = 'text/javascript; charset="utf-8"'
+ASSET_ROOT = Path(__file__).resolve().parents[2] / "src/django_ray/static/django_ray/admin"
+ASSET_PATH = re.compile(
+    r"/static/django_ray/admin/(task_live|workflow_diagnostics)(?:\.[0-9a-f]{12})?\.js"
+)
+
+
+def source_admin_assets() -> dict[str, bytes]:
+    """Read only the two bounded files from the source-derived image."""
+    assets = {}
+    for name in ADMIN_ASSETS:
+        with (ASSET_ROOT / name).open("rb") as stream:
+            body = stream.read(MAX_ASSET_BYTES + 1)
+        if not 0 < len(body) <= MAX_ASSET_BYTES:
+            raise ValueError("Admin source asset exceeds its bound")
+        assets[name] = body
+    return assets
+
+
+def asset_identities(assets: dict[str, bytes]) -> dict:
+    return {
+        name: {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+        for name, body in assets.items()
+    }
+
+
+def fulfill_admin_asset(route, request: ApplicationHttp, assets: dict, verified: set) -> bool:
+    """Deliver one bounded live response only after exact source-byte comparison."""
+    target = urlsplit(route.request.url)
+    match = ASSET_PATH.fullmatch(target.path)
+    if match is None:
+        return False
+    name = match[1] + ".js"
+    if (
+        (target.scheme, target.hostname, target.port or (443 if target.scheme == "https" else 80))
+        != (
+            "https" if request.secure else "http",
+            request.hostname,
+            request.port or (443 if request.secure else 80),
+        )
+        or route.request.method != "GET"
+        or target.username is not None
+        or target.password is not None
+        or "?" in route.request.url
+        or "#" in route.request.url
+        or target.query
+        or target.fragment
+        or route.request.resource_type != "script"
+        or name in verified
+    ):
+        raise ValueError("Admin asset request differs from its fixed contract")
+    status, body = request(
+        target.path,
+        method="GET",
+        headers={"Accept-Encoding": "identity"},
+        response_limit=len(assets[name]),
+        required_response_headers={"Content-Encoding": None, "Content-Type": ADMIN_CONTENT_TYPE},
+        required_media_types=frozenset({"text/javascript", "application/javascript"}),
+    )
+    if status != 200 or body != assets[name]:
+        raise ValueError("Served Admin asset differs from its source bytes")
+    route.fulfill(status=200, content_type=ADMIN_CONTENT_TYPE, body=body)
+    verified.add(name)
+    return True
 
 
 class BrowserObservationError(ValueError):
@@ -105,6 +173,7 @@ def observe_rendered_workflow(
     encoded = json.dumps(packet).encode()
     if len(encoded) > MAX_PACKET_BYTES:
         raise ValueError("Browser observation packet exceeds its bound")
+    expected_assets = asset_identities(source_admin_assets())
     process = subprocess.Popen(
         [BROWSER_PYTHON, "-m", "qualification.application.workflow_browser"],
         stdin=subprocess.PIPE,
@@ -126,6 +195,7 @@ def observe_rendered_workflow(
         "attempts_rendered": len(observations),
         "policy": policy,
         "javascript_errors": 0,
+        "admin_assets": expected_assets,
     }
     if process.returncode != 0:
         line = None
@@ -150,6 +220,9 @@ def render(packet: dict) -> dict:
     origin = packet["origin"]
     expected_origin = urlsplit(origin)
     errors = []
+    assets = source_admin_assets()
+    verified = set()
+    asset_request = ApplicationHttp(origin, request_timeout=5)
     with playwright.sync_playwright() as api:
         browser = api.chromium.launch(headless=True)
         try:
@@ -165,7 +238,16 @@ def render(packet: dict) -> dict:
                     expected_origin.scheme,
                     expected_origin.netloc,
                 ) and route.request.method == "GET":
-                    route.continue_()
+                    try:
+                        if not fulfill_admin_asset(route, asset_request, assets, verified):
+                            route.continue_()
+                    except Exception:
+                        if not errors:
+                            errors.append(True)
+                        try:
+                            route.abort()
+                        except Exception:
+                            pass
                 else:
                     route.abort()
 
@@ -238,13 +320,14 @@ def render(packet: dict) -> dict:
                             raise ValueError("Over-limit graph content was displayed")
                     elif "disabled" not in graph.inner_text().lower():
                         raise ValueError("Disabled explanation was not rendered")
-            if errors:
-                raise ValueError("Admin JavaScript raised an error")
+            if errors or verified != set(ADMIN_ASSETS):
+                raise ValueError("Rendered Admin JavaScript or asset verification failed")
             return {
                 "status": "passed",
                 "attempts_rendered": len(packet["attempts"]),
                 "policy": packet["policy"],
                 "javascript_errors": 0,
+                "admin_assets": asset_identities(assets),
             }
         finally:
             browser.close()

@@ -1,7 +1,11 @@
 """Public runner receipt and owned-cleanup contracts without external processes."""
 
+import hashlib
 import json
 import subprocess
+import sys
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -163,6 +167,7 @@ def test_receipts_refuse_partial_duplicate_wrong_or_unbounded_evidence(raw):
         "timeout",
         "receipt",
         "receipt-type",
+        "receipt-import",
         "cleanup",
         "ownership",
         "source",
@@ -171,6 +176,7 @@ def test_receipts_refuse_partial_duplicate_wrong_or_unbounded_evidence(raw):
         "worker-diagnostic-invalid",
         "worker-diagnostic-unavailable",
         "worker-diagnostic-collection",
+        "web-runtime",
     ],
 )
 @pytest.mark.parametrize(
@@ -258,6 +264,11 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
             raise ValueError("Incomplete receipt")
         if failure == "receipt-type":
             raise TypeError("private malformed response")
+        if failure == "receipt-import":
+            raise ModuleNotFoundError(private_error, name="django_ray")
+        if failure == "web-runtime":
+            return None
+        return runner.observe_web_runtime(web_pod(), "example/core@sha256:" + "a" * 64)
 
     monkeypatch.setattr(runner, "checked", checked)
     monkeypatch.setattr(runner, "run_test", run)
@@ -283,8 +294,21 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
     summary = json.loads((output / "summary.json").read_text())
     assert result == (0 if failure is None else 1)
     assert summary["status"] == ("passed" if failure is None else "failed")
+    assert summary["complete_application_gate"] is False
     assert summary["namespace_removed"] is (failure not in {"cleanup", "ownership"})
     assert summary["qualification_profile"] == runner.select_profile(profile, intent)
+    if failure not in {
+        "receipt",
+        "receipt-type",
+        "receipt-import",
+        "worker-diagnostic-collection",
+        "web-runtime",
+    }:
+        assert summary["web_runtime"] == runner.observe_web_runtime(
+            web_pod(), "example/core@sha256:" + "a" * 64
+        )
+    else:
+        assert summary["web_runtime"] is None
     assert summary["worker_images"] == (
         None
         if failure in {"test", "timeout", "worker-images"}
@@ -348,20 +372,16 @@ def test_runner_rejects_mutable_image_before_commands(tmp_path, monkeypatch):
 
 def test_collector_rejects_a_different_running_image_digest(tmp_path, monkeypatch):
     image = "example/core@sha256:" + "a" * 64
-    pod = {
-        "metadata": {"name": "web", "uid": "owned", "labels": {"app": "django-web"}},
-        "spec": {"initContainers": [{"name": "setup", "image": image}]},
-        "status": {
-            "initContainerStatuses": [
-                {
-                    "name": "setup",
-                    "restartCount": 0,
-                    "imageID": "example/core@sha256:" + "b" * 64,
-                    "state": {"terminated": {"exitCode": 0}},
-                }
-            ]
-        },
-    }
+    pod = web_pod()
+    pod["spec"]["initContainers"] = [{"name": "setup", "image": image}]
+    pod["status"]["initContainerStatuses"] = [
+        {
+            "name": "setup",
+            "restartCount": 0,
+            "imageID": "example/core@sha256:" + "b" * 64,
+            "state": {"terminated": {"exitCode": 0}},
+        }
+    ]
     monkeypatch.setattr(
         runner,
         "checked",
@@ -370,6 +390,328 @@ def test_collector_rejects_a_different_running_image_digest(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="candidate container"):
         runner.collect(["kubectl"], "owned", tmp_path, image)
     assert not (tmp_path / "setup.json").exists()
+
+
+def web_pod():
+    image = "example/core@sha256:" + "a" * 64
+    return {
+        "metadata": {
+            "name": "django-web-fixture",
+            "uid": "11111111-1111-4111-8111-111111111111",
+            "labels": {"app": "django-web"},
+        },
+        "spec": {"containers": [{"name": "web", "image": image}]},
+        "status": {
+            "containerStatuses": [
+                {
+                    "name": "web",
+                    "imageID": "containerd://" + image,
+                    "ready": True,
+                    "restartCount": 0,
+                    "state": {"running": {}},
+                }
+            ]
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("imageID", ""),
+        ("imageID", "example/core@sha256:" + "b" * 64),
+        ("ready", False),
+        ("ready", 1),
+        ("restartCount", False),
+        ("restartCount", 1),
+        ("state", {"waiting": {}}),
+        ("state", {"running": {}, "terminated": {}}),
+        ("state", {"running": None}),
+        ("state", {"running": False}),
+        ("state", ["running"]),
+    ],
+)
+def test_regular_web_snapshot_refuses_incomplete_or_wrong_runtime(field, value):
+    pod = web_pod()
+    pod["status"]["containerStatuses"][0][field] = value
+    with pytest.raises(ValueError, match="Regular web"):
+        runner.observe_web_runtime(pod, "example/core@sha256:" + "a" * 64)
+
+
+@pytest.mark.parametrize("prefix", ["", "containerd://", "docker-pullable://"])
+@pytest.mark.parametrize("repository", ["", "example/core@"])
+def test_web_runtime_accepts_only_anchored_documented_digest_forms(prefix, repository):
+    pod = web_pod()
+    pod["status"]["containerStatuses"][0]["imageID"] = prefix + repository + "sha256:" + "a" * 64
+    assert runner.observe_web_runtime(pod, "example/core@sha256:" + "a" * 64)["ready"] is True
+
+
+@pytest.mark.parametrize(
+    "image_id",
+    [
+        "unsupported://example/core@sha256:" + "a" * 64,
+        "garbage-sha256:" + "a" * 64,
+        "example/core@@sha256:" + "a" * 64,
+        "sha256:" + "a" * 64 + "suffix",
+    ],
+)
+def test_web_runtime_does_not_accept_arbitrary_digest_suffixes(image_id):
+    pod = web_pod()
+    pod["status"]["containerStatuses"][0]["imageID"] = image_id
+    with pytest.raises(ValueError, match="Regular web"):
+        runner.observe_web_runtime(pod, "example/core@sha256:" + "a" * 64)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "missing-spec",
+        "duplicate-spec",
+        "missing-status",
+        "duplicate-status",
+        "deleting",
+        "wrong-spec-image",
+    ],
+)
+def test_regular_web_is_selected_by_its_unique_name(kind):
+    pod = web_pod()
+    if kind == "deleting":
+        pod["metadata"]["deletionTimestamp"] = "present"
+    elif kind == "wrong-spec-image":
+        pod["spec"]["containers"][0]["image"] = "another/image:latest"
+    else:
+        entries = (
+            pod["spec"]["containers"]
+            if kind.endswith("spec")
+            else pod["status"]["containerStatuses"]
+        )
+        if kind.startswith("missing"):
+            entries.clear()
+        else:
+            entries.append(deepcopy(entries[0]))
+    with pytest.raises(ValueError):
+        runner.observe_web_runtime(pod, "example/core@sha256:" + "a" * 64)
+
+
+def test_collector_keeps_four_producers_and_returns_separate_regular_web_snapshot(
+    tmp_path, monkeypatch
+):
+    image = "example/core@sha256:" + "a" * 64
+    pods = []
+    for number, (app, (container, _names)) in enumerate(runner.RECEIPTS.items(), 1):
+        pod = (
+            web_pod()
+            if app == "django-web"
+            else {
+                "metadata": {"name": app + "-fixture", "uid": str(number), "labels": {"app": app}},
+                "spec": {},
+                "status": {},
+            }
+        )
+        spec_key = "initContainers" if app == "django-web" else "containers"
+        status_key = "initContainerStatuses" if app == "django-web" else "containerStatuses"
+        pod["spec"][spec_key] = [{"name": container, "image": image}]
+        pod["status"][status_key] = [
+            {
+                "name": container,
+                "imageID": "containerd://" + image,
+                "restartCount": 0,
+                "state": {"terminated": {"exitCode": 0}},
+            }
+        ]
+        pods.append(pod)
+    calls = []
+
+    def checked(argv):
+        calls.append(argv)
+        return b"{}" if "logs" in argv else json.dumps({"items": pods}).encode()
+
+    before = b"before nodes"
+    after = json.dumps(
+        {"cold_replacement": True, "previous_receipt_sha256": hashlib.sha256(before).hexdigest()}
+    ).encode()
+    monkeypatch.setattr(runner, "checked", checked)
+    live_receipts = current_asset_receipts()
+    monkeypatch.setattr(
+        runner,
+        "parse_receipts",
+        lambda _raw, names, **_kw: {
+            name: before
+            if name == "before-nodes"
+            else after
+            if name == "after-nodes"
+            else live_receipts.get(name, b"{}")
+            for name in names
+        },
+    )
+    from qualification.application import protected_logs
+
+    monkeypatch.setattr(protected_logs, "validate_receipt", lambda _raw, _generation: None)
+    for generation in ("before", "after"):
+        (tmp_path / f"{generation}-protected-logs.json").write_bytes(b"{}")
+    result = runner.collect(["kubectl"], "owned", tmp_path, image)
+    producers = json.loads((tmp_path / "producers.json").read_bytes())
+    assert len(producers) == 4
+    assert [p["container"] for p in producers] == [
+        "setup",
+        "assertions",
+        "assertions",
+        "assertions",
+    ]
+    assert result["container"] == "web"
+    assert result["uid"] == producers[0]["uid"]
+    assert result["image_id"] == "containerd://" + image
+    assert sum("get" in call for call in calls) == 1
+    assert sum("logs" in call for call in calls) == 4
+
+
+def current_asset_receipts():
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "fixtures/test_planning_receipts/files.json"
+        ).read_bytes()
+    )
+    assets = {
+        "task_live.js": {"bytes": 5725, "sha256": "a" * 64},
+        "workflow_diagnostics.js": {"bytes": 56730, "sha256": "b" * 64},
+    }
+
+    def augment(value):
+        if isinstance(value, dict):
+            if "browser_contract" in value:
+                value["browser_contract"]["admin_assets"] = deepcopy(assets)
+            for child in value.values():
+                augment(child)
+        elif isinstance(value, list):
+            for child in value:
+                augment(child)
+
+    result = {}
+    for path, raw in fixture.items():
+        name = path.rsplit("/", 1)[-1].removesuffix(".json")
+        if name in {
+            f"{generation}-{layer}"
+            for generation in ("before", "after")
+            for layer in ("first", "workflows", "showcase")
+        }:
+            value = json.loads(raw)
+            augment(value)
+            result[name] = json.dumps(value).encode()
+    return result
+
+
+def test_live_asset_collection_needs_no_application_dependencies(tmp_path):
+    receipts = tmp_path / "receipts.json"
+    receipts.write_text(
+        json.dumps({name: raw.decode() for name, raw in current_asset_receipts().items()}),
+        encoding="utf-8",
+    )
+    script = """
+import importlib.abc
+import json
+import sys
+from pathlib import Path
+
+blocked = {"django_ray", "django", "ray"}
+assert not any(name.split(".")[0] in blocked for name in sys.modules)
+class DenyApplicationImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in blocked:
+            raise ModuleNotFoundError("Application dependency denied", name=fullname)
+sys.meta_path.insert(0, DenyApplicationImports())
+sys.path.insert(0, sys.argv[1])
+from qualification.application.run_chainsaw import validate_live_admin_assets
+receipts = {
+    name: raw.encode() for name, raw in json.loads(Path(sys.argv[2]).read_bytes()).items()
+}
+assert len(receipts) == 6
+validate_live_admin_assets(receipts)
+from qualification.application.workflow_fixtures import workflow_cases
+assert len(workflow_cases()) == 12
+assert sum(len(case.states) for case in workflow_cases()) == 16
+assert not any(name.split(".")[0] in blocked for name in sys.modules)
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            script,
+            str(Path(__file__).resolve().parents[2]),
+            str(receipts),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_workflow_driver_reexports_the_canonical_fixture_types_and_cases():
+    from qualification.application import run_workflows, workflow_fixtures
+
+    assert run_workflows.WorkflowCase is workflow_fixtures.WorkflowCase
+    assert run_workflows.workflow_cases is workflow_fixtures.workflow_cases
+    assert all(
+        type(case) is workflow_fixtures.WorkflowCase
+        for case in (
+            *run_workflows.workflow_cases(),
+            *run_workflows.first_workflow_cases(),
+            run_workflows.showcase_failure_case(),
+        )
+    )
+
+
+@pytest.mark.parametrize("generation", ["before", "after"])
+@pytest.mark.parametrize("layer", ["first", "workflows", "showcase"])
+@pytest.mark.parametrize("failure", ["missing", "length", "digest", "extra", "case"])
+def test_live_collection_requires_each_case_identity_in_both_generations(
+    generation, layer, failure
+):
+    receipts = current_asset_receipts()
+    runner.validate_live_admin_assets(receipts)
+    name = f"{generation}-{layer}"
+    value = json.loads(receipts[name])
+    if layer == "first":
+        target = value["trials"][-1]["observations"][-1]
+    elif layer == "workflows":
+        target = value["observations"]["recovery"][-1]
+    else:
+        target = value["observation"]
+    if failure == "case":
+        if layer == "first":
+            value["trials"].pop()
+        elif layer == "workflows":
+            del value["observations"]["recovery"]
+        else:
+            del value["observation"]
+    elif failure == "missing":
+        del target["browser_contract"]["admin_assets"]
+    elif failure == "extra":
+        target["browser_contract"]["admin_assets"]["other.js"] = {"bytes": 1, "sha256": "c" * 64}
+    else:
+        key, replacement = ("bytes", 1) if failure == "length" else ("sha256", "c" * 64)
+        target["browser_contract"]["admin_assets"]["task_live.js"][key] = replacement
+    receipts[name] = json.dumps(value).encode()
+    with pytest.raises(ValueError, match="Admin asset"):
+        runner.validate_live_admin_assets(receipts)
+
+
+def test_live_collection_refuses_legacy_assets_and_assets_on_the_wrong_attempt():
+    receipts = current_asset_receipts()
+    del receipts["after-workflows"]
+    with pytest.raises(ValueError, match="Admin asset"):
+        runner.validate_live_admin_assets(receipts)
+    receipts = current_asset_receipts()
+    value = json.loads(receipts["after-workflows"])
+    attempts = value["observations"]["recovery"]
+    attempts[0]["browser_contract"] = attempts[-1].pop("browser_contract")
+    receipts["after-workflows"] = json.dumps(value).encode()
+    with pytest.raises(ValueError, match="Admin asset"):
+        runner.validate_live_admin_assets(receipts)
 
 
 def test_failure_diagnostics_exclude_resource_specs_and_bound_records(tmp_path, monkeypatch):

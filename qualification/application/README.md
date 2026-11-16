@@ -840,6 +840,37 @@ substitute for the complete success receipt.
 
 ### Rendered Admin observation
 
+The browser intercepts only the two fixed Admin script GETs. Each live response
+must have a JavaScript media type and exactly match the corresponding raw file
+in the source-derived image before those verified bytes are delivered to Chromium.
+Each source file is capped at 64 KiB; the network read uses its exact expected
+length, requests identity encoding, permits no response content encoding, and
+requires the fixed WhiteNoise UTF-8 JavaScript content type before fulfillment.
+There are no redirects or retries, and socket waits are at most five seconds.
+The existing 45-second browser process deadline remains the whole-operation bound.
+Passing browser contracts retain each logical filename, byte count and SHA-256.
+The parent independently derives the expected identities from the image files and
+refuses missing, extra or mismatched child results. These image-file reads are
+not independent Git authentication: final artifact review must compare both
+retained identities with the actual source Git blobs before claiming exact-source
+asset correspondence. No asset hashes or response bodies are written to Git history.
+
+The collector separately inspects the named regular `web` container in its existing
+Pod snapshot. It requires the admitted image reference and matching runtime digest,
+ready/running state, zero restarts and the same Pod UID as the setup producer.
+`summary.json` retains this final snapshot as `web_runtime`; it is not a continuous
+uptime assertion. The four existing receipt producers, including the setup init
+container, remain unchanged. Current live success requires both observations.
+Historical receipt shapes remain readable without gaining these newer identity
+claims, and their saved fixtures are unchanged.
+Live collection additionally requires matching identities in every final browser
+contract across both generations' first, warm, workflow and failure-showcase cases.
+The host collector reads the canonical twelve-case, sixteen-state inventory from
+the standard-library-only `workflow_fixtures` module. The container driver re-exports
+the same case type and factory; host collection does not import its application or
+pressure-probe dependencies. A collection import failure fails qualification while
+retaining a failed summary and continuing the existing UID-fenced namespace cleanup.
+
 The qualification image adds Playwright 1.63.0 and its matching Chromium headless shell in an
 isolated environment; application dependencies and the production base image are unchanged.
 Each fixed workflow case launches one browser subprocess with a 45-second wall deadline and a

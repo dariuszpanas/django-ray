@@ -148,7 +148,7 @@ class ApplicationHttp:
         method: str,
         headers: dict[str, str] | None = None,
         response_limit: int = MAX_RESPONSE_BYTES,
-        required_response_headers: dict[str, str] | None = None,
+        required_response_headers: dict[str, str | None] | None = None,
         required_cache_directives: frozenset[str] = frozenset(),
         required_media_types: frozenset[str] = frozenset(),
     ) -> tuple[int, bytes]:
@@ -257,7 +257,7 @@ class ApplicationHttp:
         method: str,
         headers: dict[str, str] | None,
         response_limit: int,
-        required_response_headers: dict[str, str] | None,
+        required_response_headers: dict[str, str | None] | None,
         required_cache_directives: frozenset[str],
         required_media_types: frozenset[str],
         timeout: float,

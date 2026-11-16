@@ -673,9 +673,25 @@ def test_collector_failed_identity_never_writes_arbitrary_log_bytes(tmp_path, mo
     from qualification.application import run_chainsaw as runner
 
     pod = {
-        "metadata": {"name": "owned", "uid": "uid", "labels": {"app": "django-web"}},
-        "spec": {"initContainers": [{"name": "setup", "image": IMAGE}]},
+        "metadata": {
+            "name": "django-web-fixture",
+            "uid": "11111111-1111-4111-8111-111111111111",
+            "labels": {"app": "django-web"},
+        },
+        "spec": {
+            "containers": [{"name": "web", "image": IMAGE}],
+            "initContainers": [{"name": "setup", "image": IMAGE}],
+        },
         "status": {
+            "containerStatuses": [
+                {
+                    "name": "web",
+                    "imageID": IMAGE,
+                    "ready": True,
+                    "restartCount": 0,
+                    "state": {"running": {}},
+                }
+            ],
             "initContainerStatuses": [
                 {
                     "name": "setup",
@@ -683,7 +699,7 @@ def test_collector_failed_identity_never_writes_arbitrary_log_bytes(tmp_path, mo
                     "restartCount": 1,
                     "state": {"terminated": {"exitCode": 0}},
                 }
-            ]
+            ],
         },
     }
     raw = (
@@ -697,7 +713,9 @@ def test_collector_failed_identity_never_writes_arbitrary_log_bytes(tmp_path, mo
         "checked",
         lambda argv: raw if "logs" in argv else json.dumps({"items": [pod]}).encode(),
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError, match="Receipt producer is not the completed candidate container"
+    ):
         runner.collect(["kubectl"], "owned", tmp_path, IMAGE)
     for path in tmp_path.iterdir():
         assert b"private-canary" not in path.read_bytes()

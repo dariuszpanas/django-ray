@@ -256,6 +256,14 @@ def _identity(value: object, attempt: int) -> None:
 
 
 def _browser(value: object, policy: str, attempts: int) -> None:
+    # Historical receipts predate asset comparison. Never invent that proof.
+    if isinstance(value, dict) and "admin_assets" in value:
+        assets = _object(value["admin_assets"], {"task_live.js", "workflow_diagnostics.js"})
+        for entry in assets.values():
+            identity = _object(entry, {"bytes", "sha256"})
+            _integer(identity["bytes"], 1, 64 * 1024)
+            require(sha(identity["sha256"]), "Admin asset digest is invalid")
+        value = {key: item for key, item in value.items() if key != "admin_assets"}
     equal(
         value,
         {
