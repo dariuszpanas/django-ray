@@ -1219,7 +1219,12 @@ checkpoint planning:
   queries) under producer-ahead page, item, and byte caps with deterministic 0-based
   item indexing, snapshot-drift (`PagedSnapshotDriftError`) and expired-cursor
   (`PagedCursorExpiredError`) guards, bounded `Retry-After` backoff, and guaranteed
-  source cleanup.
+  source cleanup. A source must honor the requested `page_size`; an overfull page
+  aborts the stream and clears its buffered and in-flight accounting. Throttling
+  sleeps by default, with each delay capped at 60 seconds and retries limited by
+  `max_throttle_retries`. Callers may inject `sleep_fn` for a custom scheduler or
+  deterministic tests. These opt-in helpers do not replace executor admission or
+  bound memory already allocated by a source while fetching or decoding a page.
 - **Cross-run concurrency and service budgets (`django_ray.workflow.concurrency`)**:
   `ConcurrencyScopeSpec` and `WorkflowConcurrencyCoordinator` coordinate overlapping
   runs on a logical `scope_key` (`ALLOW`, `QUEUE`, `REJECT`, `COALESCE_LATEST`) using

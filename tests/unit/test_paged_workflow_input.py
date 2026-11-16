@@ -22,7 +22,7 @@ class FakeK8sPagedSource:
         self,
         pages: list[PageBatch],
         *,
-        fail_on_call: dict[int, Exception] | None = None,
+        fail_on_call: dict[int, BaseException] | None = None,
     ) -> None:
         self.pages = list(pages)
         self.fail_on_call = dict(fail_on_call or {})
@@ -179,6 +179,109 @@ def test_throttling_retry_and_downstream_abort_cleanup() -> None:
     assert len(source.calls) == 3  # 2 throttled + 1 succeeded for page 1; page 2 never fetched
     with pytest.raises(PagedMapStreamAbortedError, match="leaf_0_failed"):
         stream.next_item()
+
+
+@pytest.mark.parametrize(
+    ("existing_page", "max_buffered_items", "message"),
+    [
+        (False, 2, "max_buffered_items"),
+        (False, 4, "more than page_size"),
+        (True, 4, "max_buffered_items"),
+        (True, 6, "more than page_size"),
+    ],
+)
+def test_overfull_source_page_fails_closed_and_clears_outstanding_items(
+    existing_page: bool, max_buffered_items: int, message: str
+) -> None:
+    pages = [PageBatch(items=("a", "b"), next_cursor="c1")] if existing_page else []
+    pages.append(PageBatch(items=tuple(range(100)), next_cursor=None))
+    source = FakeK8sPagedSource(pages)
+    stream = BoundedPagedMapInputStream(
+        source,
+        PagedMapInputConfig(page_size=2, max_buffered_items=max_buffered_items),
+    )
+    if existing_page:
+        assert stream.next_item() is not None
+        assert stream.in_flight_items == 1
+        assert stream.diagnostics().buffered_items == 1
+
+    with pytest.raises(PagedMapInputLimitError, match=message):
+        stream.prefetch_page()
+
+    assert source.closed
+    assert stream.total_outstanding_items == 0
+    assert stream.total_outstanding_bytes == 0
+    assert stream.diagnostics().aborted
+    assert stream.diagnostics().peak_buffered_items <= stream.config.max_buffered_items
+    with pytest.raises(PagedMapStreamAbortedError):
+        stream.next_item()
+
+
+def test_default_throttling_sleeps_for_bounded_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("django_ray.workflow.paged_input.time.sleep", sleeps.append)
+    source = FakeK8sPagedSource(
+        [PageBatch(items=("ready",), next_cursor=None)],
+        fail_on_call={
+            1: PagedSourceThrottledError(retry_after_seconds=120),
+            2: PagedSourceThrottledError(retry_after_seconds=0.25),
+        },
+    )
+    stream = BoundedPagedMapInputStream(source)
+
+    item = stream.next_item()
+
+    assert item is not None and item.value == "ready"
+    assert sleeps == [60.0, 0.25]
+    assert len(source.calls) == 3
+    assert stream.diagnostics().throttle_retries == 2
+
+
+def test_throttling_exhaustion_closes_source_without_extra_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("django_ray.workflow.paged_input.time.sleep", sleeps.append)
+    throttled = PagedSourceThrottledError(retry_after_seconds=0.25)
+    source = FakeK8sPagedSource([], fail_on_call=dict.fromkeys((1, 2, 3), throttled))
+    stream = BoundedPagedMapInputStream(source, PagedMapInputConfig(max_throttle_retries=2))
+
+    with pytest.raises(PagedSourceThrottledError) as caught:
+        stream.next_item()
+
+    assert caught.value is throttled
+    assert sleeps == [0.25, 0.25]
+    assert len(source.calls) == 3
+    assert source.closed
+    assert stream.diagnostics().aborted
+
+
+@pytest.mark.parametrize("phase", ["fetch", "sleep"])
+@pytest.mark.parametrize("interruption", [RuntimeError("interrupted"), KeyboardInterrupt()])
+def test_fetch_or_sleep_failure_closes_source_without_retry(
+    phase: str, interruption: BaseException
+) -> None:
+    source = FakeK8sPagedSource(
+        [],
+        fail_on_call={
+            1: interruption
+            if phase == "fetch"
+            else PagedSourceThrottledError(retry_after_seconds=0.25)
+        },
+    )
+
+    def interrupted_sleep(_seconds: float) -> None:
+        raise interruption
+
+    stream = BoundedPagedMapInputStream(source, sleep_fn=interrupted_sleep)
+    with pytest.raises(type(interruption)) as caught:
+        stream.next_item()
+
+    assert caught.value is interruption
+    assert source.closed
+    assert len(source.calls) == 1
+    assert stream.diagnostics().aborted
+    assert stream.total_outstanding_items == 0
 
 
 def test_paged_input_config_and_stream_edge_cases() -> None:

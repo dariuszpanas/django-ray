@@ -17,6 +17,7 @@ input stream with:
 from __future__ import annotations
 
 import json
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -210,7 +211,7 @@ class BoundedPagedMapInputStream:
     ) -> None:
         self.source = source
         self.config = (config or PagedMapInputConfig()).validated()
-        self._sleep_fn = sleep_fn or (lambda _s: None)
+        self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
 
         self._cursor: str | None = None
         self._snapshot_token: str | None = None
@@ -294,6 +295,19 @@ class BoundedPagedMapInputStream:
         page_items: deque[PagedMapItem] = deque()
         page_bytes = 0
         for raw in batch.items:
+            if self.total_outstanding_items + len(page_items) + 1 > self.config.max_buffered_items:
+                self._fail_and_close(
+                    PagedMapInputLimitError(
+                        "Paged source outstanding items exceeded max_buffered_items "
+                        f"({self.config.max_buffered_items})"
+                    )
+                )
+            if len(page_items) >= self.config.page_size:
+                self._fail_and_close(
+                    PagedMapInputLimitError(
+                        f"Paged source returned more than page_size ({self.config.page_size}) items"
+                    )
+                )
             if self._next_item_index >= self.config.max_total_items:
                 self._fail_and_close(
                     PagedMapInputLimitError(
@@ -359,7 +373,10 @@ class BoundedPagedMapInputStream:
                     self._fail_and_close(exc)
                 attempts += 1
                 self._throttle_retries += 1
-                self._sleep_fn(exc.retry_after_seconds)
+                try:
+                    self._sleep_fn(exc.retry_after_seconds)
+                except BaseException as error:
+                    self._fail_and_close(error)
             except PagedCursorExpiredError as exc:
                 if (
                     self.config.allow_relist_on_expired_cursor
@@ -376,7 +393,7 @@ class BoundedPagedMapInputStream:
                     self._next_item_index = 0
                     continue
                 self._fail_and_close(exc)
-            except Exception as exc:
+            except BaseException as exc:
                 self._fail_and_close(exc)
 
     def next_item(self) -> PagedMapItem | None:
