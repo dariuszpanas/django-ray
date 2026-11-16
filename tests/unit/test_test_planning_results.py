@@ -134,6 +134,44 @@ def test_actual_attempt_observations_normalize_without_claiming_complete_reposit
     assert "complete_upgrade_gate" not in document
 
 
+@pytest.mark.parametrize(
+    "failure", [None, "missing", "uid", "pod", "image", "digest", "ready", "restarts", "extra"]
+)
+def test_additive_web_runtime_snapshot_is_bound_without_inventing_old_proof(bundle, failure):
+    summary_path = APP + "application-evidence/summary.json"
+    producers = json.loads(bundle[3][APP + "application-evidence/producers.json"])
+    summary = json.loads(bundle[3][summary_path])
+    assert "web_runtime" not in summary
+    web = {
+        "pod": producers[0]["pod"],
+        "uid": producers[0]["uid"],
+        "container": "web",
+        "image": summary["image"],
+        "image_id": producers[0]["image_id"],
+        "ready": True,
+        "restarts": 0,
+    }
+    if failure == "missing":
+        del web["container"]
+    elif failure:
+        field, value = {
+            "uid": ("uid", "22222222-2222-4222-8222-222222222222"),
+            "pod": ("pod", "django-web-other"),
+            "image": ("image", "other:latest"),
+            "digest": ("image_id", "example@sha256:" + "0" * 64),
+            "ready": ("ready", 1),
+            "restarts": ("restarts", False),
+            "extra": ("future", True),
+        }[failure]
+        web[field] = value
+    changed = mutate(bundle, summary_path, ("web_runtime",), web)
+    if failure:
+        with pytest.raises(results.NormalizationError):
+            normalize(changed)
+    else:
+        assert len(normalize(changed)["results"]) == 1
+
+
 @pytest.mark.parametrize("layer", ["core", "workflows"])
 def test_authenticated_after_receipt_cannot_reuse_before_execution_evidence(bundle, layer):
     bundle = for_attempt(bundle, 2)

@@ -195,9 +195,12 @@ def parse_receipts(
 
 def collect(
     kubectl, namespace: str, output: Path, image: str, *, expected_profile: dict | None = None
-) -> None:
+) -> dict:
     pods = json.loads(checked([*kubectl, "get", "pods", "-n", namespace, "-o", "json"]))["items"]
     identities = []
+    collected = {}
+    (web,) = [pod for pod in pods if pod["metadata"].get("labels", {}).get("app") == "django-web"]
+    web_runtime = observe_web_runtime(web, image)
     for app, (container, names) in RECEIPTS.items():
         (pod,) = [pod for pod in pods if pod["metadata"].get("labels", {}).get("app") == app]
         statuses = pod["status"].get("containerStatuses", []) + pod["status"].get(
@@ -241,6 +244,7 @@ def collect(
             raise ValueError("Receipt producer is not the completed candidate container")
         for name, data in parse_receipts(raw, names, expected_profile=expected_profile).items():
             (output / f"{name}.json").write_bytes(data)
+            collected[name] = data
         identities.append(
             {
                 "pod": pod["metadata"]["name"],
@@ -265,6 +269,128 @@ def collect(
         if len(raw) > 2048:
             raise ValueError("Protected log receipt exceeds its byte limit")
         validate_log_receipt(json.loads(raw), generation)
+    validate_live_admin_assets(collected)
+    return web_runtime
+
+
+def validate_live_admin_assets(receipts: dict[str, bytes]) -> None:
+    """Require both identities on every current browser case in both generations."""
+    from qualification.application.workflow_fixtures import workflow_cases
+
+    baseline = None
+    try:
+        for generation in ("before", "after"):
+            first = json.loads(receipts[f"{generation}-first"])
+            trials = first["trials"]
+            if not isinstance(trials, list) or len(trials) != 2:
+                raise ValueError("Incomplete live Admin asset observations")
+            groups = [trial["observations"] for trial in trials]
+            if any(not isinstance(group, list) or len(group) != 1 for group in groups):
+                raise ValueError("Incomplete live Admin asset observations")
+            workflows = json.loads(receipts[f"{generation}-workflows"])["observations"]
+            cases = workflow_cases()
+            if not isinstance(workflows, dict) or set(workflows) != {case.name for case in cases}:
+                raise ValueError("Incomplete live Admin asset observations")
+            for case in cases:
+                attempts = workflows[case.name]
+                if (
+                    not isinstance(attempts, list)
+                    or len(attempts) != len(case.states)
+                    or any("browser_contract" in attempt for attempt in attempts[:-1])
+                ):
+                    raise ValueError("Incomplete live Admin asset observations")
+                groups.append(attempts)
+            showcase = json.loads(receipts[f"{generation}-showcase"])["observation"]
+            groups.append([showcase])
+            for group in groups:
+                contract = group[-1]["browser_contract"]
+                assets = contract["admin_assets"]
+                if (
+                    contract["status"] != "passed"
+                    or not isinstance(assets, dict)
+                    or set(assets) != {"task_live.js", "workflow_diagnostics.js"}
+                ):
+                    raise ValueError("Incomplete live Admin asset observations")
+                for identity in assets.values():
+                    if (
+                        not isinstance(identity, dict)
+                        or set(identity) != {"bytes", "sha256"}
+                        or type(identity["bytes"]) is not int
+                        or not 0 < identity["bytes"] <= 64 * 1024
+                        or not isinstance(identity["sha256"], str)
+                        or re.fullmatch(r"[0-9a-f]{64}", identity["sha256"]) is None
+                    ):
+                        raise ValueError("Incomplete live Admin asset observations")
+                if baseline is None:
+                    baseline = assets
+                elif assets != baseline:
+                    raise ValueError("Live Admin asset identities differ across observations")
+    except (KeyError, TypeError, IndexError):
+        raise ValueError("Incomplete live Admin asset observations") from None
+
+
+def observe_web_runtime(pod: dict, image: str) -> dict:
+    """Inspect the regular web container separately from its setup producer."""
+    (spec,) = [item for item in pod["spec"]["containers"] if item["name"] == "web"]
+    (status,) = [item for item in pod["status"]["containerStatuses"] if item["name"] == "web"]
+    image_id = status.get("imageID")
+    state = status.get("state")
+    if (
+        pod["metadata"].get("deletionTimestamp")
+        or spec["image"] != image
+        or runtime_image_digest(image_id) != image.rsplit("@", 1)[-1]
+        or status.get("ready") is not True
+        or type(status.get("restartCount")) is not int
+        or status["restartCount"] != 0
+        or not isinstance(state, dict)
+        or set(state) != {"running"}
+        or not isinstance(state["running"], dict)
+    ):
+        raise ValueError("Regular web runtime does not match the admitted image")
+    result = {
+        "pod": pod["metadata"]["name"],
+        "uid": pod["metadata"]["uid"],
+        "container": "web",
+        "image": image,
+        "image_id": image_id,
+        "ready": True,
+        "restarts": 0,
+    }
+    validate_web_runtime(result, image)
+    return result
+
+
+def runtime_image_digest(value: object) -> str | None:
+    """Accept anchored repository/bare digests and the two runtime prefixes."""
+    if not isinstance(value, str):
+        return None
+    for prefix in ("containerd://", "docker-pullable://"):
+        if value.startswith(prefix):
+            value = value.removeprefix(prefix)
+            break
+    if "://" in value:
+        return None
+    match = re.fullmatch(r"(?:[a-zA-Z0-9][a-zA-Z0-9./:_-]{0,239}@)?(sha256:[0-9a-f]{64})", value)
+    return match[1] if match is not None else None
+
+
+def validate_web_runtime(value: object, image: str) -> None:
+    """Require the complete typed snapshot before retaining a passing summary."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"pod", "uid", "container", "image", "image_id", "ready", "restarts"}
+        or not isinstance(value["pod"], str)
+        or re.fullmatch(r"django-web-[a-z0-9-]{1,63}", value["pod"]) is None
+        or not isinstance(value["uid"], str)
+        or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value["uid"]) is None
+        or value["container"] != "web"
+        or value["image"] != image
+        or runtime_image_digest(value["image_id"]) != image.rsplit("@", 1)[-1]
+        or value["ready"] is not True
+        or type(value["restarts"]) is not int
+        or value["restarts"] != 0
+    ):
+        raise ValueError("Regular web runtime observation is incomplete")
 
 
 def diagnose(kubectl, namespace: str, output: Path) -> None:
@@ -462,6 +588,7 @@ def main(argv=None) -> int:
     passed = cleaned = False
     worker_images = None
     worker_images_failure = None
+    web_runtime = None
     try:
         created = json.loads(checked([*kubectl, "create", "namespace", namespace, "-o", "json"]))
         uid = created["metadata"]["uid"]
@@ -501,12 +628,16 @@ def main(argv=None) -> int:
         if uid is not None:
             print("Collecting application receipts and removing the owned namespace", flush=True)
             try:
-                collect(kubectl, namespace, args.output, args.image, expected_profile=profile)
+                web_runtime = collect(
+                    kubectl, namespace, args.output, args.image, expected_profile=profile
+                )
+                validate_web_runtime(web_runtime, args.image)
                 current_tree = checked([*git, "rev-parse", "HEAD^{tree}"]).decode().strip()
                 passed = passed and current_tree == source_tree
                 passed = passed and not checked([*git, "status", "--porcelain"]).strip()
             except (
                 OSError,
+                ImportError,
                 ValueError,
                 RuntimeError,
                 KeyError,
@@ -543,6 +674,7 @@ def main(argv=None) -> int:
             "qualification_profile": profile,
             "complete_application_gate": False,
             "worker_images": worker_images,
+            "web_runtime": web_runtime,
         }
         if worker_images_failure is not None:
             summary["worker_images_failure"] = worker_images_failure

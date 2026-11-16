@@ -202,6 +202,32 @@ def application(evidence: Evidence, expected: ExpectedRun) -> None:
             == images["candidate"].rsplit("@", 1)[-1],
             "wrong-application-producer-image",
         )
+    # Preserve historical receipts without claiming these later observations.
+    if "web_runtime" in summary:
+        from qualification.application.run_chainsaw import validate_web_runtime
+
+        web = summary["web_runtime"]
+        try:
+            validate_web_runtime(web, images["candidate"])
+        except ValueError:
+            raise NormalizationError("invalid-application-web-runtime") from None
+        require(
+            isinstance(web, dict)
+            and set(web) == {"pod", "uid", "container", "image", "image_id", "ready", "restarts"},
+            "invalid-application-web-runtime",
+        )
+        fields(
+            web,
+            {
+                "pod": producers[0]["pod"],
+                "uid": producers[0]["uid"],
+                "container": "web",
+                "image": images["candidate"],
+                "ready": True,
+                "restarts": 0,
+            },
+            "wrong-application-web-runtime",
+        )
 
 
 def _native_observations(name: str, backend: str, runner: str, crash: bool, value: dict) -> None:

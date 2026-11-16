@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require Application qualification to compare both served Admin scripts with
+  source-derived image bytes and inspect the regular web runtime image separately
+  from its setup producer. Retain bounded identity evidence for final source-blob
+  audit. Keep host collection independent of application imports, with failed
+  summary and owned cleanup retained on import failure; historical receipts do not
+  gain the new proof (#743).
+
 - Clear stalled Admin workflow diagnostics after a 15-second scheduled response
   deadline, preserving manual reopen retries for current detail and one cached
   failure per archived graph. Keep attempt-pinned JSON fallbacks and ignore late

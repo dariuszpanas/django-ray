@@ -1,9 +1,94 @@
-"""Independent expected topology for the fixed public workflow fixtures."""
+"""Fixed workflow cases and independent topology for public qualification fixtures."""
+
+from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 FIRST_WORKFLOW_TRIAL_NAMES = ("showcase-first", "showcase-warm")
+
+
+@dataclass(frozen=True)
+class WorkflowCase:
+    name: str
+    endpoint: str
+    options: tuple[tuple[str, object], ...]
+    states: tuple[str, ...]
+    policy: str
+    callable_path: str
+
+
+def workflow_cases() -> tuple[WorkflowCase, ...]:
+    """Use tiny existing public fixtures, not caller-selected application code."""
+    cases = []
+    for policy in ("full", "terminal_only", "disabled"):
+        for fail in (False, True):
+            options: dict[str, object] = {
+                "fast_items": 2,
+                "slow_items": 1,
+                "fast_seconds": 0.01,
+                "slow_seconds": 0.05 if fail else 0.02,
+            }
+            if policy != "full":
+                options["reporting_policy"] = policy
+            if fail:
+                options.update(failure_branch="slow", failure_item=0)
+            cases.append(
+                WorkflowCase(
+                    f"{policy}-{'failure' if fail else 'success'}",
+                    "/api/cluster/complex-workflow",
+                    tuple(options.items()),
+                    ("FAILED" if fail else "SUCCEEDED",),
+                    policy,
+                    "testproject.apps.cluster_tasks.tasks.complex_workflow_benchmark",
+                )
+            )
+    cases.append(
+        WorkflowCase(
+            "recovery",
+            "/api/cluster/workflow-recovery-showcase",
+            (("item_count", 1), ("work_seconds", 0.01)),
+            ("FAILED", "FAILED", "SUCCEEDED"),
+            "full",
+            "testproject.apps.cluster_tasks.tasks.order_fulfillment_recovery_showcase_task",
+        )
+    )
+    cases.append(
+        WorkflowCase(
+            "plan-overflow",
+            "",
+            (),
+            ("SUCCEEDED",),
+            "full",
+            "testproject.apps.cluster_tasks.tasks.plan_overflow_workflow_qualification",
+        )
+    )
+    cases.append(
+        WorkflowCase(
+            "admin-display-limit",
+            "",
+            (),
+            ("SUCCEEDED",),
+            "full",
+            "testproject.apps.cluster_tasks.tasks.admin_display_limit_qualification",
+        )
+    )
+    for outcome in ("success", "exhausted", "unlimited"):
+        cases.append(
+            WorkflowCase(
+                f"retry-{outcome}",
+                "",
+                (),
+                # Leaf retries are nested inside the manager's three durable
+                # attempts. Inspect every exhausted attempt's retained graph.
+                ("FAILED", "FAILED", "FAILED") if outcome == "exhausted" else ("SUCCEEDED",),
+                "full",
+                f"testproject.apps.cluster_tasks.tasks.retry_{outcome}_qualification",
+            )
+        )
+    return tuple(cases)
+
 
 WORKFLOW_SHOWCASE_NODE_LAYERS = (
     frozenset({"0.0"}),

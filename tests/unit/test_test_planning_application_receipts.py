@@ -52,6 +52,83 @@ def test_retained_payloads_are_accepted(name):
     validate_application_payload(name, receipt(name))
 
 
+def admin_assets():
+    return {
+        name: {"bytes": size, "sha256": digest * 64}
+        for name, size, digest in (
+            ("task_live.js", 5896, "a"),
+            ("workflow_diagnostics.js", 58505, "b"),
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "missing", "extra", "empty", "oversized", "boolean", "digest", "future"]
+)
+def test_additive_asset_receipts_are_typed_without_upgrading_historical_evidence(failure):
+    value = receipt("before-workflows")
+    target = value["observations"]["full-success"][0]["browser_contract"]
+    assert "admin_assets" not in target
+    target["admin_assets"] = admin_assets()
+    if failure == "missing":
+        del target["admin_assets"]["task_live.js"]
+    elif failure == "extra":
+        target["admin_assets"]["other.js"] = {"bytes": 1, "sha256": "c" * 64}
+    elif failure:
+        key, replacement = {
+            "empty": ("bytes", 0),
+            "oversized": ("bytes", 65537),
+            "boolean": ("bytes", True),
+            "digest": ("sha256", "invalid"),
+            "future": ("unreviewed", True),
+        }[failure]
+        target["admin_assets"]["task_live.js"][key] = replacement
+    original = json.dumps(value, sort_keys=True)
+    if failure:
+        with pytest.raises(NormalizationError):
+            validate_application_payload("before-workflows", value)
+    else:
+        validate_application_payload("before-workflows", value)
+        assert len(json.dumps(value).encode()) < 32 * 1024
+    assert json.dumps(value, sort_keys=True) == original
+    historical = receipt("before-workflows")
+    validate_application_payload("before-workflows", historical)
+    assert "admin_assets" not in historical["observations"]["full-success"][0]["browser_contract"]
+
+
+@pytest.mark.parametrize(
+    "name,expected_count,limit",
+    [
+        ("before-first", 2, 16384),
+        ("before-workflows", 12, 32768),
+        ("before-showcase", 1, 8192),
+    ],
+)
+def test_all_new_browser_identities_fit_existing_receipt_budgets(name, expected_count, limit):
+    from qualification.application.run_chainsaw import parse_receipts
+
+    value = receipt(name)
+    count = 0
+
+    def augment(item):
+        nonlocal count
+        if isinstance(item, dict):
+            if "browser_contract" in item:
+                item["browser_contract"]["admin_assets"] = admin_assets()
+                count += 1
+            for child in item.values():
+                augment(child)
+        elif isinstance(item, list):
+            for child in item:
+                augment(child)
+
+    augment(value)
+    raw = json.dumps(value, sort_keys=True).encode()
+    assert count == expected_count
+    assert len(raw) <= limit
+    assert parse_receipts(raw, (name,)) == {name: raw}
+
+
 def test_retained_generations_are_linked():
     validate_application_generations(
         receipt("before-nodes"), receipt("after-nodes"), receipt("setup"), **generation_payloads()
