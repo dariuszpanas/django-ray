@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timestamp; trusted signal handlers can still load deferred fields. Current
   execution reads and the remaining worker scan byte bounds are unchanged (#718).
 
+- Return unauthorized responses for non-ASCII sample API bearer credentials,
+  including malformed configured values, while preserving ASCII token comparison
+  and operator, demo, and metrics credential separation (#725).
+
 - Report payload inventory as incomplete when its reverse registry scan exceeds
   the object limit, preserving partial counts and exit status 2 (#722).
 

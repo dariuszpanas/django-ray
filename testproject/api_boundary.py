@@ -24,6 +24,18 @@ def demo_enabled() -> bool:
     )
 
 
+def _matches_bearer_token(token: str, expected: object) -> bool:
+    """Reject unsupported text before the ASCII constant-time comparison."""
+    return (
+        isinstance(token, str)
+        and isinstance(expected, str)
+        and bool(expected)
+        and token.isascii()
+        and expected.isascii()
+        and secrets.compare_digest(token, expected)
+    )
+
+
 class ApiTokenAuth(HttpBearer):
     def authenticate(self, request: Any, token: str) -> str | None:
         if not getattr(settings, "DJANGO_API_ENABLED", True):
@@ -34,7 +46,7 @@ class ApiTokenAuth(HttpBearer):
         else:
             expected = getattr(settings, "DJANGO_API_TOKEN", None)
             identity = "django-ray-testproject-operator"
-        if expected and secrets.compare_digest(token, expected):
+        if _matches_bearer_token(token, expected):
             if request.method == "POST":
                 _bound_request(request)
             return identity
@@ -44,7 +56,7 @@ class ApiTokenAuth(HttpBearer):
 class MetricsTokenAuth(HttpBearer):
     def authenticate(self, request: Any, token: str) -> str | None:
         expected = getattr(settings, "DJANGO_METRICS_TOKEN", None)
-        if expected and secrets.compare_digest(token, expected):
+        if _matches_bearer_token(token, expected):
             return "django-ray-testproject-metrics"
         return ApiTokenAuth().authenticate(request, token)
 
