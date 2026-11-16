@@ -152,11 +152,25 @@ def _assert_metadata_only(value: object) -> None:
 
 
 def _worker_log_tail(path: Path, *, maximum_chars: int = 8_000) -> str:
+    if type(maximum_chars) is not int or maximum_chars < 0:
+        raise ValueError("maximum_chars must be a non-negative integer")
+    if maximum_chars == 0:
+        return ""
+    # UTF-8 uses at most four bytes per character. Three extra bytes keep
+    # a partial leading codepoint outside the retained character suffix.
+    byte_budget = 4 * maximum_chars + 3
     try:
-        contents = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as stream:
+            end = stream.seek(0, os.SEEK_END)
+            start = max(0, end - byte_budget)
+            stream.seek(start)
+            # Read only the observed EOF window, even if the log grows.
+            contents = stream.read(end - start)
     except OSError:
         return "<worker log unavailable>"
-    return contents[-maximum_chars:]
+    text = contents.decode("utf-8", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text[-maximum_chars:]
 
 
 def _wait_for_recovered_execution(

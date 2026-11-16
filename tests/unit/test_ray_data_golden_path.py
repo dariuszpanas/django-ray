@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import os
 import sqlite3
@@ -231,6 +232,157 @@ def test_distributed_recipe_module_has_no_django_imports() -> None:
 
     assert "django" not in roots
     assert "django_ray" not in roots
+
+
+@pytest.fixture
+def worker_log_tail() -> Any:
+    """Execute only the pure helper; never import the native probe module."""
+    source = (PROJECT_ROOT / "scripts/ray_data_golden_path_probe.py").read_text(encoding="utf-8")
+    function = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "_worker_log_tail"
+    )
+    namespace: dict[str, Any] = {"Path": Path, "os": os}
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), "<worker-log-tail>", "exec"),
+        namespace,
+    )
+    return namespace["_worker_log_tail"]
+
+
+class _ObservedTailStream:
+    def __init__(self, owner: _ObservedTailLog) -> None:
+        self.owner = owner
+        self.stream = io.BytesIO(owner.data)
+
+    def __enter__(self) -> _ObservedTailStream:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.stream.close()
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        position = self.stream.seek(offset, whence)
+        if whence == os.SEEK_END and self.owner.growth:
+            self.stream.write(self.owner.growth)
+            self.stream.seek(position)
+        return position
+
+    def read(self, size: int = -1) -> bytes:
+        self.owner.reads.append(size)
+        return self.stream.read(size)
+
+
+class _ObservedTailLog:
+    """Observe read sizes; legacy read_text records its unbounded read."""
+
+    def __init__(self, data: bytes, *, growth: bytes = b"") -> None:
+        self.data = data
+        self.growth = growth
+        self.reads: list[int] = []
+        self.opened: list[str] = []
+
+    def read_text(self, *, encoding: str, errors: str) -> str:
+        self.reads.append(-1)
+        text = (self.data + self.growth).decode(encoding, errors)
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def open(self, mode: str) -> _ObservedTailStream:
+        self.opened.append(mode)
+        assert mode == "rb"
+        return _ObservedTailStream(self)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"A" * 65_536,
+        ("\U0001f680" * 9_000).encode(),
+        b"\r\n" * 20_000,
+        b"\r" * 40_000,
+    ],
+)
+def test_worker_log_tail_bounds_default_read_before_decoding(
+    worker_log_tail: Any, data: bytes
+) -> None:
+    path = _ObservedTailLog(data)
+    expected = data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")[-8000:]
+    assert worker_log_tail(path) == expected
+    assert path.reads == [32_003]
+    assert path.opened == ["rb"]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"short",
+        b"A\r\nB\rC\nD",
+        ("\u00e9\U0001f680" * 12).encode(),
+        (b"prefix" + "\U0001f680".encode() * 16),
+        b"\xffA\xf0\x9fB\xc3(\r\nlast\r",
+        b"before-\xf0\x9f\x9a",
+    ],
+)
+@pytest.mark.parametrize("maximum_chars", [1, 2, 5, 8000])
+def test_worker_log_tail_preserves_full_text_suffix(
+    tmp_path: Path, worker_log_tail: Any, data: bytes, maximum_chars: int
+) -> None:
+    path = tmp_path / "owned-log.txt"
+    path.write_bytes(data)
+    expected = path.read_text(encoding="utf-8", errors="replace")[-maximum_chars:]
+    assert worker_log_tail(path, maximum_chars=maximum_chars) == expected
+
+
+@pytest.mark.parametrize("maximum_chars", [1, 7, 10**30])
+def test_worker_log_tail_custom_cap_has_finite_read_budget(
+    worker_log_tail: Any, maximum_chars: int
+) -> None:
+    data = b"prefix-data-TAIL123"
+    path = _ObservedTailLog(data)
+    assert worker_log_tail(path, maximum_chars=maximum_chars) == data.decode()[-maximum_chars:]
+    assert path.reads == [min(len(data), 4 * maximum_chars + 3)]
+
+
+def test_worker_log_tail_growth_cannot_extend_snapshot_read(worker_log_tail: Any) -> None:
+    original = b"A" * 128 + b"TAIL123"
+    path = _ObservedTailLog(original, growth=b"G" * 1024)
+    assert worker_log_tail(path, maximum_chars=7) == "TAIL123"
+    assert path.reads == [31]
+    assert path.opened == ["rb"]
+
+
+def test_worker_log_tail_zero_does_not_open_or_read(worker_log_tail: Any) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("zero must perform no I/O")
+
+    path = SimpleNamespace(open=forbidden, read_text=forbidden)
+    assert worker_log_tail(path, maximum_chars=0) == ""
+
+
+@pytest.mark.parametrize("maximum_chars", [-1, -8000, True, False, 1.5, "8", None, [2]])
+def test_worker_log_tail_invalid_cap_is_fixed_and_precedes_io(
+    worker_log_tail: Any, maximum_chars: Any
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("invalid cap must perform no I/O")
+
+    path = SimpleNamespace(open=forbidden, read_text=forbidden)
+    with pytest.raises(ValueError, match="^maximum_chars must be a non-negative integer$"):
+        worker_log_tail(path, maximum_chars=maximum_chars)
+
+
+def test_worker_log_tail_keeps_missing_file_fallback(tmp_path: Path, worker_log_tail: Any) -> None:
+    assert worker_log_tail(tmp_path / "missing.log") == "<worker log unavailable>"
+
+
+def test_worker_log_tail_keeps_unreadable_file_fallback(worker_log_tail: Any) -> None:
+    def refused(*_args: object, **_kwargs: object) -> Any:
+        raise PermissionError("synthetic unreadable log")
+
+    path = SimpleNamespace(open=refused, read_text=refused)
+    assert worker_log_tail(path) == "<worker log unavailable>"
 
 
 class _RecoveryClock:
