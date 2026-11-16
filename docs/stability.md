@@ -96,10 +96,18 @@ The following behavior is intended to become stable at 1.0:
 - additive database migrations and compatible readers for durable formats supported by
   the current release.
 
-The checked inventory records stable Python import locations and parameter names. A
-compatible release may add optional keyword parameters, result fields, enum values, or
-new APIs when existing callers continue to work and documented exhaustive consumers
-have an explicit forward-compatibility rule.
+The checked inventory records candidate Python import locations and each function
+parameter's name, calling kind and whether it has a default. Its internal inventory
+schema is version 2; the candidate API contract remains version 1. The check detects
+an existing optional parameter becoming required or an existing keyword parameter
+becoming positional-only. It does not freeze default values, annotations or class
+constructor signatures, and it does not accept the final 1.0 API or support policy.
+
+A compatible release may add optional keyword parameters, result fields, enum values,
+or new APIs when existing callers continue to work and documented exhaustive consumers
+have an explicit forward-compatibility rule. The candidate function inventory still
+requires a deliberate reviewed update for an optional parameter addition; the check
+does not automatically accept it or decide release compatibility.
 
 ## Experimental surface
 
