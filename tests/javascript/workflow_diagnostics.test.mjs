@@ -427,6 +427,7 @@ function loadDiagnostics({
   dataset = {},
   archivedAttempts = [],
   currentAttemptState = "RUNNING",
+  controller = AbortController,
 } = {}) {
   const details = new FakeElement("details");
   details.dataset = {
@@ -473,6 +474,8 @@ function loadDiagnostics({
   const fetchCalls = [];
   const queuedResponses = [...fetchResponses];
   const copied = [];
+  const timers = new Map();
+  let nextTimer = 0;
   const document = {
     createElement(tagName) {
       return new FakeElement(tagName);
@@ -485,6 +488,16 @@ function loadDiagnostics({
     },
   };
   const window = {
+    AbortController: controller,
+    setTimeout(callback, delay) {
+      assert.equal(delay, 15000, "diagnostics only schedule owned request deadlines");
+      const id = ++nextTimer;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
     ResizeObserver: class {
       constructor(callback) {
         this.callback = callback;
@@ -501,7 +514,7 @@ function loadDiagnostics({
       if (next instanceof Error) {
         throw next;
       }
-      return next;
+      return typeof next === "function" ? next(options) : next;
     },
     navigator: {
       clipboard: {
@@ -538,6 +551,14 @@ function loadDiagnostics({
     currentGraphMount,
     queuedResponses,
     status,
+    timers,
+    async expire(id = [...timers.keys()][0]) {
+      assert.ok(timers.has(id), "expected an active request deadline");
+      const timer = timers.get(id);
+      timers.delete(id);
+      timer.callback();
+      await settle();
+    },
     async toggle(open) {
       details.open = open;
       await details.dispatch("toggle");
@@ -679,6 +700,65 @@ function graphLayerNodeIds(app) {
   );
 }
 
+function pendingRead() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function openManualLoader(kind, responses, options = {}) {
+  const app = loadDiagnostics({
+    ...options,
+    fetchResponses: kind === "current"
+      ? [response(200, validPayload()), ...responses]
+      : responses,
+    archivedAttempts: kind === "archived" ? [1] : [],
+  });
+  let graph = null;
+  if (kind === "outer") {
+    await app.toggle(true);
+  } else if (kind === "current") {
+    await app.toggle(true);
+    graph = await app.toggleGraph(true);
+  } else {
+    graph = await app.toggleArchivedGraph(0, true);
+  }
+  return {
+    app,
+    graph,
+    status: kind === "outer" ? app.status : kind === "current"
+      ? graphStatus(app) : graph.querySelector("[data-workflow-graph-status]"),
+    content: kind === "outer" ? app.content : kind === "current"
+      ? graphContent(app) : graph.querySelector("[data-workflow-graph-content]"),
+    async reopen() {
+      if (kind === "outer") {
+        await app.toggle(false);
+        await app.toggle(true);
+      } else if (kind === "current") {
+        await app.toggleGraph(false);
+        await app.toggleGraph(true);
+      } else {
+        await app.toggleArchivedGraph(0, false);
+        await app.toggleArchivedGraph(0, true);
+      }
+    },
+  };
+}
+
+async function stalledManualLoader(kind, stage, options = {}) {
+  const stalled = pendingRead();
+  const initial = response(200, {});
+  initial.json = () => stalled.promise;
+  const loader = await openManualLoader(
+    kind, [stage === "headers" ? stalled.promise : initial], options,
+  );
+  return { ...loader, stalled };
+}
+
 test("the closed disclosure lazily renders safe, capability-gated actions", async () => {
   const maliciousDefinition = "<img src=x onerror=steal-secret()>";
   const app = loadDiagnostics({
@@ -716,6 +796,7 @@ test("the closed disclosure lazily renders safe, capability-gated actions", asyn
       credentials: "same-origin",
       cache: "no-store",
       headers: { Accept: "application/json" },
+      signal: {},
     },
   );
   assert.equal(app.content.hidden, false);
@@ -1559,6 +1640,7 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
       credentials: "same-origin",
       cache: "no-store",
       headers: { Accept: "application/json" },
+      signal: {},
     },
   );
   assert.equal(graphContent(app).hidden, false);
@@ -2738,3 +2820,257 @@ test("graph styles remain usable without the testproject Unfold theme", () => {
     ) >= 4.5,
   );
 });
+
+for (const kind of ["outer", "current", "archived"]) {
+  for (const stage of ["headers", "body"]) {
+    test(`${kind} stalled ${stage} expires and preserves its manual retry policy`, async () => {
+      const loader = await stalledManualLoader(kind, stage);
+      const { app, status, content } = loader;
+      const initialCount = app.fetchCalls.length;
+      const originalSignal = app.fetchCalls.at(-1).options.signal;
+      assert.equal(status.attributes.get("aria-busy"), "true");
+      assert.equal(app.timers.size, 1);
+      await loader.reopen();
+      assert.equal(app.fetchCalls.length, initialCount);
+
+      await app.expire();
+      assert.equal(originalSignal.aborted, true);
+      assert.equal(status.attributes.get("aria-busy"), "false");
+      assert.equal(status.dataset.state, "error");
+      assert.equal(content.hidden, true);
+      assert.equal(app.timers.size, 0, "manual diagnostics must never auto-poll");
+      assert.equal(app.fetchCalls.length, initialCount);
+      if (kind !== "outer") {
+        assert.equal(loader.graph.dataset.hydrationState, "error");
+        assert.match(status.textContent, /bounded JSON views/);
+      }
+      app.queuedResponses.push(response(
+        200, kind === "outer" ? validPayload() : validGraphPayload(),
+      ));
+      await loader.reopen();
+      if (kind === "archived") {
+        assert.equal(app.fetchCalls.length, initialCount);
+        assert.match(status.textContent, /Reload this page/);
+        assert.equal(status.attributes.get("aria-busy"), "false");
+      } else {
+        assert.equal(app.fetchCalls.length, initialCount + 1);
+        assert.equal(status.attributes.get("aria-busy"), "false");
+        assert.equal(status.dataset.state, "ready");
+        assert.equal(content.hidden, false);
+        assert.notEqual(app.fetchCalls.at(-1).options.signal, originalSignal);
+        assert.equal(app.fetchCalls.at(-1).options.signal.aborted, false);
+      }
+      assert.equal(app.timers.size, 0);
+      const cachedCount = app.fetchCalls.length;
+      await loader.reopen();
+      assert.equal(app.fetchCalls.length, cachedCount);
+    });
+  }
+
+  for (const [stage, lateKind] of [
+    ["headers", "authentication"], ["headers", "terminal data"],
+    ["headers", "rejection"], ["body", "terminal data"], ["body", "rejection"],
+  ]) {
+    test(`${kind} late ${stage} ${lateKind} cannot change replacement or cached failure`, async () => {
+      const loader = await stalledManualLoader(kind, stage);
+      const { app, status, content, stalled } = loader;
+      const initialCount = app.fetchCalls.length;
+      await app.expire();
+      const replacement = pendingRead();
+      app.queuedResponses.push(replacement.promise);
+      await loader.reopen();
+      assert.equal(app.fetchCalls.length, initialCount + (kind === "archived" ? 0 : 1));
+      const beforeLate = {
+        text: status.textContent,
+        state: status.dataset.state,
+        busy: status.attributes.get("aria-busy"),
+        hidden: content.hidden,
+        timers: [...app.timers.keys()],
+      };
+      if (lateKind === "rejection") {
+        stalled.reject(new Error("late private network or JSON error"));
+      } else {
+        const payload = kind === "outer"
+          ? validPayload({ plan: { definition_name: "late-private-definition" } })
+          : degradedGraphPayload("UNAVAILABLE", "late-private-graph-message");
+        stalled.resolve(stage === "body" ? payload : lateKind === "authentication"
+          ? response(401, {}) : response(200, payload));
+      }
+      await settle();
+      assert.deepEqual({
+        text: status.textContent,
+        state: status.dataset.state,
+        busy: status.attributes.get("aria-busy"),
+        hidden: content.hidden,
+        timers: [...app.timers.keys()],
+      }, beforeLate);
+      assert.equal(app.details.textContent.includes("late-private"), false);
+
+      if (kind !== "archived") {
+        assert.equal(app.fetchCalls.at(-1).options.signal.aborted, false);
+        replacement.resolve(response(
+          200, kind === "outer" ? validPayload() : validGraphPayload(),
+        ));
+        await settle();
+        assert.equal(status.dataset.state, "ready");
+        assert.equal(content.hidden, false);
+      }
+      assert.equal(app.timers.size, 0);
+      const cachedCount = app.fetchCalls.length;
+      await loader.reopen();
+      assert.equal(app.fetchCalls.length, cachedCount);
+    });
+  }
+}
+
+test("a graph retains one deadline across headers and a pending JSON body", async () => {
+  const headers = pendingRead();
+  const body = pendingRead();
+  const loader = await openManualLoader("current", [headers.promise]);
+  const deadline = [...loader.app.timers.keys()][0];
+  const initial = response(200, {});
+  initial.json = () => body.promise;
+  headers.resolve(initial);
+  await settle();
+  assert.deepEqual([...loader.app.timers.keys()], [deadline]);
+  await loader.app.expire(deadline);
+  assert.equal(loader.status.attributes.get("aria-busy"), "false");
+  assert.equal(loader.app.timers.size, 0);
+});
+
+test("independent archived reads own separate controllers and deadline timers", async () => {
+  const first = pendingRead();
+  const second = pendingRead();
+  const app = loadDiagnostics({
+    archivedAttempts: [1, 2], fetchResponses: [first.promise, second.promise],
+  });
+  const firstGraph = await app.toggleArchivedGraph(0, true);
+  const firstDeadline = [...app.timers.keys()][0];
+  const secondGraph = await app.toggleArchivedGraph(1, true);
+  const secondDeadline = [...app.timers.keys()].find(id => id !== firstDeadline);
+  const [firstSignal, secondSignal] = app.fetchCalls.map(call => call.options.signal);
+  assert.notEqual(firstSignal, secondSignal);
+  assert.equal(app.timers.size, 2);
+  await app.expire(firstDeadline);
+  assert.equal(firstSignal.aborted, true);
+  assert.equal(secondSignal.aborted, false);
+  assert.equal(firstGraph.dataset.hydrationState, "error");
+  assert.equal(secondGraph.dataset.hydrationState, "loading");
+  assert.deepEqual([...app.timers.keys()], [secondDeadline]);
+  second.resolve(response(200, validGraphPayload()));
+  await settle();
+  assert.equal(secondGraph.dataset.hydrationState, "ready");
+  assert.equal(app.timers.size, 0);
+  first.resolve(response(401, {}));
+  await settle();
+  assert.equal(firstGraph.dataset.hydrationState, "error");
+  assert.equal(secondGraph.dataset.hydrationState, "ready");
+  await app.toggleArchivedGraph(0, false);
+  await app.toggleArchivedGraph(0, true);
+  assert.equal(app.fetchCalls.length, 2);
+});
+
+test("outer non-OK JSON is refused without reading its pending body", async () => {
+  const initial = response(503, {});
+  initial.json = () => { throw new Error("must not read outer error JSON"); };
+  const loader = await openManualLoader("outer", [initial]);
+  assert.equal(loader.app.timers.size, 0);
+  assert.equal(loader.status.attributes.get("aria-busy"), "false");
+  assert.equal(loader.status.textContent, "Workflow diagnostics are temporarily unavailable.");
+  loader.app.queuedResponses.push(response(200, validPayload()));
+  await loader.reopen();
+  assert.equal(loader.app.fetchCalls.length, 2);
+  assert.equal(loader.content.hidden, false);
+});
+
+for (const kind of ["outer", "current", "archived"]) {
+  for (const initial of [
+    response(401, {}), response(403, {}), response(404, {}),
+    response(200, {}, { contentType: "text/html" }),
+  ]) {
+    test(`${kind} refusal ${initial.status}/${initial.headers.contentType} clears its deadline and stays cached`, async () => {
+      initial.json = () => { throw new Error("must not consume a refused body"); };
+      const loader = await openManualLoader(kind, [initial]);
+      const count = loader.app.fetchCalls.length;
+      assert.equal(loader.app.timers.size, 0);
+      assert.equal(loader.status.attributes.get("aria-busy"), "false");
+      assert.equal(loader.content.hidden, true);
+      await loader.reopen();
+      assert.equal(loader.app.fetchCalls.length, count);
+    });
+  }
+}
+
+for (const kind of ["outer", "current", "archived"]) {
+  for (const stage of ["headers", "body"]) {
+    test(`${kind} ${stage} abort rejection is handled without automatic retry`, async () => {
+      const result = ({ signal }) => {
+        const aborted = new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("private abort error")));
+        });
+        if (stage === "headers") return aborted;
+        const initial = response(200, {});
+        initial.json = () => aborted;
+        return initial;
+      };
+      const loader = await openManualLoader(kind, [result]);
+      const count = loader.app.fetchCalls.length;
+      await loader.app.expire();
+      assert.equal(loader.status.attributes.get("aria-busy"), "false");
+      assert.equal(loader.app.timers.size, 0);
+      assert.equal(loader.app.fetchCalls.length, count);
+      assert.equal(loader.app.details.textContent.includes("private abort error"), false);
+    });
+  }
+}
+
+for (const kind of ["outer", "archived"]) {
+  for (const [label, controller] of [
+    ["missing", null],
+    ["throwing", class { constructor() { throw new Error("private controller error"); } }],
+  ]) {
+    test(`${kind} ${label} controller gives cached browser guidance without fetching`, async () => {
+      const loader = await openManualLoader(kind, [], { controller });
+      assert.equal(loader.app.fetchCalls.length, 0);
+      assert.equal(loader.app.timers.size, 0);
+      assert.equal(loader.status.attributes.get("aria-busy"), "false");
+      assert.match(loader.status.textContent, /browser; reload the page/);
+      assert.equal(loader.app.details.textContent.includes("private controller error"), false);
+      await loader.reopen();
+      assert.equal(loader.app.fetchCalls.length, 0);
+    });
+  }
+}
+
+test("current graph controller failure stays cached after a successful parent read", async () => {
+  let created = 0;
+  class OnlyParentController {
+    constructor() {
+      if (created++ === 0) return new AbortController();
+      throw new Error("private constructor failure");
+    }
+  }
+  const loader = await openManualLoader("current", [], { controller: OnlyParentController });
+  assert.equal(loader.app.fetchCalls.length, 1);
+  assert.equal(loader.app.timers.size, 0);
+  assert.equal(loader.status.attributes.get("aria-busy"), "false");
+  assert.match(loader.status.textContent, /browser; reload the page/);
+  await loader.reopen();
+  assert.equal(loader.app.fetchCalls.length, 1);
+  assert.equal(created, 2);
+});
+
+for (const kind of ["outer", "current", "archived"]) {
+  test(`${kind} a throwing abort cannot escape deadline recovery`, async () => {
+    class AbortThrows extends AbortController {
+      abort() { throw new Error("private cancellation failure"); }
+    }
+    const loader = await stalledManualLoader(kind, "headers", { controller: AbortThrows });
+    const count = loader.app.fetchCalls.length;
+    await assert.doesNotReject(loader.app.expire());
+    assert.equal(loader.status.attributes.get("aria-busy"), "false");
+    assert.equal(loader.app.timers.size, 0);
+    assert.equal(loader.app.fetchCalls.length, count);
+    assert.equal(loader.app.details.textContent.includes("private cancellation failure"), false);
+  });
+}
