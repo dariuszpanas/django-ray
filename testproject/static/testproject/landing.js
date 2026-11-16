@@ -114,10 +114,22 @@
     output.textContent = error instanceof Error ? error.message : "The request failed.";
   }
 
+  function showCurrentActionError(error, generation, token) {
+    if (
+      credentialIsCurrent(generation, token) ||
+      (error instanceof DashboardCredentialError && error.clearedCurrentCredential)
+    ) {
+      showActionError(error);
+    }
+  }
+
   async function refreshStats() {
+    const refreshGeneration = credentialGeneration;
+    const refreshToken = apiToken;
     const response = await authenticatedRequest("/api/executions/stats");
     if (!response.ok) throw new Error(`Stats request failed: ${response.status}`);
     const stats = await response.json();
+    if (!credentialIsCurrent(refreshGeneration, refreshToken)) return;
     for (const [key, element] of Object.entries(statMap)) {
       element.textContent = stats[key] ?? 0;
     }
@@ -173,9 +185,14 @@
       const task = await response.json();
       if (!credentialIsCurrent(actionGeneration, actionToken)) return;
       output.textContent = `Task ${task.task_id} enqueued with status ${task.status}.`;
-      window.setTimeout(() => refreshStats().catch(showActionError), 700);
+      window.setTimeout(() => {
+        if (!credentialIsCurrent(actionGeneration, actionToken)) return;
+        return refreshStats().catch((error) => {
+          showCurrentActionError(error, actionGeneration, actionToken);
+        });
+      }, 700);
     } catch (error) {
-      showActionError(error);
+      showCurrentActionError(error, actionGeneration, actionToken);
     } finally {
       trigger.disabled = false;
     }
@@ -198,7 +215,7 @@
       protectedResponse.scrollIntoView({ behavior: "smooth", block: "nearest" });
       output.textContent = `${title} loaded through the authenticated API.`;
     } catch (error) {
-      showActionError(error);
+      showCurrentActionError(error, actionGeneration, actionToken);
     } finally {
       button.disabled = false;
     }
