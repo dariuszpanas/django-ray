@@ -1122,9 +1122,12 @@ class _RayExecutor(_Executor):
                 try:
                     from django_ray.workflow.progress.protocol import decode_workflow_progress_event
 
+                    identity = self.workflow_run_identity
+                    if identity is None:
+                        raise ValueError("Workflow progress run identity is unavailable")
                     settled = decode_workflow_progress_event(
                         marker,
-                        expected_run_identity=self.workflow_run_identity.as_dict(),
+                        expected_run_identity=identity.as_dict(),
                         limits=self.workflow_progress_limits,
                     )
                     if (

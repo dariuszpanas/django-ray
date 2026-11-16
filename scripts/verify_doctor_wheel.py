@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import BinaryIO, cast
 
 
 def _run(command: list[str], *, directory: Path, environment: dict[str, str]) -> tuple[int, bytes]:
@@ -35,8 +36,9 @@ def _run(command: list[str], *, directory: Path, environment: dict[str, str]) ->
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=2)
-        process.stdout.close()
-        process.stderr.close()
+        # Both binary streams are owned PIPEs from the Popen above.
+        cast(BinaryIO, process.stdout).close()
+        cast(BinaryIO, process.stderr).close()
 
 
 def verify() -> None:

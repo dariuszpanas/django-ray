@@ -20,7 +20,7 @@ from enum import StrEnum
 from itertools import islice
 from secrets import token_hex
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 from weakref import ReferenceType, ref
 
@@ -4849,7 +4849,7 @@ def stamp_workflow_progress_detail_expiry_locked(
     if run_storage is None:
         return False
     if expiry is None:
-        finished_at = execution.finished_at
+        finished_at = cast(datetime | None, execution.finished_at)
         if finished_at is None:
             return False
         if finished_at.tzinfo is None:

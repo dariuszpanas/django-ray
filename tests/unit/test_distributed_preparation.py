@@ -119,8 +119,13 @@ def test_preparation_tracks_the_window_with_exact_order_and_bindings(
     assert requests == (list(range(count)) if strict else [])
     if strict:
         decoded = [codec.decode_nested_execution_request(call[-10]) for call in sender.calls]
-        assert [request.boundary_identity.item_index for request in decoded] == list(range(count))
-        assert len({request.boundary_identity.operation_id for request in decoded}) == 1
+        boundaries: list[codec.NestedDistributedBoundaryIdentity] = []
+        for request in decoded:
+            boundary = request.boundary_identity
+            assert isinstance(boundary, codec.NestedDistributedBoundaryIdentity)
+            boundaries.append(boundary)
+        assert [boundary.item_index for boundary in boundaries] == list(range(count))
+        assert len({boundary.operation_id for boundary in boundaries}) == 1
         assert all(request.outer_identity.task_id == "task-41" for request in decoded)
         for request, call in zip(decoded, sender.calls, strict=True):
             assert request.callable_binding == original_digest(call[0])

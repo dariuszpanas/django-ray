@@ -17,6 +17,7 @@ PAYLOAD = "native-upgrade:" + "x" * 2048
 def snapshot(fields=None, expected=None):
     from django.apps import apps
     from django.core.serializers.json import DjangoJSONEncoder
+    from django.db.models import Model
 
     from django_ray.models import RayTaskExecution, TaskAttempt
 
@@ -26,7 +27,7 @@ def snapshot(fields=None, expected=None):
                 return {"base64": base64.b64encode(o).decode()}
             return super().default(o)
 
-    models = [RayTaskExecution, TaskAttempt]
+    models: list[type[Model]] = [RayTaskExecution, TaskAttempt]
     models.extend(
         model
         for model in apps.get_app_config("django_ray").get_models()

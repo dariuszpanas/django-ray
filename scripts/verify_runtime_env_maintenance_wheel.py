@@ -14,6 +14,7 @@ import sys
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import BinaryIO, cast
 
 MARKER = "installed-maintenance-private-value"
 TASK_PREFIX = "installed-maintenance-private-task"
@@ -228,8 +229,9 @@ def _run(directory: Path, phase: str, *arguments: str) -> tuple[int, bytes]:
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=2)
-        process.stdout.close()
-        process.stderr.close()
+        # Both binary streams are owned PIPEs from the Popen above.
+        cast(BinaryIO, process.stdout).close()
+        cast(BinaryIO, process.stderr).close()
 
 
 def _command(directory: Path, mode: str, *arguments: str) -> dict:

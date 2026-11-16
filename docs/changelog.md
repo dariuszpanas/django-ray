@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require ty 0.0.102 for development and preserve optional-member checks while updating the
+  Python dependency group. Narrow prepared state, result variants, ORM fields
+  and test fixtures; retain unconfirmed cleanup when an expected doctor pipe is
+  missing. The newer S3 SDK defaults to standard retries with three total
+  attempts; operator retry settings remain authoritative, and storage
+  preconditions and integrity checks are unchanged (#735).
+
 - Reject nonrepresentable lifecycle clock and deadline integers through the
   existing typed rejection and bounded validation errors, preserving immutable
   state and valid integer/float timestamps in the Ray-free model (#733).

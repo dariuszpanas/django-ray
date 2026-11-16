@@ -40,9 +40,10 @@ def wrapped(cause):
 def test_cleanup_confirms_only_completed_result_or_explicit_terminal_task_error(error, confirmed):
     owned = remote.Remote()
     owned.refs = [object()]
-    owned.ray = SimpleNamespace(
+    fake_ray = SimpleNamespace(
         cancel=Mock(), get=Mock(side_effect=error), shutdown=Mock(), exceptions=exceptions
     )
+    owned.ray = fake_ray
     closed = Mock()
     owned.stack.callback(closed)
     if confirmed:
@@ -53,25 +54,28 @@ def test_cleanup_confirms_only_completed_result_or_explicit_terminal_task_error(
     else:
         with pytest.raises(ValueError, match="unconfirmed"):
             owned.cleanup(remote.time.monotonic() + 5)
-    owned.ray.cancel.assert_called_once_with(owned.refs[0], force=True)
+    assert owned.ray is fake_ray
+    fake_ray.cancel.assert_called_once_with(owned.refs[0], force=True)
     if isinstance(error, TimeoutError):
-        owned.ray.shutdown.assert_not_called()
+        fake_ray.shutdown.assert_not_called()
         closed.assert_not_called()
     else:
-        owned.ray.shutdown.assert_called_once_with()
+        fake_ray.shutdown.assert_called_once_with()
         closed.assert_called_once_with()
 
 
 def test_ambiguous_submission_cannot_be_cleared_by_later_shutdown():
     owned = remote.Remote()
-    owned.ray = SimpleNamespace(shutdown=Mock(), exceptions=exceptions)
+    fake_ray = SimpleNamespace(shutdown=Mock(), exceptions=exceptions)
+    owned.ray = fake_ray
     function = SimpleNamespace(remote=Mock(side_effect=OSError("lost submission")))
     with pytest.raises(OSError):
         owned.get(function, (), {}, remote.time.monotonic() + 5)
     assert owned.uncertain and not owned.refs
     with pytest.raises(ValueError, match="unconfirmed"):
         owned.cleanup(remote.time.monotonic() + 5)
-    owned.ray.shutdown.assert_called_once_with()
+    assert owned.ray is fake_ray
+    fake_ray.shutdown.assert_called_once_with()
 
 
 def test_timed_out_get_retains_exact_reference_for_cancellation():
@@ -107,16 +111,19 @@ def test_cleanup_does_not_swallow_owned_alarm_or_begin_more_calls_after_expiry(m
         clock[0] = 7.0
         raise TimeoutError("owned alarm")
 
-    owned.ray = SimpleNamespace(cancel=Mock(side_effect=interrupted), get=Mock(), shutdown=Mock())
+    fake_ray = SimpleNamespace(cancel=Mock(side_effect=interrupted), get=Mock(), shutdown=Mock())
+    owned.ray = fake_ray
     monkeypatch.setattr(remote, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     with pytest.raises(TimeoutError):
         owned.cleanup(7)
-    assert owned.ray.cancel.call_count == 1
-    owned.ray.get.assert_not_called()
-    owned.ray.shutdown.assert_not_called()
+    assert owned.ray is fake_ray
+    assert fake_ray.cancel.call_count == 1
+    fake_ray.get.assert_not_called()
+    fake_ray.shutdown.assert_not_called()
     with pytest.raises(TimeoutError):
         owned.cleanup(7)
-    assert owned.ray.cancel.call_count == 1
+    assert owned.ray is fake_ray
+    assert fake_ray.cancel.call_count == 1
 
 
 def test_shared_mount_control_reads_candidate_module_and_writes_back(tmp_path, monkeypatch):
@@ -253,6 +260,83 @@ def test_owned_get_refuses_expired_work_before_submission(monkeypatch):
     function.remote.assert_not_called()
 
 
+@pytest.mark.parametrize("operation", ["get", "observe"])
+def test_unprepared_remote_refuses_before_submission_or_reference_mutation(monkeypatch, operation):
+    owned = remote.Remote()
+    function = SimpleNamespace(remote=Mock())
+    probe = Mock(side_effect=AssertionError("unprepared observer created remote work"))
+    monkeypatch.setattr(remote, "mount_probe", probe)
+    deadline = remote.time.monotonic() + 5
+
+    with pytest.raises(ValueError, match="^Owned sentinel mount has not been verified$"):
+        if operation == "get":
+            owned.get(function, (), {}, deadline)
+        else:
+            owned.observe(deadline)
+
+    function.remote.assert_not_called()
+    probe.assert_not_called()
+    assert owned.refs == [] and owned.uncertain is False
+
+
+@pytest.mark.parametrize("missing", ["root", "ray", "profile", "plan"])
+def test_reject_requires_complete_prepared_state_before_remote_effects(
+    tmp_path, monkeypatch, missing
+):
+    from django_ray.runner import ray_core
+
+    owned = remote.Remote()
+    register = Mock()
+    definition = Mock(side_effect=AssertionError("unprepared rejection submitted remote work"))
+    monkeypatch.setattr(ray_core, "_get_remote_execute_django_task", definition)
+    owned.root = tmp_path
+    owned.ray = SimpleNamespace(cloudpickle=SimpleNamespace(register_pickle_by_value=register))
+    owned.profile = SimpleNamespace(profile="project", digest="a" * 64)
+    owned.plan = SimpleNamespace(as_transport_dict=Mock())
+    setattr(owned, missing, None)
+
+    with pytest.raises(ValueError, match="^Owned sentinel mount has not been verified$"):
+        owned.reject(Fixture("before", pk=123), remote.time.monotonic() + 5)
+
+    register.assert_not_called()
+    definition.assert_not_called()
+    assert owned.refs == [] and owned.uncertain is False
+    assert not (tmp_path / "invoked").exists()
+
+
+def test_reject_preserves_injected_cloudpickle_capability(tmp_path, monkeypatch):
+    from ray import cloudpickle
+
+    from django_ray.runner import ray_core
+
+    class RegistrationObservedError(Exception):
+        pass
+
+    register = Mock(side_effect=RegistrationObservedError)
+    real_register = Mock(side_effect=AssertionError("real Ray replaced the injected capability"))
+    monkeypatch.setattr(cloudpickle, "register_pickle_by_value", real_register)
+    definition = Mock(side_effect=AssertionError("registration sentinel should stop before submit"))
+    monkeypatch.setattr(ray_core, "_get_remote_execute_django_task", definition)
+    owned = remote.Remote()
+    owned.root = tmp_path
+    owned.ray = SimpleNamespace(
+        cloudpickle=SimpleNamespace(register_pickle_by_value=register),
+        util=SimpleNamespace(
+            client=SimpleNamespace(ray=SimpleNamespace(is_connected=lambda: True))
+        ),
+    )
+    owned.profile = SimpleNamespace(profile="thin", digest="a" * 64)
+    owned.plan = SimpleNamespace(as_transport_dict=lambda: {"profile": "thin", "schema_version": 1})
+
+    with pytest.raises(RegistrationObservedError):
+        owned.reject(Fixture("before", pk=123), remote.time.monotonic() + 5)
+
+    register.assert_called_once()
+    real_register.assert_not_called()
+    definition.assert_not_called()
+    assert owned.refs == [] and owned.uncertain is False
+
+
 def test_prepare_uses_production_profile_and_same_hard_pinned_worker_without_retries(
     tmp_path, monkeypatch, settings
 ):
@@ -298,6 +382,7 @@ def test_prepare_uses_production_profile_and_same_hard_pinned_worker_without_ret
         assert options["scheduling_strategy"].soft is False
         assert options["max_retries"] == 0 and options["retry_exceptions"] is False
         assert options["runtime_env"] == {}
+    assert owned.profile is not None
     assert owned.profile.profile == "project"
     assert (tmp_path / "observed").read_bytes() == control
     initialize.assert_called_once_with(address="ray://ray-head:10001")

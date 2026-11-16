@@ -88,6 +88,15 @@ Dependency:
 - install `boto3` to use this backend.
 - package extra: `pip install "django-ray[s3]"`.
 
+Clients created by django-ray inherit the installed SDK's retry configuration.
+Botocore 1.44.0 and later default to `standard` mode with three total attempts
+for S3, including the initial request. Earlier SDK defaults used `legacy` mode.
+This can change when an outage surfaces as a storage failure. Explicit AWS retry
+settings or a caller-supplied client retain control; django-ray does not force a
+legacy `Config`. These SDK attempts are separate from the three application-level
+write attempts for conditional conflicts and do not bound total operation time.
+See the [AWS retry rollout](https://aws.amazon.com/blogs/developer/updated-default-retry-behavior-for-aws-sdks-and-tools/).
+
 S3 writes use `If-None-Match: *`; a digest key that already exists is read and
 verified instead of overwritten. Cleanup first verifies the referenced bytes and
 then deletes with the observed ETag as an `If-Match` precondition. S3-compatible

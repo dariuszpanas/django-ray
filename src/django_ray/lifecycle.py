@@ -246,7 +246,7 @@ def _attempt_workflow_progress_summary(execution: RayTaskExecution) -> str | Non
             reported_finished_at = datetime.fromisoformat(
                 summary["terminal"]["finished_at"][:-1] + "+00:00"
             )
-            outer_finished_at = execution.finished_at
+            outer_finished_at = cast(datetime, execution.finished_at)
             if outer_finished_at.tzinfo is None:
                 outer_finished_at = outer_finished_at.replace(tzinfo=UTC)
             if outer_finished_at.astimezone(UTC) <= reported_finished_at:
@@ -254,7 +254,7 @@ def _attempt_workflow_progress_summary(execution: RayTaskExecution) -> str | Non
         if execution.state not in WORKFLOW_PROGRESS_TERMINAL_STATES:
             return None
 
-        terminal_at = execution.finished_at or datetime.now(UTC)
+        terminal_at = cast(datetime | None, execution.finished_at) or datetime.now(UTC)
         previous_updated_at = datetime.fromisoformat(
             summary["timestamps"]["updated_at"][:-1] + "+00:00"
         )

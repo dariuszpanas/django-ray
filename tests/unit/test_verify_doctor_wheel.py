@@ -16,13 +16,16 @@ def test_doctor_verifier_hook_loads_owned_sibling_under_isolated_import(monkeypa
     def spec(name, path):
         calls.append(path.name)
         value = original(name, path)
-        execute = value.loader.exec_module
+        assert value is not None
+        loader = value.loader
+        assert loader is not None
+        execute = loader.exec_module
 
         def load(module):
             execute(module)
             module.verify = lambda: calls.append("verified")
 
-        monkeypatch.setattr(value.loader, "exec_module", load)
+        monkeypatch.setattr(loader, "exec_module", load)
         return value
 
     monkeypatch.setattr(verify_wheel.importlib.util, "spec_from_file_location", spec)

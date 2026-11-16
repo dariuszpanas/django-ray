@@ -60,11 +60,14 @@ class Remote:
     def get(self, function, args, kwargs, deadline):
         if time.monotonic() >= deadline:
             raise TimeoutError("Owned remote work deadline expired")
+        ray = self.ray
+        if ray is None:
+            raise ValueError("Owned sentinel mount has not been verified")
         self.uncertain = True
         ref = function.remote(*args, **kwargs)
         self.refs.append(ref)
         self.uncertain = False
-        result = self.ray.get(ref, timeout=max(0.001, deadline - time.monotonic()))
+        result = ray.get(ref, timeout=max(0.001, deadline - time.monotonic()))
         self.refs.remove(ref)
         if time.monotonic() >= deadline:
             raise TimeoutError("Owned remote result arrived after its deadline")
@@ -72,6 +75,7 @@ class Remote:
 
     def prepare(self, root, control, deadline):
         import ray
+        import ray.cloudpickle
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
         from django_ray.conf.settings import get_settings
@@ -115,7 +119,10 @@ class Remote:
                 raise ValueError("Actual selected worker did not write the shared control")
 
     def observe(self, deadline, *, first=False):
-        function = self.ray.remote(mount_probe()).options(**self.options)
+        ray = self.ray
+        if ray is None:
+            raise ValueError("Owned sentinel mount has not been verified")
+        function = ray.remote(mount_probe()).options(**self.options)
         value = self.get(
             function, (str(self.root), self.control, self.source_digest), {"first": first}, deadline
         )
@@ -137,7 +144,9 @@ class Remote:
         )
         from qualification.application.protocol_fixture import CALLABLE
 
-        if self.root is None:
+        root, ray = self.root, self.ray
+        profile, plan = self.profile, self.plan
+        if root is None or ray is None or profile is None or plan is None:
             raise ValueError("Owned sentinel mount has not been verified")
         identity = ExecutionIdentity(
             task_execution_pk=fixture.pk,
@@ -157,12 +166,10 @@ class Remote:
                     ),
                     serialized_kwargs="{}",
                     input_reference=None,
-                    runtime_env_profile=self.profile.profile,
-                    runtime_env_hash=self.profile.digest,
-                    runtime_env_plan_identity=self.plan.as_transport_dict(),
-                    compiled_graph_submission_transport=_compiled_graph_submission_transport(
-                        self.ray
-                    ),
+                    runtime_env_profile=profile.profile,
+                    runtime_env_hash=profile.digest,
+                    runtime_env_plan_identity=plan.as_transport_dict(),
+                    compiled_graph_submission_transport=_compiled_graph_submission_transport(ray),
                 )
             )
         )
@@ -171,7 +178,7 @@ class Remote:
         request["execution_protocol_version"] = 2
         # Match the production Core runner: Ray Client deserializes this
         # definition on its generic head before the task RuntimeEnv exists.
-        self.ray.cloudpickle.register_pickle_by_value(remote_module)
+        ray.cloudpickle.register_pickle_by_value(remote_module)
         raw = self.get(
             _get_remote_execute_django_task().options(**self.options),
             (json.dumps(request, sort_keys=True, separators=(",", ":")),),
@@ -203,7 +210,7 @@ class Remote:
         ):
             raise ValueError("Remote worker did not return the fixed strict refusal")
         self.observe(deadline)
-        if (self.root / "invoked").exists():
+        if (root / "invoked").exists():
             raise ValueError("Unsupported request invoked its poison callable")
 
     def cleanup(self, deadline):

@@ -2733,7 +2733,7 @@ class Command(BaseCommand):
                 require_completion_data_match=False,
             ) as owned:
                 current = owned.execution if owned is not None else None
-                if current is None:
+                if current is None or owned is None:
                     pass
                 elif (
                     str(current.ray_job_id or "") != reserved_handle.ray_job_id

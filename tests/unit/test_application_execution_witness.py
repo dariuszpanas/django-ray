@@ -158,12 +158,13 @@ def test_fixed_file_inventory_covers_current_receipt_names_without_discovery():
     assert set(witness.RECEIPT_NAMES) == names
     assert len(witness.FILES) == len(set(witness.FILES)) == 25
     parsed = ast.parse(Path(witness.__file__).read_text(encoding="utf-8"))
-    imports = {
-        (node.module if isinstance(node, ast.ImportFrom) else alias.name).split(".")[0]
-        for node in ast.walk(parsed)
-        if isinstance(node, ast.Import | ast.ImportFrom)
-        for alias in node.names
-    }
+    imports: set[str] = set()
+    for node in ast.walk(parsed):
+        if isinstance(node, ast.ImportFrom):
+            assert node.level == 0 and node.module is not None
+            imports.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Import):
+            imports.update(alias.name.split(".")[0] for alias in node.names)
     assert imports <= sys.stdlib_module_names | {"__future__"}
     assert not any(
         isinstance(node, ast.Call)
