@@ -247,6 +247,17 @@ variables, outer Job driver, and real Ray Data workers. The probe pins the durab
 backend target to the exact address of its new local cluster, so another developer
 cluster cannot capture the work through `auto` discovery.
 
+The recovery observer retries only typed SQLite `BUSY` errors from its execution and
+terminal-attempt reads, within one original 300-second polling budget. It re-reads the
+complete pair after contention and rejects observations that return after that deadline.
+Worker exit and timeout diagnostics retain the last busy cause and a scalar count;
+successful probe JSON records `sqlite_busy_observations`. `LOCKED`, unknown causes,
+other database errors and missing rows still fail immediately. The polling deadline
+cannot interrupt an in-flight synchronous database call, and other probe reads remain
+fail-fast. This changes neither task retries nor worker/database timeout or journal
+settings. A recovered observation still needs every existing native-workload assertion;
+it does not identify the lock owner or explain the original contention.
+
 The probe requires two archived attempt outcomes and builds a bounded allowlist of rq2
 submission IDs from the known durable execution primary key/public ID, archived attempt
 protocols, and generation range. It matches JobInfo by ID before parsing metadata, then

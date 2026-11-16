@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -160,31 +161,66 @@ def _worker_log_tail(path: Path, *, maximum_chars: int = 8_000) -> str:
 
 def _wait_for_recovered_execution(
     execution_pk: int, worker: subprocess.Popen[str], log: Path
-) -> Any:
+) -> tuple[Any, int]:
+    from django.db import OperationalError, connection
+
     from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 
     deadline = time.monotonic() + 300
     terminal = {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED, TaskState.LOST}
+    busy_observations = 0
+    last_busy_error: OperationalError | None = None
     while time.monotonic() < deadline:
-        execution = RayTaskExecution.objects.get(pk=execution_pk)
-        if execution.state in terminal:
-            attempts = list(
-                TaskAttempt.objects.filter(execution_id=execution_pk).order_by("attempt_number")
-            )
-            if len(attempts) >= 2:
-                return execution
-            raise AssertionError(
-                f"Ray Data task became terminal before framework retry: {execution.state}: "
-                f"{execution.error_message}\n{_worker_log_tail(log)}"
-            )
+        observation_unavailable = False
+        try:
+            execution = RayTaskExecution.objects.get(pk=execution_pk)
+            if time.monotonic() >= deadline:
+                break
+            if execution.state in terminal:
+                attempts = list(
+                    TaskAttempt.objects.filter(execution_id=execution_pk).order_by("attempt_number")
+                )
+                if time.monotonic() >= deadline:
+                    break
+                if len(attempts) >= 2:
+                    return execution, busy_observations
+                raise AssertionError(
+                    f"Ray Data task became terminal before framework retry: {execution.state}: "
+                    f"{execution.error_message}\n{_worker_log_tail(log)}"
+                )
+        except OperationalError as error:
+            cause = error.__cause__
+            code = getattr(cause, "sqlite_errorcode", None)
+            if (
+                connection.vendor != "sqlite"
+                or not isinstance(cause, sqlite3.OperationalError)
+                or type(code) is not int
+                or code < 0
+                or code & 255 != sqlite3.SQLITE_BUSY
+            ):
+                raise
+            busy_observations += 1
+            last_busy_error = error
+            observation_unavailable = True
         return_code = worker.poll()
         if return_code is not None:
-            raise AssertionError(
-                f"Ray Job management worker exited with {return_code} before completion:\n"
-                f"{_worker_log_tail(log)}"
+            observation = (
+                "database observation unavailable"
+                if observation_unavailable
+                else "before completion"
             )
-        time.sleep(0.25)
-    raise AssertionError(f"Ray Data recovery task timed out:\n{_worker_log_tail(log)}")
+            raise AssertionError(
+                f"Ray Job management worker exited with {return_code}; {observation} "
+                f"(sqlite_busy_observations={busy_observations}):\n"
+                f"{_worker_log_tail(log)}"
+            ) from last_busy_error
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.25, remaining))
+    raise AssertionError(
+        f"Ray Data recovery task timed out (sqlite_busy_observations={busy_observations}):\n"
+        f"{_worker_log_tail(log)}"
+    ) from last_busy_error
 
 
 def _build_rq2_submission_candidates(
@@ -516,7 +552,9 @@ def main() -> int:
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
-                execution = _wait_for_recovered_execution(execution.pk, worker, worker_log_path)
+                execution, busy_observations = _wait_for_recovered_execution(
+                    execution.pk, worker, worker_log_path
+                )
                 submissions = _load_ray_job_submission_evidence(
                     ray_address=probe_ray_address,
                     execution_pk=execution.pk,
@@ -727,6 +765,7 @@ def main() -> int:
                 "preinstalled_ray_data_environment": True,
                 "disposable_cluster_target_pinned": True,
                 "automatic_retry_recovered": True,
+                "sqlite_busy_observations": busy_observations,
                 "failed_artifact_rejected": failed_artifact_rejected,
                 "idempotent_artifact_adoption": adopted_again == adopted,
                 "stale_attempt_fence_rejected": stale_fence_rejected,

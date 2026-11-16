@@ -6,12 +6,15 @@ import ast
 import hashlib
 import json
 import os
+import sqlite3
 import stat
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from django.db import OperationalError
 
 from django_ray.runtime.context import DurableTaskContext
 from testproject.apps.cluster_tasks import ray_data_job, tasks
@@ -228,6 +231,325 @@ def test_distributed_recipe_module_has_no_django_imports() -> None:
 
     assert "django" not in roots
     assert "django_ray" not in roots
+
+
+class _RecoveryClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _recovery_busy_error(code: object = sqlite3.SQLITE_BUSY) -> OperationalError:
+    cause = sqlite3.OperationalError("database is locked")
+    if code is not None:
+        cause.sqlite_errorcode = code
+    error = OperationalError("database is locked")
+    error.__cause__ = cause
+    return error
+
+
+def _install_recovery_observer(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    executions: list[Any],
+    attempts: list[Any] | None = None,
+    worker_exit: int | None = None,
+) -> SimpleNamespace:
+    from django_ray.models import RayTaskExecution, TaskAttempt
+
+    monkeypatch.setenv("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "test-sentinel")
+    from scripts import ray_data_golden_path_probe as probe
+
+    clock = _RecoveryClock()
+    calls: list[str] = []
+    attempt_observations = attempts if attempts is not None else [[object(), object()]]
+
+    def take(observations: list[Any]) -> Any:
+        value = observations.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value() if callable(value) else value
+
+    def get_execution(*, pk: int) -> Any:
+        assert pk == 41
+        calls.append("execution")
+        return take(executions)
+
+    def get_attempts(*, execution_id: int) -> SimpleNamespace:
+        assert execution_id == 41
+
+        def ordered(name: str) -> Any:
+            assert name == "attempt_number"
+
+            def rows() -> Any:
+                calls.append("attempts")
+                yield from take(attempt_observations)
+
+            return rows()
+
+        return SimpleNamespace(order_by=ordered)
+
+    def poll() -> int | None:
+        calls.append("worker")
+        return worker_exit
+
+    monkeypatch.setattr(RayTaskExecution.objects, "get", get_execution)
+    monkeypatch.setattr(TaskAttempt.objects, "filter", get_attempts)
+    monkeypatch.setattr(probe, "time", clock)
+    monkeypatch.setattr(probe, "_worker_log_tail", lambda _path: "bounded worker tail")
+    return SimpleNamespace(probe=probe, clock=clock, calls=calls, worker=SimpleNamespace(poll=poll))
+
+
+def _recovered_execution(state: str = "SUCCEEDED") -> SimpleNamespace:
+    return SimpleNamespace(state=state, error_message="fixture failure")
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_BUSY | (2 << 8)])
+def test_recovery_observer_retries_busy_execution_reads(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    execution = _recovered_execution()
+    fixture = _install_recovery_observer(
+        monkeypatch, executions=[_recovery_busy_error(code), execution]
+    )
+
+    assert fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused")) == (
+        execution,
+        1,
+    )
+    assert fixture.calls == ["execution", "worker", "execution", "attempts"]
+    assert fixture.clock.sleeps == [0.25]
+
+
+def test_recovery_observer_reloads_execution_after_busy_attempt_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _recovered_execution("FAILED")
+    current = _recovered_execution()
+    fixture = _install_recovery_observer(
+        monkeypatch,
+        executions=[stale, current],
+        attempts=[_recovery_busy_error(), [object(), object()]],
+    )
+
+    assert fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused")) == (
+        current,
+        1,
+    )
+    assert fixture.calls == ["execution", "attempts", "worker", "execution", "attempts"]
+
+
+def test_recovery_observer_preserves_one_deadline_and_last_busy_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, last = _recovery_busy_error(), _recovery_busy_error()
+    fixture = _install_recovery_observer(monkeypatch, executions=[first, last])
+
+    def nearly_expired() -> Any:
+        fixture.clock.now = 299.9
+        raise last
+
+    # The second failed read consumes the original budget; a new 300-second
+    # deadline on either retry would start an unwanted third read.
+    from django_ray.models import RayTaskExecution
+
+    fixture_executions = [first, nearly_expired]
+
+    def get_execution(**_kwargs: object) -> Any:
+        fixture.calls.append("execution")
+        item = fixture_executions.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item()
+
+    monkeypatch.setattr(RayTaskExecution.objects, "get", get_execution)
+    with pytest.raises(AssertionError, match="timed out.*sqlite_busy_observations=2") as observed:
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert observed.value.__cause__ is last
+    assert "bounded worker tail" in str(observed.value)
+    assert fixture.calls == ["execution", "worker", "execution", "worker"]
+    assert fixture.clock.sleeps == pytest.approx([0.25, 0.1])
+    assert fixture.clock.now == 300.0
+
+
+@pytest.mark.parametrize("phase", ["execution", "attempts"])
+def test_recovery_observer_refuses_late_results_without_another_read(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    execution = _recovered_execution()
+    fixture = _install_recovery_observer(monkeypatch, executions=[execution])
+
+    def expires(value: Any) -> Any:
+        fixture.clock.now = 300.0
+        return value
+
+    from django_ray.models import RayTaskExecution, TaskAttempt
+
+    if phase == "execution":
+
+        def get_execution(**_kwargs: object) -> Any:
+            fixture.calls.append("execution")
+            return expires(execution)
+
+        monkeypatch.setattr(RayTaskExecution.objects, "get", get_execution)
+    else:
+
+        def get_attempts(**_kwargs: object) -> SimpleNamespace:
+            def ordered(_name: str) -> Any:
+                fixture.calls.append("attempts")
+                return expires([object(), object()])
+
+            return SimpleNamespace(order_by=ordered)
+
+        monkeypatch.setattr(TaskAttempt.objects, "filter", get_attempts)
+
+    with pytest.raises(AssertionError, match="timed out"):
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert fixture.calls == (["execution"] if phase == "execution" else ["execution", "attempts"])
+    assert fixture.clock.sleeps == []
+
+
+def test_recovery_observer_reports_worker_exit_with_unavailable_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    busy = _recovery_busy_error()
+    fixture = _install_recovery_observer(monkeypatch, executions=[busy], worker_exit=7)
+    with pytest.raises(AssertionError, match="exited with 7.*observation unavailable") as observed:
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert observed.value.__cause__ is busy
+    assert "sqlite_busy_observations=1" in str(observed.value)
+    assert "bounded worker tail" in str(observed.value)
+    assert fixture.calls == ["execution", "worker"]
+    assert fixture.clock.sleeps == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        sqlite3.SQLITE_LOCKED,
+        sqlite3.SQLITE_ERROR,
+        sqlite3.SQLITE_IOERR,
+        sqlite3.SQLITE_CORRUPT,
+        None,
+        "5",
+        5.0,
+        -251,
+    ],
+)
+def test_recovery_observer_propagates_other_sqlite_errors(
+    monkeypatch: pytest.MonkeyPatch, code: object
+) -> None:
+    error = _recovery_busy_error(code)
+    fixture = _install_recovery_observer(monkeypatch, executions=[error])
+    with pytest.raises(OperationalError) as observed:
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert observed.value is error
+    assert fixture.calls == ["execution"]
+
+
+@pytest.mark.parametrize("cause", [None, ValueError("database is locked")])
+def test_recovery_observer_requires_original_sqlite_operational_cause(
+    monkeypatch: pytest.MonkeyPatch, cause: BaseException | None
+) -> None:
+    error = OperationalError("database is locked")
+    error.__cause__ = cause
+    fixture = _install_recovery_observer(monkeypatch, executions=[error])
+    with pytest.raises(OperationalError) as observed:
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert observed.value is error
+
+
+def test_recovery_observer_checks_actual_database_vendor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from django.db import connection
+
+    error = _recovery_busy_error()
+    fixture = _install_recovery_observer(monkeypatch, executions=[error])
+    monkeypatch.setattr(connection, "vendor", "postgresql")
+    with pytest.raises(OperationalError) as observed:
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert observed.value is error
+
+
+def test_recovery_observer_preserves_missing_row_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from django_ray.models import RayTaskExecution
+
+    error = RayTaskExecution.DoesNotExist()
+    fixture = _install_recovery_observer(monkeypatch, executions=[error])
+    with pytest.raises(RayTaskExecution.DoesNotExist) as observed:
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert observed.value is error
+
+
+def test_recovery_observer_preserves_terminal_before_retry_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _install_recovery_observer(
+        monkeypatch, executions=[_recovered_execution("FAILED")], attempts=[[object()]]
+    )
+    with pytest.raises(AssertionError, match="terminal before framework retry"):
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert fixture.clock.sleeps == []
+
+
+@pytest.mark.parametrize("state", ["SUCCEEDED", "FAILED", "CANCELLED", "LOST"])
+def test_recovery_observer_preserves_ordinary_completion(
+    monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    running, terminal = _recovered_execution("RUNNING"), _recovered_execution(state)
+    fixture = _install_recovery_observer(monkeypatch, executions=[running, terminal])
+    assert fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused")) == (
+        terminal,
+        0,
+    )
+    assert fixture.clock.sleeps == [0.25]
+
+
+def test_recovery_observer_preserves_observed_worker_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = _install_recovery_observer(
+        monkeypatch, executions=[_recovered_execution("RUNNING")], worker_exit=3
+    )
+    with pytest.raises(AssertionError, match="exited with 3; before completion") as observed:
+        fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused"))
+    assert observed.value.__cause__ is None
+    assert "sqlite_busy_observations=0" in str(observed.value)
+    assert "observation unavailable" not in str(observed.value)
+    assert fixture.calls == ["execution", "worker"]
+    assert fixture.clock.sleeps == []
+
+
+def test_recovery_observer_accepts_real_owned_sqlite_busy_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "owned-recovery-observer.sqlite3"
+    with (
+        closing(sqlite3.connect(database, timeout=0)) as owner,
+        closing(sqlite3.connect(database, timeout=0)) as reader,
+    ):
+        owner.execute("CREATE TABLE owned_probe (value INTEGER)")
+        owner.commit()
+        owner.execute("BEGIN EXCLUSIVE")
+        try:
+            with pytest.raises(sqlite3.OperationalError) as observed:
+                reader.execute("SELECT value FROM owned_probe").fetchall()
+            cause = observed.value
+            assert cause.sqlite_errorcode == sqlite3.SQLITE_BUSY
+        finally:
+            owner.rollback()
+    error = OperationalError("database is locked")
+    error.__cause__ = cause
+    execution = _recovered_execution()
+    fixture = _install_recovery_observer(monkeypatch, executions=[error, execution])
+    assert fixture.probe._wait_for_recovered_execution(41, fixture.worker, Path("unused")) == (
+        execution,
+        1,
+    )
 
 
 def test_real_probe_forces_one_disposable_local_ray_runtime() -> None:
