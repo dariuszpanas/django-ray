@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clear stalled Admin workflow diagnostics after a 15-second scheduled response
+  deadline, preserving manual reopen retries for current detail and one cached
+  failure per archived graph. Keep attempt-pinned JSON fallbacks and ignore late
+  responses. Browsers that cannot create a request controller receive reload
+  guidance; suspension can delay the deadline (#740).
+
 - Bound Admin live task polling with a 15-second scheduled deadline covering
   response headers and JSON. Abort expired requests, preserve displayed values
   and retry after three seconds while visible; late responses cannot overwrite

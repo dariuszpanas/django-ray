@@ -56,6 +56,69 @@
   let graphMarkerSequence = 0;
   let graphRenderSequence = 0;
   let requested = false;
+  const requestDeadlineMs = 15000;
+
+  class RequestControllerUnavailable extends Error {}
+
+  const readResponse = async (url, { readErrorJson = false } = {}) => {
+    let controller;
+    try {
+      controller = new window.AbortController();
+    } catch (error) {
+      throw new RequestControllerUnavailable();
+    }
+    let deadlineTimer = null;
+    let expired = false;
+    try {
+      // This operation never changes presentation or a loader's retry guard.
+      // A timed-out read may settle after a replacement has already completed.
+      const read = (async () => {
+        const response = await window.fetch(url, {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (expired) {
+          return null;
+        }
+        const contentType = response.headers?.get("content-type") ?? "";
+        const readJson =
+          !response.redirected &&
+          ![401, 403, 404].includes(response.status) &&
+          contentType.includes("application/json") &&
+          (response.ok || readErrorJson);
+        return {
+          response,
+          contentType,
+          payload: readJson ? await response.json() : null,
+        };
+      })();
+      // One scheduled deadline covers headers and body. Browser suspension or
+      // a blocked event loop can delay it; this is not a hard wall-time bound.
+      const deadline = new Promise((_, reject) => {
+        deadlineTimer = window.setTimeout(() => {
+          expired = true;
+          reject(new Error("request deadline"));
+          try {
+            controller.abort();
+          } catch (error) {
+            // Logical timeout recovery does not depend on browser cancellation.
+          }
+        }, requestDeadlineMs);
+      });
+      const result = await Promise.race([read, deadline]);
+      if (expired) {
+        throw new Error("request deadline");
+      }
+      return result;
+    } finally {
+      if (deadlineTimer !== null) {
+        window.clearTimeout(deadlineTimer);
+      }
+    }
+  };
 
   const isRecord = (value) =>
     value !== null && typeof value === "object" && !Array.isArray(value);
@@ -1220,13 +1283,10 @@
       graph.dataset.hydrationState = "loading";
       setGraphStatus("Loading the bounded workflow graph\u2026", "loading");
       try {
-        const response = await window.fetch(graphEndpoints.graph, {
-          method: "GET",
-          credentials: "same-origin",
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-        });
-        const contentType = response.headers?.get("content-type") ?? "";
+        const { response, contentType, payload } = await readResponse(
+          graphEndpoints.graph,
+          { readErrorJson: true },
+        );
         if (response.redirected || [401, 403].includes(response.status)) {
           graphContent.hidden = true;
           showFallbacks();
@@ -1265,7 +1325,7 @@
           return;
         }
 
-        const validated = validateGraphPayload(await response.json());
+        const validated = validateGraphPayload(payload);
         const expectedStatusCode =
           validated.payload.status === "CORRUPT" ? 503 : 200;
         if (response.status !== expectedStatusCode) {
@@ -1320,6 +1380,17 @@
           } and ${edges} ${edges === 1 ? "connection" : "connections"}.`,
         );
       } catch (error) {
+        if (error instanceof RequestControllerUnavailable) {
+          graphContent.hidden = true;
+          showFallbacks();
+          graph.dataset.hydrationState = "unavailable";
+          setGraphSummary("Unavailable in this browser.");
+          setGraphStatus(
+            "Workflow graph unavailable in this browser; reload the page for current status or use the bounded JSON views below.",
+            "error",
+          );
+          return;
+        }
         recoverableFailure("The workflow graph could not be displayed safely.");
       }
     };
@@ -1645,13 +1716,9 @@
     }
     setStatus("Loading workflow diagnostics\u2026", "loading");
     try {
-      const response = await window.fetch(endpoints.diagnostics, {
-        method: "GET",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-      });
-      const contentType = response.headers?.get("content-type") ?? "";
+      const { response, contentType, payload } = await readResponse(
+        endpoints.diagnostics,
+      );
       if (
         response.redirected ||
         [401, 403].includes(response.status)
@@ -1681,8 +1748,15 @@
         );
         return;
       }
-      render(await response.json());
+      render(payload);
     } catch (error) {
+      if (error instanceof RequestControllerUnavailable) {
+        setStatus(
+          "Workflow diagnostics unavailable in this browser; reload the page for current status.",
+          "error",
+        );
+        return;
+      }
       requested = false;
       contentNode.hidden = true;
       setStatus("Workflow diagnostics could not be displayed safely.", "error");
