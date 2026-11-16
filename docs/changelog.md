@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retry transient non-JSON Admin status failures and clear temporary error
+  feedback when unchanged task status recovers (#716).
+
 - Keep dashboard statistics and action feedback tied to the current browser
   credential after replacement or Forget token (#714).
 
