@@ -1245,7 +1245,11 @@ checkpoint planning:
   connected to executor admission and do not provide distributed coordination.
   `ExternalServiceBudgetSpec` and `SharedServiceBudgetController` enforce shared
   concurrency and token-bucket rate budgets with per-run anti-starvation caps and
-  `Retry-After` cooldowns.
+  `Retry-After` cooldowns. Lease TTL and token rate configuration must be finite,
+  positive numbers: NaN, either infinity, and integers too large to convert to a
+  float raise the field-specific `WorkflowConcurrencyConfigurationError` before
+  registration changes any existing scope, grant, or queue state. Infinity is not
+  an unlimited-TTL or unlimited-rate sentinel.
 - **Fail-closed step checkpoint planning (`django_ray.workflow.checkpoints`)**:
   `CheckpointableNodeSpec`, `DurableStepCheckpointEnvelope`, and
   `WorkflowCheckpointResumePlanner` validate pinned plan fingerprints, strict

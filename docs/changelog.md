@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject nonfinite workflow concurrency TTLs and service token rates before
+  registration can replace valid state. Report integer-to-float overflow as a
+  field-specific configuration error; finite positive values retain their normal
+  expiry and rate behavior (#728).
+
 - Keep repeated opt-in workflow concurrency requests for an exact owner identity
   in one queue position instead of granting duplicate leases later. Preserve
   queue order and genuine coalescing, and honor zero queue capacity for
