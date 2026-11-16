@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed cleanup for an explicit retry (#717). Store adapters must implement
   `compact_chunks`; overriding non-consuming merge alone is insufficient.
 
+- Page global worker maintenance by frozen primary-key cycles instead of caching
+  every matching execution. Continue past skipped owners, restrict live-owner
+  lookups to each page, and retain exact per-row ownership checks. Candidate and
+  Ray Job status counts are bounded; lifecycle payload costs remain unchanged
+  and broader resource acceptance remains open under #718.
+
 - Report payload inventory as incomplete when its reverse registry scan exceeds
   the object limit, preserving partial counts and exit status 2 (#722).
 
