@@ -918,7 +918,12 @@ bounded SQLite workspace without materializing unbounded Python `observed_node_i
 `django_ray.workflow.progress.spill_capacity` enforces node-local aggregate byte
 reservations, workspace and per-owner quotas, filesystem free-space headroom checks,
 and PID-reuse-safe janitor cleanup of proven-stale workspaces and quarantines
-(#156, #158). Open issue
+(#156, #158). This standalone controller requires a finite positive lock timeout
+and finite nonnegative stale-owner grace; zero grace remains valid. NaN, either
+infinity, and duration integers too large to convert to a float raise
+`WorkflowProgressSpillCapacityConfigurationError` before root or lock access.
+These validation rules do not activate the controller in executor admission.
+Open issue
 [#157](https://github.com/dariuszpanas/django-ray/issues/157) owns the remaining
 25k/100k/250k-node native Linux benchmark matrix; #142 was closed as superseded.
 This does not block the admitted terminal path described above. See
