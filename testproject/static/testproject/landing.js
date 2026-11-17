@@ -36,6 +36,7 @@
 
   let apiToken = "";
   let credentialGeneration = 0;
+  let protectedResponseGeneration = 0;
 
   class DashboardCredentialError extends Error {
     constructor(message, clearedCurrentCredential = false) {
@@ -61,6 +62,7 @@
   }
 
   function clearProtectedResponse() {
+    protectedResponseGeneration += 1;
     protectedResponse.hidden = true;
     protectedResponseTitle.textContent = "";
     protectedResponseBody.textContent = "";
@@ -201,21 +203,33 @@
   async function showProtectedEndpoint(button, url, title, parseResponse) {
     const actionGeneration = credentialGeneration;
     const actionToken = apiToken;
+    const responseGeneration = ++protectedResponseGeneration;
     button.disabled = true;
     output.textContent = `Loading ${title.toLowerCase()}...`;
     try {
       const response = await authenticatedRequest(url);
       if (!response.ok) throw new Error(`${title} request failed: ${response.status}`);
-      if (!credentialIsCurrent(actionGeneration, actionToken)) return;
+      if (
+        responseGeneration !== protectedResponseGeneration ||
+        !credentialIsCurrent(actionGeneration, actionToken)
+      ) return;
       const responseBody = await parseResponse(response);
-      if (!credentialIsCurrent(actionGeneration, actionToken)) return;
+      if (
+        responseGeneration !== protectedResponseGeneration ||
+        !credentialIsCurrent(actionGeneration, actionToken)
+      ) return;
       protectedResponseTitle.textContent = title;
       protectedResponseBody.textContent = responseBody;
       protectedResponse.hidden = false;
       protectedResponse.scrollIntoView({ behavior: "smooth", block: "nearest" });
       output.textContent = `${title} loaded through the authenticated API.`;
     } catch (error) {
-      showCurrentActionError(error, actionGeneration, actionToken);
+      if (
+        responseGeneration === protectedResponseGeneration ||
+        (error instanceof DashboardCredentialError && error.clearedCurrentCredential)
+      ) {
+        showCurrentActionError(error, actionGeneration, actionToken);
+      }
     } finally {
       button.disabled = false;
     }
@@ -244,5 +258,6 @@
   );
   closeProtectedResponse.addEventListener("click", () => {
     clearProtectedResponse();
+    output.textContent = "Protected response closed.";
   });
 })();

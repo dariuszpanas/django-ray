@@ -863,6 +863,28 @@ uptime assertion. The four existing receipt producers, including the setup init
 container, remain unchanged. Current live success requires both observations.
 Historical receipt shapes remain readable without gaining these newer identity
 claims, and their saved fixtures are unchanged.
+
+The collector also requires the fixed testproject `landing.js` response. After
+validating the regular web snapshot, it runs one read-only observer in that exact
+named Pod's `web` container. The observer reads at most 64 KiB plus one byte from
+the raw image source and performs one loopback static GET with `Host: django-web`.
+It requires exact source bytes, the fixed WhiteNoise UTF-8 JavaScript content type
+and no content encoding; it requests identity encoding and follows no redirects
+or retries. Socket waits are at most five seconds. The parent exec and subsequent
+same-Pod UID/image readback each have a 15-second command timeout within the
+unchanged outer Job allowance; there is no shared remaining collector deadline.
+
+The compact child JSON is checked against 4 KiB before decoding, after the existing
+command helper's post-read bound. This is not a streaming or process-RSS bound.
+The parent separately compares its clean source-file identity, without newline
+normalization, and retains a typed `landing_asset` sibling in `summary.json` bound
+to the same `web_runtime` Pod, UID and container. Final artifact review must compare
+that identity with the actual raw source Git blob. No extra receipt file or
+producer is added. Historical summaries without this field gain no landing-asset
+proof; a new passing live summary requires it. This HTTP byte observation does
+not render the landing page or reproduce its asynchronous panel races; the
+focused fake-DOM controls supply those races. It is not continuous uptime proof.
+
 Live collection additionally requires matching identities in every final browser
 contract across both generations' first, warm, workflow and failure-showcase cases.
 The host collector reads the canonical twelve-case, sixteen-state inventory from

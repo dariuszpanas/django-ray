@@ -735,3 +735,166 @@ test("header construction failures never render the bearer token", async () => {
     "The authenticated request could not be sent.",
   );
 });
+
+for (const pendingPhase of ["headers", "body"]) {
+  test(`closing the protected panel fences pending ${pendingPhase}`, async () => {
+    const dashboard = loadDashboard();
+    dashboard.elements.get("api-token").value = "same-page-token";
+    dashboard.fetchResponses.push(response(200, stats));
+    await dashboard.click("use-token");
+    let scrolls = 0;
+    dashboard.elements.get("protected-response").scrollIntoView = () => {
+      scrolls += 1;
+    };
+    dashboard.fetchResponses.push(response(200, "initial metrics"));
+    await dashboard.click("view-metrics");
+    assert.equal(dashboard.elements.get("protected-response").hidden, false);
+    assert.equal(scrolls, 1);
+
+    const pending = deferred();
+    const bodyStarted = deferred();
+    if (pendingPhase === "headers") {
+      dashboard.fetchResponses.push(pending.promise);
+    } else {
+      dashboard.fetchResponses.push({
+        ...response(200, {}),
+        json() {
+          bodyStarted.resolve();
+          return pending.promise;
+        },
+      });
+    }
+    const action = dashboard.click("view-executions");
+    if (pendingPhase === "body") await bodyStarted.promise;
+    assert.equal(dashboard.elements.get("view-executions").disabled, true);
+    await dashboard.click("close-protected-response");
+    const closeFeedback = dashboard.elements.get("output").textContent;
+    pending.resolve(pendingPhase === "headers" ? response(200, { tasks: [] }) : { tasks: [] });
+    await action;
+
+    assert.equal(dashboard.elements.get("protected-response").hidden, true);
+    assert.equal(dashboard.elements.get("protected-response-title").textContent, "");
+    assert.equal(dashboard.elements.get("protected-response-body").textContent, "");
+    assert.equal(dashboard.elements.get("output").textContent, closeFeedback);
+    assert.equal(closeFeedback, "Protected response closed.");
+    assert.equal(scrolls, 1);
+    assert.equal(dashboard.elements.get("view-executions").disabled, false);
+
+    dashboard.fetchResponses.push(response(200, { tasks: ["fresh explicit action"] }));
+    await dashboard.click("view-executions");
+    assert.equal(dashboard.elements.get("protected-response").hidden, false);
+    assert.equal(dashboard.elements.get("protected-response-title").textContent, "Executions");
+    assert.match(
+      dashboard.elements.get("protected-response-body").textContent,
+      /fresh explicit action/,
+    );
+    assert.equal(scrolls, 2);
+  });
+
+  test(`the latest protected selection wins over pending ${pendingPhase}`, async () => {
+    const dashboard = loadDashboard();
+    dashboard.elements.get("api-token").value = "same-page-token";
+    dashboard.fetchResponses.push(response(200, stats));
+    await dashboard.click("use-token");
+    let scrolls = 0;
+    dashboard.elements.get("protected-response").scrollIntoView = () => {
+      scrolls += 1;
+    };
+    const pending = deferred();
+    const bodyStarted = deferred();
+    if (pendingPhase === "headers") {
+      dashboard.fetchResponses.push(pending.promise);
+    } else {
+      dashboard.fetchResponses.push({
+        ...response(200, ""),
+        text() {
+          bodyStarted.resolve();
+          return pending.promise;
+        },
+      });
+    }
+    const oldAction = dashboard.click("view-metrics");
+    if (pendingPhase === "body") await bodyStarted.promise;
+    dashboard.fetchResponses.push(response(200, { tasks: ["latest selection"] }));
+    await dashboard.click("view-executions");
+    const expectedBody = dashboard.elements.get("protected-response-body").textContent;
+    const expectedOutput = dashboard.elements.get("output").textContent;
+    pending.resolve(pendingPhase === "headers" ? response(200, "older metrics") : "older metrics");
+    await oldAction;
+
+    assert.equal(dashboard.elements.get("protected-response").hidden, false);
+    assert.equal(dashboard.elements.get("protected-response-title").textContent, "Executions");
+    assert.equal(dashboard.elements.get("protected-response-body").textContent, expectedBody);
+    assert.equal(dashboard.elements.get("output").textContent, expectedOutput);
+    assert.equal(scrolls, 1);
+    assert.equal(dashboard.elements.get("view-metrics").disabled, false);
+  });
+}
+
+for (const failure of ["network", "body", "403"]) {
+  test(`an older protected ${failure} error preserves the latest selection`, async () => {
+    const dashboard = loadDashboard();
+    dashboard.elements.get("api-token").value = "same-page-token";
+    dashboard.fetchResponses.push(response(200, stats));
+    await dashboard.click("use-token");
+    const pending = deferred();
+    const bodyStarted = deferred();
+    if (failure === "body") {
+      dashboard.fetchResponses.push({
+        ...response(200, ""),
+        text() {
+          bodyStarted.resolve();
+          return pending.promise;
+        },
+      });
+    } else {
+      dashboard.fetchResponses.push(pending.promise);
+    }
+    const oldAction = dashboard.click("view-metrics");
+    if (failure === "body") await bodyStarted.promise;
+    dashboard.fetchResponses.push(response(200, { tasks: ["latest selection"] }));
+    await dashboard.click("view-executions");
+    const expectedBody = dashboard.elements.get("protected-response-body").textContent;
+    const expectedOutput = dashboard.elements.get("output").textContent;
+    if (failure === "403") pending.resolve(response(403, {}));
+    else pending.reject(new Error("older protected request failed"));
+    await oldAction;
+
+    assert.equal(dashboard.elements.get("protected-response").hidden, false);
+    assert.equal(dashboard.elements.get("protected-response-title").textContent, "Executions");
+    assert.equal(dashboard.elements.get("protected-response-body").textContent, expectedBody);
+    assert.equal(dashboard.elements.get("output").textContent, expectedOutput);
+    assert.equal(
+      dashboard.elements.get("credential-status").textContent,
+      "Authenticated for this loaded page. Reloading clears the token.",
+    );
+    assert.equal(dashboard.elements.get("view-metrics").disabled, false);
+  });
+}
+
+test("a superseded protected 401 still rejects the current credential", async () => {
+  const dashboard = loadDashboard();
+  dashboard.elements.get("api-token").value = "same-page-token";
+  dashboard.fetchResponses.push(response(200, stats));
+  await dashboard.click("use-token");
+  const pending = deferred();
+  dashboard.fetchResponses.push(pending.promise);
+  const oldAction = dashboard.click("view-metrics");
+  dashboard.fetchResponses.push(response(200, { tasks: ["latest selection"] }));
+  await dashboard.click("view-executions");
+  pending.resolve(response(401, {}));
+  await oldAction;
+
+  assert.equal(dashboard.elements.get("protected-response").hidden, true);
+  assert.equal(dashboard.elements.get("protected-response-title").textContent, "");
+  assert.equal(dashboard.elements.get("protected-response-body").textContent, "");
+  assert.equal(
+    dashboard.elements.get("credential-status").textContent,
+    "The API token was rejected. Paste a valid token and try again.",
+  );
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "The browser API token was rejected.",
+  );
+  assert.equal(dashboard.elements.get("view-metrics").disabled, false);
+});

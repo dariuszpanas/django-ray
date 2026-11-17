@@ -177,6 +177,9 @@ def test_receipts_refuse_partial_duplicate_wrong_or_unbounded_evidence(raw):
         "worker-diagnostic-unavailable",
         "worker-diagnostic-collection",
         "web-runtime",
+        "landing-asset",
+        "landing-timeout",
+        "landing-private",
     ],
 )
 @pytest.mark.parametrize(
@@ -270,10 +273,28 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
             return None
         return runner.observe_web_runtime(web_pod(), "example/core@sha256:" + "a" * 64)
 
+    def landing_asset(_kubectl, _namespace, web, _image):
+        if failure == "landing-asset":
+            return {"private": private_error}
+        if failure == "landing-timeout":
+            raise subprocess.TimeoutExpired(["fixed-landing-observer"], 15)
+        if failure == "landing-private":
+            raise ValueError(private_error)
+        return {
+            "schema_version": 1,
+            "status": "passed",
+            "asset": "testproject/landing.js",
+            "path": "/static/testproject/landing.js",
+            "bytes": 1,
+            "sha256": "a" * 64,
+            **{key: web[key] for key in ("pod", "uid", "container")},
+        }
+
     monkeypatch.setattr(runner, "checked", checked)
     monkeypatch.setattr(runner, "run_test", run)
     monkeypatch.setattr(runner, "observe_worker_images", worker_images)
     monkeypatch.setattr(runner, "collect", collect)
+    monkeypatch.setattr(runner, "observe_landing_asset", landing_asset)
     monkeypatch.setattr(runner, "diagnose", lambda *_args: None)
     result = runner.main(
         [
@@ -297,6 +318,12 @@ def test_runner_requires_assertions_source_and_owned_namespace_cleanup(
     assert summary["complete_application_gate"] is False
     assert summary["namespace_removed"] is (failure not in {"cleanup", "ownership"})
     assert summary["qualification_profile"] == runner.select_profile(profile, intent)
+    if summary["web_runtime"] is not None and not (failure and failure.startswith("landing-")):
+        runner.landing_asset_contract.validate_bound_record(
+            summary["landing_asset"], summary["web_runtime"]
+        )
+    else:
+        assert summary["landing_asset"] is None
     if failure not in {
         "receipt",
         "receipt-type",
@@ -413,6 +440,75 @@ def web_pod():
             ]
         },
     }
+
+
+@pytest.mark.parametrize("failure", [None, "digest", "oversized", "timeout", "uid", "pod", "image"])
+def test_landing_asset_probe_binds_source_and_the_same_named_web_pod(
+    tmp_path, monkeypatch, failure
+):
+    image = "example/core@sha256:" + "a" * 64
+    pod = web_pod()
+    web = runner.observe_web_runtime(pod, image)
+    source = tmp_path / runner.landing_asset_contract.SOURCE_RELATIVE
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"const landing = 'source';\n")
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    value = runner.landing_asset_contract.source_record(source)
+    if failure == "digest":
+        value["sha256"] = "b" * 64
+    calls = []
+
+    def checked(argv, *, timeout):
+        calls.append(argv)
+        assert timeout == 15
+        if "exec" in argv:
+            assert argv == [
+                "kubectl",
+                "exec",
+                web["pod"],
+                "-n",
+                "owned",
+                "-c",
+                "web",
+                "--",
+                "python",
+                "-m",
+                "qualification.application.landing_asset",
+            ]
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 15)
+            if failure == "oversized":
+                return b"private-canary" + b"x" * 4096
+            return json.dumps(value).encode()
+        assert argv == ["kubectl", "get", "pod", web["pod"], "-n", "owned", "-o", "json"]
+        if failure == "uid":
+            pod["metadata"]["uid"] = "22222222-2222-4222-8222-222222222222"
+        elif failure == "pod":
+            pod["metadata"]["name"] = "django-web-replacement"
+        elif failure == "image":
+            pod["status"]["containerStatuses"][0]["imageID"] = "containerd://sha256:" + "b" * 64
+        return json.dumps(pod).encode()
+
+    monkeypatch.setattr(runner, "checked", checked)
+    if failure is None:
+        result = runner.observe_landing_asset(["kubectl"], "owned", web, image)
+        assert result == {**value, **{key: web[key] for key in ("pod", "uid", "container")}}
+        assert len(calls) == 2
+    else:
+        with pytest.raises((ValueError, subprocess.TimeoutExpired)) as raised:
+            runner.observe_landing_asset(["kubectl"], "owned", web, image)
+        assert "private-canary" not in str(raised.value)
+        assert len(calls) == (1 if failure in {"digest", "oversized", "timeout"} else 2)
+
+
+@pytest.mark.parametrize("field,value", [("ready", False), ("container", "setup"), ("uid", "bad")])
+def test_landing_asset_refuses_an_unvalidated_web_snapshot_before_exec(monkeypatch, field, value):
+    image = "example/core@sha256:" + "a" * 64
+    web = runner.observe_web_runtime(web_pod(), image)
+    web[field] = value
+    monkeypatch.setattr(runner, "checked", lambda *_a, **_k: pytest.fail("exec before identity"))
+    with pytest.raises(ValueError):
+        runner.observe_landing_asset(["kubectl"], "owned", web, image)
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from qualification.application import landing_asset as landing_asset_contract
 from qualification.application.budgets import APPLICATION_SECONDS
 from qualification.application.receipt_limits import WORKFLOW_RECEIPT_MAX_BYTES
 from qualification.application.resource_profiles import (
@@ -393,6 +394,40 @@ def validate_web_runtime(value: object, image: str) -> None:
         raise ValueError("Regular web runtime observation is incomplete")
 
 
+def observe_landing_asset(kubectl, namespace: str, web_runtime: dict, image: str) -> dict:
+    """Observe fixed bytes in the same named web container, then recheck its UID."""
+    validate_web_runtime(web_runtime, image)
+    expected = landing_asset_contract.source_record(ROOT / landing_asset_contract.SOURCE_RELATIVE)
+    raw = checked(
+        [
+            *kubectl,
+            "exec",
+            web_runtime["pod"],
+            "-n",
+            namespace,
+            "-c",
+            "web",
+            "--",
+            "python",
+            "-m",
+            "qualification.application.landing_asset",
+        ],
+        timeout=15,
+    )
+    observed = landing_asset_contract.parse_record(raw, expected=expected)
+    current = json.loads(
+        checked(
+            [*kubectl, "get", "pod", web_runtime["pod"], "-n", namespace, "-o", "json"],
+            timeout=15,
+        )
+    )
+    if observe_web_runtime(current, image) != web_runtime:
+        raise ValueError("Landing asset web identity changed")
+    result = {**observed, **{key: web_runtime[key] for key in ("pod", "uid", "container")}}
+    landing_asset_contract.validate_bound_record(result, web_runtime)
+    return result
+
+
 def diagnose(kubectl, namespace: str, output: Path) -> None:
     """Retain fixed status/event fields; raw Pod logs are never public artifacts."""
     for resource in ("rayclusters", "pods", "events"):
@@ -589,6 +624,7 @@ def main(argv=None) -> int:
     worker_images = None
     worker_images_failure = None
     web_runtime = None
+    landing_asset = None
     try:
         created = json.loads(checked([*kubectl, "create", "namespace", namespace, "-o", "json"]))
         uid = created["metadata"]["uid"]
@@ -632,6 +668,9 @@ def main(argv=None) -> int:
                     kubectl, namespace, args.output, args.image, expected_profile=profile
                 )
                 validate_web_runtime(web_runtime, args.image)
+                observed_asset = observe_landing_asset(kubectl, namespace, web_runtime, args.image)
+                landing_asset_contract.validate_bound_record(observed_asset, web_runtime)
+                landing_asset = observed_asset
                 current_tree = checked([*git, "rev-parse", "HEAD^{tree}"]).decode().strip()
                 passed = passed and current_tree == source_tree
                 passed = passed and not checked([*git, "status", "--porcelain"]).strip()
@@ -675,6 +714,7 @@ def main(argv=None) -> int:
             "complete_application_gate": False,
             "worker_images": worker_images,
             "web_runtime": web_runtime,
+            "landing_asset": landing_asset,
         }
         if worker_images_failure is not None:
             summary["worker_images_failure"] = worker_images_failure
