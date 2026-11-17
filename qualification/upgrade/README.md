@@ -178,6 +178,15 @@ and build/run service `native` under an outer 1,200-second timeout. The native
 service requires two CPUs, 8 GiB RAM without swap, 1,024 PIDs, 512 MiB shared
 memory and 3 GiB temporary storage. The container has no external network.
 
+On phase failure, the diagnostic reads at most 262,147 bytes ending at the
+observed manager-log EOF before UTF-8 replacement decoding and universal-newline
+normalization, then prints the last 65,536 characters. Appended growth cannot
+extend that read. Missing or unreadable logs produce a fixed unavailable marker
+while the original phase exception is re-raised. This bounds the requested
+content read, not buffered readahead, process RSS, filesystem latency or an
+immutable snapshot under concurrent truncation or overwrite. Native workload,
+cleanup and receipt assertions remain unchanged.
+
 For each of SQLite and PostgreSQL it observes queued and running blockers, runs
 success/failure/retry work with the old manager, cancels queued work through the
 old lifecycle, and requires terminal rows and inactive leases after the manager
