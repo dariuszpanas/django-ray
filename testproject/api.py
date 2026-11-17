@@ -1896,6 +1896,8 @@ def list_executions(
 
     This provides visibility into the internal execution tracking.
     """
+    if any("\x00" in value for value in (state, queue, task_id) if value is not None):
+        raise HttpError(422, "Invalid execution-list filter.")
     queryset = _workflow_observability_executions()
 
     normalized_state = state.upper() if state else None

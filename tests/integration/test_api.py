@@ -2042,6 +2042,58 @@ class TestExecutionsAPI:
         assert response.status_code == 200
         assert [task["task_id"] for task in response.json()["tasks"]] == ["gate-target"]
 
+    @pytest.mark.parametrize("filter_name", ("state", "queue", "task_id"))
+    def test_list_executions_rejects_nul_filters_before_query(
+        self,
+        client,
+        monkeypatch: pytest.MonkeyPatch,
+        filter_name: str,
+    ) -> None:
+        def forbidden_query():
+            raise AssertionError("Invalid filters must fail before constructing the query")
+
+        monkeypatch.setattr(testproject_api, "_workflow_observability_executions", forbidden_query)
+
+        response = client.get("/api/executions", {filter_name: "NUL_CANARY\x00"})
+
+        assert response.status_code == 422
+        assert response.json() == {"detail": "Invalid execution-list filter."}
+        assert b"NUL_CANARY" not in response.content
+
+    def test_list_executions_preserves_unicode_historical_filters(self, client) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="historical-東京",
+            callable_path="test.task",
+            queue_name="retired-Δ",
+            state=TaskState.SUCCEEDED,
+        )
+        RayTaskExecution.objects.create(
+            task_id="unrelated-history",
+            callable_path="test.task",
+            state=TaskState.SUCCEEDED,
+        )
+
+        responses = (
+            client.get("/api/executions", {"queue": "retired-Δ"}),
+            client.get("/api/executions", {"task_id": "historical-東京"}),
+        )
+
+        for response in responses:
+            assert response.status_code == 200
+            assert [row["id"] for row in response.json()["tasks"]] == [execution.pk]
+
+    def test_list_executions_preserves_empty_filters(self, client) -> None:
+        execution = RayTaskExecution.objects.create(
+            task_id="empty-filter-history",
+            callable_path="test.task",
+            state=TaskState.QUEUED,
+        )
+
+        response = client.get("/api/executions", {"state": "", "queue": "", "task_id": ""})
+
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()["tasks"]] == [execution.pk]
+
     @pytest.mark.parametrize(
         "limit",
         (
