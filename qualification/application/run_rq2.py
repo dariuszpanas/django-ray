@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import shlex
 import signal
@@ -56,6 +57,7 @@ PHASES = frozenset(
         "missing_preflight",
         "reconciliation_manager",
         "reconciliation",
+        "exception_materialization",
         "cleanup",
         "receipt",
     }
@@ -147,6 +149,9 @@ def _manager_state(process) -> str:
     return "signalled" if code < 0 else "exited_nonzero"
 
 
+_OBSERVATION_CODE_ABSENT = object()
+
+
 class Diagnostics:
     """Fixed labels only; retain the first failure before attempting cleanup."""
 
@@ -155,6 +160,16 @@ class Diagnostics:
         self.phase = "preflight"
         self.failure_phase = "none"
         self.failure_type = "none"
+        self.exception_observation_code = _OBSERVATION_CODE_ABSENT
+        self.exception_observation_substage = _OBSERVATION_CODE_ABSENT
+        self.exception_observation_entry_remaining_seconds = _OBSERVATION_CODE_ABSENT
+        self.exception_observation_operation = _OBSERVATION_CODE_ABSENT
+        self.exception_observation_work_sigalrm_delivered = _OBSERVATION_CODE_ABSENT
+        self.exception_observation_work_sigterm_delivered = _OBSERVATION_CODE_ABSENT
+        self._exception_operation: str | None = None
+        self._work_signal_tracking = False
+        self._work_sigalrm_delivered = False
+        self._work_sigterm_delivered = False
         self.manager_at_failure = "not_observed"
         self.cleanup_failure_type = "none"
         self.manager_after_cleanup = "not_observed"
@@ -170,12 +185,71 @@ class Diagnostics:
         if phase not in PHASES:
             raise ValueError("Unknown request-reference observation phase")
         self.phase = phase
+        if phase == "cleanup":
+            self._work_signal_tracking = False
+        if (
+            phase == "exception_materialization"
+            and self.failure_type == "none"
+            and self.exception_observation_entry_remaining_seconds is _OBSERVATION_CODE_ABSENT
+        ):
+            self.exception_observation_entry_remaining_seconds = round(
+                max(0.0, min(WORK_SECONDS, self.work_deadline - time.monotonic())), 3
+            )
+
+    def exception_progress(self, substage: str) -> None:
+        from qualification.application.exception_materialization import OBSERVATION_SUBSTAGES
+
+        if type(substage) is not str or substage not in OBSERVATION_SUBSTAGES:
+            raise ValueError("Unknown exception observation substage")
+        if self.phase == "exception_materialization" and self.failure_type == "none":
+            self.exception_observation_substage = substage
+            if substage != "job_settlement":
+                self._exception_operation = None
+
+    def exception_operation(self, operation: str | None) -> None:
+        from qualification.application.exception_materialization import OBSERVATION_OPERATIONS
+
+        if operation is not None and (
+            type(operation) is not str or operation not in OBSERVATION_OPERATIONS
+        ):
+            raise ValueError("Unknown exception observation operation")
+        if (
+            self.phase == "exception_materialization"
+            and self.failure_type == "none"
+            and self.exception_observation_substage == "job_settlement"
+        ):
+            self._exception_operation = operation
+
+    def start_work_signal_tracking(self) -> None:
+        if self.failure_type == "none":
+            self._work_signal_tracking = True
+
+    def handle_work_signal(self, signum, frame) -> None:
+        if self._work_signal_tracking and self.failure_type == "none":
+            if signum == getattr(signal, "SIGALRM", None):
+                self._work_sigalrm_delivered = True
+            elif signum == signal.SIGTERM:
+                self._work_sigterm_delivered = True
+        _terminated(signum, frame)
 
     def failed(self, error: Exception, process=None) -> None:
         if self.failure_type == "none":
+            tracking = self._work_signal_tracking
+            self._work_signal_tracking = False
             self.failure_phase = self.phase
             self.failure_type = _error_type(error)
             self.manager_at_failure = _manager_state(process)
+            if self.failure_phase == "exception_materialization":
+                from qualification.application.exception_materialization import (
+                    observation_failure_code,
+                )
+
+                self.exception_observation_code = observation_failure_code(error)
+                if self.exception_observation_substage == "job_settlement":
+                    self.exception_observation_operation = self._exception_operation
+                if tracking:
+                    self.exception_observation_work_sigalrm_delivered = self._work_sigalrm_delivered
+                    self.exception_observation_work_sigterm_delivered = self._work_sigterm_delivered
 
     def cleanup_failed(self, error: Exception, process) -> None:
         self.failed(error, process)
@@ -196,6 +270,56 @@ class Diagnostics:
             key: value if type(value) is str and value in allowed else fallback
             for key, (value, allowed, fallback) in fields.items()
         }
+        if (
+            result["failure_phase"] == "exception_materialization"
+            and self.exception_observation_code is not _OBSERVATION_CODE_ABSENT
+        ):
+            from qualification.application.exception_materialization import (
+                OBSERVATION_FAILURE_CODES,
+            )
+
+            code = self.exception_observation_code
+            result["exception_observation_code"] = (
+                code if type(code) is str and code in OBSERVATION_FAILURE_CODES else "unclassified"
+            )
+        if (
+            result["failure_phase"] == "exception_materialization"
+            and result["failure_type"] != "none"
+        ):
+            from qualification.application.exception_materialization import OBSERVATION_SUBSTAGES
+
+            substage = self.exception_observation_substage
+            if substage is not _OBSERVATION_CODE_ABSENT:
+                result["exception_observation_substage"] = (
+                    substage
+                    if type(substage) is str and substage in OBSERVATION_SUBSTAGES
+                    else "unavailable"
+                )
+            remaining = self.exception_observation_entry_remaining_seconds
+            if remaining is not _OBSERVATION_CODE_ABSENT:
+                result["exception_observation_entry_remaining_seconds"] = (
+                    remaining
+                    if (type(remaining) is int or type(remaining) is float)
+                    and 0 <= remaining <= WORK_SECONDS
+                    and math.isfinite(remaining)
+                    else None
+                )
+        if (
+            result["failure_phase"] == "exception_materialization"
+            and result["failure_type"] != "none"
+        ):
+            from qualification.application.exception_materialization import OBSERVATION_OPERATIONS
+
+            operation = self.exception_observation_operation
+            if type(operation) is str and operation in OBSERVATION_OPERATIONS:
+                result["exception_observation_operation"] = operation
+            for key in (
+                "exception_observation_work_sigalrm_delivered",
+                "exception_observation_work_sigterm_delivered",
+            ):
+                observed = getattr(self, key)
+                if type(observed) is bool:
+                    result[key] = observed
         startup = self.start_observation if isinstance(self.start_observation, dict) else {}
         result["start_observation"] = {
             key: value
@@ -321,7 +445,9 @@ def observe_start(pk: int, manager, client, diagnostics: Diagnostics) -> None:
         raise ValueError("The owned task terminated before its initial effect")
 
 
-def validate_receipt(value: object) -> None:
+def validate_receipt(value: object, *, require_exception_materialization: bool = True) -> None:
+    if type(require_exception_materialization) is not bool:
+        raise ValueError("Invalid exception materialization receipt policy")
     if (
         not isinstance(value, dict)
         or value.get("generation") not in {"before", "after"}
@@ -332,6 +458,10 @@ def validate_receipt(value: object) -> None:
         or any(item is not True for item in value["assertions"].values())
     ):
         raise ValueError("Incomplete request-reference qualification receipt")
+    if require_exception_materialization or "exception_materialization" in value:
+        from qualification.application.exception_materialization import validate_record
+
+        validate_record(value.get("exception_materialization"), transport="rq2_job")
 
 
 def identity(row) -> tuple:
@@ -578,7 +708,7 @@ def missing_submission(row, client, *, generation: str):
             raise ValueError("Ray changed the owned submission identity")
 
 
-def verify(generation: str, facts: dict, diagnostics: Diagnostics) -> None:
+def verify(generation: str, facts: dict, diagnostics: Diagnostics, *, token: str) -> dict:
     diagnostics.enter("django_bootstrap")
     import django
 
@@ -750,6 +880,18 @@ def verify(generation: str, facts: dict, diagnostics: Diagnostics) -> None:
 
         wait(final_observation)
         facts["missing_request_terminal_without_retry"] = True
+        diagnostics.enter("exception_materialization")
+        from qualification.application.exception_materialization import observe as observe_exception
+
+        exception_evidence = observe_exception(
+            transport="rq2_job",
+            token=token,
+            deadline=deadline,
+            manager=manager,
+            job_client=client,
+            progress=diagnostics.exception_progress,
+            operation=diagnostics.exception_operation,
+        )
     except Exception as error:
         diagnostics.failed(error, manager)
         raise
@@ -770,6 +912,7 @@ def verify(generation: str, facts: dict, diagnostics: Diagnostics) -> None:
             raise
         diagnostics.manager_after_cleanup = _manager_state(manager)
     facts["owned_manager_stopped"] = True
+    return exception_evidence
 
 
 def _terminated(_signum, _frame):
@@ -779,6 +922,7 @@ def _terminated(_signum, _frame):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--generation", required=True, choices=("before", "after"))
+    parser.add_argument("--token-file", required=True, type=Path)
     parser.add_argument("--receipt", required=True, type=Path)
     args = parser.parse_args(argv)
     diagnostics = Diagnostics()
@@ -804,15 +948,26 @@ def main(argv: list[str] | None = None) -> int:
         DJANGO_RAY_QUALIFICATION_RQ2="owned-application-job",
         DJANGO_RAY_QUALIFICATION_RQ2_GENERATION=args.generation,
     )
-    previous = {sig: signal.signal(sig, _terminated) for sig in (signal.SIGTERM, signal.SIGALRM)}
+    diagnostics.start_work_signal_tracking()
+    previous = {
+        sig: signal.signal(sig, diagnostics.handle_work_signal)
+        for sig in (signal.SIGTERM, signal.SIGALRM)
+    }
     signal.alarm(WORK_SECONDS)
     try:
-        verify(args.generation, receipt["assertions"], diagnostics)
+        from qualification.application.run_api import read_token
+
+        token = read_token(args.token_file)
+        receipt["exception_materialization"] = verify(
+            args.generation, receipt["assertions"], diagnostics, token=token
+        )
         diagnostics.enter("receipt")
         validate_receipt(receipt)
         receipt["status"] = "passed"
         receipt["diagnostics"] = diagnostics.snapshot()
         encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode()) > 16 * 1024:
+            raise ValueError("Application Jobs receipt exceeds its byte limit")
         with args.receipt.open("x") as stream:
             stream.write(encoded)
     except Exception as error:

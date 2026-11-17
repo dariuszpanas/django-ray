@@ -6,8 +6,10 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -23,6 +25,7 @@ ENVIRONMENT = {
     "DATABASE_PASSWORD": "private-password",
 }
 IDS = [11, 22, 33]
+START = "2026-01-01T00:00:00Z"
 TASKS = ["10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002"]
 
 
@@ -119,7 +122,7 @@ def install(monkeypatch, connection=None, *, failure=None):
 @pytest.mark.parametrize("status_only", [False, True])
 def test_read_only_bounded_parameterized_projection_closes_before_return(monkeypatch, status_only):
     connection, calls = install(monkeypatch)
-    values, tasks = database.read_owned_rows(IDS, status_only=status_only)
+    values, tasks = database.read_owned_rows(IDS, status_only=status_only, started_at=START)
     assert values == runtime.protected_values_from_rows(IDS, envelopes())
     assert tasks == (TASKS if status_only else [])
     assert calls == [
@@ -147,6 +150,7 @@ def test_read_only_bounded_parameterized_projection_closes_before_return(monkeyp
             "SUCCEEDED",
             "FAILED",
             *IDS,
+            datetime.fromisoformat(START),
         ),
     )
     assert connection.queries[4:] == (
@@ -170,7 +174,14 @@ def test_projection_columns_match_the_candidate_model_schema():
 
     assert RayTaskExecution._meta.db_table == "django_ray_raytaskexecution"
     assert RayTaskExecution._meta.pk.column == "id"
-    for name in ("runtime_env_json", "runtime_env_profile", "callable_path", "state", "task_id"):
+    for name in (
+        "runtime_env_json",
+        "runtime_env_profile",
+        "callable_path",
+        "state",
+        "task_id",
+        "created_at",
+    ):
         assert RayTaskExecution._meta.get_field(name).column == name
 
 
@@ -187,7 +198,7 @@ def test_actual_projection_guards_bytes_fixture_and_complete_tasks(fault):
         connection.execute(
             "CREATE TABLE django_ray_raytaskexecution (id INTEGER PRIMARY KEY, "
             "runtime_env_json TEXT, runtime_env_profile TEXT, callable_path TEXT, "
-            "state TEXT, task_id TEXT)"
+            "state TEXT, task_id TEXT, created_at TEXT)"
         )
         rows: list[list[int | str]] = []
         for index, pk in enumerate([*IDS, 99]):
@@ -199,6 +210,7 @@ def test_actual_projection_guards_bytes_fixture_and_complete_tasks(fault):
                     "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
                     "SUCCEEDED" if index == 0 else "FAILED",
                     TASKS[index - 1] if index in {1, 2} else "unused",
+                    datetime.fromisoformat(START).isoformat(timespec="microseconds"),
                 ]
             )
         if fault in {"ascii", "multibyte", "nul"}:
@@ -218,7 +230,7 @@ def test_actual_projection_guards_bytes_fixture_and_complete_tasks(fault):
             assert isinstance(task_id, str)
             rows[1][5] = task_id + "\0private-suffix"
         connection.executemany(
-            "INSERT INTO django_ray_raytaskexecution VALUES (?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO django_ray_raytaskexecution VALUES (?, ?, ?, ?, ?, ?, ?)", rows
         )
         observed = connection.execute(
             database.ENVELOPES_SQL.replace("%s", "?"),
@@ -229,6 +241,7 @@ def test_actual_projection_guards_bytes_fixture_and_complete_tasks(fault):
                 "SUCCEEDED",
                 "FAILED",
                 *IDS,
+                datetime.fromisoformat(START).isoformat(timespec="microseconds"),
             ),
         ).fetchall()
         assert len(observed) == 3
@@ -259,7 +272,7 @@ def test_actual_projection_guards_bytes_fixture_and_complete_tasks(fault):
 def test_query_cursor_and_transaction_failures_close_connection(monkeypatch, failure):
     connection, _ = install(monkeypatch, Connection(fail=failure))
     with pytest.raises((OSError, TimeoutError)):
-        database.read_owned_rows(IDS, status_only=True)
+        database.read_owned_rows(IDS, status_only=True, started_at=START)
     assert connection.closed and not connection.in_transaction
     assert connection.events[-2:] == ["rollback", "closed"]
 
@@ -267,7 +280,7 @@ def test_query_cursor_and_transaction_failures_close_connection(monkeypatch, fai
 def test_connect_failure_does_not_attempt_queries(monkeypatch):
     connection, calls = install(monkeypatch, failure=OSError("private-connect"))
     with pytest.raises(OSError):
-        database.read_owned_rows(IDS, status_only=True)
+        database.read_owned_rows(IDS, status_only=True, started_at=START)
     assert len(calls) == 1
     assert not connection.events and not connection.queries
 
@@ -281,7 +294,7 @@ def test_missing_database_configuration_refuses_before_connect(monkeypatch, name
     else:
         monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match="owned"):
-        database.read_owned_rows(IDS, status_only=True)
+        database.read_owned_rows(IDS, status_only=True, started_at=START)
     assert not calls
 
 
@@ -290,7 +303,7 @@ def test_other_database_coordinates_are_not_followed(monkeypatch, name):
     _, calls = install(monkeypatch)
     monkeypatch.setenv(name, "other")
     with pytest.raises(ValueError, match="owned database"):
-        database.read_owned_rows(IDS, status_only=True)
+        database.read_owned_rows(IDS, status_only=True, started_at=START)
     assert not calls
 
 
@@ -300,14 +313,14 @@ def test_other_database_coordinates_are_not_followed(monkeypatch, name):
 def test_invalid_ids_refuse_before_connect(monkeypatch, ids):
     _, calls = install(monkeypatch)
     with pytest.raises(ValueError, match="three owned"):
-        database.read_owned_rows(ids, status_only=True)
+        database.read_owned_rows(ids, status_only=True, started_at=START)
     assert not calls
 
 
 def test_truthy_phase_is_not_an_explicit_phase(monkeypatch):
     _, calls = install(monkeypatch)
     with pytest.raises(ValueError, match="explicit phase"):
-        database.read_owned_rows(IDS, status_only=1)
+        database.read_owned_rows(IDS, status_only=1, started_at=START)
     assert not calls
 
 
@@ -356,7 +369,7 @@ def test_bad_envelope_projection_rolls_back_and_closes(monkeypatch, fault):
     rows[0] = tuple(row)
     connection, _ = install(monkeypatch, Connection(rows=rows))
     with pytest.raises(ValueError):
-        database.read_owned_rows(IDS, status_only=True)
+        database.read_owned_rows(IDS, status_only=True, started_at=START)
     assert connection.closed and connection.events[-2:] == ["rollback", "closed"]
     assert len(connection.queries) == 4
 
@@ -400,13 +413,14 @@ def test_bad_refused_task_projection_rolls_back_and_closes(monkeypatch, fault):
         tasks[0] = (pk, task, complete)
     connection, _ = install(monkeypatch, Connection(tasks=tasks))
     with pytest.raises(ValueError):
-        database.read_owned_rows(IDS, status_only=True)
+        database.read_owned_rows(IDS, status_only=True, started_at=START)
     assert connection.closed and connection.events[-2:] == ["rollback", "closed"]
 
 
 def test_reader_and_shared_validators_do_not_import_django_in_fresh_process():
     script = """
 import importlib.abc, json, sys
+START = "2026-01-01T00:00:00Z"
 from contextlib import contextmanager
 from types import SimpleNamespace
 class DenyApplicationImports(importlib.abc.MetaPathFinder):
@@ -436,7 +450,7 @@ def connect(**kwargs):
     assert kwargs['connect_timeout'] == 2
     return connection
 sys.modules['psycopg'] = SimpleNamespace(connect=connect)
-values, found = database.read_owned_rows([11,22,33], status_only=True)
+values, found = database.read_owned_rows([11,22,33], status_only=True, started_at=START)
 assert len(values) == 11 and found == tasks and connection.closed
 assert not any(name.split('.')[0] in {'django','django_ray','ray','unfold','testproject'} for name in sys.modules)
 """
@@ -450,3 +464,72 @@ assert not any(name.split('.')[0] in {'django','django_ray','ray','unfold','test
     )
     assert result.returncode == 0, result.stderr.decode()
     assert result.stdout == b""
+
+
+@pytest.mark.parametrize("row_id", IDS)
+@pytest.mark.parametrize("offset", [-1, 0, 1], ids=["before", "equal", "after"])
+def test_actual_projection_requires_each_owned_row_to_be_new(row_id, offset):
+    # Exercise the shipped WHERE condition with actual SQL. The text timestamp
+    # adapter is confined to this SQLite model; PostgreSQL uses aware datetimes.
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.create_function("OCTET_LENGTH", 1, lambda value: len(value.encode()))
+        connection.execute(
+            "CREATE TABLE django_ray_raytaskexecution (id INTEGER PRIMARY KEY, "
+            "runtime_env_json TEXT, runtime_env_profile TEXT, callable_path TEXT, "
+            "state TEXT, created_at TEXT)"
+        )
+        start = datetime.fromisoformat(START)
+        for index, pk in enumerate(IDS):
+            created_at = start + timedelta(seconds=offset if pk == row_id else 0)
+            connection.execute(
+                "INSERT INTO django_ray_raytaskexecution VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    pk,
+                    json.dumps({"nonce": f"n-{pk}", "ciphertext": f"c-{pk}"}),
+                    "thin",
+                    "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+                    "SUCCEEDED" if index == 0 else "FAILED",
+                    created_at.isoformat(timespec="microseconds"),
+                ),
+            )
+        observed = connection.execute(
+            database.ENVELOPES_SQL.replace("%s", "?"),
+            (
+                65536,
+                "thin",
+                "testproject.apps.cluster_tasks.tasks.runtime_env_probe",
+                "SUCCEEDED",
+                "FAILED",
+                *IDS,
+                start.isoformat(timespec="microseconds"),
+            ),
+        ).fetchall()
+        if offset < 0:
+            assert {row[0] for row in observed} == set(IDS) - {row_id}
+            with pytest.raises(ValueError, match="lost an owned row"):
+                runtime.protected_values_from_rows(IDS, observed)
+        else:
+            assert {row[0] for row in observed} == set(IDS)
+            assert len(runtime.protected_values_from_rows(IDS, observed)) == 11
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("status_only", [False, True])
+@pytest.mark.parametrize("case", ["naive", "non-utc", "oversized", "nonstring", "malformed"])
+def test_invalid_capture_start_refuses_before_database_setup(monkeypatch, status_only, case):
+    values = {
+        "naive": "2026-01-01T00:00:00",
+        "non-utc": "2026-01-01T01:00:00+01:00",
+        "oversized": "2026-01-01T00:00:00." + "0" * 41 + "Z",
+        "nonstring": False,
+        "malformed": "not-a-timestamp",
+    }
+
+    def forbidden():
+        raise AssertionError("database setup must not run")
+
+    monkeypatch.setattr(database, "_connection_options", forbidden)
+    with pytest.raises(ValueError):
+        database.read_owned_rows(IDS, status_only=status_only, started_at=cast(str, values[case]))

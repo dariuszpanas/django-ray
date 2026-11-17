@@ -117,10 +117,13 @@ def parse_receipts(
     *,
     expected_profile: dict | None = None,
     require_state_api_selection: bool = True,
+    require_exception_materialization: bool = True,
 ) -> dict[str, bytes]:
-    """Accept complete receipts; only the fixed historical adapter may waive absent State facts."""
+    """Accept complete receipts; fixed historical adapters may waive absent later facts."""
     if type(require_state_api_selection) is not bool:
         raise ValueError("Invalid State API selection receipt policy")
+    if type(require_exception_materialization) is not bool:
+        raise ValueError("Invalid exception materialization receipt policy")
     log_limit = MAX_RECEIPT_BYTES + 4096 if names == ("reporting",) else 65536
     if len(raw) > log_limit:
         raise ValueError("Receipt log exceeds its byte limit")
@@ -188,10 +191,16 @@ def parse_receipts(
                     value.get("state_api_selection"),
                     execution_id=executions[0].get("execution_id"),
                 )
+            if require_exception_materialization or "exception_materialization" in value:
+                from qualification.application.exception_materialization import validate_record
+
+                validate_record(value.get("exception_materialization"), transport="ray_core")
         elif value["layer"] == "application_rq2":
             from qualification.application.run_rq2 import validate_receipt
 
-            validate_receipt(value)
+            validate_receipt(
+                value, require_exception_materialization=require_exception_materialization
+            )
         elif value["layer"] == SHOWCASE_LAYER:
             validate_showcase_receipt(value)
         elif value["layer"] == "application_protocol":
@@ -287,14 +296,34 @@ def collect(
     ):
         raise ValueError("Cold generation is not bound to the original receipt")
     (output / "producers.json").write_text(json.dumps(identities, indent=2), encoding="utf-8")
+    from qualification.application.protected_logs import validate_pair as validate_log_pair
     from qualification.application.protected_logs import validate_receipt as validate_log_receipt
+
+    protected_receipts = {}
 
     for generation in ("before", "after"):
         with (output / f"{generation}-protected-logs.json").open("rb") as stream:
             raw = stream.read(2049)
         if len(raw) > 2048:
             raise ValueError("Protected log receipt exceeds its byte limit")
-        validate_log_receipt(json.loads(raw), generation)
+        protected = json.loads(raw)
+        validate_log_receipt(protected, generation)
+        if (
+            protected["log_window"]["capture_started_at"]
+            != json.loads(collected[f"{generation}-core"])["protected_runtime"]["started_at"]
+        ):
+            raise ValueError("Protected log window is not bound to its current Core Capture")
+        protected_receipts[generation] = raw
+    validate_log_pair(protected_receipts["before"], protected_receipts["after"])
+    from qualification.application.exception_materialization import validate_distinct_records
+
+    validate_distinct_records(
+        [
+            json.loads(collected[f"{generation}-{layer}"])["exception_materialization"]
+            for generation in ("before", "after")
+            for layer in ("core", "rq2")
+        ]
+    )
     validate_live_admin_assets(collected)
     return web_runtime
 

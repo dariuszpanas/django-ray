@@ -314,8 +314,26 @@ kubeconfig path list across Chainsaw's child environment, without copying config
 contents. It binds the candidate image,
 requires the exact Pod UIDs with no restarts before and after, and rejects a
 replacement or a log whose earliest timestamp does not cover the observation
-start. Each full log has a 1 MiB cap plus one-byte overflow detection; accepting a
-truncated tail cannot pass. Before either log snapshot, a private checker reads
+start. The first observation keeps the full retained source query. Its successful
+schema-2 receipt records only source fingerprints and each surface's last complete
+record timestamp and SHA-256. The second observation reads that exact bounded
+receipt and requests each unchanged source from its own prior timestamp, inclusive.
+It must find the exact prior complete record within the returned prefix, including
+when several records share a timestamp. Missing overlap, rotation that removes the
+anchor, an unfinished-only log, changed sources, empty output or overflow fail closed.
+The collector joins the raw prior-receipt digest, both source windows and their actual
+Core Capture timestamps. No earlier receipt is promoted into new-source acceptance.
+Each full or continuation read has the same 1 MiB cap plus one-byte overflow detection;
+accepting a truncated tail cannot pass. The two windows preserve fixed-marker coverage
+over their retained-source union. Current encrypted row values are newly created inside
+their Capture, and both private rereads require all three rows' creation times to be at
+or after that validated Capture start. This explicit fresh-fixture contract replaces
+rescanning earlier bytes for future-created values; it is not that identical predicate.
+It does not extend protection to arbitrary old encrypted row values after their own
+snapshot. Provider timestamp ordering, inclusive filtering and retained record identity
+remain assumptions; the observer does not certify arbitrary deleted middle records,
+pre-baseline rotation recovery, general clock synchronization or continuous process
+secrecy. A still-oversized continuation fails; no native headroom is assumed. Before either log snapshot, a private checker reads
 the two exact refused task-status APIs with one-second socket limits under a
 four-second in-Pod alarm and seven-second host command limit. The host allowance
 also covers exec transport, initial Python module loading and receipt return outside the
@@ -352,6 +370,12 @@ identity, lifecycle or readiness predicate. These fields never contain Pod names
 images, labels, raw probe output or exception text. A running container that is
 not ready remains a failure; a recent manager heartbeat alone does not replace
 Kubernetes readiness or the required protected-log observation.
+Manager-log failures additionally identify fixed source-start, command exit/size/stderr,
+empty output, timestamp decode/parse/length or coverage sites. Command attribution follows
+the existing exit, size, stderr priority; command timeouts retain `manager_log`.
+These labels preserve the version-2 fields and contain no source or subprocess values.
+They identify rejection sites in that run; an earlier `manager_log`/`invalid` record does
+not identify a particular predicate. Web-log attribution retains `web_log`.
 The API/Admin log surface here means the shared django-web server log, not a
 separate rendered Admin-page assertion.
 
@@ -366,6 +390,10 @@ claim. The existing rq2 deadline, task result, single effect, recovery and clean
 assertions remain required; the process receipt contains three fixed booleans.
 
 Both `before-protected-logs.json` and `after-protected-logs.json` are mandatory.
+Current collection requires schema 2 and the exact pair join. Only the fixed
+`45180ea` historical adapter explicitly accepts schema 1; its saved receipt files
+are unchanged and gain no overlap or freshness facts. No receipt or CLI flag can
+select that historical validation policy.
 Unexpected private bytes are never retained as raw failure artifacts. Successful
 source receipts keep their existing exact-byte identity and layer validators;
 unknown top-level fields are refused. Failed application receipts retain only
@@ -943,6 +971,116 @@ These assertions cover the ordinary-result presentation part of #455; they do
 not complete the whole application catalogue or the release checklist in #372.
 
 
+## Exception message materialization fixture
+
+Each existing generation adds one fixed Core task and one request-reference
+Jobs task. Their only task body raises an ordinary exception whose `__str__`
+raises on strict attempt 1, then returns a fixed result on strict attempt 2.
+The module is isolated from the public task catalogue, API enqueue choices and
+UI. Its settings/context checks prevent accidental use; they are not an
+external authorization mechanism. The Core observation follows
+`protected.finish`, and the Jobs observation follows the original missing
+request/no-replay checks using the same still-live reconciliation manager.
+Those original assertions, manager lifecycle and controlled task remain intact.
+
+The mandatory `exception_materialization` sibling stays in the existing Core
+and Jobs receipts. Pure validation runs in both receipt branches, and the
+collector joins four distinct owned task identities across the two generations.
+The validator imports only the standard library; its native observer imports
+Django, the task and SDK primitives lazily. The host reader must separately pin
+and review the resulting source/import owners before using the new predicates.
+The existing 16 KiB receipt caps, selected-file inventory, nine witness steps,
+source/runtime archives, cold replacement, protected-log interval and cleanup
+requirements remain unchanged.
+
+The fixed `45180ea` historical receipt adapter explicitly permits this
+later-added sibling to be absent. A present record must still validate, and
+all earlier receipt assertions remain required. Current collectors and native
+validators keep the mandatory default; receipts and command-line inputs cannot
+select the historical policy. Historical source and attempt identities, files
+and before-node hash links remain unchanged. This compatibility path does not
+claim that the exception fixture ran in a historical workload.
+
+Passing evidence requires failed-then-successful archive states, exact protocol
+and candidate manager/executor versions, two attempts and generation 2, the
+fixed fallback message with the original class/callable traceback, and no
+secondary rendering sentinel. The observer reads the actual current task and
+execution APIs plus the first attempt's Admin detail. It compares owned raw
+fields before and after those reads, deletes only the exact settled PK/UUID and
+two attempts, and checks deletion. Its short-lived Admin session is removed in
+`finally`. A narrowly guarded equivalent of the existing Core-only session
+helper accepts just the same two disposable settings modules, with both the
+Django settings identity and environment checked; the old helper stays unchanged.
+
+Jobs evidence finds two unique submissions by complete attempt/generation/task
+coordination digests in a bounded inventory, then binds their actual typed
+carrier, reference, registry, canonical request and metadata. It does not use a
+global Job count or an overwritten current-row Job ID as first-attempt history.
+Both transports must succeed and both observed SDK models must expose an exact
+integer zero driver exit code. The SDK may already have coerced JSON: this is
+not a raw-wire scalar-type certificate. The original one-Job/no-replay fixture
+retains its separate assertions. Individual request-object garbage collection
+and exactly-once application effects are not claimed.
+
+No attempt archive contains a wire `exception_type`, `retryable`, generation,
+Job ID or owner column. Native evidence uses actual stored traceback/provenance
+and recovery; the separate entrypoint units verify the wire fields. An archive's
+`created_at` is archive creation, not enqueue time. An elapsed `run_after` can
+remain on a successful automatic retry and is not required to be null.
+
+Core spends at most a requested 180-second observation window within the
+original remaining shared phase. Jobs uses the original 170-second work
+deadline, including a four-second settlement after both transport completions;
+its existing cleanup reserve is not borrowed. Synchronous calls are checked
+after return, not physically interrupted by this observer. Existing process
+supervisors and namespace cleanup remain authoritative. An unproved or active
+failure is left for that outer cleanup, never deleted as successful evidence.
+This fixture does not add resources, deadlines, backoff, retry settings or an
+extra manager. Available headroom and receipt fit must be established by actual
+reviewed Linux execution; exhaustion fails rather than skips the new checks.
+
+The generation supervisor forwards its configured `--token-file` path to the
+Jobs stage. That stage reads the bounded mounted credential once, inside its
+existing work budget and before Django, SDK or manager work. Missing or invalid
+files fail preflight. Only the file path enters argv. The token is used for the
+existing authenticated API reads and is excluded from receipts and diagnostics.
+
+The selected facts do not establish the complete Application catalogue,
+coordinated upgrade, release, reuse, physical erasure or a security certificate.
+`complete_application_gate` and the existing broader acceptance flags stay false.
+
+
+The two new Jobs also require the actual fixed entrypoint diagnostics: attempt 1
+emits `django-ray task failed: exception message unavailable`, and attempt 2
+emits `django-ray task completed successfully`. Exactly one matching
+`django-ray task ` line is required for each completed transport. Other bounded
+framework lines remain allowed, but unexpected application lines, secondary
+rendering text, raw task/callable/request values, and fallback text on other log
+lines are refused. The fallback remains forbidden in SDK model output and in
+attempt 2's logs. As in the retained original Job inspector, nonempty environment
+values with PASSWORD/SECRET/TOKEN/API_KEY/ENCRYPTION_KEY in their key are compared
+locally against both per-identity SDK and log surfaces, without exporting them.
+These are source-owned fixture checks, not observed disclosure or a general
+secret-detection certificate. Targeted mocked controls include the real fixed
+log lines and synthetic secret canaries; native execution remains required.
+
+If the Jobs observer fails, its first `exception_materialization` failure also
+retains an optional fixed `exception_observation_code`. The code identifies an
+existing fixture guard or a trusted request-binding rejection category without
+rendering exception text, arguments, causes, metadata or logs. Unknown failures
+use `unclassified`; cleanup cannot replace the first code. The serialization
+boundary whitelists it again, and passing, other-phase and historical snapshots
+omit it. The existing coarse `failure_type` and all acceptance assertions stay
+unchanged. A diagnostic code identifies the failed check, not its root cause.
+Failed exception observations additionally retain their last fixed
+`exception_observation_substage` and `exception_observation_entry_remaining_seconds`.
+The remaining value is captured once at entry to the overall exception observation,
+uses the original work deadline, and is limited to finite numbers from 0 to 170.
+The substage is location context, not measured substage cost or a timeout cause.
+Cleanup preserves the first failure context; passing, other-phase and historical
+snapshots omit both fields. No new timer, retry, resource or observation budget is added.
+
+
 ## State API address selection
 
 The selected State API observer runs immediately after the existing Core dashboard
@@ -971,3 +1109,12 @@ The existing process supervisor, 600-second shared phase and receipt/log caps re
 required. Failed lookups retain only the fixed `state_api_selection` stage/code.
 This selected proof is not multi-cluster routing, failover, log transport, general
 SDK compatibility or complete Application/release acceptance.
+
+Failed Jobs exception observations may additionally retain one fixed settlement
+operation label and exact booleans for SIGALRM and SIGTERM delivered while work
+tracking was active before the first failure capture began. Successful calls clear
+the operation marker; cleanup cannot replace the frozen facts. These identify an
+uncompleted observer boundary and observed signal delivery, not an interrupted-call
+or timer-origin/cause certificate. False SIGALRM does not exclude monotonic budget
+exhaustion. Passing, historical and other-phase observations omit the new fields.
+No deadline, request timeout, fence, retry, resource or receipt cap changes.

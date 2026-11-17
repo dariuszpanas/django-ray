@@ -241,16 +241,18 @@ def test_sql_projection_refuses_oversized_bytes_before_materializing(monkeypatch
 IMAGE = "registry/application@sha256:" + "a" * 64
 
 
-def host_fixture(*, failure=None):
-    now = datetime.now(UTC)
-    start = (now - timedelta(seconds=60)).isoformat().replace("+00:00", "Z")
-    early = (now - timedelta(seconds=120)).isoformat().replace("+00:00", "Z")
+def host_fixture(
+    *, failure=None, generation="before", now=None, capture_seconds=60, source_seconds=120
+):
+    now: datetime = now or datetime.now(UTC)
+    start = (now - timedelta(seconds=capture_seconds)).isoformat().replace("+00:00", "Z")
+    early = (now - timedelta(seconds=source_seconds)).isoformat().replace("+00:00", "Z")
     evidence = {"api_clear": True, "row_ids": [1, 2, 3], "started_at": start}
     items = []
     for app, container in (
         ("django-web", "web"),
         ("django-manager", "manager"),
-        ("assert-before", "assertions"),
+        (f"assert-{generation}", "assertions"),
     ):
         items.append(
             {
@@ -306,7 +308,7 @@ def host_fixture(*, failure=None):
                     "manager_logs_clear": failure != "comparison",
                 }
             ).encode()
-        elif "assert-before-pod" in argv:
+        elif f"assert-{generation}-pod" in argv:
             raw = json.dumps(
                 {"layer": "application_core", "status": "passed", "protected_runtime": evidence}
             ).encode()
@@ -442,9 +444,10 @@ def test_private_checkers_close_database_before_status_and_final_checker_makes_n
     closed = False
     alarms = []
 
-    def read_rows(row_ids, *, status_only):
+    def read_rows(row_ids, *, status_only, started_at):
         nonlocal closed
         assert row_ids == [1, 2, 3]
+        assert started_at == "2026-10-11T00:00:00Z"
         closed = True
         return ["private-canary"], ["first", "second"] if status_only else []
 
@@ -527,6 +530,7 @@ logs.inspect_stdin(status_only=status_only)
         [
             sys.executable,
             "-I",
+            "-B",
             "-c",
             program,
             str(Path(__file__).resolve().parents[2]),
@@ -971,3 +975,310 @@ def test_refused_task_ids_project_bounded_complete_canonical_values(suffix):
             runtime.refused_task_ids(ids)
     else:
         assert runtime.refused_task_ids(ids) == tasks
+
+
+def provider_nanoseconds(stamp):
+    """Independent fake-provider ordering: integer epoch nanoseconds, no floats."""
+    assert stamp.endswith("Z")
+    whole, _, fraction = stamp[:-1].partition(".")
+    parsed = datetime.fromisoformat(whole)
+    days = parsed.toordinal() - datetime(1970, 1, 1).toordinal()
+    seconds = days * 86400 + parsed.hour * 3600 + parsed.minute * 60 + parsed.second
+    return seconds * 1_000_000_000 + int(fraction.ljust(9, "0"))
+
+
+def overlap_fixture(tmp_path, *, same_timestamp=False, failure=None):
+    """Model source timestamps, inclusive filtering, then a prefix byte limit."""
+    now = datetime.now(UTC).replace(microsecond=123456)
+    stamp = (now - timedelta(seconds=230)).strftime("%Y-%m-%dT%H:%M:%S") + ".123456789Z"
+    old_time = (now - timedelta(seconds=250)).isoformat().replace("+00:00", "Z")
+    new_time = (now - timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+    old = (old_time + " synthetic old history\n").encode()
+    old *= (logs.LOG_BYTES * 3 // 5) // len(old)
+    earlier_same_time = (
+        (stamp + " synthetic equal-time predecessor\n").encode() if same_timestamp else b""
+    )
+    anchor = (stamp + " synthetic complete overlap\n").encode()
+    near_prior = (
+        stamp.replace(".123456789Z", ".123456788Z") + " synthetic nanosecond predecessor\n"
+    ).encode()
+    baseline = old + near_prior + earlier_same_time + anchor
+    current = (new_time + " synthetic current history\n").encode()
+    current *= (logs.LOG_BYTES * 3 // 5) // len(current)
+    event = (new_time + " synthetic required post-Capture event\n").encode()
+    current += event
+    assert len(baseline) <= logs.LOG_BYTES < len(baseline + current)
+    previous, previous_calls = host_fixture(now=now, capture_seconds=240, source_seconds=300)
+    following, following_calls = host_fixture(now=now, generation="after", source_seconds=300)
+    flags = []
+
+    def wrap(underlying, *, after):
+        def run(argv, **kwargs):
+            if "--inspect-stdin" in argv:
+                packet = json.loads(kwargs["input"])
+                manager = base64.b64decode(packet["logs"][1])
+                expected = earlier_same_time + anchor + current if after else baseline
+                assert manager == expected
+                if after:
+                    assert provider_nanoseconds(new_time) > provider_nanoseconds(
+                        packet["protected_runtime"]["started_at"]
+                    )
+                    assert event in manager and near_prior not in manager
+            result = underlying(argv, **kwargs)
+            if after and "get" in argv and failure == "source-changed":
+                value = json.loads(result.stdout)
+                value["items"][1]["metadata"]["uid"] = "other-manager-uid"
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+            if "logs" in argv and argv[argv.index("-c") + 1] == "manager":
+                raw = baseline + current if after else baseline
+                since = [arg.split("=", 1)[1] for arg in argv if arg.startswith("--since-time=")]
+                if after:
+                    flags.append(since)
+                if since:
+                    # Deliberately keep all same-timestamp records before the anchor.
+                    lower = provider_nanoseconds(since[0])
+                    raw = b"".join(
+                        line
+                        for line in raw.splitlines(keepends=True)
+                        if provider_nanoseconds(line.split(b" ", 1)[0].decode()) >= lower
+                    )
+                if after and failure == "changed-anchor":
+                    raw = raw.replace(anchor, (stamp + " changed complete overlap\n").encode())
+                elif after and failure == "missing-anchor":
+                    raw = raw.replace(anchor, b"")
+                elif after and failure == "overflow":
+                    raw += current
+                elif after and failure == "empty":
+                    raw = b""
+                elif after and failure == "partial-only":
+                    raw = (stamp + " unfinished overlap").encode()
+                elif after and failure == "first-later":
+                    later = stamp.replace(".123456789Z", ".123456790Z")
+                    raw = (later + " impossible later prefix\n").encode() + anchor + current
+                elif after and failure == "last-earlier":
+                    earlier = stamp.replace(".123456789Z", ".123456788Z")
+                    raw += (earlier + " impossible earlier suffix\n").encode()
+                (maximum,) = [
+                    int(arg.split("=", 1)[1]) for arg in argv if arg.startswith("--limit-bytes=")
+                ]
+                return subprocess.CompletedProcess(argv, 0, raw[:maximum], b"")
+            return result
+
+        return run
+
+    before = logs.observe(
+        context="owned-context",
+        kubeconfig_paths="/original/config",
+        namespace="django-ray-core-owned",
+        image=IMAGE,
+        generation="before",
+        run=wrap(previous, after=False),
+    )
+    raw = json.dumps(before, sort_keys=True).encode()
+    path = tmp_path / "before-protected-logs.json"
+    path.write_bytes(raw)
+    return raw, path, wrap(following, after=True), previous_calls, following_calls, flags, stamp
+
+
+@pytest.mark.parametrize("same_timestamp", [False, True])
+def test_host_continuation_filters_only_after_an_exact_full_scan(tmp_path, same_timestamp):
+    before, path, run, previous_calls, calls, flags, stamp = overlap_fixture(
+        tmp_path, same_timestamp=same_timestamp
+    )
+    after = logs.observe(
+        context="owned-context",
+        kubeconfig_paths="/original/config",
+        namespace="django-ray-core-owned",
+        image=IMAGE,
+        generation="after",
+        previous_receipt=path,
+        run=run,
+    )
+    raw = json.dumps(after, sort_keys=True).encode()
+    logs.validate_pair(before, raw)
+    assert flags == [[stamp]]  # Preserve all nine fractional digits in argv.
+    assert not any(arg.startswith("--since-time=") for argv, _ in previous_calls for arg in argv)
+    assert len(previous_calls) == len(calls) == 7
+    assert [options["timeout"] for _, options in calls] == [2, 2, 7, 5, 5, 6, 2]
+    assert sum("--limit-bytes=1048577" in argv for argv, _ in calls) == 2
+    for argv, _ in calls:
+        if "--timestamps=true" in argv:
+            role = argv[argv.index("-c") + 1]
+            expected = json.loads(before)["log_window"]["sources"][role]["last_time"]
+            assert [arg for arg in argv if arg.startswith("--since-time=")] == [
+                "--since-time=" + expected
+            ]
+    assert max(len(before), len(raw)) <= 2048
+    assert "synthetic" not in raw.decode() and "synthetic" not in before.decode()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "changed-anchor",
+        "missing-anchor",
+        "overflow",
+        "empty",
+        "partial-only",
+        "source-changed",
+        "first-later",
+        "last-earlier",
+    ],
+)
+def test_host_continuation_refuses_missing_or_incomplete_overlap(tmp_path, failure):
+    _, path, run, _, calls, _, _ = overlap_fixture(tmp_path, failure=failure)
+    with pytest.raises(ValueError) as caught:
+        logs.observe(
+            context="owned-context",
+            kubeconfig_paths="/original/config",
+            namespace="django-ray-core-owned",
+            image=IMAGE,
+            generation="after",
+            previous_receipt=path,
+            run=run,
+        )
+    assert not any("--inspect-stdin" in argv for argv, _ in calls)
+
+    diagnostic = json.loads(logs.diagnostics.diagnostic(caught.value, "host"))
+    assert (
+        diagnostic["failure_phase"]
+        == {
+            "changed-anchor": "manager_log",
+            "missing-anchor": "manager_log_coverage",
+            "overflow": "manager_log_command_size",
+            "empty": "manager_log_empty",
+            "partial-only": "manager_log",
+            "source-changed": "manager_log",
+            "first-later": "manager_log",
+            "last-earlier": "manager_log",
+        }[failure]
+    )
+    assert diagnostic["failure_type"] == "invalid"
+    assert "synthetic" not in json.dumps(diagnostic)
+
+
+@pytest.mark.parametrize("failure", ["missing", "oversized", "future-anchor"])
+def test_host_continuation_requires_a_bounded_previous_proof(tmp_path, failure):
+    _, path, run, _, calls, _, _ = overlap_fixture(tmp_path)
+    if failure == "missing":
+        path = None
+    elif failure == "oversized":
+        path.write_bytes(b" " * 2049)
+    else:
+        previous = json.loads(path.read_bytes())
+        previous["log_window"]["sources"]["manager"]["last_time"] = "2999-01-01T00:00:00Z"
+        path.write_text(json.dumps(previous))
+    with pytest.raises(ValueError):
+        logs.observe(
+            context="owned-context",
+            kubeconfig_paths="/original/config",
+            namespace="django-ray-core-owned",
+            image=IMAGE,
+            generation="after",
+            previous_receipt=path,
+            run=run,
+        )
+    assert not any("exec" in argv or "--timestamps=true" in argv for argv, _ in calls)
+
+
+@pytest.mark.parametrize("mutation", ["digest", "identity", "since", "overlap", "unknown"])
+def test_protected_window_pair_rejects_broken_joins(tmp_path, mutation):
+    before, path, run, _, _, _, _ = overlap_fixture(tmp_path)
+    after = logs.observe(
+        context="owned-context",
+        kubeconfig_paths="/original/config",
+        namespace="django-ray-core-owned",
+        image=IMAGE,
+        generation="after",
+        previous_receipt=path,
+        run=run,
+    )
+    window = after["log_window"]
+    if mutation == "digest":
+        window["previous_receipt_sha256"] = "f" * 64
+    elif mutation == "identity":
+        window["sources"]["web"]["identity_sha256"] = "f" * 64
+    elif mutation == "since":
+        window["sources"]["web"]["since_time"] = "2000-01-01T00:00:00Z"
+    elif mutation == "overlap":
+        window["sources"]["web"]["overlap_sha256"] = "f" * 64
+    else:
+        window["private-canary"] = "must-not-pass"
+    with pytest.raises(ValueError):
+        logs.validate_pair(before, json.dumps(after).encode())
+
+
+def test_current_protected_logs_refuse_legacy_except_fixed_historical_policy():
+    legacy = {
+        "schema_version": 1,
+        "layer": "application_protected_logs",
+        "status": "passed",
+        "complete_application_gate": False,
+        "generation": "before",
+        "assertions": dict.fromkeys(logs.FACTS, True),
+    }
+    with pytest.raises(ValueError):
+        logs.validate_receipt(legacy, "before")
+    logs.validate_receipt(legacy, "before", allow_historical_schema1=True)
+    legacy["assertions"][logs.FACTS[0]] = 1
+    with pytest.raises(ValueError):
+        logs.validate_receipt(legacy, "before", allow_historical_schema1=True)
+    with pytest.raises(ValueError):
+        logs.validate_receipt(legacy, "before", allow_historical_schema1=1)
+
+
+@pytest.mark.parametrize(
+    "raw", [b"2000-01-01T00:00:00Z unfinished", b"no-time complete\n"], ids=["partial", "malformed"]
+)
+def test_protected_log_anchor_requires_a_complete_timestamped_record(raw):
+    with pytest.raises(ValueError):
+        logs._last_record(raw)
+
+
+@pytest.mark.parametrize("boundary", ["capture", "last"])
+def test_protected_window_refuses_reversed_nanosecond_chronology(tmp_path, boundary):
+    _, path, run, _, _, _, _ = overlap_fixture(tmp_path)
+    after = logs.observe(
+        context="owned-context",
+        kubeconfig_paths="/original/config",
+        namespace="django-ray-core-owned",
+        image=IMAGE,
+        generation="after",
+        previous_receipt=path,
+        run=run,
+    )
+    window = after["log_window"]
+    second = window["capture_started_at"][:19]
+    window["capture_started_at"] = second + (
+        ".123456000Z" if boundary == "capture" else ".123456999Z"
+    )
+    for observed in window["sources"].values():
+        observed["since_time"] = second + (
+            ".123456001Z" if boundary == "capture" else ".123456002Z"
+        )
+        observed["last_time"] = second + (".123456002Z" if boundary == "capture" else ".123456001Z")
+    with pytest.raises(ValueError):
+        logs.validate_receipt(after, "after")
+
+
+def test_host_continuation_rejects_anchor_after_capture_within_one_microsecond(tmp_path):
+    before, path, run, _, calls, _, _ = overlap_fixture(tmp_path)
+    previous = json.loads(before)
+    capture = datetime.fromisoformat(previous["log_window"]["capture_started_at"]) + timedelta(
+        seconds=180
+    )
+    later = capture.isoformat().replace("+00:00", "Z").replace(".123456Z", ".123456001Z")
+    previous["log_window"]["sources"]["manager"]["last_time"] = later
+    path.write_text(json.dumps(previous))
+    with pytest.raises(ValueError):
+        logs.observe(
+            context="owned-context",
+            kubeconfig_paths="/original/config",
+            namespace="django-ray-core-owned",
+            image=IMAGE,
+            generation="after",
+            previous_receipt=path,
+            run=run,
+        )
+    assert len(calls) == 2
+    assert not any("exec" in argv or "--timestamps=true" in argv for argv, _ in calls)

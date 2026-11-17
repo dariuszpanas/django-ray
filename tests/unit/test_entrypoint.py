@@ -10,9 +10,11 @@ import os
 import runpy
 import subprocess
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -1442,6 +1444,141 @@ class TestEntrypointPayload:
         assert result["error"] == "async failure"
         assert result["exception_type"] == "builtins.ValueError"
         assert result["retryable"] is True
+
+    @pytest.mark.parametrize("completion_family", ["legacy", "enriched"])
+    @pytest.mark.parametrize(
+        ("callable_kind", "error_kind"),
+        [
+            pytest.param("sync", "raising", id="sync-raising"),
+            pytest.param("async", "raising", id="async-raising"),
+            pytest.param("sync", "non-string", id="sync-non-string"),
+            pytest.param("sync", "plan-mismatch", id="sync-plan-mismatch"),
+        ],
+    )
+    def test_execute_task_materializes_exception_messages(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        completion_family: str,
+        callable_kind: str,
+        error_kind: str,
+    ) -> None:
+        """Formatting failure must retain one framed original task outcome."""
+
+        class BrokenMessageError(RuntimeError):
+            def __str__(self) -> str:
+                raise RuntimeError("synthetic message rendering failed")
+
+        class NonStringMessageError(RuntimeError):
+            def __str__(self) -> str:
+                return cast(str, None)
+
+        class BrokenPlanMismatchError(WorkflowPlanMismatchError):
+            def __str__(self) -> str:
+                raise RuntimeError("synthetic message rendering failed")
+
+        error_type = {
+            "raising": BrokenMessageError,
+            "non-string": NonStringMessageError,
+            "plan-mismatch": BrokenPlanMismatchError,
+        }[error_kind]
+        identity = ExecutionIdentity(81, "00000000-0000-4000-8000-000000000081", 2, 4)
+        invoked: list[str] = []
+        persisted: list[tuple[object, ...]] = []
+        contexts: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def failing_sync() -> None:
+            invoked.append("sync")
+            raise error_type()
+
+        async def failing_async() -> None:
+            invoked.append("async")
+            raise error_type()
+
+        def fake_context(*args: object, **kwargs: object):
+            contexts.append((args, kwargs))
+            return nullcontext()
+
+        def forbidden_ray_init(*_args: object, **_kwargs: object):
+            raise AssertionError("resource-free regression attempted Ray initialization")
+
+        import ray
+
+        monkeypatch.setattr(ray, "init", forbidden_ray_init)
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+        monkeypatch.setattr(entrypoint, "load_task_input", lambda **_kwargs: ([], {}))
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.import_callable",
+            lambda _path: failing_sync if callable_kind == "sync" else failing_async,
+        )
+        monkeypatch.setattr("django_ray.runtime.context.durable_task_execution", fake_context)
+        monkeypatch.setattr(
+            entrypoint, "_persist_task_completion", lambda *args: persisted.append(args)
+        )
+
+        bound = completion_family == "enriched"
+        wire = entrypoint.execute_task(
+            "tests.synthetic_materialization_failure",
+            "[]",
+            "{}",
+            task_execution_pk=identity.task_execution_pk,
+            task_id=identity.task_id,
+            attempt_number=identity.attempt_number,
+            execution_generation=identity.execution_generation,
+            ray_job_driver=True,
+            _completion_identity=identity if bound else None,
+            _execution_protocol_version=1 if bound else None,
+        )
+
+        assert invoked == [callable_kind]
+        assert persisted == [(identity.task_execution_pk, 2, 4, wire)]
+        assert len(contexts) == 1
+        assert contexts[0][0] == (identity.task_execution_pk,)
+        assert contexts[0][1]["task_id"] == identity.task_id
+        assert contexts[0][1]["attempt_number"] == 2
+        assert contexts[0][1]["execution_generation"] == 4
+        expected_exception_type = f"{error_type.__module__}.{error_type.__name__}"
+        if bound:
+            decoded = decode_execution_completion(
+                wire,
+                expected_identity=identity,
+                expected_execution_protocol_version=1,
+            )
+            assert decoded.source is ExecutionCompletionSource.ACCEPTED_VERSIONED_V1
+            completion = decoded.completion
+            assert completion.identity == identity
+            assert completion.execution_protocol_version == 1
+            assert completion.executor_django_ray_version
+            outcome = {
+                "success": completion.success,
+                "result": completion.result,
+                "result_reference": completion.result_reference,
+                "error": completion.error,
+                "traceback": completion.traceback,
+                "exception_type": completion.exception_type,
+                "retryable": completion.retryable,
+            }
+        else:
+            outcome = json.loads(wire)
+            assert "completion_schema" not in outcome
+
+        original_traceback = outcome["traceback"]
+        assert isinstance(original_traceback, str)
+        assert "Traceback (most recent call last):" in original_traceback
+        assert f"failing_{callable_kind}" in original_traceback
+        assert error_type.__name__ in original_traceback
+        assert "synthetic message rendering failed" not in wire
+        expected_retryable = error_kind != "plan-mismatch"
+        assert outcome["success"] is False
+        assert outcome["retryable"] is expected_retryable
+        assert outcome == {
+            "success": False,
+            "result": None,
+            "result_reference": None,
+            "error": "exception message unavailable",
+            "traceback": original_traceback,
+            "exception_type": expected_exception_type,
+            "retryable": expected_retryable,
+        }
 
     def test_execute_task_preserves_failure_evidence_inside_json_framing(
         self,

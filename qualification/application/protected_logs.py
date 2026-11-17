@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -72,7 +74,11 @@ def inspect_stdin(*, status_only: bool = False) -> None:
             raise ValueError("Protected log surface is empty or oversized")
         surfaces.append(surface)
     diagnostics.phase("read_only_db")
-    values, tasks = read_owned_rows(packet["protected_runtime"]["row_ids"], status_only=status_only)
+    values, tasks = read_owned_rows(
+        packet["protected_runtime"]["row_ids"],
+        status_only=status_only,
+        started_at=packet["protected_runtime"]["started_at"],
+    )
     if status_only:
         diagnostics.phase("status_api")
         from qualification.application.run_api import ApplicationHttp
@@ -119,29 +125,148 @@ def verify_refusal_statuses(request, *, token: str, tasks: list[str], values: li
         assert_clear([body], values)
 
 
-def validate_receipt(value: object, generation: str) -> None:
+def _timestamp(value: object) -> tuple[str, str]:
+    # Validate the calendar separately; ordering keeps all nine fractional digits.
+    if (
+        not isinstance(value, str)
+        or len(value) > 40
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z", value
+        )
+        is None
+    ):
+        raise ValueError("Protected log window has no bounded UTC timestamp")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo != UTC:
+        raise ValueError("Protected log window has no UTC timestamp")
+    second, _, fraction = value[:-1].partition(".")
+    return second, fraction.ljust(9, "0")
+
+
+def _digest(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _last_record(raw: bytes) -> tuple[str, str]:
+    # Ignore an unfinished trailing record; never retain or split the whole log.
+    end = raw.rfind(b"\n")
+    if end < 0:
+        raise ValueError("Protected log window has no complete anchor record")
+    start = raw.rfind(b"\n", 0, end) + 1
+    line = raw[start : end + 1]
+    stamp = line.split(b" ", 1)[0].decode()
+    _timestamp(stamp)
+    return stamp, hashlib.sha256(line).hexdigest()
+
+
+def _has_record(raw: bytes, stamp: str, digest: str) -> bool:
+    prefix = (stamp + " ").encode()
+    start = 0
+    while (end := raw.find(b"\n", start)) >= 0:
+        line = raw[start : end + 1]
+        if line.startswith(prefix) and hashlib.sha256(line).hexdigest() == digest:
+            return True
+        start = end + 1
+    return False
+
+
+def validate_receipt(
+    value: object, generation: str, *, allow_historical_schema1: bool = False
+) -> None:
+    if type(allow_historical_schema1) is not bool:
+        raise ValueError("Protected log historical policy must be explicit")
+    fields = {
+        "schema_version",
+        "layer",
+        "status",
+        "complete_application_gate",
+        "generation",
+        "assertions",
+    }
+    legacy = (
+        allow_historical_schema1
+        and isinstance(value, dict)
+        and type(value.get("schema_version")) is int
+        and value["schema_version"] == 1
+    )
     if (
         not isinstance(value, dict)
-        or set(value)
-        != {
-            "schema_version",
-            "layer",
-            "status",
-            "complete_application_gate",
-            "generation",
-            "assertions",
-        }
+        or set(value) != (fields if legacy else fields | {"log_window"})
         or type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
+        or value["schema_version"] != (1 if legacy else 2)
         or value["layer"] != "application_protected_logs"
         or value["status"] != "passed"
         or value["complete_application_gate"] is not False
         or value["generation"] != generation
+        or generation not in {"before", "after"}
         or not isinstance(value["assertions"], dict)
         or set(value["assertions"]) != set(FACTS)
         or any(value["assertions"][name] is not True for name in FACTS)
     ):
         raise ValueError("Protected log receipt is incomplete")
+    if legacy:
+        return
+    window = value["log_window"]
+    if (
+        not isinstance(window, dict)
+        or set(window) != {"previous_receipt_sha256", "capture_started_at", "sources"}
+        or not isinstance(window["sources"], dict)
+        or set(window["sources"]) != {"web", "manager"}
+        or (
+            window["previous_receipt_sha256"] is not None
+            if generation == "before"
+            else not _digest(window["previous_receipt_sha256"])
+        )
+    ):
+        raise ValueError("Protected log receipt has an invalid window")
+    capture = _timestamp(window["capture_started_at"])
+    for observed in window["sources"].values():
+        if (
+            not isinstance(observed, dict)
+            or set(observed)
+            != {"identity_sha256", "since_time", "overlap_sha256", "last_time", "last_sha256"}
+            or not _digest(observed["identity_sha256"])
+            or not _digest(observed["last_sha256"])
+        ):
+            raise ValueError("Protected log receipt has an invalid source window")
+        last = _timestamp(observed["last_time"])
+        if generation == "before":
+            if observed["since_time"] is not None or observed["overlap_sha256"] is not None:
+                raise ValueError("Protected log first window must retain the full source query")
+        elif (
+            not _digest(observed["overlap_sha256"])
+            or _timestamp(observed["since_time"]) > capture
+            or _timestamp(observed["since_time"]) > last
+        ):
+            raise ValueError("Protected log continuation does not cover its boundary")
+
+
+def validate_pair(before_raw: bytes, after_raw: bytes) -> None:
+    if (
+        not isinstance(before_raw, bytes)
+        or not isinstance(after_raw, bytes)
+        or not before_raw
+        or not after_raw
+        or max(len(before_raw), len(after_raw)) > 2048
+    ):
+        raise ValueError("Protected log receipt exceeds its byte limit")
+    before = json.loads(before_raw)
+    after = json.loads(after_raw)
+    validate_receipt(before, "before")
+    validate_receipt(after, "after")
+    if after["log_window"]["previous_receipt_sha256"] != hashlib.sha256(before_raw).hexdigest():
+        raise ValueError("Protected log continuation has no exact previous receipt")
+    for role in ("web", "manager"):
+        previous = before["log_window"]["sources"][role]
+        current = after["log_window"]["sources"][role]
+        if (
+            current["identity_sha256"] != previous["identity_sha256"]
+            or current["since_time"] != previous["last_time"]
+            or current["overlap_sha256"] != previous["last_sha256"]
+        ):
+            raise ValueError("Protected log continuation does not overlap its unchanged source")
 
 
 @diagnostics.tracked("host")
@@ -152,14 +277,30 @@ def observe(
     namespace: str,
     image: str,
     generation: str,
+    previous_receipt: Path | None = None,
     run=subprocess.run,
 ) -> dict:
     deadline = time.monotonic() + SECONDS
+    previous_raw = None
+    previous = None
+    if generation == "after":
+        if previous_receipt is None:
+            raise ValueError("Protected log continuation requires its previous receipt")
+        with previous_receipt.open("rb") as stream:
+            previous_raw = stream.read(2049)
+        if len(previous_raw) > 2048:
+            raise ValueError("Protected log receipt exceeds its byte limit")
+        previous = json.loads(previous_raw)
+        validate_receipt(previous, "before")
+    elif generation != "before" or previous_receipt is not None:
+        raise ValueError("Protected log first window must not select a previous receipt")
     # Chainsaw replaces KUBECONFIG for command operations with a one-context file.
     # Restore the runner's original paths so its explicit context remains authoritative.
     environment = {**os.environ, "KUBECONFIG": kubeconfig_paths}
 
-    def command(arguments, *, data=None, maximum=LOG_BYTES, limit=5, private=False):
+    def command(
+        arguments, *, data=None, maximum=LOG_BYTES, limit=5, private=False, manager_log=False
+    ):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Protected log observation deadline expired")
@@ -176,6 +317,14 @@ def observe(
             if failure is not None:
                 raise failure
         if result.returncode or len(result.stdout) > maximum or result.stderr:
+            if manager_log:
+                diagnostics.phase(
+                    "manager_log_command_exit"
+                    if result.returncode
+                    else "manager_log_command_size"
+                    if len(result.stdout) > maximum
+                    else "manager_log_command_stderr"
+                )
             raise ValueError("Protected log command did not return complete bounded evidence")
         return result.stdout
 
@@ -257,6 +406,17 @@ def observe(
     now = datetime.now(UTC)
     if not 0 <= (now - start).total_seconds() <= 1800:
         raise ValueError("Protected log observation interval is invalid")
+    window: dict = {
+        "previous_receipt_sha256": hashlib.sha256(previous_raw).hexdigest()
+        if previous_raw is not None
+        else None,
+        "capture_started_at": evidence["started_at"],
+        "sources": {},
+    }
+    if previous is not None:
+        for observed in previous["log_window"]["sources"].values():
+            if _timestamp(observed["last_time"]) > _timestamp(evidence["started_at"]):
+                raise ValueError("Protected log continuation starts after the current Capture")
     web = before["django-web"]
 
     def inspect(packet, *, status_only):
@@ -299,8 +459,24 @@ def observe(
     for app in ("django-web", "django-manager"):
         diagnostics.phase("web_log" if app == "django-web" else "manager_log")
         name, _, container, started = before[app]
+        manager_log = app == "django-manager"
+        if manager_log:
+            diagnostics.phase("manager_log_source_start")
         if datetime.fromisoformat(started) > start:
             raise ValueError("Protected log source was replaced during the observation interval")
+        if manager_log:
+            diagnostics.phase("manager_log")
+        identity = hashlib.sha256(
+            json.dumps(
+                [context, kubeconfig_paths, namespace, image, *before[app]],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        prior_source = (
+            previous["log_window"]["sources"][container] if previous is not None else None
+        )
+        if prior_source is not None and prior_source["identity_sha256"] != identity:
+            raise ValueError("Protected log continuation source changed")
         raw = command(
             [
                 "logs",
@@ -309,14 +485,50 @@ def observe(
                 container,
                 "--timestamps=true",
                 "--tail=-1",
+                *(
+                    ["--since-time=" + prior_source["last_time"]]
+                    if prior_source is not None
+                    else []
+                ),
                 f"--limit-bytes={LOG_BYTES + 1}",
-            ]
+            ],
+            manager_log=manager_log,
         )
+        if manager_log:
+            diagnostics.phase("manager_log_empty")
         if not raw:
             raise ValueError("Protected log source has no interval evidence")
+        if manager_log:
+            diagnostics.phase("manager_log_timestamp_decode")
         first = raw.split(b" ", 1)[0].decode()
+        if manager_log:
+            diagnostics.phase("manager_log_timestamp_parse")
         if len(first) > 40 or datetime.fromisoformat(first) > start:
+            if manager_log:
+                diagnostics.phase(
+                    "manager_log_timestamp_length" if len(first) > 40 else "manager_log_coverage"
+                )
             raise ValueError("Protected log source does not cover the observation start")
+        if manager_log:
+            diagnostics.phase("manager_log")
+        if _timestamp(first) > _timestamp(evidence["started_at"]):
+            if manager_log:
+                diagnostics.phase("manager_log_coverage")
+            raise ValueError("Protected log source does not cover the observation start")
+        last_time, last_sha256 = _last_record(raw)
+        if prior_source is not None and (
+            _timestamp(first) > _timestamp(prior_source["last_time"])
+            or not _has_record(raw, prior_source["last_time"], prior_source["last_sha256"])
+            or _timestamp(last_time) < _timestamp(prior_source["last_time"])
+        ):
+            raise ValueError("Protected log continuation lost its complete overlap record")
+        window["sources"][container] = {
+            "identity_sha256": identity,
+            "since_time": prior_source["last_time"] if prior_source is not None else None,
+            "overlap_sha256": prior_source["last_sha256"] if prior_source is not None else None,
+            "last_time": last_time,
+            "last_sha256": last_sha256,
+        }
         logs.append(base64.b64encode(raw).decode())
     diagnostics.phase("private_compare")
     inspect({"protected_runtime": evidence, "logs": logs}, status_only=False)
@@ -329,14 +541,19 @@ def observe(
     diagnostics.inventory(None, "deadline")
     if time.monotonic() > deadline:
         raise ValueError("Protected log source changed or exceeded its deadline")
-    return {
-        "schema_version": 1,
+    receipt = {
+        "schema_version": 2,
         "layer": "application_protected_logs",
         "status": "passed",
         "complete_application_gate": False,
         "generation": generation,
         "assertions": dict.fromkeys(FACTS, True),
+        "log_window": window,
     }
+    validate_receipt(receipt, generation)
+    if previous_raw is not None:
+        validate_pair(previous_raw, json.dumps(receipt, sort_keys=True).encode())
+    return receipt
 
 
 def main(argv=None) -> int:
@@ -350,6 +567,7 @@ def main(argv=None) -> int:
     parser.add_argument("--image")
     parser.add_argument("--generation", choices=("before", "after"))
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--previous-receipt", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.inspect_stdin or args.inspect_status:
@@ -372,6 +590,7 @@ def main(argv=None) -> int:
                 namespace=args.namespace,
                 image=args.image,
                 generation=args.generation,
+                previous_receipt=args.previous_receipt,
             )
             validate_receipt(receipt, args.generation)
             with args.output.open("x") as stream:

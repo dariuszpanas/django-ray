@@ -43,6 +43,17 @@ def maintenance_observer(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def exception_observer(monkeypatch):
+    from qualification.application import exception_materialization, http_context
+    from tests.unit.test_application_exception_materialization import record
+
+    # These existing Core tests replace native observers; retain that boundary.
+    outer_deadline = run_core.time.monotonic() + 300
+    monkeypatch.setattr(http_context, "local_outer_deadline", lambda: outer_deadline)
+    monkeypatch.setattr(exception_materialization, "observe", lambda **kwargs: record())
+
+
 @pytest.fixture
 def durable(monkeypatch):
     config = {
@@ -355,17 +366,26 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
         )
 
 
-@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize(
+    "failed", [False, True, "state_api_selection", "exception_materialization"]
+)
 def test_core_requires_result_presentation_before_writing_a_passing_receipt(
     tmp_path, monkeypatch, capsys, failed
 ):
     from qualification.application import (
         dashboard_browser,
+        exception_materialization,
+        http_context,
         protected_runtime,
         result_presentation,
         runtime_env_refusal,
     )
     from qualification.application.api import ApiEvidence
+    from tests.unit.test_application_exception_materialization import record as exception_record
+
+    steps = []
+    monkeypatch.setattr(run_core.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(http_context, "local_outer_deadline", lambda: 160.0)
 
     monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
     monkeypatch.setattr("django.setup", lambda: None)
@@ -376,11 +396,15 @@ def test_core_requires_result_presentation_before_writing_a_passing_receipt(
     monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {"execution_id": 1})
     monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *_a, **_k: TASK_ID)
     monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *_a: {})
-    monkeypatch.setattr(
-        run_core,
-        "verify_state_api_selection",
-        lambda _task_id, *, execution_id: state_selection_record(execution_id),
-    )
+
+    def observe_state(task_id, *, execution_id):
+        steps.append("state")
+        assert task_id == TASK_ID and execution_id == 1
+        if failed == "state_api_selection":
+            raise run_core.CoreEvidenceError(run_core.CoreEvidenceFailure.STATE_API_SELECTION)
+        return state_selection_record(execution_id)
+
+    monkeypatch.setattr(run_core, "verify_state_api_selection", observe_state)
 
     def verify_refusals(request, *, evidence, **kwargs):
         evidence.update(
@@ -392,27 +416,49 @@ def test_core_requires_result_presentation_before_writing_a_passing_receipt(
         return [2, 3]
 
     monkeypatch.setattr(runtime_env_refusal, "verify_refusals", verify_refusals)
-    monkeypatch.setattr(
-        protected_runtime.Capture,
-        "finish",
-        lambda self, ids: {"api_clear": True, "row_ids": ids, "started_at": self.started_at},
-    )
+
+    def finish(self, ids):
+        steps.append("protected_finish")
+        return {"api_clear": True, "row_ids": ids, "started_at": self.started_at}
+
+    monkeypatch.setattr(protected_runtime.Capture, "finish", finish)
+
+    def observe_exception(**kwargs):
+        steps.append("exception")
+        assert kwargs["transport"] == "ray_core" and kwargs["deadline"] == 160.0
+        assert kwargs["token"] == "fixed-token"
+        if failed == "exception_materialization":
+            raise ValueError("private observer failure must be discarded")
+        return exception_record()
+
+    monkeypatch.setattr(exception_materialization, "observe", observe_exception)
 
     def observe(*, token):
+        steps.append("result")
         assert token == "fixed-token"
-        if failed:
+        if failed is True:
             raise ValueError("private result response must not be emitted")
         return dict(result_presentation.EVIDENCE)
 
     monkeypatch.setattr(result_presentation, "observe_result_presentation", observe)
     path = tmp_path / "core.json"
-    assert run_core.main(["--token-file", "unused", "--receipt", str(path)]) == int(failed)
+    assert run_core.main(["--token-file", "unused", "--receipt", str(path)]) == int(bool(failed))
     output = capsys.readouterr().out
     assert "private result response" not in output
+    assert "private observer failure" not in output
     receipt = json.loads(output)
-    assert path.exists() is not failed
+    assert path.exists() is not bool(failed)
+    expected_steps = ["state"]
+    if failed != "state_api_selection":
+        expected_steps += ["protected_finish", "exception"]
+        assert receipt["state_api_selection"] == state_selection_record(1)
+        if failed != "exception_materialization":
+            expected_steps.append("result")
+            assert receipt["exception_materialization"] == exception_record()
+    assert steps == expected_steps
     if failed:
-        assert receipt["failed_stage"] == "ordinary_result_presentation"
+        expected_stage = failed if type(failed) is str else "ordinary_result_presentation"
+        assert receipt["failed_stage"] == expected_stage
         assert "ordinary_results" not in receipt
     else:
         result_presentation.validate_evidence(receipt["ordinary_results"])

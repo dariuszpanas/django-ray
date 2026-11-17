@@ -507,3 +507,72 @@ def test_untrusted_event_coordinates_and_timestamps_do_not_escape_projection(inv
     assert clean["event_time"] is None
     assert clean["series_last_observed_time"] is None
     assert "private-canary" not in json.dumps(clean)
+
+
+@pytest.mark.parametrize(
+    "failure,phase",
+    [
+        ("source-start", "manager_log_source_start"),
+        ("source-timestamp", "manager_log_source_start"),
+        ("command-exit", "manager_log_command_exit"),
+        ("command-size", "manager_log_command_size"),
+        ("command-stderr", "manager_log_command_stderr"),
+        ("command-exit-size-stderr", "manager_log_command_exit"),
+        ("command-size-stderr", "manager_log_command_size"),
+        ("empty", "manager_log_empty"),
+        ("timestamp-decode", "manager_log_timestamp_decode"),
+        ("timestamp-parse", "manager_log_timestamp_parse"),
+        ("timestamp-length", "manager_log_timestamp_length"),
+        ("coverage", "manager_log_coverage"),
+    ],
+)
+def test_manager_log_failure_identifies_existing_predicate_without_private_values(failure, phase):
+    underlying, calls = host_fixture()
+
+    def run(argv, **kwargs):
+        result = underlying(argv, **kwargs)
+        if "get" in argv and failure.startswith("source-"):
+            value = json.loads(result.stdout)
+            manager = value["items"][1]["status"]["containerStatuses"][0]
+            manager["state"]["running"]["startedAt"] = (
+                "2999-01-01T00:00:00Z" if failure == "source-start" else "private-manager-canary"
+            )
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+        if "logs" not in argv or argv[argv.index("-c") + 1] != "manager":
+            return result
+        code, raw, stderr = 0, result.stdout, b""
+        if failure.startswith("command-"):
+            code = 1 if "exit" in failure else 0
+            raw = b"x" * (logs.LOG_BYTES + 1) if "size" in failure else b"private-manager-canary"
+            stderr = b"private-manager-canary" if "stderr" in failure else b""
+        elif failure == "empty":
+            raw = b""
+        elif failure == "timestamp-decode":
+            raw = b"\xff private-manager-canary"
+        elif failure == "timestamp-parse":
+            raw = b"private-manager-canary body"
+        elif failure == "timestamp-length":
+            raw = b"x" * 41 + b" private-manager-canary"
+        elif failure == "coverage":
+            raw = b"2999-01-01T00:00:00Z private-manager-canary"
+        return subprocess.CompletedProcess(argv, code, raw, stderr)
+
+    with pytest.raises(ValueError) as caught:
+        observe(run)
+    encoded = diagnostics.diagnostic(caught.value, "host")
+    value = json.loads(encoded)
+    assert value == {
+        "schema_version": 2,
+        "layer": "application_protected_logs",
+        "status": "failed",
+        "failure_scope": "host",
+        "failure_phase": phase,
+        "failure_type": "invalid",
+        "child_phase": None,
+        "source_role": None,
+        "inventory_reason": None,
+    }
+    assert "private-manager-canary" not in encoded and "2999" not in encoded
+    assert len(encoded.encode()) + 1 <= diagnostics.MAX_BYTES
+    assert len(calls) == (4 if failure.startswith("source-") else 5)
+    assert not any("--inspect-stdin" in argv for argv, _ in calls)

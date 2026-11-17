@@ -79,6 +79,8 @@ def test_generation_retains_fixed_order_receipts_and_previous_generation(generat
         assert argv[:2] == [sys.executable, "-m"]
         assert argv[argv.index("--receipt") + 1] == f"/receipts/{generation}-{name}.json"
         assert not any("&&" in arg for arg in argv)
+        if name != "nodes":
+            assert argv[argv.index("--token-file") + 1] == str(Path("/credentials/token"))
     nodes = commands[1][1]
     assert ("--previous-receipt" in nodes) == (generation == "after")
     if generation == "after":
@@ -343,6 +345,7 @@ def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
     from qualification.application.run_chainsaw import parse_receipts
     from qualification.application.runtime_env_maintenance import FACTS as MAINTENANCE_FACTS
     from qualification.application.runtime_env_refusal import CASES, FACTS
+    from tests.unit.test_application_exception_materialization import record as exception_record
 
     monkeypatch.setattr(runner, "run_command", Mock(return_value=0))
     assert runner.run_phases(_commands()) == 0
@@ -359,6 +362,7 @@ def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
                 case: dict.fromkeys(facts, True) for case, facts in MAINTENANCE_FACTS.items()
             },
             "ordinary_results": dict(RESULT_EVIDENCE),
+            "exception_materialization": exception_record(),
             "api": {"task_id": "25200000-0000-4000-8000-000000000002"},
             "executions": [
                 {"task_id": "25200000-0000-4000-8000-000000000002", "execution_id": 1},

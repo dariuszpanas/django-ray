@@ -157,14 +157,15 @@ def application(evidence: Evidence, expected: ExpectedRun) -> None:
         for name in names:
             validate_application_payload(name, evidence.json(output + name + ".json"))
             lines.append(evidence.read(output + name + ".json"))
-        # This fixed historical adapter predates State selection evidence.
-        # Waive only absence; any present record is still validated, and the
-        # retained historical files/context gain no new facts.
+        # This adapter retains the fixed 45180ea contract. Those historical
+        # receipts predate State selection and exception materialization.
+        # Waive only absence; present records still validate and no new facts are invented.
         parse_receipts(
             b"\n".join(lines),
             names,
             expected_profile=profile,
             require_state_api_selection=False,
+            require_exception_materialization=False,
         )
     before = evidence.read(output + "before-nodes.json")
     fields(
@@ -185,7 +186,12 @@ def application(evidence: Evidence, expected: ExpectedRun) -> None:
         after_workflows=evidence.json(output + "after-workflows.json"),
     )
     for generation in ("before", "after"):
-        validate_logs(evidence.json(output + generation + "-protected-logs.json"), generation)
+        # This adapter owns the fixed 45180ea receipt contract, before window proofs.
+        validate_logs(
+            evidence.json(output + generation + "-protected-logs.json"),
+            generation,
+            allow_historical_schema1=True,
+        )
     producers = evidence.json(output + "producers.json")
     require(isinstance(producers, list) and len(producers) == 4, "missing-application-producers")
     require(len({value["uid"] for value in producers}) == 4, "duplicate-application-producer")
