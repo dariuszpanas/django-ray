@@ -295,7 +295,7 @@ class TestLiveFailureInjection:
 
     def test_cancellation_finalizes_live_pending_task(self, live_ray_cluster):
         """Separate requested/durable cancellation from observed callable stopping."""
-        from ray.exceptions import GetTimeoutError, TaskCancelledError
+        from ray.exceptions import GetTimeoutError, RayTaskError, TaskCancelledError
 
         from django_ray.lifecycle import request_task_cancellation
         from django_ray.models import CancellationStatus, TaskAttempt
@@ -344,11 +344,36 @@ class TestLiveFailureInjection:
 
         def observe(witness, predicate):
             deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                state = ray.get(witness.snapshot.remote(), timeout=2)
-                if predicate(state):
-                    return state
-                time.sleep(0.05)
+            pending = None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if pending is None:
+                    pending = witness.snapshot.remote()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                try:
+                    state = ray.get(pending, timeout=min(2, remaining))
+                except RayTaskError:
+                    # Remote callable errors can also inherit GetTimeoutError.
+                    raise
+                except GetTimeoutError:
+                    pass
+                else:
+                    if time.monotonic() >= deadline:
+                        break
+                    matched = predicate(state)
+                    if time.monotonic() >= deadline:
+                        break
+                    if matched:
+                        return state
+                    pending = None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
             raise AssertionError("Owned cancellation observation deadline expired")
 
         # An independent no-cancel control proves this callable remains active
