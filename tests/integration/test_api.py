@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import warnings
 from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -248,6 +249,27 @@ class TestLandingPage:
         assert response.status_code == 200
 
         content = response.content.decode("utf-8")
+
+        # Check the actual JS output target, not another live region on the page.
+        class ActionStatusParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.outputs = []
+
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                if attributes.get("id") == "output":
+                    self.outputs.append(attributes)
+
+        parser = ActionStatusParser()
+        parser.feed(content)
+        parser.close()
+        assert len(parser.outputs) == 1
+        status = parser.outputs[0]
+        assert status.get("role") == "status"
+        assert status.get("aria-live", "polite") == "polite"
+        assert status.get("aria-atomic", "true") == "true"
+
         script_path = REPOSITORY_ROOT / "testproject/static/testproject/landing.js"
         script = script_path.read_text(encoding="utf-8")
 

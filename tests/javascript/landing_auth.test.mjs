@@ -285,6 +285,11 @@ test("statistics and enqueue use the shared bearer request path", async () => {
   dashboard.fetchResponses.push(response(200, { task_id: "task-1", status: "READY" }));
   await dashboard.click("trigger");
 
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "Task task-1 enqueued with status READY.",
+  );
+
   assert.equal(dashboard.fetchCalls[1].url, "/api/enqueue/add/2/3");
   assert.equal(dashboard.fetchCalls[1].options.method, "POST");
   assert.equal(
@@ -686,6 +691,8 @@ test("a protected action denied with 403 retains the verified credential", async
 
   dashboard.fetchResponses.push(response(403, { detail: "Forbidden" }));
   await dashboard.click("trigger");
+
+  assert.equal(dashboard.elements.get("output").textContent, "Enqueue failed: 403");
 
   assert.equal(
     dashboard.elements.get("credential-status").textContent,

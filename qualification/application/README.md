@@ -642,6 +642,14 @@ matching job and task identity, a successful State API response, and a rendered
 `FINISHED` task detail with no JavaScript errors. Anonymous Admin access must be
 denied. A URL or HTTP success alone does not pass this assertion.
 
+Before the Admin navigation, the same page opens the same-origin landing root and
+requires exactly one visible `#output` with `role="status"`. Missing `aria-live`
+and `aria-atomic` use the status role's polite and atomic defaults; explicit values
+must be `polite` and `true`. The fixed `landing_action_status_verified` receipt fact
+requires this DOM check. It adds no page, protected action or API credential, and
+uses the existing browser deadline. This proves the rendered status semantics,
+not an assistive-technology announcement of a task outcome.
+
 The proxy permits four concurrent requests, limits each response to 8 MiB, and
 does not forward browser credentials. The browser subprocess has a 60-second
 deadline; its process group, temporary Admin session and proxy are removed on
