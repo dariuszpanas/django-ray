@@ -6,7 +6,7 @@ on:
       mode:
         description: Fixed diagnostic workload
         type: choice
-        options: [claim, maintenance]
+        options: [claim, maintenance, maintenance-tail-scaling]
         default: claim
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   benchmark:
-    if: inputs.mode != 'maintenance'
+    if: inputs.mode != 'maintenance' && inputs.mode != 'maintenance-tail-scaling'
     name: PostgreSQL Polling Benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -131,7 +131,7 @@ jobs:
 
   maintenance:
     if: >-
-      inputs.mode == 'maintenance' &&
+      (inputs.mode == 'maintenance' || inputs.mode == 'maintenance-tail-scaling') &&
       github.repository_id == '790856348' &&
       github.repository_owner_id == '15094983' &&
       github.actor_id == '15094983'
@@ -145,6 +145,7 @@ jobs:
     env:
       DJANGO_SETTINGS_MODULE: tests.postgres_settings
       DJANGO_RAY_MAINTENANCE_PLANS: owned-disposable-v1
+      MAINTENANCE_PRESET: ${{ inputs.mode == 'maintenance-tail-scaling' && 'tail-scaling' || 'fixed' }}
       DATABASE_NAME: maintenance_plans
       DATABASE_USER: django_ray
       DATABASE_PASSWORD: django_ray
@@ -157,13 +158,13 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Admit the owner source and disposable runner
-        run: python -m qualification.maintenance_plans --preflight
+        run: python -m qualification.maintenance_plans --preflight --preset "$MAINTENANCE_PRESET"
 
       - name: Require the exact-source Linux CI checkpoint
         timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python -m qualification.maintenance_plans --checkpoint
+        run: python -m qualification.maintenance_plans --checkpoint --preset "$MAINTENANCE_PRESET"
 
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -181,7 +182,7 @@ jobs:
         run: |
           refuse() { printf '%s\n' 'MAINTENANCE_POSTGRES_CREATE_FAILED' >&2; exit 1; }
           unset DOCKER_CONTEXT DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_VERSION
-          python -m qualification.maintenance_plans --preflight
+          python -m qualification.maintenance_plans --preflight --preset "$MAINTENANCE_PRESET"
           cid_file="$RUNNER_TEMP/maintenance-postgres.cid"
           test ! -e "$cid_file" || refuse
           docker --host unix:///var/run/docker.sock create \
@@ -228,7 +229,7 @@ jobs:
           ulimit -f 4096
           timeout --signal=TERM --kill-after=10s 360s \
             uv run --no-sync --python 3.12 python -m qualification.maintenance_plans \
-            --output "$RUNNER_TEMP/maintenance-plans/report.json"
+            --output "$RUNNER_TEMP/maintenance-plans/report.json" --preset "$MAINTENANCE_PRESET"
 
       - name: Remove only this job's PostgreSQL container and anonymous volume
         if: always() && steps.postgres.outputs.container_id != ''

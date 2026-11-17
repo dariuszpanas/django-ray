@@ -7,6 +7,7 @@ import json
 import re
 import shlex
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -502,6 +503,193 @@ def test_owner_admission_binds_actor_repo_event_and_source(monkeypatch):
     assert source.call_count == 1
 
 
+def _tail_scaling_part(count):
+    """Synthetic report assembly frames, not database or plan evidence."""
+    records = []
+    for index, kind in enumerate(probe.METHODS):
+        for queues in ("all", ["plan-a"], ["plan-a", "plan-b"]):
+            for ids in ([], [11, 13]) if kind == "orphan" else ([],):
+                for phase in ("high-water", "first", "continuation"):
+                    records.append(
+                        {
+                            "profile": "high-tail",
+                            "seeded_rows": count,
+                            "kind": kind,
+                            "queues": queues,
+                            "phase": phase,
+                            "reconciled_active_page_ids": ids,
+                            "worker_method_sha256": ("abc"[index]) * 64,
+                            "sql": "SELECT %s",
+                            "parameters": (7,),
+                            "plan": {"Node Type": "Limit", "Actual Rows": 1},
+                            "nodes": 1,
+                            "explain": [{"Plan": {"Node Type": "Limit", "Actual Rows": 1}}],
+                        }
+                    )
+    return {
+        "schema_version": 1,
+        "limits": probe.LIMITS,
+        "records": records,
+        "postgres_version": 170011,
+        "migrations": ["synthetic"],
+        "indexes": [["synthetic", "synthetic"]],
+        "fixture_rows_rolled_back": True,
+        "complete_worker_gate": False,
+        "production_performance_acceptance": False,
+        "scope": "Synthetic report assembly only",
+        "protocol_range": [1, 1],
+        "orphan_active_page_scenarios": "Synthetic empty/two-ID cases",
+    }
+
+
+def test_tail_scaling_uses_fixed_population_grid_and_preserves_original_records(monkeypatch):
+    parts = {count: _tail_scaling_part(count) for count in (2048, 4096, 8192)}
+    collect = Mock(side_effect=lambda *, profiles, count: parts[count])
+    monkeypatch.setattr(probe, "collect", collect)
+
+    report = probe.collect_tail_scaling()
+
+    assert [call.kwargs for call in collect.call_args_list] == [
+        {"profiles": ("high-tail",), "count": count} for count in (2048, 4096, 8192)
+    ]
+    assert report["schema_version"] == 2
+    assert report["series"] == {
+        "name": "high-tail-scaling-v1",
+        "populations": [2048, 4096, 8192],
+        "shared_fixture_prefix_rows": 1024,
+    }
+    assert len(report["records"]) == 108
+    assert {
+        count: sum(r["seeded_rows"] == count for r in report["records"]) for count in parts
+    } == {
+        2048: 36,
+        4096: 36,
+        8192: 36,
+    }
+    original = parts[2048]["records"][0]
+    assert report["records"][0] is original
+    assert report["records"][0]["parameters"] is original["parameters"]
+    assert all(part["schema_version"] == 1 and "series" not in part for part in parts.values())
+    assert "Serial populations share aborted-tuple, index and cache history" in report["scope"]
+    assert all(part["scope"] == "Synthetic report assembly only" for part in parts.values())
+    assert report["complete_worker_gate"] is False
+    assert report["production_performance_acceptance"] is False
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing",
+        "duplicate",
+        "wrong_population",
+        "bool_population",
+        "wrong_profile",
+        "wrong_queue",
+        "wrong_phase",
+        "wrong_kind",
+        "extra_ids",
+        "unordered_ids",
+        "bool_id",
+        "inconsistent_ids",
+        "changed_method_hash",
+        "extra_field",
+    ],
+)
+def test_tail_scaling_grid_refuses_missing_duplicate_or_mixed_scenarios(damage):
+    records = deepcopy(
+        [row for count in (2048, 4096, 8192) for row in _tail_scaling_part(count)["records"]]
+    )
+    active = next(row for row in records if row["reconciled_active_page_ids"])
+    if damage == "missing":
+        records.pop()
+    elif damage == "duplicate":
+        records[-1] = deepcopy(records[0])
+    elif damage == "wrong_population":
+        records[0]["seeded_rows"] = 8193
+    elif damage == "bool_population":
+        records[0]["seeded_rows"] = True
+    elif damage == "wrong_profile":
+        records[0]["profile"] = "dense"
+    elif damage == "wrong_queue":
+        records[0]["queues"] = ["plan-c"]
+    elif damage == "wrong_phase":
+        records[0]["phase"] = "restart"
+    elif damage == "wrong_kind":
+        records[0]["kind"] = "completed"
+    elif damage == "extra_ids":
+        active["reconciled_active_page_ids"] = [11, 13, 15]
+    elif damage == "unordered_ids":
+        active["reconciled_active_page_ids"] = [13, 11]
+    elif damage == "bool_id":
+        active["reconciled_active_page_ids"] = [True, 13]
+    elif damage == "inconsistent_ids":
+        active["reconciled_active_page_ids"] = [21, 23]
+    elif damage == "changed_method_hash":
+        records[0]["worker_method_sha256"] = "f" * 64
+    else:
+        records[0]["unexpected"] = "synthetic-private-canary"
+    with pytest.raises(probe.PlanRefusalError, match="^SERIES_GRID$"):
+        probe._validate_tail_scaling_grid(records)
+
+
+@pytest.mark.parametrize("failure", ["metadata", "collection", "report_budget"])
+def test_tail_scaling_stops_before_a_partial_series_can_be_success(monkeypatch, failure):
+    seen = []
+
+    def collect(*, profiles, count):
+        seen.append(count)
+        if failure == "collection" and count == 4096:
+            raise probe.PlanRefusalError("PLAN_BUDGET")
+        part = _tail_scaling_part(count)
+        if failure == "metadata" and count == 4096:
+            part["postgres_version"] = 170012
+        return part
+
+    monkeypatch.setattr(probe, "collect", collect)
+    if failure == "report_budget":
+        monkeypatch.setattr(probe, "MAX_REPORT_BYTES", 1)
+    code = {
+        "metadata": "SERIES_METADATA",
+        "collection": "PLAN_BUDGET",
+        "report_budget": "REPORT_BUDGET",
+    }[failure]
+    with pytest.raises(probe.PlanRefusalError, match=f"^{code}$"):
+        probe.collect_tail_scaling()
+    assert seen == ([2048] if failure == "report_budget" else [2048, 4096])
+
+
+@pytest.mark.parametrize("damage", ["schema", "rollback", "worker", "performance", "count"])
+def test_tail_scaling_refuses_invalid_part_before_collecting_another_population(
+    monkeypatch, damage
+):
+    part = _tail_scaling_part(2048)
+    if damage == "schema":
+        part["schema_version"] = True
+    elif damage == "rollback":
+        part["fixture_rows_rolled_back"] = False
+    elif damage == "worker":
+        part["complete_worker_gate"] = True
+    elif damage == "performance":
+        part["production_performance_acceptance"] = True
+    else:
+        part["records"][0]["seeded_rows"] = 4096
+    collect = Mock(return_value=part)
+    monkeypatch.setattr(probe, "collect", collect)
+    category = "SERIES_GRID" if damage == "count" else "SERIES_METADATA"
+    with pytest.raises(probe.PlanRefusalError, match=f"^{category}$"):
+        probe.collect_tail_scaling()
+    collect.assert_called_once_with(profiles=("high-tail",), count=2048)
+
+
+def test_unknown_preset_refuses_before_source_or_database_admission(monkeypatch):
+    admission = Mock(side_effect=AssertionError("admission must remain untouched"))
+    monkeypatch.setattr(probe, "admission", admission)
+    with pytest.raises(SystemExit) as error:
+        probe.main(["--preset", "arbitrary-population"])
+    assert error.value.code == 2
+    admission.assert_not_called()
+
+
 def test_manual_workflow_admits_before_private_postgres_allocation():
     document = yaml.safe_load(
         (
@@ -589,3 +777,34 @@ def test_manual_workflow_admits_before_private_postgres_allocation():
         "${{ runner.temp }}/maintenance-plans/report.json",
         "${{ runner.temp }}/maintenance-plans/cleanup.json",
     ]
+
+
+def test_manual_tail_scaling_is_a_fixed_choice_through_the_existing_owned_job():
+    document = yaml.safe_load(
+        (
+            Path(__file__).resolve().parents[2] / ".github/workflows/polling-benchmark.yml"
+        ).read_text()
+    )
+    trigger = document.get("on", document.get(True))
+    mode = trigger["workflow_dispatch"]["inputs"]["mode"]
+    assert mode["options"] == ["claim", "maintenance", "maintenance-tail-scaling"]
+    assert mode["default"] == "claim"
+    assert document["jobs"]["benchmark"]["if"] == (
+        "inputs.mode != 'maintenance' && inputs.mode != 'maintenance-tail-scaling'"
+    )
+    job = document["jobs"]["maintenance"]
+    assert "inputs.mode == 'maintenance-tail-scaling'" in job["if"]
+    assert "github.actor_id == '15094983'" in job["if"]
+    assert "github.repository_id == '790856348'" in job["if"]
+    assert "github.repository_owner_id == '15094983'" in job["if"]
+    assert job["env"]["MAINTENANCE_PRESET"] == (
+        "${{ inputs.mode == 'maintenance-tail-scaling' && 'tail-scaling' || 'fixed' }}"
+    )
+    commands = [step.get("run", "") for step in job["steps"]]
+    preset = '--preset "$MAINTENANCE_PRESET"'
+    assert all(
+        preset in command for command in commands if "qualification.maintenance_plans" in command
+    )
+    assert (
+        len([command for command in commands if "qualification.maintenance_plans" in command]) == 4
+    )

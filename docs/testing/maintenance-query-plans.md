@@ -6,6 +6,11 @@ The new mode installs only the tracked frozen lock with the PostgreSQL extra.
 It runs no worker turn, Ray runtime, task function, lease authority or lifecycle
 transition. This diagnostic does not close #718.
 
+The separate fixed `maintenance-tail-scaling` mode uses the same owned job and
+resource ceilings. It chooses the `tail-scaling` preset; ordinary `maintenance`
+keeps the original fixed 8,192-row three-profile matrix and schema version 1.
+There is no arbitrary population, SQL, source or baseline-ref input.
+
 ## Admission and execution
 
 The owner must review the exact source and admit this disposable job. There are
@@ -48,6 +53,11 @@ timeout --signal=TERM --kill-after=10s 360s \
   --output "$RUNNER_TEMP/maintenance-plans/report.json"
 ```
 
+`maintenance-tail-scaling` adds only `--preset tail-scaling` to that fixed
+collector command. Preflight, exact-source CI, installation, container ownership,
+timeouts and cleanup remain the same. Preset names are validated before the
+collector can initialize Django or access its database.
+
 The implementation's presence is not a passing run. This mode must be exercised
 and its exact-source/cleanup evidence reviewed before acceptance. It is an
 investigation, not a latency threshold or deployed qualification gate.
@@ -84,6 +94,30 @@ states, several queues and completed RUNNING rows. No user data is accepted.
 Supported protocol bounds are recorded; other protocol distributions are not
 modeled in this initial investigation.
 
+The `tail-scaling` preset runs only the existing high-tail profile at exactly
+2,048, 4,096 and 8,192 rows in one source/lock/index context. The same lower
+1,024-row fixture shape is retained at each point: alternating running and
+cancelling rows, three queues, and the existing completion-data distribution.
+These are not 1,024 rows eligible for every query. Only the terminal high-PK tail
+grows. The three populations are rolled back separately and application-data
+emptiness is checked between them. Sequence values and statistics may advance;
+raw primary keys are not a cross-population equality oracle.
+The ascending populations share the same tables and indexes after rollback and
+`ANALYZE`; aborted-tuple, index and cache history is not reset. Buffer or timing
+differences therefore do not isolate population-size effects. Per-node row,
+filter and loop observations remain diagnostic, not a causal physical benchmark.
+
+The new report uses schema version 2 with a `series` discriminator:
+`name="high-tail-scaling-v1"`, `populations=[2048,4096,8192]`, and
+`shared_fixture_prefix_rows=1024`. Its exact grid is 36 records per population,
+108 total: all three scan kinds and queue selections, both orphan active-page
+cases, and high-water/first/continuation queries. Missing, duplicate or mixed
+grid entries, changed method hashes or database metadata, and budget overflow
+refuse instead of yielding a partial successful series. Original query records
+and typed PostgreSQL parameters are retained without normalization or casts.
+The series scope records the shared-history limitation. The maximum population
+and every plan/report cap remain unchanged.
+
 The fixed matrix captures at most 108 original queries/plans. `EXPLAIN (ANALYZE,
 BUFFERS, TIMING OFF, FORMAT JSON)` executes those reads. Bounded original JSON and
 a numeric summary retain row estimates, actual rows/loops, rows removed and buffer
@@ -92,6 +126,13 @@ method hashes, installed versions, migrations, indexes and profile. Each plan is
 limited to 64 nodes, depth 16 and 64 KiB; the full report is at most 1 MiB.
 Failures expose fixed categories without exception text or credentials. The
 run/attempt-specific JSON artifact is retained for 14 days.
+
+Compare per-node rows, loops, filtering and buffers across the fixed populations;
+do not add inclusive parent and child buffers or treat planner cost estimates as
+elapsed time. The series has no required planner/index shape or latency threshold.
+It does not qualify a new index or a high-water algorithm change. The strict
+artifact reader must explicitly admit the version-2 series and full grid; a
+version-1 fixed-population audit is not series evidence.
 
 Profiles roll back their owned rows. Application-data emptiness is checked before
 seeding and after successful rollback; cleanup failure cannot yield success. No
@@ -110,10 +151,16 @@ runner, can prevent explicit cleanup; the disposable hosted runner remains the
 final boundary. No workload starts before ID publication. A missing report or
 cleanup-only artifact does not qualify the diagnostic.
 
-The hosted PostgreSQL lane exercises a small separately created database through
-fresh admission, actual migrations, plan capture, timeout settings and rollback
-or failure refusal. Resource-free tests cover source/query guards and evidence
-budgets on contributor hosts. No native workload runs on Windows.
+The hosted PostgreSQL lane exercises a separately created database through fresh
+admission, actual migrations, plan capture, timeout settings and rollback or
+failure refusal. Its tail conformance test calls the unchanged collector at
+2,048 and 4,096 rows with all queues only: 12 plans per point, 24 total. It checks
+the lower fixture shape and tail cardinality while retaining schema version 1;
+it neither assembles nor qualifies the full scaling series. Full 108-record
+assembly/grid controls are resource-free synthetic tests; the actual three-point
+series remains an explicitly admitted manual run. The conformance test's extra
+inspection queries warm caches and are not performance evidence. No native
+workload runs on Windows.
 
 These synthetic plans establish no production database cost, worker/RSS bound,
 throughput, savings, index need, migration recommendation, lifecycle/payload

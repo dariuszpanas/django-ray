@@ -55,6 +55,7 @@ def test_fresh_database_entry_migrates_captures_actual_plans_and_rolls_back(monk
 
         monkeypatch.setattr(probe, "plan_summary", inspect_deadlines)
         report = probe.collect(profiles=("dense",), count=384, queue_groups=(None,))
+        assert report["schema_version"] == 1 and "series" not in report
         assert len(report["records"]) == 12
         assert report["fixture_rows_rolled_back"] is True
         assert report["complete_worker_gate"] is False
@@ -85,6 +86,67 @@ def test_plan_failure_rolls_back_owned_fixture_rows(monkeypatch):
             assert cursor.fetchone()[0] == "15s"
             cursor.execute("SHOW lock_timeout")
             assert cursor.fetchone()[0] == "2s"
+
+
+def test_two_tail_lengths_keep_lower_fixture_shape_and_legacy_capture_contract(monkeypatch):
+    from django_ray.models import RayTaskExecution
+
+    original_seed = probe.seed
+    prefixes = []
+    populations = []
+
+    def inspect_fixture(profile, count):
+        original_seed(profile, count)
+        assert profile == "high-tail"
+        ordered = RayTaskExecution.objects.order_by("pk")
+        assert ordered.count() == count
+        prefix = list(ordered.values_list("state", "queue_name", "completion_data")[:1024])
+        assert prefix == [
+            (
+                "RUNNING" if index % 2 == 0 else "CANCELLING",
+                probe.QUEUES[(index // 2) % 3],
+                "{}" if index % 16 == 0 else None,
+            )
+            for index in range(1024)
+        ]
+        if prefixes:
+            assert prefix == prefixes[0]
+        prefixes.append(prefix)
+        populations.append(count)
+        last_prefix_pk = ordered.values_list("pk", flat=True)[1023]
+        tail = RayTaskExecution.objects.filter(pk__gt=last_prefix_pk)
+        assert tail.count() == count - 1024
+        assert not tail.exclude(state="SUCCEEDED").exists()
+
+    monkeypatch.setattr(probe, "seed", inspect_fixture)
+    with fresh_database() as owned:
+        probe.prepare_database(owned)
+        plans = 0
+        for count in (2048, 4096):
+            report = probe.collect(profiles=("high-tail",), count=count, queue_groups=(None,))
+            assert report["schema_version"] == 1 and "series" not in report
+            assert len(report["records"]) == 12
+            assert all(
+                row["profile"] == "high-tail"
+                and row["seeded_rows"] == count
+                and row["queues"] == "all"
+                for row in report["records"]
+            )
+            assert {
+                (row["kind"], row["phase"], bool(row["reconciled_active_page_ids"]))
+                for row in report["records"]
+            } == {
+                (kind, phase, active)
+                for kind in probe.METHODS
+                for phase in ("high-water", "first", "continuation")
+                for active in ((False, True) if kind == "orphan" else (False,))
+            }
+            assert report["fixture_rows_rolled_back"] is True
+            assert report["complete_worker_gate"] is False
+            assert report["production_performance_acceptance"] is False
+            probe.fixture_empty()
+            plans += len(report["records"])
+        assert populations == [2048, 4096] and plans == 24
 
 
 def test_nonempty_catalog_refuses_before_migrate(monkeypatch):
