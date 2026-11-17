@@ -1675,8 +1675,8 @@ class RayTaskExecutionAdmin(DjangoRayModelAdmin):
             )
         if state in {TaskState.QUEUED, TaskState.RUNNING, TaskState.CANCELLING}:
             return (
-                f"Retry is unavailable while this execution is {state.lower()}. "
-                "Wait for a terminal outcome before choosing a recovery action."
+                f"This page opened while the execution was {state.lower()}. "
+                "After a terminal outcome, reload this page to review recovery actions."
             )
         if state == TaskState.CANCELLED:
             return (
