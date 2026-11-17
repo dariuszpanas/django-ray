@@ -27,6 +27,9 @@ MAX_PLAN_BYTES = 65536
 MAX_REPORT_BYTES = 1024 * 1024
 PROFILES = ("dense", "sparse", "high-tail")
 QUEUES = ("plan-a", "plan-b", "plan-c")
+PRESETS = ("fixed", "tail-scaling")
+TAIL_SCALING_POPULATIONS = (2048, 4096, 8192)
+TAIL_SCALING_PREFIX_ROWS = 1024
 METHODS = {
     "orphan": "reconcile_tasks",
     "running": "detect_stuck_tasks",
@@ -668,10 +671,130 @@ def collect(*, profiles=PROFILES, count=MAX_ROWS, queue_groups=(None, (QUEUES[0]
     }
 
 
+def _validate_tail_scaling_grid(records):
+    """Require every fixed population/scenario exactly once; never infer missing plans."""
+    phases = ("high-water", "first", "continuation")
+    queues = ((), (QUEUES[0],), QUEUES[:2])
+    expected = {
+        (count, kind, queue, phase, active)
+        for count in TAIL_SCALING_POPULATIONS
+        for kind in METHODS
+        for queue in queues
+        for phase in phases
+        for active in ((False, True) if kind == "orphan" else (False,))
+    }
+    if type(records) is not list or len(records) != len(expected):
+        raise PlanRefusalError("SERIES_GRID")
+    seen, method_hashes, active_ids = set(), {}, {}
+    for row in records:
+        if type(row) is not dict or set(row) != {
+            "profile",
+            "seeded_rows",
+            "kind",
+            "queues",
+            "phase",
+            "reconciled_active_page_ids",
+            "worker_method_sha256",
+            "sql",
+            "parameters",
+            "plan",
+            "nodes",
+            "explain",
+        }:
+            raise PlanRefusalError("SERIES_GRID")
+        count, kind = row.get("seeded_rows"), row.get("kind")
+        phase, selected = row.get("phase"), row.get("queues")
+        ids = row.get("reconciled_active_page_ids")
+        source_hash = row.get("worker_method_sha256")
+        if (
+            row.get("profile") != "high-tail"
+            or type(count) is not int
+            or count not in TAIL_SCALING_POPULATIONS
+            or type(kind) is not str
+            or kind not in METHODS
+            or type(phase) is not str
+            or phase not in phases
+            or type(ids) is not list
+            or len(ids) not in ((0, 2) if kind == "orphan" else (0,))
+            or any(type(pk) is not int or pk <= 0 for pk in ids)
+            or (ids and ids[0] >= ids[1])
+            or type(source_hash) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None
+        ):
+            raise PlanRefusalError("SERIES_GRID")
+        if type(selected) is str and selected == "all":
+            queue = ()
+        elif type(selected) is list and selected in ([QUEUES[0]], list(QUEUES[:2])):
+            queue = tuple(selected)
+        else:
+            raise PlanRefusalError("SERIES_GRID")
+        key = (count, kind, queue, phase, bool(ids))
+        if key in seen or method_hashes.setdefault(kind, source_hash) != source_hash:
+            raise PlanRefusalError("SERIES_GRID")
+        if ids and active_ids.setdefault(count, tuple(ids)) != tuple(ids):
+            raise PlanRefusalError("SERIES_GRID")
+        seen.add(key)
+    if seen != expected:
+        raise PlanRefusalError("SERIES_GRID")
+
+
+def collect_tail_scaling():
+    """Reuse the unchanged collector for three fixed high-tail population points."""
+    common = None
+    records = []
+    report = None
+    for count in TAIL_SCALING_POPULATIONS:
+        part = collect(profiles=("high-tail",), count=count)
+        if (
+            type(part) is not dict
+            or type(part.get("schema_version")) is not int
+            or part["schema_version"] != 1
+            or part.get("fixture_rows_rolled_back") is not True
+            or part.get("complete_worker_gate") is not False
+            or part.get("production_performance_acceptance") is not False
+        ):
+            raise PlanRefusalError("SERIES_METADATA")
+        selected = part.get("records")
+        if (
+            type(selected) is not list
+            or len(selected) != 36
+            or any(type(row) is not dict or row.get("seeded_rows") != count for row in selected)
+        ):
+            raise PlanRefusalError("SERIES_GRID")
+        metadata = {key: value for key, value in part.items() if key != "records"}
+        if common is None:
+            common = metadata
+        elif encode(common) != encode(metadata):
+            raise PlanRefusalError("SERIES_METADATA")
+        # Keep the original SQL parameters/driver adapters and records intact.
+        records.extend(selected)
+        report = {
+            **common,
+            "schema_version": 2,
+            "series": {
+                "name": "high-tail-scaling-v1",
+                "populations": list(TAIL_SCALING_POPULATIONS),
+                "shared_fixture_prefix_rows": TAIL_SCALING_PREFIX_ROWS,
+            },
+            "scope": (
+                common["scope"]
+                + " Serial populations share aborted-tuple, index and cache history; "
+                "buffer/timing differences do not isolate population-size effects."
+            ),
+            "records": records,
+        }
+        bounded_report(report)
+    if report is None:
+        raise PlanRefusalError("SERIES_GRID")
+    _validate_tail_scaling_grid(records)
+    return report
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--checkpoint", action="store_true")
+    parser.add_argument("--preset", choices=PRESETS, default="fixed")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -713,7 +836,7 @@ def main(argv=None) -> int:
             for kind in METHODS:
                 worker_queryset(kind, None, SUPPORTED_EXECUTION_PROTOCOL_RANGE)
             prepare_database(connection)
-            report = collect()
+            report = collect() if args.preset == "fixed" else collect_tail_scaling()
         finally:
             connection.close()
         if source_identity(identity["source_commit"]) != identity:
