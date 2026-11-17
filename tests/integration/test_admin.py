@@ -2979,7 +2979,8 @@ class TestRayTaskExecutionAdmin:
         assert 'id="django-ray-live-heading"' in content
         assert content.count('role="status"') == 3
         assert 'id="django-ray-task-actions"' in content
-        assert "Retry is unavailable while this execution is running" in content
+        assert "This page opened while the execution was running." in content
+        assert "reload this page to review recovery actions" in content
         assert "Retry task..." not in content
         assert 'aria-live="polite"' in content
         assert 'class="django-ray-live__grid"' in content
@@ -3178,6 +3179,49 @@ class TestRayTaskExecutionAdmin:
         assert (
             TaskAttempt.objects.get(execution=expired, attempt_number=1).state == TaskState.EXPIRED
         )
+
+    @pytest.mark.parametrize(
+        "opened_state",
+        [TaskState.QUEUED, TaskState.RUNNING, TaskState.CANCELLING],
+    )
+    @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
+    def test_execution_detail_active_retry_guidance_explains_reload(
+        self,
+        opened_state: str,
+    ) -> None:
+        user = get_user_model().objects.create_superuser(username="retry-active-guidance")
+        task = RayTaskExecution.objects.create(
+            task_id="admin-retry-active-guidance",
+            callable_path="testproject.tasks.failing_task",
+            state=opened_state,
+        )
+        client = Client()
+        client.force_login(user)
+        detail_url = reverse(
+            "admin:django_ray_raytaskexecution_change",
+            args=[task.pk],
+        )
+
+        opened_response = client.get(detail_url)
+        opened_html = opened_response.content.decode()
+
+        assert opened_response.status_code == 200
+        assert f"This page opened while the execution was {opened_state.lower()}." in opened_html
+        assert (
+            "After a terminal outcome, reload this page to review recovery actions." in opened_html
+        )
+        assert "Retry task..." not in opened_html
+
+        # A view fixture transition models a terminal update while this page is open.
+        # A fresh GET remains authoritative for permission and action availability.
+        RayTaskExecution.objects.filter(pk=task.pk).update(state=TaskState.FAILED)
+        reloaded_response = client.get(detail_url)
+        reloaded_html = reloaded_response.content.decode()
+
+        assert reloaded_response.status_code == 200
+        assert "Retrying creates a new attempt" in reloaded_html
+        assert "Retry task..." in reloaded_html
+        assert "This page opened while the execution was" not in reloaded_html
 
     @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
     def test_execution_detail_exposes_retry_or_fresh_enqueue_guidance(self) -> None:
