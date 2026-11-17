@@ -587,13 +587,30 @@ def main():
     )
 
 
-if __name__ == "__main__":
+def _manager_log_tail(log: Path) -> str:
+    """Bound content read at observed EOF before decoding the diagnostic suffix."""
+    maximum_chars = 65_536
+    try:
+        with log.open("rb") as stream:
+            end = stream.seek(0, 2)
+            size = min(end, 4 * maximum_chars + 3)
+            stream.seek(end - size)
+            raw = stream.read(size)
+    except OSError:
+        return "<manager log unavailable>"
+    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    return text[-maximum_chars:]
+
+
+def _run_with_diagnostics() -> None:
     try:
         main()
     except Exception:
         from django.conf import settings
 
-        log = settings.ROOT / "manager.log"
-        if log.is_file():
-            print(log.read_text(errors="replace")[-65536:], flush=True)
+        print(_manager_log_tail(settings.ROOT / "manager.log"), flush=True)
         raise
+
+
+if __name__ == "__main__":
+    _run_with_diagnostics()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import copy
 import io
@@ -16,6 +17,7 @@ import tarfile
 import tomllib
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 from xml.etree import ElementTree
 
@@ -756,3 +758,212 @@ def test_native_baseline_never_requires_candidate_lease_policy_command(
     native_probe.main()
     assert json.loads(receipt_path.read_text())["version"] == baseline
     assert "lease_policy" not in json.loads(receipt_path.read_text())["observations"]
+
+
+class _ObservedManagerLog:
+    """Record requested content reads, including the former text-read path."""
+
+    def __init__(self, data: bytes, *, growth: bytes = b"", fail_at: str = ""):
+        self.data, self.growth, self.fail_at = data, growth, fail_at
+        self.opened = []
+        self.reads = []
+        self.stream = io.BytesIO(data)
+
+    def open(self, mode):
+        self.opened.append(mode)
+        if self.fail_at == "open":
+            raise PermissionError("synthetic unavailable manager log")
+        assert mode == "rb"
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.stream.close()
+
+    def seek(self, offset, whence=0):
+        if self.fail_at == "seek":
+            raise OSError("synthetic unavailable manager log")
+        position = self.stream.seek(offset, whence)
+        if whence == 2 and self.growth:
+            self.stream.write(self.growth)
+            self.stream.seek(position)
+        return position
+
+    def read(self, size=-1):
+        self.reads.append(size)
+        if self.fail_at == "read":
+            raise OSError("synthetic unavailable manager log")
+        return self.stream.read(size)
+
+    def read_text(self, *, errors):
+        self.opened.append("text")
+        self.reads.append(-1)
+        return self.data.decode("utf-8", errors=errors)
+
+    def is_file(self):
+        return True
+
+
+@pytest.fixture
+def native_log_diagnostics():
+    """Compile only pure diagnostics; do not import or run the native probe."""
+    path = Path(__file__).resolve().parents[2] / "qualification/upgrade/native_probe.py"
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    functions = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_manager_log_tail", "_run_with_diagnostics"}
+    ]
+    namespace = {"Path": Path}
+    exec(
+        compile(ast.Module(body=functions, type_ignores=[]), "<native-diagnostics>", "exec"),
+        namespace,
+    )
+    return SimpleNamespace(module=module, namespace=namespace)
+
+
+def _native_entrypoint(monkeypatch, settings, log, diagnostics, *, failure=None):
+    """Run the actual entrypoint AST with main replaced before any native work."""
+
+    class Root:
+        def __truediv__(self, name):
+            assert name == "manager.log"
+            return log
+
+    settings.ROOT = Root()
+    main = Mock(side_effect=failure)
+    namespace = diagnostics.namespace
+    monkeypatch.setitem(namespace, "main", main)
+    monkeypatch.setitem(namespace, "__name__", "__main__")
+    entrypoint = next(
+        node
+        for node in diagnostics.module.body
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
+    )
+    return lambda: exec(
+        compile(ast.Module(body=[entrypoint], type_ignores=[]), "<native-entrypoint>", "exec"),
+        namespace,
+    ), main
+
+
+def test_native_entrypoint_bounds_log_content_read(
+    monkeypatch, settings, capsys, native_log_diagnostics
+):
+    log = _ObservedManagerLog(b"L" * 300_000)
+    failure = RuntimeError("original phase failure")
+    run, main = _native_entrypoint(
+        monkeypatch, settings, log, native_log_diagnostics, failure=failure
+    )
+    with pytest.raises(RuntimeError) as observed:
+        run()
+    assert observed.value is failure
+    main.assert_called_once_with()
+    assert capsys.readouterr().out == "L" * 65_536 + "\n"
+    assert log.opened == ["rb"]
+    assert log.reads == [262_147]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"short log",
+        b"L" * 300_000,
+        "prefix\U0001f600".encode() * 40_000,
+        b"prefix" + "\U0001f600".encode() * 70_000,
+        b"\xff\xfe" * 140_000,
+        (b"line\r\nnext\rlast\n" * 25_000),
+        b"\r\n" * 150_000,
+        b"prefix" + "\U0001f600".encode() * 70_000 + b"\xf0\x9f",
+    ],
+)
+def test_native_manager_log_tail_preserves_text_and_bounds_read(data, native_log_diagnostics):
+    log = _ObservedManagerLog(data)
+    expected = data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+    assert (
+        native_log_diagnostics.namespace["_manager_log_tail"](cast(Path, log)) == expected[-65_536:]
+    )
+    assert log.opened == ["rb"]
+    assert log.reads == [min(len(data), 262_147)]
+    assert log.stream.closed
+
+
+def test_native_manager_log_tail_matches_actual_utf8_text_read(tmp_path, native_log_diagnostics):
+    path = tmp_path / "manager.log"
+    path.write_bytes(("\U0001f600\r\ninvalid".encode() + b"\xff\r") * 25_000)
+    assert (
+        native_log_diagnostics.namespace["_manager_log_tail"](path)
+        == path.read_text(encoding="utf-8", errors="replace")[-65_536:]
+    )
+
+
+def test_native_manager_log_tail_does_not_read_appended_growth(native_log_diagnostics):
+    log = _ObservedManagerLog(b"original tail", growth=b"new data" * 40_000)
+    assert native_log_diagnostics.namespace["_manager_log_tail"](cast(Path, log)) == "original tail"
+    assert log.reads == [len(b"original tail")]
+    assert log.stream.closed
+
+
+@pytest.mark.parametrize("fail_at", ["open", "seek", "read"])
+def test_native_manager_log_tail_refuses_unavailable_content(fail_at, native_log_diagnostics):
+    log = _ObservedManagerLog(b"unused", fail_at=fail_at)
+    assert native_log_diagnostics.namespace["_manager_log_tail"](cast(Path, log)) == (
+        "<manager log unavailable>"
+    )
+    if fail_at != "open":
+        assert log.stream.closed
+
+
+def test_native_manager_log_tail_missing_file_is_fixed(tmp_path, native_log_diagnostics):
+    assert native_log_diagnostics.namespace["_manager_log_tail"](tmp_path / "missing.log") == (
+        "<manager log unavailable>"
+    )
+
+
+@pytest.mark.parametrize("fail_at", ["open", "seek", "read"])
+def test_native_entrypoint_unavailable_log_preserves_phase_failure(
+    monkeypatch, settings, capsys, fail_at, native_log_diagnostics
+):
+    failure = RuntimeError("original phase failure")
+    run, main = _native_entrypoint(
+        monkeypatch,
+        settings,
+        _ObservedManagerLog(b"unused", fail_at=fail_at),
+        native_log_diagnostics,
+        failure=failure,
+    )
+    with pytest.raises(RuntimeError) as observed:
+        run()
+    assert observed.value is failure
+    main.assert_called_once_with()
+    assert capsys.readouterr().out == "<manager log unavailable>\n"
+
+
+def test_native_entrypoint_success_does_not_read_log(
+    monkeypatch, settings, capsys, native_log_diagnostics
+):
+    log = _ObservedManagerLog(b"unused", fail_at="open")
+    run, main = _native_entrypoint(monkeypatch, settings, log, native_log_diagnostics)
+    run()
+    main.assert_called_once_with()
+    assert log.opened == []
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(3)])
+def test_native_entrypoint_keeps_baseexception_behavior(
+    monkeypatch, settings, failure, capsys, native_log_diagnostics
+):
+    log = _ObservedManagerLog(b"unused", fail_at="open")
+    run, main = _native_entrypoint(
+        monkeypatch, settings, log, native_log_diagnostics, failure=failure
+    )
+    with pytest.raises(type(failure)) as observed:
+        run()
+    assert observed.value is failure
+    main.assert_called_once_with()
+    assert log.opened == []
+    assert capsys.readouterr().out == ""
