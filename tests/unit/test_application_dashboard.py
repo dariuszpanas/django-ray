@@ -25,6 +25,57 @@ def packet():
     }
 
 
+def landing_status_page(*, status=200, url=None, count=1, visible=True, attributes=None):
+    origin = packet()["origin"]
+    attributes = {"role": "status", **(attributes or {})}
+
+    def goto(target, *, wait_until):
+        assert target == origin + "/"
+        assert wait_until == "domcontentloaded"
+        return None if status is None else SimpleNamespace(status=status)
+
+    def locator(selector):
+        assert selector == "#output"
+        return SimpleNamespace(
+            count=lambda: count,
+            is_visible=lambda: visible,
+            get_attribute=attributes.get,
+        )
+
+    return SimpleNamespace(url=url or origin + "/", goto=goto, locator=locator)
+
+
+@pytest.mark.parametrize("attributes", [{}, {"aria-live": "polite", "aria-atomic": "true"}])
+def test_landing_action_status_accepts_role_defaults_and_explicit_semantics(attributes):
+    dashboard_browser.verify_landing_action_status(
+        landing_status_page(attributes=attributes), packet()["origin"]
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": None},
+        {"status": 404},
+        {"url": "http://other/"},
+        {"url": packet()["origin"] + "/admin/"},
+        {"count": 0},
+        {"count": 2},
+        {"visible": False},
+        {"attributes": {"role": None}},
+        {"attributes": {"role": "alert"}},
+        {"attributes": {"aria-live": "off"}},
+        {"attributes": {"aria-live": "assertive"}},
+        {"attributes": {"aria-atomic": "false"}},
+    ],
+)
+def test_landing_action_status_rejects_unavailable_or_inert_output(change):
+    with pytest.raises(ValueError):
+        dashboard_browser.verify_landing_action_status(
+            landing_status_page(**change), packet()["origin"]
+        )
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -165,7 +216,19 @@ def test_proxy_enforces_origin_credentials_read_only_and_cleanup(
 
 @pytest.mark.parametrize(
     "failure",
-    [None, "exit", "exit_line", "exit_bool", "exit_large", "missing", "oversized", "timeout"],
+    [
+        None,
+        "exit",
+        "exit_line",
+        "exit_bool",
+        "exit_large",
+        "missing",
+        "missing_landing_status",
+        "false_landing_status",
+        "integer_landing_status",
+        "oversized",
+        "timeout",
+    ],
 )
 def test_browser_wrapper_requires_complete_evidence_and_always_cleans_up(monkeypatch, failure):
     import os
@@ -203,7 +266,13 @@ def test_browser_wrapper_requires_complete_evidence_and_always_cleans_up(monkeyp
             if failure in {"exit_line", "exit_bool", "exit_large"}:
                 line = {"exit_line": 123, "exit_bool": True, "exit_large": 10001}[failure]
                 return json.dumps({"status": "failed", "line": line}).encode(), None
-            value = {} if failure == "missing" else dashboard_browser.EXPECTED
+            value = {} if failure == "missing" else dashboard_browser.EXPECTED.copy()
+            if failure == "missing_landing_status":
+                value.pop("landing_action_status_verified")
+            if failure == "false_landing_status":
+                value["landing_action_status_verified"] = False
+            if failure == "integer_landing_status":
+                value["landing_action_status_verified"] = 1
             return json.dumps(value).encode(), None
 
         def wait(self, timeout):

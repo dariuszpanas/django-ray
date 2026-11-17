@@ -26,6 +26,7 @@ from qualification.application.workflow_session import qualification_admin_sessi
 
 EXPECTED = {
     "status": "passed",
+    "landing_action_status_verified": True,
     "anonymous_admin_denied": True,
     "admin_task_link_verified": True,
     "proxy_base_path_verified": True,
@@ -33,6 +34,21 @@ EXPECTED = {
     "task_detail_rendered": True,
     "javascript_errors": 0,
 }
+
+
+def verify_landing_action_status(page, origin):
+    response = page.goto(origin + "/", wait_until="domcontentloaded")
+    if response is None or response.status != 200 or page.url != origin + "/":
+        raise ValueError("Landing page did not load at the expected origin")
+    output = page.locator("#output")
+    if output.count() != 1 or not output.is_visible():
+        raise ValueError("Landing action output is missing, ambiguous or hidden")
+    if (
+        output.get_attribute("role") != "status"
+        or output.get_attribute("aria-live") not in (None, "polite")
+        or output.get_attribute("aria-atomic") not in (None, "true")
+    ):
+        raise ValueError("Landing action output lacks polite atomic status semantics")
 
 
 def validate_packet(packet):
@@ -114,7 +130,10 @@ def observe_dashboard(request, task_id):
                 except (ValueError, AttributeError):
                     pass
             raise BrowserObservationError(line)
-        if len(output) > 1024 or json.loads(output) != EXPECTED:
+        if len(output) > 1024:
+            raise BrowserObservationError()
+        observed = json.loads(output)
+        if observed != EXPECTED or observed.get("landing_action_status_verified") is not True:
             raise BrowserObservationError()
     return {**EXPECTED, "session_and_proxy_removed": True}
 
@@ -173,6 +192,7 @@ def render(packet):
             )
             page = context.new_page()
             page.set_default_timeout(15000)
+            verify_landing_action_status(page, origin)
             admin_url = (
                 origin + f"/admin/django_ray/raytaskexecution/{packet['execution_pk']}/change/"
             )
