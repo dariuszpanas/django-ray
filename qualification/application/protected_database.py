@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 
 from qualification.application.protected_runtime import (
     MAX_BODY,
@@ -20,7 +21,7 @@ SELECT id,
        (runtime_env_profile = %s AND callable_path = %s),
        (state = %s), (state = %s)
 FROM django_ray_raytaskexecution
-WHERE id IN (%s, %s, %s)
+WHERE id IN (%s, %s, %s) AND created_at >= %s
 """
 TASKS_SQL = """
 SELECT id, SUBSTR(task_id, 1, 37), (task_id = SUBSTR(task_id, 1, 37))
@@ -55,15 +56,23 @@ def _connection_options() -> dict:
     }
 
 
-def read_owned_rows(row_ids: list[int], *, status_only: bool) -> tuple[list[str], list[str]]:
+def read_owned_rows(
+    row_ids: list[int], *, status_only: bool, started_at: str
+) -> tuple[list[str], list[str]]:
     """Close the read-only connection before returning values for HTTP/log checks.
 
     The caller's existing child alarm also covers imports and connection setup.
     The status and log phases each reread their exact current owned rows.
+    Every row must have been created during the validated current Capture.
     """
     validate_row_ids(row_ids)
     if type(status_only) is not bool:
         raise ValueError("Protected database observation requires an explicit phase")
+    if not isinstance(started_at, str) or len(started_at) > 40:
+        raise ValueError("Protected database observation requires a bounded UTC start")
+    start = datetime.fromisoformat(started_at)
+    if start.tzinfo != UTC:
+        raise ValueError("Protected database observation requires a bounded UTC start")
     options = _connection_options()
     import importlib
 
@@ -84,6 +93,7 @@ def read_owned_rows(row_ids: list[int], *, status_only: bool) -> tuple[list[str]
                         "SUCCEEDED",
                         "FAILED",
                         *row_ids,
+                        start,
                     ),
                 )
                 values = protected_values_from_rows(row_ids, cursor.fetchmany(4))

@@ -117,6 +117,7 @@ STAGES = {
     "lease_policy",
     "protected_runtime_surfaces",
     "ordinary_result_presentation",
+    "exception_materialization",
     "collector-pressure",
     "recovery",
     "plan-overflow",
@@ -151,6 +152,7 @@ RECEIPT_FIELDS = {
         "protected_runtime",
         "ordinary_results",
         "state_api_selection",
+        "exception_materialization",
     },
     "workflow_api_admin": {
         "complete_workflow_gate",
@@ -168,7 +170,13 @@ RECEIPT_FIELDS = {
         "qualification_profile",
         "trials",
     },
-    "application_rq2": {"generation", "budget_seconds", "assertions", "diagnostics"},
+    "application_rq2": {
+        "generation",
+        "budget_seconds",
+        "assertions",
+        "diagnostics",
+        "exception_materialization",
+    },
     "workflow_reporting_benchmark": {"report"},
     "application_showcase_failure": {
         "generation",
@@ -375,6 +383,7 @@ def lines(raw: bytes) -> list[dict]:
                         "phase",
                         "failure_phase",
                         "failure_type",
+                        "exception_observation_code",
                         "manager_at_failure",
                         "cleanup_failure_type",
                         "manager_after_cleanup",
@@ -382,6 +391,16 @@ def lines(raw: bytes) -> list[dict]:
                     ):
                         if key in original:
                             setattr(diagnostic, key, original[key])
+                    if item["status"] == "failed":
+                        for key in (
+                            "exception_observation_substage",
+                            "exception_observation_entry_remaining_seconds",
+                            "exception_observation_operation",
+                            "exception_observation_work_sigalrm_delivered",
+                            "exception_observation_work_sigterm_delivered",
+                        ):
+                            if key in original:
+                                setattr(diagnostic, key, original[key])
                     item["diagnostics"] = diagnostic.snapshot()
             projected.append(item)
     return projected

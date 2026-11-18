@@ -62,7 +62,14 @@ def generation_commands(generation: str, base_url: str, token_file: Path) -> tup
             "rq2",
             command(
                 "run_rq2",
-                ["--generation", generation, "--receipt", f"/receipts/{generation}-rq2.json"],
+                [
+                    "--generation",
+                    generation,
+                    "--token-file",
+                    str(token_file),
+                    "--receipt",
+                    f"/receipts/{generation}-rq2.json",
+                ],
             ),
         ),
         *(

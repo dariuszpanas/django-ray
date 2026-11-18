@@ -425,6 +425,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         receipt["failed_stage"] = "protected_runtime_surfaces"
         receipt["protected_runtime"] = protected.finish([probe_owner["execution_id"], *refusal_ids])
+        receipt["failed_stage"] = "exception_materialization"
+        from qualification.application.exception_materialization import observe as observe_exception
+        from qualification.application.http_context import local_outer_deadline
+
+        original_deadline = local_outer_deadline()
+        if original_deadline is None:
+            raise ValueError("Exception Core observer requires the original generation deadline")
+        receipt["exception_materialization"] = observe_exception(
+            transport="ray_core",
+            token=read_token(args.token_file),
+            deadline=min(time.monotonic() + 180, original_deadline),
+            manager_prefix=args.manager_prefix,
+        )
         receipt["failed_stage"] = "ordinary_result_presentation"
         from qualification.application.result_presentation import observe_result_presentation
 

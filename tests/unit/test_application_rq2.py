@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from qualification.application import run_rq2 as probe
+from tests.unit.test_application_exception_materialization import record as exception_record
 
 
 def receipt(**updates):
@@ -23,6 +24,7 @@ def receipt(**updates):
         "generation": "before",
         "budget_seconds": probe.BUDGET_SECONDS,
         "assertions": dict.fromkeys(probe.FACTS, True),
+        "exception_materialization": exception_record("rq2_job"),
         **updates,
     }
 
@@ -420,7 +422,7 @@ def test_real_observation_preserves_premature_manager_exit_before_cleanup(
     diagnostic = probe.Diagnostics()
     facts = dict.fromkeys(probe.FACTS, False)
     with pytest.raises(TimeoutError if cleanup_error or bootstrap_delay else ValueError):
-        probe.verify("before", facts, diagnostic)
+        probe.verify("before", facts, diagnostic, token="bounded-test-credential-765")
     observed = diagnostic.snapshot()
     assert observed["failure_phase"] == "initial_effect"
     assert observed["failure_type"] == ("timeout" if bootstrap_delay else "validation")
@@ -785,14 +787,22 @@ def test_failure_receipt_retains_only_fixed_partial_evidence(tmp_path, monkeypat
     alarm = Mock()
     monkeypatch.setattr(probe.signal, "alarm", alarm, raising=False)
 
-    def fail(generation, facts, diagnostics):
+    def fail(generation, facts, diagnostics, *, token):
+        assert token == "bounded-test-credential-for-rq2-765"
         diagnostics.enter(phase)
         facts[probe.FACTS[0]] = True
         raise RuntimeError("unbounded sensitive error")
 
     monkeypatch.setattr(probe, "verify", fail)
     target = tmp_path / "receipt.json"
-    assert probe.main(["--generation", "before", "--receipt", str(target)]) == 1
+    token_file = tmp_path / "token"
+    token_file.write_text("bounded-test-credential-for-rq2-765", encoding="ascii")
+    assert (
+        probe.main(
+            ["--generation", "before", "--token-file", str(token_file), "--receipt", str(target)]
+        )
+        == 1
+    )
     output = capsys.readouterr().out
     assert "sensitive" not in output and "unbounded" not in output
     retained = json.loads(output)
@@ -801,3 +811,303 @@ def test_failure_receipt_retains_only_fixed_partial_evidence(tmp_path, monkeypat
     assert retained["diagnostics"]["failure_type"] == "unexpected"
     assert not target.exists()
     assert [call.args[0] for call in alarm.call_args_list] == [170, 0]
+
+
+@pytest.fixture
+def rq2_cli_signals(monkeypatch):
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings_qualification")
+    monkeypatch.setattr(probe.sys, "platform", "linux")
+    monkeypatch.setattr(probe.signal, "SIGALRM", 14, raising=False)
+    monkeypatch.setattr(probe.signal, "signal", Mock(return_value=None))
+    alarm = Mock()
+    monkeypatch.setattr(probe.signal, "alarm", alarm, raising=False)
+    return alarm
+
+
+@pytest.mark.parametrize("generation", ["before", "after"])
+def test_generation_token_file_is_read_before_rq2_verification(
+    tmp_path, monkeypatch, capsys, rq2_cli_signals, generation
+):
+    from qualification.application import run_api, run_generation
+
+    token_file = tmp_path / "mounted credentials" / "DJANGO_API_TOKEN"
+    token_file.parent.mkdir()
+    token = "bounded-test-credential-for-rq2-765"
+    token_file.write_text(token, encoding="ascii")
+    read = Mock(wraps=run_api.read_token)
+    monkeypatch.setattr(run_api, "read_token", read)
+
+    def verify(selected_generation, facts, diagnostics, *, token):
+        assert selected_generation == generation
+        assert token == "bounded-test-credential-for-rq2-765"
+        facts.update(dict.fromkeys(probe.FACTS, True))
+        return exception_record("rq2_job")
+
+    observe = Mock(side_effect=verify)
+    monkeypatch.setattr(probe, "verify", observe)
+    argv = dict(
+        run_generation.generation_commands(generation, "http://django-web:8000", token_file)
+    )["rq2"]
+    target = tmp_path / "receipt.json"
+    argv[argv.index("--receipt") + 1] = str(target)
+    assert token not in argv
+    assert probe.main(argv[3:]) == 0
+    read.assert_called_once_with(token_file)
+    observe.assert_called_once()
+    captured = capsys.readouterr()
+    retained = json.loads(captured.out)
+    assert retained["status"] == "passed"
+    assert json.loads(target.read_text()) == retained
+    assert token not in captured.out and captured.err == ""
+    assert [call.args[0] for call in rq2_cli_signals.call_args_list] == [170, 0]
+
+
+@pytest.mark.parametrize("contents", [None, "invalid token with spaces"])
+def test_rq2_missing_or_invalid_token_refuses_before_verification(
+    tmp_path, monkeypatch, capsys, rq2_cli_signals, contents
+):
+    from qualification.application.run_generation import generation_commands
+
+    token_file = tmp_path / "DJANGO_API_TOKEN"
+    if contents is not None:
+        token_file.write_text(contents, encoding="ascii")
+    verify = Mock(side_effect=AssertionError("Invalid credential must not enter verification"))
+    monkeypatch.setattr(probe, "verify", verify)
+    argv = dict(generation_commands("before", "http://django-web:8000", token_file))["rq2"]
+    target = tmp_path / "receipt.json"
+    argv[argv.index("--receipt") + 1] = str(target)
+    assert probe.main(argv[3:]) == 1
+    verify.assert_not_called()
+    captured = capsys.readouterr()
+    retained = json.loads(captured.out)
+    assert retained["status"] == "failed" and not any(retained["assertions"].values())
+    assert retained["diagnostics"]["failure_phase"] == "preflight"
+    assert retained["diagnostics"]["failure_type"] == "validation"
+    assert "exception_observation_code" not in retained["diagnostics"]
+    assert str(token_file) not in captured.out and captured.err == ""
+    assert not target.exists()
+    assert [call.args[0] for call in rq2_cli_signals.call_args_list] == [170, 0]
+
+
+@pytest.mark.parametrize("delivered", ["none", "alarm", "term", "both"])
+def test_actual_cli_work_signals_survive_wrapped_os_error(
+    tmp_path, monkeypatch, capsys, rq2_cli_signals, delivered
+):
+    handlers = {}
+
+    def install(signum, handler):
+        if callable(handler):
+            handlers[signum] = handler
+        return None
+
+    monkeypatch.setattr(probe.signal, "signal", install)
+    monkeypatch.setattr(probe.time, "monotonic", lambda: 100.0)
+
+    class PrivateOSError(OSError):
+        def __str__(self):
+            raise AssertionError("private error was rendered")
+
+    def fail(_generation, _facts, diagnostics, *, token):
+        diagnostics.enter("exception_materialization")
+        diagnostics.exception_progress("job_settlement")
+        diagnostics.exception_operation("job_logs")
+        cause = None
+        selected = []
+        if delivered in {"alarm", "both"}:
+            selected.append(probe.signal.SIGALRM)
+        if delivered in {"term", "both"}:
+            selected.append(probe.signal.SIGTERM)
+        for signum in selected:
+            try:
+                handlers[signum](signum, None)
+            except TimeoutError as observed:
+                cause = observed
+        raise PrivateOSError("signal-private-canary") from cause
+
+    monkeypatch.setattr(probe, "verify", fail)
+    token = tmp_path / "token"
+    token.write_text("bounded-test-credential-for-rq2-765", encoding="ascii")
+    assert (
+        probe.main(
+            [
+                "--generation",
+                "before",
+                "--token-file",
+                str(token),
+                "--receipt",
+                str(tmp_path / "receipt"),
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    value = json.loads(captured.out)["diagnostics"]
+    assert (
+        value["failure_type"] == "os_error"
+        and value["exception_observation_code"] == "unclassified"
+    )
+    assert value["exception_observation_operation"] == "job_logs"
+    assert value["exception_observation_work_sigalrm_delivered"] is (delivered in {"alarm", "both"})
+    assert value["exception_observation_work_sigterm_delivered"] is (delivered in {"term", "both"})
+    assert value["exception_observation_entry_remaining_seconds"] == 170
+    assert [call.args[0] for call in rq2_cli_signals.call_args_list] == [170, 0]
+    assert "signal-private-canary" not in captured.out and captured.err == ""
+
+
+def test_monotonic_expiry_does_not_require_a_delivered_work_signal(monkeypatch):
+    from qualification.application import exception_materialization
+
+    clock = [100.0]
+    monkeypatch.setattr(probe.time, "monotonic", lambda: clock[0])
+    diagnostic = probe.Diagnostics()
+    diagnostic.start_work_signal_tracking()
+    diagnostic.enter("exception_materialization")
+    diagnostic.exception_progress("job_settlement")
+    clock[0] = diagnostic.work_deadline
+    with pytest.raises(TimeoutError) as caught:
+        exception_materialization._remaining(diagnostic.work_deadline)
+    diagnostic.failed(caught.value)
+    value = diagnostic.snapshot()
+    assert value["failure_type"] == "timeout"
+    assert value["exception_observation_code"] == "unclassified"
+    assert value["exception_observation_work_sigalrm_delivered"] is False
+    assert value["exception_observation_work_sigterm_delivered"] is False
+    assert "exception_observation_operation" not in value
+
+
+def test_first_failure_freezes_operation_and_work_signals_before_cleanup(rq2_cli_signals):
+    diagnostic = probe.Diagnostics()
+    diagnostic.start_work_signal_tracking()
+    diagnostic.enter("exception_materialization")
+    diagnostic.exception_progress("job_settlement")
+    diagnostic.exception_operation("job_info")
+    with pytest.raises(TimeoutError):
+        diagnostic.handle_work_signal(probe.signal.SIGALRM, None)
+    original = OSError("primary-private-canary")
+    diagnostic.failed(original)
+    first = diagnostic.snapshot()
+    diagnostic.enter("cleanup")
+    with pytest.raises(TimeoutError) as cleanup:
+        diagnostic.handle_work_signal(probe.signal.SIGTERM, None)
+    diagnostic.cleanup_failed(cleanup.value, None)
+    diagnostic.failed(ValueError("later-private-canary"))
+    value = diagnostic.snapshot()
+    for key in (
+        "failure_phase",
+        "failure_type",
+        "exception_observation_operation",
+        "exception_observation_work_sigalrm_delivered",
+        "exception_observation_work_sigterm_delivered",
+    ):
+        assert value[key] == first[key]
+    assert value["exception_observation_work_sigalrm_delivered"] is True
+    assert value["exception_observation_work_sigterm_delivered"] is False
+    assert value["cleanup_failure_type"] == "timeout"
+
+
+def test_signal_during_failure_secondary_probe_is_not_added_to_frozen_work_facts(rq2_cli_signals):
+    diagnostic = probe.Diagnostics()
+    diagnostic.start_work_signal_tracking()
+    diagnostic.enter("exception_materialization")
+    diagnostic.exception_progress("job_settlement")
+    diagnostic.exception_operation("terminal_snapshot")
+    process = SimpleNamespace(
+        poll=lambda: diagnostic.handle_work_signal(probe.signal.SIGALRM, None)
+    )
+    diagnostic.failed(OSError("first-private-canary"), process)
+    value = diagnostic.snapshot()
+    assert value["failure_type"] == "os_error" and value["manager_at_failure"] == "unavailable"
+    assert value["exception_observation_work_sigalrm_delivered"] is False
+    assert value["exception_observation_work_sigterm_delivered"] is False
+
+
+def test_cleanup_alarm_is_not_a_work_signal_fact(rq2_cli_signals):
+    diagnostic = probe.Diagnostics()
+    diagnostic.start_work_signal_tracking()
+    diagnostic.enter("exception_materialization")
+    diagnostic.enter("cleanup")
+    with pytest.raises(TimeoutError) as caught:
+        diagnostic.handle_work_signal(probe.signal.SIGALRM, None)
+    diagnostic.failed(caught.value)
+    assert diagnostic._work_sigalrm_delivered is False
+    assert not any(key.startswith("exception_observation_work_") for key in diagnostic.snapshot())
+
+
+@pytest.mark.parametrize("mode", ["historical", "passing", "other_phase"])
+def test_operation_and_signal_fields_are_absent_outside_new_failed_observation(mode):
+    diagnostic = probe.Diagnostics()
+    if mode != "historical":
+        diagnostic.start_work_signal_tracking()
+    diagnostic.enter("client" if mode == "other_phase" else "exception_materialization")
+    if mode == "passing":
+        diagnostic.exception_progress("job_settlement")
+        diagnostic.exception_operation("job_logs")
+    else:
+        diagnostic.failed(OSError("private-canary"))
+    value = diagnostic.snapshot()
+    for field in (
+        "exception_observation_operation",
+        "exception_observation_work_sigalrm_delivered",
+        "exception_observation_work_sigterm_delivered",
+    ):
+        assert field not in value
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("exception_observation_operation", "private-canary"),
+        ("exception_observation_operation", 1),
+        ("exception_observation_operation", True),
+        ("exception_observation_work_sigalrm_delivered", 1),
+        ("exception_observation_work_sigalrm_delivered", "private-canary"),
+        ("exception_observation_work_sigalrm_delivered", None),
+        ("exception_observation_work_sigterm_delivered", 1),
+        ("exception_observation_work_sigterm_delivered", "private-canary"),
+        ("exception_observation_work_sigterm_delivered", None),
+    ],
+)
+def test_new_failure_context_is_rewhitelisted_without_truthy_coercion(field, bad):
+    from qualification.application.safe_diagnostics import lines
+
+    diagnostic = probe.Diagnostics()
+    diagnostic.enter("exception_materialization")
+    diagnostic.failed(OSError("private-canary"))
+    setattr(diagnostic, field, bad)
+    assert field not in diagnostic.snapshot()
+    raw = {
+        "layer": "application_rq2",
+        "status": "failed",
+        "diagnostics": {
+            "phase": "exception_materialization",
+            "failure_phase": "exception_materialization",
+            "failure_type": "os_error",
+            field: bad,
+            "unknown_private_field": "private-canary",
+        },
+    }
+    projected = lines(json.dumps(raw).encode())[0]["diagnostics"]
+    assert field not in projected and "private-canary" not in json.dumps(projected)
+
+
+def test_safe_projection_keeps_only_valid_failed_operation_and_signal_facts():
+    from qualification.application.safe_diagnostics import lines
+
+    raw = {
+        "layer": "application_rq2",
+        "status": "failed",
+        "diagnostics": {
+            "phase": "cleanup",
+            "failure_phase": "exception_materialization",
+            "failure_type": "os_error",
+            "exception_observation_operation": "request_load",
+            "exception_observation_work_sigalrm_delivered": False,
+            "exception_observation_work_sigterm_delivered": True,
+            "unknown_private_field": "private-canary",
+        },
+    }
+    projected = lines(json.dumps(raw).encode())[0]["diagnostics"]
+    assert projected["exception_observation_operation"] == "request_load"
+    assert projected["exception_observation_work_sigalrm_delivered"] is False
+    assert projected["exception_observation_work_sigterm_delivered"] is True
+    assert "private-canary" not in json.dumps(projected)

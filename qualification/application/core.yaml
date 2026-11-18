@@ -1378,6 +1378,7 @@ spec:
         - --namespace=$OBSERVATION_NAMESPACE
         - --image=$OBSERVATION_IMAGE
         - --generation=after
+        - --previous-receipt=$OBSERVATION_OUTPUT/before-protected-logs.json
         - --output=$OBSERVATION_OUTPUT/after-protected-logs.json
   - name: measure-reporting-policies
     try:

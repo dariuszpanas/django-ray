@@ -111,6 +111,11 @@ def test_profile_waits_for_assertions_around_identical_cold_replacement():
             "--namespace=$OBSERVATION_NAMESPACE",
             "--image=$OBSERVATION_IMAGE",
             f"--generation={generation}",
+            *(
+                ["--previous-receipt=$OBSERVATION_OUTPUT/before-protected-logs.json"]
+                if generation == "after"
+                else []
+            ),
             f"--output=$OBSERVATION_OUTPUT/{generation}-protected-logs.json",
         ]
         assert {item["name"]: item["value"] for item in observed["env"]} == {

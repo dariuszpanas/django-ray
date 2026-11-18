@@ -14,6 +14,7 @@ from qualification.application.lease_policy import FACTS as LEASE_FACTS
 from qualification.application.result_presentation import EVIDENCE as RESULT_EVIDENCE
 from qualification.application.runtime_env_maintenance import FACTS as MAINTENANCE_FACTS
 from qualification.application.runtime_env_refusal import CASES, FACTS
+from tests.unit.test_application_exception_materialization import record as exception_record
 
 
 def receipt(layer="application_setup", **changes):
@@ -25,6 +26,7 @@ def receipt(layer="application_setup", **changes):
             case: dict.fromkeys(facts, True) for case, facts in MAINTENANCE_FACTS.items()
         }
         defaults["ordinary_results"] = dict(RESULT_EVIDENCE)
+        defaults["exception_materialization"] = exception_record()
         defaults["api"] = {"task_id": "25200000-0000-4000-8000-000000000002"}
         defaults["executions"] = [
             {"task_id": defaults["api"]["task_id"], "execution_id": 1},
@@ -603,8 +605,9 @@ def test_regular_web_is_selected_by_its_unique_name(kind):
         runner.observe_web_runtime(pod, "example/core@sha256:" + "a" * 64)
 
 
+@pytest.mark.parametrize("window_failure", [None, "capture", "pair"])
 def test_collector_keeps_four_producers_and_returns_separate_regular_web_snapshot(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, window_failure
 ):
     image = "example/core@sha256:" + "a" * 64
     pods = []
@@ -642,6 +645,27 @@ def test_collector_keeps_four_producers_and_returns_separate_regular_web_snapsho
     ).encode()
     monkeypatch.setattr(runner, "checked", checked)
     live_receipts = current_asset_receipts()
+
+    def generation_receipt(layer, transport, number):
+        value = json.loads(receipt("application_core")) if layer == "core" else {}
+        value["exception_materialization"] = exception_record(transport, number=number)
+        value.setdefault("protected_runtime", {})["started_at"] = "2026-10-12T00:00:00Z"
+        return json.dumps(value).encode()
+
+    live_receipts.update(
+        {
+            f"{generation}-{layer}": generation_receipt(layer, transport, number)
+            for number, (generation, layer, transport) in enumerate(
+                (
+                    ("before", "core", "ray_core"),
+                    ("before", "rq2", "rq2_job"),
+                    ("after", "core", "ray_core"),
+                    ("after", "rq2", "rq2_job"),
+                ),
+                1,
+            )
+        }
+    )
     monkeypatch.setattr(
         runner,
         "parse_receipts",
@@ -657,9 +681,30 @@ def test_collector_keeps_four_producers_and_returns_separate_regular_web_snapsho
     from qualification.application import protected_logs
 
     monkeypatch.setattr(protected_logs, "validate_receipt", lambda _raw, _generation: None)
+    pair_calls = []
+
+    def validate_pair(before, after):
+        pair_calls.append((before, after))
+        assert all(
+            json.loads(raw)["log_window"]["capture_started_at"] == "2026-10-12T00:00:00Z"
+            for raw in (before, after)
+        )
+        if window_failure == "pair":
+            raise ValueError("Rejected synthetic pair")
+
+    monkeypatch.setattr(protected_logs, "validate_pair", validate_pair)
     for generation in ("before", "after"):
-        (tmp_path / f"{generation}-protected-logs.json").write_bytes(b"{}")
+        stamp = "2026-10-11T00:00:00Z" if window_failure == "capture" else "2026-10-12T00:00:00Z"
+        (tmp_path / f"{generation}-protected-logs.json").write_bytes(
+            json.dumps({"log_window": {"capture_started_at": stamp}}).encode()
+        )
+    if window_failure:
+        with pytest.raises(ValueError):
+            runner.collect(["kubectl"], "owned", tmp_path, image)
+        assert len(pair_calls) == (1 if window_failure == "pair" else 0)
+        return
     result = runner.collect(["kubectl"], "owned", tmp_path, image)
+    assert len(pair_calls) == 1
     producers = json.loads((tmp_path / "producers.json").read_bytes())
     assert len(producers) == 4
     assert [p["container"] for p in producers] == [
@@ -1190,3 +1235,46 @@ def test_current_core_state_record_is_accepted_by_both_closed_consumers(generati
     value = json.loads(raw)
     assert passed_receipt(value) is value
     assert runner.parse_receipts(raw, (f"{generation}-core",)) == {f"{generation}-core": raw}
+
+
+@pytest.mark.parametrize(
+    "state_policy,exception_policy,missing,accepted",
+    [
+        (False, True, ("state_api_selection",), True),
+        (True, False, ("exception_materialization",), True),
+        (True, False, ("state_api_selection",), False),
+        (False, True, ("exception_materialization",), False),
+        (False, False, ("state_api_selection", "exception_materialization"), True),
+        (True, True, ("state_api_selection", "exception_materialization"), False),
+    ],
+)
+def test_state_and_exception_absence_policies_are_independent(
+    state_policy, exception_policy, missing, accepted
+):
+    value = json.loads(receipt("application_core"))
+    for name in missing:
+        value.pop(name)
+    raw = json.dumps(value).encode()
+    policies = {
+        "require_state_api_selection": state_policy,
+        "require_exception_materialization": exception_policy,
+    }
+    if accepted:
+        assert runner.parse_receipts(raw, ("before-core",), **policies) == {"before-core": raw}
+    else:
+        with pytest.raises(ValueError):
+            runner.parse_receipts(raw, ("before-core",), **policies)
+
+
+@pytest.mark.parametrize("sibling", ["state_api_selection", "exception_materialization"])
+def test_historical_absence_policies_cannot_waive_a_present_invalid_sibling(sibling):
+    value = json.loads(receipt("application_core"))
+    policies = {
+        "require_state_api_selection": False,
+        "require_exception_materialization": False,
+    }
+    raw = json.dumps(value).encode()
+    assert runner.parse_receipts(raw, ("before-core",), **policies) == {"before-core": raw}
+    value[sibling] = None
+    with pytest.raises(ValueError):
+        runner.parse_receipts(json.dumps(value).encode(), ("before-core",), **policies)
