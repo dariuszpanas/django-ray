@@ -561,6 +561,37 @@ def get_workflow_node(
     )
 
 
+def _address_pinned_state_client(address: str) -> Any:
+    """Keep a selected State API endpoint authoritative over ambient Ray routes.
+
+    Ray's StateApiClient constructor lets RAY_API_SERVER_ADDRESS and RAY_ADDRESS
+    override its address argument. Initialize its inherited HTTP client with the
+    same independent resolver already used by the Jobs backend instead. Keep the
+    SDK's dependency check and base initialization rather than copying its HTTP,
+    authentication or TLS fields.
+    """
+    from ray.dashboard.modules.dashboard_sdk import SubmissionClient
+    from ray.util.state import api as state_api
+
+    from django_ray.runner.ray_job import _resolve_submission_address
+
+    if state_api.requests is None:
+        raise RuntimeError(
+            "The Ray state CLI & SDK require the ray[default] "
+            "installation: `pip install 'ray[default']``"
+        )
+    endpoint = _resolve_submission_address(address)
+    client = state_api.StateApiClient.__new__(state_api.StateApiClient)
+    SubmissionClient.__init__(
+        client,
+        address=endpoint,
+        create_cluster_if_needed=False,
+        headers={"Content-Type": "application/json"},
+        cookies=None,
+    )
+    return client
+
+
 def get_ray_task_state(
     ray_task_id: str,
     *,
@@ -570,11 +601,21 @@ def get_ray_task_state(
     try:
         from ray.util.state import get_task
 
-        result = get_task(
-            id=ray_task_id,
-            address=_state_api_address(address),
-            timeout=_state_api_timeout(),
-        )
+        selected = _state_api_address(address)
+        timeout = _state_api_timeout()
+        if not selected:
+            result = get_task(id=ray_task_id, address=selected, timeout=timeout)
+        else:
+            from ray.util.state.common import GetApiOptions, StateResource
+
+            client = _address_pinned_state_client(selected)
+            task_id = ray_task_id if isinstance(ray_task_id, str) else ray_task_id.task_id().hex()
+            result = client.get(
+                StateResource.TASKS,
+                task_id,
+                GetApiOptions(timeout=timeout),
+                _explain=False,
+            )
     except Exception as error:
         raise WorkflowObservabilityError("Ray State API is unavailable") from error
 

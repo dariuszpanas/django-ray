@@ -25,6 +25,20 @@ def receipt(layer="application_setup", **changes):
             case: dict.fromkeys(facts, True) for case, facts in MAINTENANCE_FACTS.items()
         }
         defaults["ordinary_results"] = dict(RESULT_EVIDENCE)
+        defaults["api"] = {"task_id": "25200000-0000-4000-8000-000000000002"}
+        defaults["executions"] = [
+            {"task_id": defaults["api"]["task_id"], "execution_id": 1},
+            {"task_id": "25200000-0000-4000-8000-000000000003", "execution_id": 2},
+        ]
+        defaults["state_api_selection"] = {
+            "schema_version": 1,
+            "execution_id": 1,
+            "query_count": 4,
+            "explicit_api_server_address": True,
+            "explicit_ray_address": True,
+            "configured_api_server_address": True,
+            "configured_ray_address": True,
+        }
         defaults["protected_runtime"] = {
             "api_clear": True,
             "row_ids": [1, 2, 3],
@@ -1054,3 +1068,125 @@ def test_container_failure_stops_chainsaw_but_allows_planned_deletion(
         assert not output
     else:
         assert json.loads(output) == {"application_container_failed": True, "exit_code": expected}
+
+
+@pytest.mark.parametrize("generation", ["before", "after"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing",
+        "count",
+        "bool_count",
+        "schema",
+        "owner",
+        "bool_owner",
+        "extra",
+        "task_join",
+    ],
+)
+def test_core_receipts_require_typed_state_selection_and_exact_api_owner(generation, failure):
+    value = json.loads(receipt("application_core"))
+    if failure == "missing":
+        value.pop("state_api_selection")
+    elif failure == "task_join":
+        value["executions"][0]["task_id"] = "another-task"
+    else:
+        field, replacement = {
+            "count": ("query_count", 3),
+            "bool_count": ("query_count", True),
+            "schema": ("schema_version", True),
+            "owner": ("execution_id", 2),
+            "bool_owner": ("execution_id", True),
+            "extra": ("private", "private-state-canary"),
+        }[failure]
+        value["state_api_selection"][field] = replacement
+    with pytest.raises(ValueError, match="State API selection"):
+        runner.parse_receipts(json.dumps(value).encode(), (f"{generation}-core",))
+
+
+@pytest.mark.parametrize("generation", ["before", "after"])
+@pytest.mark.parametrize("present", [None, {"schema_version": 1}])
+def test_historical_state_policy_waives_only_absence_not_present_invalid_record(
+    generation, present
+):
+    value = json.loads(receipt("application_core"))
+    value.pop("state_api_selection")
+    raw = json.dumps(value).encode()
+    assert runner.parse_receipts(
+        raw, (f"{generation}-core",), require_state_api_selection=False
+    ) == {
+        f"{generation}-core": raw,
+    }
+    value["state_api_selection"] = present
+    with pytest.raises(ValueError, match="State API selection"):
+        runner.parse_receipts(
+            json.dumps(value).encode(), (f"{generation}-core",), require_state_api_selection=False
+        )
+
+
+@pytest.mark.parametrize("policy", [None, 0, 1, "false"])
+def test_state_selection_receipt_policy_requires_an_actual_boolean(policy):
+    with pytest.raises(ValueError, match="State API selection receipt policy"):
+        runner.parse_receipts(
+            receipt("application_core"), ("before-core",), require_state_api_selection=policy
+        )
+
+
+@pytest.mark.parametrize("generation", ["before", "after"])
+@pytest.mark.parametrize(
+    "fact",
+    [
+        "explicit_api_server_address",
+        "explicit_ray_address",
+        "configured_api_server_address",
+        "configured_ray_address",
+    ],
+)
+@pytest.mark.parametrize("bad", [False, 1])
+def test_core_state_selection_requires_each_actual_true_fact(generation, fact, bad):
+    value = json.loads(receipt("application_core"))
+    value["state_api_selection"][fact] = bad
+    with pytest.raises(ValueError, match="State API selection"):
+        runner.parse_receipts(json.dumps(value).encode(), (f"{generation}-core",))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "api_missing",
+        "api_empty_task",
+        "owners_empty",
+        "first_missing",
+        "first_bool_id",
+        "swapped",
+        "probe_id",
+    ],
+)
+def test_core_state_selection_cannot_join_a_missing_or_different_first_owner(failure):
+    value = json.loads(receipt("application_core"))
+    if failure == "api_missing":
+        value.pop("api")
+    elif failure == "api_empty_task":
+        value["api"]["task_id"] = ""
+    elif failure == "owners_empty":
+        value["executions"] = []
+    elif failure == "first_missing":
+        value["executions"][0] = None
+    elif failure == "first_bool_id":
+        value["executions"][0]["execution_id"] = True
+    elif failure == "swapped":
+        value["executions"].reverse()
+    else:
+        value["state_api_selection"]["execution_id"] = value["executions"][1]["execution_id"]
+    with pytest.raises(ValueError, match="State API selection"):
+        runner.parse_receipts(json.dumps(value).encode(), ("before-core",))
+
+
+@pytest.mark.parametrize("generation", ["before", "after"])
+def test_current_core_state_record_is_accepted_by_both_closed_consumers(generation):
+    from qualification.application.safe_diagnostics import passed_receipt
+
+    raw = receipt("application_core")
+    value = json.loads(raw)
+    assert passed_receipt(value) is value
+    assert runner.parse_receipts(raw, (f"{generation}-core",)) == {f"{generation}-core": raw}

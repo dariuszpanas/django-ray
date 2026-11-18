@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from dataclasses import asdict
 from enum import StrEnum
@@ -14,6 +15,7 @@ from uuid import UUID
 from qualification.application.api import (
     TASK_FAILURE_STATES,
     ApiEvidence,
+    validate_state_api_selection,
     validate_task_status_payload,
     verify_application_api,
 )
@@ -33,6 +35,7 @@ class CoreEvidenceFailure(StrEnum):
     RUNTIME_ENVELOPE = "runtime_envelope"
     RUNTIME_KEY = "runtime_key"
     RUNTIME_PROFILE = "runtime_profile"
+    STATE_API_SELECTION = "state_api_selection"
 
 
 class CoreEvidenceError(ValueError):
@@ -156,6 +159,84 @@ def verify_durable_task(task_id: str, *, profile: str, manager_prefix: str) -> d
         "encrypted_snapshot_authenticated": True,
         "elapsed_seconds": round((row.finished_at - row.created_at).total_seconds(), 3),
     }
+
+
+def verify_state_api_selection(task_id: str, *, execution_id: int) -> dict:
+    """Exercise selected State endpoints over the existing owned native HTTP route."""
+    from django_ray.conf.settings import get_settings
+    from django_ray.models import RayTaskExecution
+    from django_ray.observability import get_ray_task_state
+    from qualification.application.http_context import local_outer_deadline
+
+    try:
+        config = get_settings()
+        endpoint = config.get("RAY_STATE_API_ADDRESS")
+        timeout = config.get("RAY_STATE_API_TIMEOUT_SECONDS", 5)
+        deadline = local_outer_deadline()
+        row = RayTaskExecution.objects.get(task_id=task_id)
+        if (
+            endpoint != "http://ray-head:8265"
+            or type(timeout) is not int
+            or timeout != 5
+            or deadline is None
+            or type(execution_id) is not int
+            or execution_id <= 0
+            or row.pk != execution_id
+            or row.task_id != task_id
+            or row.state != "SUCCEEDED"
+            or row.attempt_number != 1
+            or row.execution_protocol_version != 1
+            or type(row.ray_job_id) is not str
+        ):
+            raise ValueError("State API selection requires its owned completed API task")
+        match = re.fullmatch(r"([0-9a-f]{8}):([0-9a-f]{48})", row.ray_job_id)
+        if match is None:
+            raise ValueError("State API selection requires the owned composite Ray identity")
+        job_id, ray_task_id = match.groups()
+        keys = ("RAY_API_SERVER_ADDRESS", "RAY_ADDRESS")
+        original = {key: os.environ[key] for key in keys if key in os.environ}
+        facts = {}
+        try:
+            for fact, explicit, key in (
+                ("explicit_api_server_address", True, keys[0]),
+                ("explicit_ray_address", True, keys[1]),
+                ("configured_api_server_address", False, keys[0]),
+                ("configured_ray_address", False, keys[1]),
+            ):
+                for name in keys:
+                    os.environ.pop(name, None)
+                os.environ[key] = endpoint + "/__django_ray_qualification_unselected_state_api__"
+                if deadline - time.monotonic() < timeout:
+                    raise ValueError("State API selection lacks original generation time")
+                values = (
+                    get_ray_task_state(ray_task_id, address=endpoint)
+                    if explicit
+                    else get_ray_task_state(ray_task_id)
+                )
+                if time.monotonic() >= deadline:
+                    raise ValueError("State API selection exhausted original generation time")
+                if type(values) is not list or len(values) != 1 or type(values[0]) is not dict:
+                    raise ValueError("State API selection requires exactly one owned Ray attempt")
+                value = values[0]
+                if (
+                    value.get("task_id") != ray_task_id
+                    or value.get("job_id") != job_id
+                    or value.get("state") != "FINISHED"
+                    or type(value.get("attempt_number")) is not int
+                    or value["attempt_number"] != 0
+                ):
+                    raise ValueError("State API selection returned another Ray identity or outcome")
+                facts[fact] = True
+        finally:
+            for key in keys:
+                os.environ.pop(key, None)
+            for key, value in original.items():
+                os.environ[key] = value
+        evidence = {"schema_version": 1, "execution_id": execution_id, "query_count": 4, **facts}
+        validate_state_api_selection(evidence, execution_id=execution_id)
+        return evidence
+    except Exception:
+        raise CoreEvidenceError(CoreEvidenceFailure.STATE_API_SELECTION) from None
 
 
 def verify_runtime_probe(request: ApplicationHttp, *, token: str, timeout: float) -> str:
@@ -304,6 +385,10 @@ def main(argv: list[str] | None = None) -> int:
         from qualification.application.dashboard_browser import observe_dashboard
 
         receipt["dashboard"] = observe_dashboard(request, api.task_id)
+        receipt["failed_stage"] = "state_api_selection"
+        receipt["state_api_selection"] = verify_state_api_selection(
+            api.task_id, execution_id=api_owner["execution_id"]
+        )
         receipt["failed_stage"] = "lease_policy"
         from qualification.application.lease_policy import empty_evidence as empty_lease_evidence
         from qualification.application.lease_policy import verify_lease_policy

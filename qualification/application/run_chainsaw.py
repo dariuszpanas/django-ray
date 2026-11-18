@@ -112,9 +112,15 @@ def checked(argv, *, data=None, timeout=40):
 
 
 def parse_receipts(
-    raw: bytes, names: tuple[str, ...], *, expected_profile: dict | None = None
+    raw: bytes,
+    names: tuple[str, ...],
+    *,
+    expected_profile: dict | None = None,
+    require_state_api_selection: bool = True,
 ) -> dict[str, bytes]:
-    """Accept complete source receipts, never a truncated log or partial success."""
+    """Accept complete receipts; only the fixed historical adapter may waive absent State facts."""
+    if type(require_state_api_selection) is not bool:
+        raise ValueError("Invalid State API selection receipt policy")
     log_limit = MAX_RECEIPT_BYTES + 4096 if names == ("reporting",) else 65536
     if len(raw) > log_limit:
         raise ValueError("Receipt log exceeds its byte limit")
@@ -163,6 +169,25 @@ def parse_receipts(
             validate_maintenance(value.get("runtime_env_maintenance"))
             validate_result_evidence(value.get("ordinary_results"))
             validate_protected(value.get("protected_runtime"))
+            if require_state_api_selection or "state_api_selection" in value:
+                from qualification.application.api import validate_state_api_selection
+
+                api = value.get("api")
+                executions = value.get("executions")
+                if (
+                    type(api) is not dict
+                    or type(api.get("task_id")) is not str
+                    or not api["task_id"]
+                    or type(executions) is not list
+                    or len(executions) != 2
+                    or type(executions[0]) is not dict
+                    or executions[0].get("task_id") != api["task_id"]
+                ):
+                    raise ValueError("State API selection is not bound to its API execution owner")
+                validate_state_api_selection(
+                    value.get("state_api_selection"),
+                    execution_id=executions[0].get("execution_id"),
+                )
         elif value["layer"] == "application_rq2":
             from qualification.application.run_rq2 import validate_receipt
 

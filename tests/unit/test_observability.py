@@ -592,6 +592,14 @@ def test_workflow_snapshot_wraps_present_and_absent_progress(workflow_execution,
     assert get_workflow_snapshot(execution)["workflow"] is None
 
 
+def _stub_state_task_query(monkeypatch, query) -> None:
+    """Keep result-shape tests on the selected-client query seam."""
+    client = SimpleNamespace(get=lambda _resource, task_id, _options, **kwargs: query(id=task_id))
+    monkeypatch.setattr(
+        observability_module, "_address_pinned_state_client", lambda _address: client
+    )
+
+
 def test_get_ray_task_state_serializes_attempts(monkeypatch, settings) -> None:
     settings.DJANGO_RAY = {
         "RAY_ADDRESS": "auto",
@@ -603,7 +611,7 @@ def test_get_ray_task_state_serializes_attempts(monkeypatch, settings) -> None:
         ],
         get_log=lambda **kwargs: [],
     )
-    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+    _stub_state_task_query(monkeypatch, fake_state.get_task)
 
     assert get_ray_task_state("ray-task-1") == [{"task_id": "ray-task-1", "state": "RUNNING"}]
 
@@ -673,7 +681,10 @@ def test_observability_redacts_state_and_log_payloads(monkeypatch, settings) -> 
         ],
         get_log=lambda **kwargs: iter(["access-token=secret-value\n"]),
     )
-    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+    _stub_state_task_query(monkeypatch, fake_state.get_task)
+    from ray.util import state
+
+    monkeypatch.setattr(state, "get_log", fake_state.get_log)
 
     assert "secret-value" not in str(get_ray_task_state("ray-task-1"))
     assert "secret-value" not in str(get_ray_task_logs("ray-task-1"))
@@ -693,7 +704,7 @@ def test_observability_does_not_return_sensitive_mapping_key_text(monkeypatch, s
             )
         ],
     )
-    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+    _stub_state_task_query(monkeypatch, fake_state.get_task)
 
     rendered = str(get_ray_task_state("ray-task-sensitive-key"))
 
@@ -712,7 +723,7 @@ def test_get_ray_task_state_wraps_state_api_errors(monkeypatch, settings) -> Non
         get_task=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
         get_log=lambda **kwargs: [],
     )
-    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+    _stub_state_task_query(monkeypatch, fake_state.get_task)
 
     with pytest.raises(WorkflowObservabilityError, match="State API is unavailable"):
         get_ray_task_state("ray-task-1")
@@ -841,7 +852,7 @@ def test_get_ray_task_state_handles_none_and_object_shapes(monkeypatch, settings
         return result
 
     fake_state = SimpleNamespace(get_task=_get_task, get_log=lambda **kwargs: [])
-    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+    _stub_state_task_query(monkeypatch, fake_state.get_task)
 
     assert get_ray_task_state("ray-task-1") == []
 
@@ -870,7 +881,7 @@ def test_get_ray_task_state_does_not_render_unknown_objects(monkeypatch, setting
         get_task=lambda **kwargs: HostileRecord(),
         get_log=lambda **kwargs: [],
     )
-    monkeypatch.setitem(sys.modules, "ray.util.state", fake_state)
+    _stub_state_task_query(monkeypatch, fake_state.get_task)
 
     assert get_ray_task_state("ray-task-1") == [{"record": "unsupported"}]
 

@@ -308,6 +308,11 @@ def test_core_requires_negative_cases_and_retains_partial_safe_progress(
     monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *args, **kwargs: TASK_ID)
     monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *args: {})
     monkeypatch.setattr(
+        run_core,
+        "verify_state_api_selection",
+        lambda _task_id, *, execution_id: state_selection_record(execution_id),
+    )
+    monkeypatch.setattr(
         result_presentation,
         "observe_result_presentation",
         lambda **kwargs: dict(result_presentation.EVIDENCE),
@@ -371,6 +376,11 @@ def test_core_requires_result_presentation_before_writing_a_passing_receipt(
     monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {"execution_id": 1})
     monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *_a, **_k: TASK_ID)
     monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *_a: {})
+    monkeypatch.setattr(
+        run_core,
+        "verify_state_api_selection",
+        lambda _task_id, *, execution_id: state_selection_record(execution_id),
+    )
 
     def verify_refusals(request, *, evidence, **kwargs):
         evidence.update(
@@ -430,6 +440,11 @@ def test_operational_observer_failure_stops_core_and_retains_only_fixed_facts(
     monkeypatch.setattr(run_core, "verify_durable_task", lambda *_a, **_k: {"execution_id": 1})
     monkeypatch.setattr(run_core, "verify_runtime_probe", lambda *_a, **_k: TASK_ID)
     monkeypatch.setattr(dashboard_browser, "observe_dashboard", lambda *_a: {})
+    monkeypatch.setattr(
+        run_core,
+        "verify_state_api_selection",
+        lambda _task_id, *, execution_id: state_selection_record(execution_id),
+    )
     monkeypatch.setattr(runtime_env_refusal, "verify_refusals", lambda *_a, **_k: [2, 3])
 
     def fail(*args, evidence, **kwargs):
@@ -457,3 +472,238 @@ def test_operational_observer_failure_stops_core_and_retains_only_fixed_facts(
     assert lines(output.encode())[0]["failed_stage"] == stage
     with pytest.raises(ValueError):
         module.validate_evidence(receipt[stage])
+
+
+def state_selection_record(execution_id=5):
+    return {
+        "schema_version": 1,
+        "execution_id": execution_id,
+        "query_count": 4,
+        "explicit_api_server_address": True,
+        "explicit_ray_address": True,
+        "configured_api_server_address": True,
+        "configured_ray_address": True,
+    }
+
+
+@pytest.fixture
+def state_selection_seams(monkeypatch):
+    from django_ray import observability
+    from qualification.application import http_context
+
+    row = SimpleNamespace(
+        pk=5,
+        task_id=TASK_ID,
+        state="SUCCEEDED",
+        attempt_number=1,
+        execution_protocol_version=1,
+        ray_job_id="a" * 8 + ":" + "b" * 48,
+    )
+    config = {"RAY_STATE_API_ADDRESS": "http://ray-head:8265", "RAY_STATE_API_TIMEOUT_SECONDS": 5}
+    clock = [1.0]
+    monkeypatch.setattr(run_core.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(http_context, "local_outer_deadline", lambda: 100.0)
+    monkeypatch.setattr(ray_settings, "get_settings", lambda: config)
+    monkeypatch.setattr(RayTaskExecution.objects, "get", lambda **kwargs: row)
+    calls = []
+
+    def getter(task_id, **kwargs):
+        import os
+
+        calls.append(
+            (
+                task_id,
+                kwargs,
+                {
+                    key: os.environ[key]
+                    for key in ("RAY_API_SERVER_ADDRESS", "RAY_ADDRESS")
+                    if key in os.environ
+                },
+            )
+        )
+        return [{"task_id": "b" * 48, "job_id": "a" * 8, "state": "FINISHED", "attempt_number": 0}]
+
+    monkeypatch.setattr(observability, "get_ray_task_state", getter)
+    return row, config, clock, calls, getter
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        {},
+        {"RAY_ADDRESS": ""},
+        {
+            "RAY_API_SERVER_ADDRESS": "original-api",
+            "RAY_ADDRESS": "original-ray",
+        },
+    ],
+)
+def test_state_selection_exercises_four_unmasked_cases_and_restores_exact_environment(
+    monkeypatch, state_selection_seams, original
+):
+    import os
+
+    from qualification.application.api import validate_state_api_selection
+
+    _row, _config, _clock, calls, _getter = state_selection_seams
+    keys = ("RAY_API_SERVER_ADDRESS", "RAY_ADDRESS")
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in original.items():
+        monkeypatch.setenv(key, value)
+    evidence = run_core.verify_state_api_selection(TASK_ID, execution_id=5)
+    assert evidence == state_selection_record()
+    validate_state_api_selection(evidence, execution_id=5)
+    wrong = "http://ray-head:8265/__django_ray_qualification_unselected_state_api__"
+    assert calls == [
+        ("b" * 48, {"address": "http://ray-head:8265"}, {keys[0]: wrong}),
+        ("b" * 48, {"address": "http://ray-head:8265"}, {keys[1]: wrong}),
+        ("b" * 48, {}, {keys[0]: wrong}),
+        ("b" * 48, {}, {keys[1]: wrong}),
+    ]
+    assert {key: os.environ[key] for key in keys if key in os.environ} == original
+
+
+@pytest.mark.parametrize("failure_index", range(4))
+def test_state_selection_restores_both_address_keys_when_each_lookup_fails(
+    monkeypatch, state_selection_seams, failure_index
+):
+    import os
+
+    from django_ray import observability
+
+    _row, _config, _clock, calls, getter = state_selection_seams
+    monkeypatch.setenv("RAY_API_SERVER_ADDRESS", "")
+    monkeypatch.setenv("RAY_ADDRESS", "original-ray")
+
+    def fail(task_id, **kwargs):
+        result = getter(task_id, **kwargs)
+        if len(calls) - 1 == failure_index:
+            raise RuntimeError("private-sdk-response-canary")
+        return result
+
+    monkeypatch.setattr(observability, "get_ray_task_state", fail)
+    with pytest.raises(run_core.CoreEvidenceError) as caught:
+        run_core.verify_state_api_selection(TASK_ID, execution_id=5)
+    assert caught.value.code is run_core.CoreEvidenceFailure.STATE_API_SELECTION
+    assert str(caught.value) == "state_api_selection"
+    assert len(calls) == failure_index + 1
+    assert (
+        os.environ["RAY_API_SERVER_ADDRESS"] == "" and os.environ["RAY_ADDRESS"] == "original-ray"
+    )
+
+
+@pytest.mark.parametrize("failure_index", range(4))
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing",
+        "duplicate",
+        "wrong_task",
+        "wrong_job",
+        "not_finished",
+        "bool_attempt",
+        "second_attempt",
+    ],
+)
+def test_state_selection_rejects_wrong_or_untyped_actual_getter_results(
+    monkeypatch, state_selection_seams, failure, failure_index
+):
+    import os
+
+    from django_ray import observability
+
+    _row, _config, _clock, calls, getter = state_selection_seams
+    monkeypatch.setenv("RAY_API_SERVER_ADDRESS", "original-api")
+    monkeypatch.setenv("RAY_ADDRESS", "")
+
+    def changed(task_id, **kwargs):
+        values = getter(task_id, **kwargs)
+        if len(calls) - 1 != failure_index:
+            return values
+        if failure == "missing":
+            return []
+        if failure == "duplicate":
+            return values * 2
+        value = values[0]
+        value.update(
+            {
+                "wrong_task": {"task_id": "c" * 48},
+                "wrong_job": {"job_id": "c" * 8},
+                "not_finished": {"state": "RUNNING"},
+                "bool_attempt": {"attempt_number": False},
+                "second_attempt": {"attempt_number": 1},
+            }[failure]
+        )
+        return values
+
+    monkeypatch.setattr(observability, "get_ray_task_state", changed)
+    with pytest.raises(run_core.CoreEvidenceError) as caught:
+        run_core.verify_state_api_selection(TASK_ID, execution_id=5)
+    assert caught.value.code is run_core.CoreEvidenceFailure.STATE_API_SELECTION
+    assert len(calls) == failure_index + 1
+    assert (
+        os.environ["RAY_API_SERVER_ADDRESS"] == "original-api" and os.environ["RAY_ADDRESS"] == ""
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "owner",
+        "task",
+        "handle",
+        "state",
+        "attempt",
+        "protocol",
+        "endpoint",
+        "timeout",
+        "no_deadline",
+        "late",
+    ],
+)
+def test_state_selection_refuses_bad_preconditions_before_any_getter_call(
+    monkeypatch, state_selection_seams, failure
+):
+    from qualification.application import http_context
+
+    row, config, clock, calls, _getter = state_selection_seams
+    if failure in {"owner", "task", "handle", "state", "attempt", "protocol"}:
+        field, value = {
+            "owner": ("pk", 6),
+            "task": ("task_id", "another-task"),
+            "handle": ("ray_job_id", "a:b"),
+            "state": ("state", "RUNNING"),
+            "attempt": ("attempt_number", 2),
+            "protocol": ("execution_protocol_version", 2),
+        }[failure]
+        setattr(row, field, value)
+    elif failure == "endpoint":
+        config["RAY_STATE_API_ADDRESS"] = "http://127.0.0.1:8765/ray"
+    elif failure == "timeout":
+        config["RAY_STATE_API_TIMEOUT_SECONDS"] = True
+    elif failure == "no_deadline":
+        monkeypatch.setattr(http_context, "local_outer_deadline", lambda: None)
+    else:
+        clock[0] = 96
+    with pytest.raises(run_core.CoreEvidenceError):
+        run_core.verify_state_api_selection(TASK_ID, execution_id=5)
+    assert calls == []
+
+
+def test_state_selection_cannot_accept_a_reply_after_the_original_deadline(
+    monkeypatch, state_selection_seams
+):
+    from django_ray import observability
+
+    _row, _config, clock, calls, getter = state_selection_seams
+
+    def late(task_id, **kwargs):
+        result = getter(task_id, **kwargs)
+        clock[0] = 100
+        return result
+
+    monkeypatch.setattr(observability, "get_ray_task_state", late)
+    with pytest.raises(run_core.CoreEvidenceError):
+        run_core.verify_state_api_selection(TASK_ID, execution_id=5)
+    assert len(calls) == 1

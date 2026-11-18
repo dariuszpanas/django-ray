@@ -941,3 +941,33 @@ generation supervisor still enforces the unchanged 600-second process budget.
 The collector requires every typed result-presentation field in both generations.
 These assertions cover the ordinary-result presentation part of #455; they do
 not complete the whole application catalogue or the release checklist in #372.
+
+
+## State API address selection
+
+The selected State API observer runs immediately after the existing Core dashboard
+check, using that same completed API execution. In each cold generation it makes
+four serial real `get_ray_task_state` calls: explicit and configured State endpoints,
+each against only a wrong `RAY_API_SERVER_ADDRESS` or only a wrong `RAY_ADDRESS`.
+The wrong endpoint is a fixed nonexistent path on the same owned Ray origin. Both
+address keys are cleared between cases and their exact prior presence and values
+are restored in `finally`. These temporary environment changes are confined to
+the existing qualification process. SDK methods, credentials and application
+settings remain unchanged; the observer adds no workload, process or resources.
+
+The fixed `state_api_selection` record contains schema 1, the owned execution ID,
+query count 4 and four literal true facts. Every response must be exactly one
+matching Ray task/job in `FINISHED` at integer Ray attempt 0; these are different
+identities from the durable Django task and attempt 1. Current collection requires
+this record in both generations and joins its execution ID to the existing API
+owner. Only the fixed `45180ea` adapter waives an absent later-added record; a present
+invalid record still fails, and retained historical files gain no new facts.
+
+The observer uses the original generation deadline with guards before and after
+each lookup and no retries or deadline reset. The configured State API timeout is
+five seconds and the SDK may normalize it; socket waits apply per blocking operation.
+Four times five is nominal, not a total wall-clock bound.
+The existing process supervisor, 600-second shared phase and receipt/log caps remain
+required. Failed lookups retain only the fixed `state_api_selection` stage/code.
+This selected proof is not multi-cluster routing, failover, log transport, general
+SDK compatibility or complete Application/release acceptance.

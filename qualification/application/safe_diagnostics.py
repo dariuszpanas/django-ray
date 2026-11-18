@@ -111,6 +111,7 @@ STAGES = {
     "remote_runtime_env",
     "probe_execution_ownership",
     "dashboard_proxy",
+    "state_api_selection",
     "runtime_env_refusal",
     "runtime_env_maintenance",
     "lease_policy",
@@ -149,6 +150,7 @@ RECEIPT_FIELDS = {
         "lease_policy",
         "protected_runtime",
         "ordinary_results",
+        "state_api_selection",
     },
     "workflow_api_admin": {
         "complete_workflow_gate",
