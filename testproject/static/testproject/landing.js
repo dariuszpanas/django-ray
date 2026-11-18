@@ -37,6 +37,7 @@
   let apiToken = "";
   let credentialGeneration = 0;
   let protectedResponseGeneration = 0;
+  let statisticsRequestGeneration = 0;
 
   class DashboardCredentialError extends Error {
     constructor(message, clearedCurrentCredential = false) {
@@ -126,12 +127,18 @@
   }
 
   async function refreshStats() {
+    const requestGeneration = ++statisticsRequestGeneration;
     const refreshGeneration = credentialGeneration;
     const refreshToken = apiToken;
     const response = await authenticatedRequest("/api/executions/stats");
     if (!response.ok) throw new Error(`Stats request failed: ${response.status}`);
     const stats = await response.json();
-    if (!credentialIsCurrent(refreshGeneration, refreshToken)) return;
+    if (
+      requestGeneration !== statisticsRequestGeneration ||
+      !credentialIsCurrent(refreshGeneration, refreshToken)
+    ) {
+      return;
+    }
     for (const [key, element] of Object.entries(statMap)) {
       element.textContent = stats[key] ?? 0;
     }
