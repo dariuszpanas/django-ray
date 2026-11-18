@@ -905,3 +905,70 @@ test("a superseded protected 401 still rejects the current credential", async ()
   );
   assert.equal(dashboard.elements.get("view-metrics").disabled, false);
 });
+
+for (const pendingPhase of ["headers", "body"]) {
+  test(`newer same-credential statistics win over pending ${pendingPhase}`, async () => {
+    const dashboard = loadDashboard();
+    dashboard.fetchResponses.push(response(200, stats));
+    dashboard.elements.get("api-token").value = "same-credential-stats-token";
+    await dashboard.click("use-token");
+
+    dashboard.fetchResponses.push(response(200, { task_id: "task-a", status: "READY" }));
+    await dashboard.click("trigger");
+    assert.equal(dashboard.elements.get("trigger").disabled, false);
+
+    // R1 captures task A before task B exists, but its delivery stays pending.
+    const olderStats = { total: 10, queued: 1, running: 2, succeeded: 3, failed: 1, expired: 3 };
+    const olderResponse = deferred();
+    const olderBodyStarted = deferred();
+    if (pendingPhase === "headers") {
+      dashboard.fetchResponses.push(olderResponse.promise);
+    } else {
+      dashboard.fetchResponses.push({
+        ...response(200, olderStats),
+        json() {
+          olderBodyStarted.resolve();
+          return olderResponse.promise;
+        },
+      });
+    }
+    const olderRefresh = dashboard.scheduled.shift()();
+    if (pendingPhase === "body") await olderBodyStarted.promise;
+    assert.equal(dashboard.fetchCalls.at(-1).url, "/api/executions/stats");
+
+    // The first POST has completed, so the actual button allows task B.
+    assert.equal(dashboard.elements.get("trigger").disabled, false);
+    dashboard.fetchResponses.push(response(200, { task_id: "task-b", status: "READY" }));
+    await dashboard.click("trigger");
+    assert.equal(dashboard.elements.get("trigger").disabled, false);
+    const newerStats = { total: 11, queued: 2, running: 1, succeeded: 4, failed: 2, expired: 2 };
+    const newerResponse = deferred();
+    dashboard.fetchResponses.push(newerResponse.promise);
+    const newerRefresh = dashboard.scheduled.shift()();
+    assert.equal(dashboard.fetchCalls.at(-1).url, "/api/executions/stats");
+    newerResponse.resolve(response(200, newerStats));
+    await newerRefresh;
+    for (const [key, value] of Object.entries(newerStats)) {
+      assert.equal(dashboard.elements.get(`stat-${key}`).textContent, value);
+    }
+
+    olderResponse.resolve(
+      pendingPhase === "headers" ? response(200, olderStats) : olderStats,
+    );
+    await olderRefresh;
+    for (const [key, value] of Object.entries(newerStats)) {
+      assert.equal(dashboard.elements.get(`stat-${key}`).textContent, value);
+    }
+    assert.equal(dashboard.fetchCalls.length, 5);
+    for (const call of dashboard.fetchCalls) {
+      assert.equal(
+        call.options.headers.get("Authorization"),
+        "Bearer same-credential-stats-token",
+      );
+    }
+    assert.equal(
+      dashboard.elements.get("credential-status").textContent,
+      "Authenticated for this loaded page. Reloading clears the token.",
+    );
+  });
+}
