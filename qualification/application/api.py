@@ -53,6 +53,33 @@ EXPECTED_EXECUTION_DETAIL_DIAGNOSTIC_MAX_BYTES = 64 * 1024
 EXPECTED_EXECUTION_DETAIL_RESPONSE_MAX_BYTES = 256 * 1024
 
 
+STATE_API_SELECTION_FACTS = (
+    "explicit_api_server_address",
+    "explicit_ray_address",
+    "configured_api_server_address",
+    "configured_ray_address",
+)
+
+
+def validate_state_api_selection(value: object, *, execution_id: object) -> None:
+    """Require the fixed four native lookups bound to the existing API owner."""
+    if (
+        type(value) is not dict
+        or value.keys()
+        != {"schema_version", "execution_id", "query_count", *STATE_API_SELECTION_FACTS}
+        or type(execution_id) is not int
+        or execution_id <= 0
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or type(value.get("execution_id")) is not int
+        or value["execution_id"] != execution_id
+        or type(value.get("query_count")) is not int
+        or value["query_count"] != 4
+        or any(value[name] is not True for name in STATE_API_SELECTION_FACTS)
+    ):
+        raise ValueError("Incomplete State API selection evidence or owner binding")
+
+
 class HttpRequest(Protocol):
     """Transport must enforce requested byte limits and required response headers.
 

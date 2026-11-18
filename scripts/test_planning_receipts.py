@@ -157,7 +157,15 @@ def application(evidence: Evidence, expected: ExpectedRun) -> None:
         for name in names:
             validate_application_payload(name, evidence.json(output + name + ".json"))
             lines.append(evidence.read(output + name + ".json"))
-        parse_receipts(b"\n".join(lines), names, expected_profile=profile)
+        # This fixed historical adapter predates State selection evidence.
+        # Waive only absence; any present record is still validated, and the
+        # retained historical files/context gain no new facts.
+        parse_receipts(
+            b"\n".join(lines),
+            names,
+            expected_profile=profile,
+            require_state_api_selection=False,
+        )
     before = evidence.read(output + "before-nodes.json")
     fields(
         evidence.json(output + "after-nodes.json"),

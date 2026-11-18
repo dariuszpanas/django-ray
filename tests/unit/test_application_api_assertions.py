@@ -18,9 +18,14 @@ def test_api_assertions_import_with_only_the_standard_library() -> None:
             sys.executable,
             "-I",
             "-S",
+            "-B",
             "-c",
             "import sys; sys.path.insert(0, sys.argv[1]); "
-            "from qualification.application.api import ApiEvidence, verify_application_api; "
+            "from qualification.application.api import ApiEvidence, verify_application_api, "
+            "validate_state_api_selection; "
+            "validate_state_api_selection({'schema_version':1,'execution_id':1,'query_count':4,"
+            "'explicit_api_server_address':True,'explicit_ray_address':True,"
+            "'configured_api_server_address':True,'configured_ray_address':True},execution_id=1); "
             "assert ApiEvidence().task_id == ''; "
             "assert not any(name.split('.')[0] in "
             "{'django', 'django_ray', 'ray', 'kubernetes', 'scripts'} for name in sys.modules)",

@@ -359,6 +359,20 @@ def test_phase_markers_do_not_change_receipt_collection(monkeypatch, capsys):
                 case: dict.fromkeys(facts, True) for case, facts in MAINTENANCE_FACTS.items()
             },
             "ordinary_results": dict(RESULT_EVIDENCE),
+            "api": {"task_id": "25200000-0000-4000-8000-000000000002"},
+            "executions": [
+                {"task_id": "25200000-0000-4000-8000-000000000002", "execution_id": 1},
+                {"task_id": "25200000-0000-4000-8000-000000000003", "execution_id": 2},
+            ],
+            "state_api_selection": {
+                "schema_version": 1,
+                "execution_id": 1,
+                "query_count": 4,
+                "explicit_api_server_address": True,
+                "explicit_ray_address": True,
+                "configured_api_server_address": True,
+                "configured_ray_address": True,
+            },
             "protected_runtime": {
                 "api_clear": True,
                 "row_ids": [1, 2, 3],
