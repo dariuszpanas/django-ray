@@ -408,6 +408,58 @@ def _nullable(node: _Node) -> bool:
     return node.minimum == 0 or _nullable(node.node)
 
 
+_MAX_ASCII_FAST_BRANCHES = 128
+_MAX_ASCII_FAST_OPTIONALS_PER_BRANCH = 2
+
+
+def _serialize_simple_sequence(node: _Node) -> tuple[str, int] | None:
+    """Serialize a backtracking-free sequence from parsed AST atoms, else None."""
+    if isinstance(node, _Empty):
+        return "", 0
+    if isinstance(node, _Atom):
+        return f"(?:{node.source})", 0
+    if isinstance(node, _Concatenation):
+        parts: list[str] = []
+        total_optionals = 0
+        for part in node.parts:
+            serialized = _serialize_simple_sequence(part)
+            if serialized is None:
+                return None
+            text, optionals = serialized
+            total_optionals += optionals
+            if total_optionals > _MAX_ASCII_FAST_OPTIONALS_PER_BRANCH:
+                return None
+            parts.append(text)
+        return "".join(parts), total_optionals
+    if isinstance(node, _Repeat):
+        if isinstance(node.node, _Atom) and node.maximum is not None and node.maximum <= 1:
+            if node.minimum == 0 and node.maximum == 1:
+                return f"(?:{node.node.source})?", 1
+            if node.minimum == 1 and node.maximum == 1:
+                return f"(?:{node.node.source})", 0
+            return "", 0
+        return None
+    return None
+
+
+def _serialize_simple_linear_branches(node: _Node) -> list[str] | None:
+    """Serialize parsed branches guaranteed strictly O(n) in Python's re engine."""
+    if isinstance(node, _Alternation):
+        branches: list[str] = []
+        for branch in node.branches:
+            serialized = _serialize_simple_linear_branches(branch)
+            if serialized is None:
+                return None
+            branches.extend(serialized)
+            if len(branches) > _MAX_ASCII_FAST_BRANCHES:
+                return None
+        return branches
+    serialized_seq = _serialize_simple_sequence(node)
+    if serialized_seq is None:
+        return None
+    return [serialized_seq[0]]
+
+
 @dataclass(slots=True)
 class _MutableState:
     epsilon: list[int] = field(default_factory=list)
@@ -587,6 +639,7 @@ class RedactionPatternProgram:
     _closures: tuple[int, ...]
     _start_closure: int
     _accept_mask: int
+    _ascii_fast_regex: re.Pattern[str] | None = None
 
     @property
     def pattern_count(self) -> int:
@@ -620,6 +673,17 @@ class RedactionPatternProgram:
         """Return whether any configured pattern searches successfully in text."""
         if type(value) is not str:
             raise TypeError("redaction pattern search input must be text")
+        if metrics is None and self._ascii_fast_regex is not None and value.isascii():
+            work = 1 + len(value)
+            if budget is None:
+                if work > self.limits.max_work_units_per_value:
+                    return True
+                return self._ascii_fast_regex.search(value) is not None
+            if not isinstance(budget, RedactionPatternWorkBudget):
+                raise TypeError("budget must be a RedactionPatternWorkBudget instance")
+            if budget.exhausted or not budget.consume(work):
+                return True
+            return self._ascii_fast_regex.search(value) is not None
         return self.search_tokens((value,), metrics=metrics, budget=budget)
 
     def search_tokens(
@@ -864,6 +928,8 @@ def _compile_cached(
             for index, source in enumerate(configured_sources)
         ),
     )
+    all_simple_linear = bool(entries)
+    fast_branches: list[str] = []
     for pattern_label, source in entries:
         builder.pattern_label = pattern_label
         compile_failure: str | None = None
@@ -884,6 +950,12 @@ def _compile_cached(
         node = _Parser(source, limits, pattern_label=pattern_label).parse()
         if _nullable(node):
             raise RedactionPatternError(f"{pattern_label}: pattern can match empty text")
+        if all_simple_linear:
+            branches = _serialize_simple_linear_branches(node)
+            if branches is None or len(fast_branches) + len(branches) > _MAX_ASCII_FAST_BRANCHES:
+                all_simple_linear = False
+            else:
+                fast_branches.extend(branches)
         pattern_state_start = len(builder.states)
         fragment = builder.compile(node)
         accept = builder.new_state()
@@ -895,6 +967,11 @@ def _compile_cached(
                 f"{pattern_label}: NFA exceeds {limits.max_states_per_pattern} states"
             )
         accept_mask |= 1 << accept
+
+    ascii_fast_regex: re.Pattern[str] | None = None
+    if all_simple_linear:
+        combined = "|".join(f"(?:{branch})" for branch in fast_branches)
+        ascii_fast_regex = re.compile(combined, re.IGNORECASE)
 
     states = tuple(
         _State(epsilon=tuple(state.epsilon), transitions=tuple(state.transitions))
@@ -910,6 +987,7 @@ def _compile_cached(
         _closures=closures,
         _start_closure=closures[super_start],
         _accept_mask=accept_mask,
+        _ascii_fast_regex=ascii_fast_regex,
     )
 
 

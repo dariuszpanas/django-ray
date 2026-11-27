@@ -1488,32 +1488,36 @@ class SQLitePreparationWorkspace:
     ) -> tuple[list[storage.PreparedWorkflowProgressTopologyPage], int]:
         """Build canonical pages with one cancellation boundary per output page."""
         pages: list[storage.PreparedWorkflowProgressTopologyPage] = []
+        empty_envelope_bytes = len(
+            storage._canonical_json_bytes(
+                {
+                    "collection": collection.value,
+                    "records": [],
+                    "schema_version": storage.WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION,
+                }
+            )
+        )
+        max_page_bytes = min(
+            storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ENCODED_BYTES,
+            storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_DECODED_BYTES,
+        )
         consumed = 0
         while consumed < len(records):
             self._check_cancellation()
             page_records: list[dict[str, Any]] = []
+            current_bytes = empty_envelope_bytes
             while consumed + len(page_records) < len(records):
                 candidate = records[consumed + len(page_records)]
-                trial = {
-                    "collection": collection.value,
-                    "records": [*page_records, candidate],
-                    "schema_version": storage.WORKFLOW_PROGRESS_STORAGE_PROTOCOL_VERSION,
-                }
-                encoded = storage._canonical_json_bytes(trial)
-                if page_records and (
-                    len(page_records) >= storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS
-                    or len(encoded) > storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ENCODED_BYTES
-                    or len(encoded) > storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_DECODED_BYTES
-                ):
+                candidate_bytes = len(storage._canonical_json_bytes(candidate))
+                projected_bytes = current_bytes + (1 if page_records else 0) + candidate_bytes
+                if page_records and projected_bytes > max_page_bytes:
                     break
-                if (
-                    len(encoded) > storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ENCODED_BYTES
-                    or len(encoded) > storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_DECODED_BYTES
-                ):
+                if projected_bytes > max_page_bytes:
                     raise storage.WorkflowProgressStorageLimitError(
                         "one topology record cannot fit in a storage page"
                     )
                 page_records.append(candidate)
+                current_bytes = projected_bytes
                 if len(page_records) == storage.WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ITEMS:
                     break
             payload = storage._canonical_json_bytes(

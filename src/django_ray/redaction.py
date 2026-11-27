@@ -117,6 +117,10 @@ DEFAULT_REDACT_PATTERNS: tuple[str, ...] = (
     r"credential",
     r"private[_-]?key",
 )
+_DEFAULT_COMPILED_PATTERNS = compile_redaction_patterns(
+    (),
+    builtin_patterns=DEFAULT_REDACT_PATTERNS,
+)
 
 
 def _configured_patterns(
@@ -137,9 +141,10 @@ def _configured_patterns(
                 patterns = get_settings().get("REDACT_PATTERNS")
             except ImproperlyConfigured:
                 patterns = None
-    configured: Sequence[str] | str = () if patterns is None else patterns
+    if patterns is None or (type(patterns) in (tuple, list) and not patterns):
+        return _DEFAULT_COMPILED_PATTERNS
     return compile_redaction_patterns(
-        configured,
+        patterns,
         builtin_patterns=DEFAULT_REDACT_PATTERNS,
     )
 
