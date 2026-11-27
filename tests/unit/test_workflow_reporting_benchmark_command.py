@@ -837,9 +837,13 @@ def test_selection_accepts_the_materialized_benchmark_plan(
         ).as_dict()
     )
 
-    # Presentation redaction omits the selection for this real plan. That is
-    # not evidence of an invalid execution policy.
-    assert "selection" not in (get_workflow_plan(execution) or {})
+    presented = get_workflow_plan(execution) or {}
+    if hide_identity:
+        # Configured presentation redaction omits the selection for this real
+        # plan. That is not evidence of an invalid execution policy.
+        assert "selection" not in presented
+    else:
+        assert presented.get("selection", {}).get("selected_strategy") == "dynamic_tasks"
 
     assert benchmark._selection(execution, policy) == {
         "reporting_policy": policy,

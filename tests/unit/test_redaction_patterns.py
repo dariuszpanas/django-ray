@@ -551,3 +551,62 @@ def test_instrumented_search_work_scales_linearly() -> None:
     assert large.transition_checks <= (small.transition_checks * 2) + program.state_count
     assert large.predicate_evaluations == small.predicate_evaluations
     assert large.active_state_visits <= large.input_characters * program.state_count
+
+
+def test_ascii_fast_path_matches_nfa_and_preserves_budget_contracts() -> None:
+    simple = compile_redaction_patterns(
+        (r"customer|client", r"api[_-]?key"),
+        builtin_patterns=(r"password", r"token"),
+    )
+    quantified = compile_redaction_patterns((r"password", r"(a+)+b"))
+    nested_alt = compile_redaction_patterns(r"(?:a|aa)(?:a|aa)b")
+    many_optionals = compile_redaction_patterns(r"a?a?a?b")
+
+    assert simple._ascii_fast_regex is not None
+    assert quantified._ascii_fast_regex is None
+    assert nested_alt._ascii_fast_regex is None
+    assert many_optionals._ascii_fast_regex is None
+
+    for value in ("", "ordinary", "node-00001", "API_KEY", "api-key", "apikey", "CLIENT", "token"):
+        assert simple.search(value) is simple.search_tokens((value,))
+
+    with pytest.raises(TypeError, match="RedactionPatternWorkBudget"):
+        simple.search("ordinary", budget="invalid")  # type: ignore[arg-type]
+
+    budget = RedactionPatternWorkBudget(limit=10)
+    assert not simple.search("ordinary", budget=budget)
+    assert budget.used == 9
+    assert not budget.exhausted
+    assert simple.search("ab", budget=budget)
+    assert budget.exhausted
+    assert budget.used == 10
+    assert simple.search("x", budget=budget)
+
+    tight = compile_redaction_patterns(
+        "password",
+        limits=replace(DEFAULT_REDACTION_PATTERN_LIMITS, max_work_units_per_value=5),
+    )
+    assert tight.search("ordinary")
+    assert not tight.search("ok")
+
+    # Unrecognized braced syntax like `{,}` is parsed as literal atoms; the
+    # AST-serialized fast path must match NFA semantics without backtracking.
+    braced = compile_redaction_patterns(r"(a{,}){,}b")
+    for sample in ("a" * 32, "a{,}{,}b", "ab"):
+        assert braced.search(sample) is braced.search_tokens((sample,))
+
+    # Preserve atom boundaries so short octal escapes cannot merge with digits.
+    for pattern in (r"\0(77)", r"\0{1}77"):
+        octal = compile_redaction_patterns(pattern)
+        assert octal._ascii_fast_regex is not None
+        for sample in ("?", "\x0077", "\x007", "77"):
+            assert octal.search(sample) is octal.search_tokens((sample,))
+        assert not octal.search("?")
+        assert octal.search("\x0077")
+
+    many_branches = compile_redaction_patterns(
+        tuple("|".join(f"b{group}i{index}" for index in range(30)) for group in range(5))
+    )
+    assert many_branches._ascii_fast_regex is None
+    assert many_branches.search("b0i0")
+    assert many_branches.search("b4i29")
