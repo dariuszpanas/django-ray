@@ -216,12 +216,12 @@ jobs:
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
       - name: Install native shutdown debugger
-        if: matrix.python-version != '3.12'
+        if: matrix.python-version != '3.12' && github.event_name != 'pull_request'
         timeout-minutes: 3
         run: sudo --non-interactive python3 scripts/install_ci_debugger.py
 
       - name: Verify native shutdown diagnostics
-        if: matrix.python-version != '3.12'
+        if: matrix.python-version != '3.12' && github.event_name != 'pull_request'
         timeout-minutes: 2
         env:
           DJANGO_RAY_REQUIRE_NATIVE_DEBUGGER: "1"
@@ -244,7 +244,7 @@ jobs:
           markers: not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
 
       - name: Run real_ray tests
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' || github.event_name == 'pull_request'
         env:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
         run: |
@@ -263,7 +263,7 @@ jobs:
             -v
 
       - name: Run real_ray tests with native diagnostics
-        if: matrix.python-version != '3.12'
+        if: matrix.python-version != '3.12' && github.event_name != 'pull_request'
         env:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
         run: |

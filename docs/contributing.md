@@ -4,9 +4,8 @@ The [test planning shadow pilot](testing/test-planning-shadow.md) compares
 qualification selection while preserving all existing required CI checks.
 Test planning shadow checks are advisory and never replace required CI.
 
-Stage 1 pyrn shadow checks are advisory and never replace CI Gate. The
-`pyrn Shadow (Advisory)` workflow records container worker budgets, symbol-level
-TIA shadow plans, and portable verify-role parity receipts alongside required CI.
+Required Linux CI executes the portable test suite directly through `pyrn`,
+superseding the retired advisory `pyrn Shadow (Advisory)` workflow.
 
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant

@@ -22,6 +22,7 @@ from django_ray.runtime.result_buffer import (
     WorkflowMapResultBuffer,
     normalize_result_buffer_actor_options,
     result_buffer_plan_contract,
+    result_buffer_ray_actor_options,
     validate_result_buffer_ack,
 )
 from django_ray.workflow.plans import WorkflowPlanValidationError
@@ -107,29 +108,6 @@ def build_oversized_resource(index: int, tracker: Any) -> dict[str, Any]:
 
     ray.get(tracker.record.remote(index))
     return {"index": index, "manifest": "x" * 4096}
-
-
-class _ResultBufferOwner:
-    def spawn(self) -> Any:
-        import ray
-
-        from django_ray.runtime.result_buffer import (
-            WorkflowMapResultBuffer,
-            normalize_result_buffer_actor_options,
-            result_buffer_ray_actor_options,
-        )
-
-        options = normalize_result_buffer_actor_options(
-            {"num_cpus": 0.1, "memory": 1024 * 1024},
-            max_serialized_bytes=1024 * 1024,
-        )
-        child = (
-            ray.remote(WorkflowMapResultBuffer)
-            .options(**result_buffer_ray_actor_options(options))
-            .remote(1, 1024 * 1024)
-        )
-        ray.get(child.ready.remote())
-        return child
 
 
 def _actor_options(**overrides: Any) -> dict[str, Any]:
@@ -1021,21 +999,15 @@ def test_real_ray_actor_resources_direct_returns_and_success_cleanup(
         time.sleep(0.05)
 
 
-@pytest.mark.real_ray
-def test_real_ray_non_detached_buffer_dies_with_owner(ray_cluster: Any) -> None:
-    from ray.exceptions import RayActorError, RayTaskError
-
-    owner = ray_cluster.remote(num_cpus=0.1)(_ResultBufferOwner).remote()
-    child = ray_cluster.get(owner.spawn.remote())
-    assert validate_result_buffer_ack(ray_cluster.get(child.ready.remote()), state="ready")
-
-    ray_cluster.kill(owner, no_restart=True)
-    deadline = time.monotonic() + 10
-    while True:
-        try:
-            ray_cluster.get(child.ready.remote(), timeout=0.5)
-        except (RayActorError, RayTaskError):
-            break
-        if time.monotonic() >= deadline:
-            pytest.fail("non-detached result buffer survived owner death")
-        time.sleep(0.05)
+def test_result_buffer_ray_actor_options_never_requests_detached_lifetime() -> None:
+    options = normalize_result_buffer_actor_options(
+        {"num_cpus": 0.1, "memory": 1024 * 1024},
+        max_serialized_bytes=1024 * 1024,
+    )
+    ray_options = result_buffer_ray_actor_options(options)
+    assert ray_options["lifetime"] is None
+    with pytest.raises(ValueError, match="unsupported fields: lifetime"):
+        normalize_result_buffer_actor_options(
+            {"num_cpus": 0.1, "memory": 1024 * 1024, "lifetime": "detached"},
+            max_serialized_bytes=1024 * 1024,
+        )

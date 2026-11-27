@@ -128,7 +128,6 @@
           "tests/unit/test_workflow_progress_protocol.py",
           "tests/unit/test_workflow_progress_publication.py",
           "tests/unit/test_workflow_progress_preparation.py",
-          "tests/unit/test_workflow_progress_preparation_prototype.py",
           "tests/unit/test_workflow_progress_reads.py",
           "tests/unit/test_workflow_progress_storage_audit.py",
           "tests/unit/test_workflow_progress_storage_boundaries.py",
@@ -514,16 +513,6 @@
       ],
       "reason": "Pure summary codec cases pay for a database identity, while several read-order cases construct larger workflows than their cursor boundary requires.",
       "review": "Split DB-free protocol cases from ORM/lifecycle cases and right-size read cardinalities without merging HTTP adapter coverage."
-    },
-    {
-      "id": "workflow-progress-preparation",
-      "owner": "Workflow progress preparation and prototype",
-      "paths": [
-        "tests/unit/test_workflow_progress_preparation.py",
-        "tests/unit/test_workflow_progress_preparation_prototype.py"
-      ],
-      "reason": "Production and prototype suites have similar ordering and reporting shapes but retain different end-to-end topology and detachment contracts.",
-      "review": "Do not consolidate until a scheduled benchmark or replacement harness proves both production and prototype invariants."
     },
     {
       "id": "bundled-browser-contract",

@@ -494,13 +494,12 @@ deltas only between cases collected under the same server configuration.
 
 ## Benchmark Workflow Progress Preparation
 
-ADR-0005's opt-in preparation benchmark has two explicit implementations. The default
-`prototype-composite` mode measures the issue-#140 non-production topology/detail
-prototype. `production-topology` measures the issue-#141 package path through legacy
-topology detachment. Each sparse or high-edge scenario runs in a fresh subprocess and
-removes its private workspace before the parent accepts the result. Neither mode starts
-Ray, writes Django database rows, accesses Kubernetes, or activates schema-v3
-production.
+ADR-0005's opt-in preparation benchmark measures the `production-topology`
+implementation (the issue-#141 package path through legacy topology detachment; the
+non-production `prototype-composite` mode has been retired). Each sparse or high-edge
+scenario runs in a fresh subprocess and removes its private workspace before the parent
+accepts the result. The benchmark does not start Ray, write Django database rows, access
+Kubernetes, or activate schema-v3 production.
 
 The benchmark launcher and its private worker mode require Linux. Both reject
 Windows and macOS before creating a workspace or starting a subprocess. Linux
@@ -511,21 +510,11 @@ launch/termination and macOS RSS accommodations as a focused part of
 [issue #456](https://github.com/dariuszpanas/django-ray/issues/456); cross-platform
 filesystem defenses and host tools that launch Linux containers remain separate.
 
-Run the required decision matrix on Linux from an otherwise idle checkout:
+Run the required production-topology decision matrix on Linux from an otherwise idle
+checkout:
 
 ```bash
-mkdir -p artifacts /tmp/django-ray-issue140-benchmark
-python scripts/benchmark_workflow_progress_preparation.py \
-  --implementation prototype-composite \
-  --required-scale \
-  --timeout-seconds 7200 \
-  --workspace-parent /tmp/django-ray-issue140-benchmark \
-  --output artifacts/workflow-progress-preparation.json
-```
-
-Repeat the topology-only production matrix separately:
-
-```bash
+mkdir -p artifacts /tmp/django-ray-issue141-benchmark
 python scripts/benchmark_workflow_progress_preparation.py \
   --implementation production-topology \
   --required-scale \
