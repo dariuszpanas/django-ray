@@ -4,6 +4,23 @@ Required Linux CI executes the portable test suite directly through `pyrn` and
 validates conditional deployed qualifications through `Qualification Gate`. The
 retired advisory test-planning and `pyrn` shadow workflows have been removed.
 
+Pull-request CI preserves full cold-suite coverage verification while accelerating
+non-coverage lanes with fail-closed symbol-level TIA and CAS caching:
+
+- `Test (Python 3.12)` and `Test (Python 3.14)` always execute the full portable
+  library suite cold (`tier: full`, `--cov-sysmon`) plus `real_ray`, enforcing the
+  95% global and 90% worker/Ray Job coverage floors. Every `push` to `main` runs
+  100% cold full-suite verification across all matrix versions and seeds fresh
+  `pyrn` CAS caches keyed by resolved dependency fingerprints.
+- Non-coverage PR lanes (`Test (Python 3.13)` portable tests, `Testproject & Tooling`,
+  and `Dependencies (minimum-direct / latest)`) use `pyrn` symbol-level TIA
+  (`tier: strict`, `unknown_path_policy = "full"`) against the PR base commit. Any
+  unmapped file, global trigger, missing git history, or resolved dependency drift in
+  `Dependencies` fails closed to cold full-suite execution (`FullVerified`, bypassing
+  CAS reads). Python 3.13 still runs the full `real_ray` suite on every PR.
+- Deployed Kind/KubeRay qualification remains governed separately by
+  `Qualification Gate` (`scripts/qualification_policy.json`).
+
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
 changes. Its passing current-source result is required when the enqueue-only gate row applies,

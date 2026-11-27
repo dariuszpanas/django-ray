@@ -191,6 +191,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install uv
@@ -220,14 +221,16 @@ jobs:
           tests/unit/test_observe_pytest_exit.py -q
 
       - name: Run portable tests with pyrn
-        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        uses: dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5 # v0.2.3
         with:
           command: run
           repo: .
           python: .venv/bin/python
           workers: "4"
           role: verify
-          tier: full
+          tier: ${{ (matrix.python-version == '3.13' && github.event_name == 'pull_request') && 'strict' || 'full' }}
+          tia: ${{ matrix.python-version == '3.13' && github.event_name == 'pull_request' }}
+          base: ${{ (matrix.python-version == '3.13' && github.event_name == 'pull_request') && github.event.pull_request.base.sha || '' }}
           cov-sysmon: ${{ matrix.python-version != '3.13' || github.event_name != 'pull_request' }}
           cov-out: ${{ (matrix.python-version != '3.13' || github.event_name != 'pull_request') && '.coverage' || '' }}
           metrics-kv: "true"
@@ -679,6 +682,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install uv
@@ -693,17 +697,38 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Restore pyrn CAS cache
+        id: restore-pyrn-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pyrn-cache
+          key: pyrn-cas-v1-tooling-py312-${{ hashFiles('uv.lock', '.pyrn.toml', 'pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            pyrn-cas-v1-tooling-py312-${{ hashFiles('uv.lock', '.pyrn.toml', 'pyproject.toml') }}-
+
       - name: Run tooling tests with pyrn
-        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        uses: dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5 # v0.2.3
         with:
           command: run
           repo: .
           python: .venv/bin/python
           workers: "4"
           role: verify
-          tier: full
+          tier: ${{ github.event_name == 'pull_request' && 'strict' || 'full' }}
+          tia: ${{ github.event_name == 'pull_request' }}
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          cache: "true"
+          cache-dir: ${{ runner.temp }}/pyrn-cache
           metrics-kv: "true"
           markers: tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
+
+      - name: Save pyrn CAS cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pyrn-cache
+          key: pyrn-cas-v1-tooling-py312-${{ hashFiles('uv.lock', '.pyrn.toml', 'pyproject.toml') }}-${{ github.sha }}
 
       - name: Validate sample project
         run: uv run make test-testproject
@@ -793,6 +818,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install uv
@@ -838,20 +864,49 @@ jobs:
           uv lock --upgrade --python ${{ matrix.python-version }}
           uv sync --python ${{ matrix.python-version }}
 
+      - name: Fingerprint resolved environment
+        id: env-hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          hash="$(uv pip freeze --python .venv/bin/python | LC_ALL=C sort | sha256sum | cut -c1-16)"
+          printf 'hash=%s\n' "$hash" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pyrn CAS cache
+        id: restore-pyrn-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pyrn-cache
+          key: pyrn-cas-v1-deps-${{ matrix.resolution }}-py${{ matrix.python-version }}-${{ steps.env-hash.outputs.hash }}-${{ hashFiles('.pyrn.toml', 'pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            pyrn-cas-v1-deps-${{ matrix.resolution }}-py${{ matrix.python-version }}-${{ steps.env-hash.outputs.hash }}-${{ hashFiles('.pyrn.toml', 'pyproject.toml') }}-
+
       - name: Run tests
         env:
           PYTHONFAULTHANDLER: "1"
           RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
-        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        uses: dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5 # v0.2.3
         with:
           command: run
           repo: .
           python: .venv/bin/python
           workers: "4"
           role: verify
-          tier: full
+          tier: ${{ (github.event_name == 'pull_request' && steps.restore-pyrn-cache.outputs.cache-matched-key != '') && 'strict' || 'full' }}
+          tia: ${{ github.event_name == 'pull_request' && steps.restore-pyrn-cache.outputs.cache-matched-key != '' }}
+          base: ${{ (github.event_name == 'pull_request' && steps.restore-pyrn-cache.outputs.cache-matched-key != '') && github.event.pull_request.base.sha || '' }}
+          cache: "true"
+          cache-dir: ${{ runner.temp }}/pyrn-cache
           metrics-kv: "true"
           markers: not live_cluster and not real_ray and not tooling and (not postgresql or sqlite_compatible)
+
+      - name: Save pyrn CAS cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pyrn-cache
+          key: pyrn-cas-v1-deps-${{ matrix.resolution }}-py${{ matrix.python-version }}-${{ steps.env-hash.outputs.hash }}-${{ hashFiles('.pyrn.toml', 'pyproject.toml') }}-${{ github.sha }}
 
   ray-data-golden-path:
     if: github.event_name != 'pull_request_target'
