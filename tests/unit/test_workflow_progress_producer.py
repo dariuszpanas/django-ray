@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Event
@@ -20,7 +19,6 @@ from django_ray.workflow.progress.protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
 )
-from tests.local_ray import local_ray_runtime
 
 _RUN_IDENTITY = {
     "schema_version": 1,
@@ -106,12 +104,6 @@ def _run_bounded_context_leaf(
     return node_id
 
 
-@pytest.fixture(scope="module")
-def ray_runtime() -> Iterator[Any]:
-    with local_ray_runtime(num_cpus=2) as ray:
-        yield ray
-
-
 def _decoded(actor: _Actor) -> list[Any]:
     return [
         decode_workflow_progress_event(
@@ -184,8 +176,10 @@ def test_map_coordinator_bounds_forced_updates_before_terminal_handoff(
 
 
 @pytest.mark.real_ray
-def test_real_ray_map_progress_has_one_pending_call_and_final_handoff(ray_runtime: Any) -> None:
-    actor = ray_runtime.remote(num_cpus=0, max_concurrency=4)(_BlockedRayIngestActor).remote(
+def test_real_ray_map_progress_has_one_pending_call_and_final_handoff(
+    module_ray_cluster: Any,
+) -> None:
+    actor = module_ray_cluster.remote(num_cpus=0, max_concurrency=4)(_BlockedRayIngestActor).remote(
         _RUN_IDENTITY
     )
     session = WorkflowProgressProducerSession(actor, _RUN_IDENTITY, "map")
@@ -196,7 +190,7 @@ def test_real_ray_map_progress_has_one_pending_call_and_final_handoff(ray_runtim
     report = session.finish()
     assert report["submitted"] == 2
     assert report["pending_acknowledgements"] == 2
-    events = ray_runtime.get(actor.release_and_collect.remote(2), timeout=15)
+    events = module_ray_cluster.get(actor.release_and_collect.remote(2), timeout=15)
     assert [event[1] for event in events] == ["map_progress", "map_progress"]
     # This deliberately concurrent receiver may start calls in either order.
     # The coordinator test separately asserts terminal submission ordering.
@@ -469,17 +463,17 @@ def test_counter_saturation_is_explicit_and_finish_is_idempotent() -> None:
 
 @pytest.mark.real_ray
 def test_forked_ray_leaves_remain_independently_bounded(
-    ray_runtime: Any,
+    module_ray_cluster: Any,
 ) -> None:
     leaf_count = 4
     updates = 100
-    actor = ray_runtime.remote(num_cpus=0, max_concurrency=16)(_BlockedRayIngestActor).remote(
-        _RUN_IDENTITY
-    )
-    remote_leaf = ray_runtime.remote(_run_bounded_context_leaf)
+    actor = module_ray_cluster.remote(num_cpus=0, max_concurrency=16)(
+        _BlockedRayIngestActor
+    ).remote(_RUN_IDENTITY)
+    remote_leaf = module_ray_cluster.remote(_run_bounded_context_leaf)
 
     leaf_ids = [f"leaf-{index}" for index in range(leaf_count)]
-    results = ray_runtime.get(
+    results = module_ray_cluster.get(
         [
             remote_leaf.remote(
                 actor,
@@ -490,7 +484,7 @@ def test_forked_ray_leaves_remain_independently_bounded(
             for node_id in leaf_ids
         ]
     )
-    events = ray_runtime.get(
+    events = module_ray_cluster.get(
         actor.release_and_collect.remote(3 * leaf_count),
     )
 
@@ -526,9 +520,9 @@ def test_forked_ray_leaves_remain_independently_bounded(
 
 @pytest.mark.real_ray
 def test_real_ray_blocked_actor_cannot_build_one_leaf_pending_chain(
-    ray_runtime: Any,
+    module_ray_cluster: Any,
 ) -> None:
-    actor = ray_runtime.remote(num_cpus=0, max_concurrency=4)(_BlockedRayIngestActor).remote(
+    actor = module_ray_cluster.remote(num_cpus=0, max_concurrency=4)(_BlockedRayIngestActor).remote(
         _RUN_IDENTITY
     )
     session = WorkflowProgressProducerSession(actor, _RUN_IDENTITY, "leaf")
@@ -537,7 +531,7 @@ def test_real_ray_blocked_actor_cannot_build_one_leaf_pending_chain(
         assert session.offer(current, 1_000)
 
     report = session.finish()
-    events = ray_runtime.get(actor.release_and_collect.remote(2))
+    events = module_ray_cluster.get(actor.release_and_collect.remote(2))
     assert report["offered"] == 1_000
     assert report["submitted"] == 2
     assert report["superseded"] == 998

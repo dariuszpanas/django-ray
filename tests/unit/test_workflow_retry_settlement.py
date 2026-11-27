@@ -1,23 +1,14 @@
 """Final workflow node outcomes must agree with retrying callable outcomes."""
 
-from collections.abc import Iterator
 from types import SimpleNamespace
 
 import pytest
 
-from tests.local_ray import local_ray_runtime
 from tests.unit.test_remote import (
     _WORKFLOW_RUN_IDENTITY,
     _execute_bound_workflow_step,
     _progress_actor,
 )
-
-
-@pytest.fixture(scope="module")
-def ray_cluster() -> Iterator[object]:
-    """Share one bounded local Ray runtime across this module's clean-teardown cases."""
-    with local_ray_runtime(num_cpus=2) as ray:
-        yield ray
 
 
 @pytest.mark.parametrize("failures", [0, 1, 2])
@@ -148,7 +139,7 @@ def concurrent_capture_target(barrier, value):
 
 @pytest.mark.real_ray
 @pytest.mark.parametrize("unavailable", [False, True])
-def test_native_concurrent_captures_finish_without_collector_ack(ray_cluster, unavailable):
+def test_native_concurrent_captures_finish_without_collector_ack(module_ray_cluster, unavailable):
     """Four actual workers finish while every collector acknowledgement is blocked."""
     import asyncio
     import time
@@ -181,14 +172,14 @@ def test_native_concurrent_captures_finish_without_collector_ack(ray_cluster, un
         async def health(self):
             return self.kinds
 
-    barrier = ray_cluster.remote(num_cpus=0, max_restarts=0)(Barrier).remote()
-    collector = ray_cluster.remote(num_cpus=0, max_restarts=0)(BlockedCollector).remote()
+    barrier = module_ray_cluster.remote(num_cpus=0, max_restarts=0)(Barrier).remote()
+    collector = module_ray_cluster.remote(num_cpus=0, max_restarts=0)(BlockedCollector).remote()
     refs, markers = [], []
     try:
-        assert ray_cluster.get(collector.health.remote(), timeout=10) == []
+        assert module_ray_cluster.get(collector.health.remote(), timeout=10) == []
         if unavailable:
-            ray_cluster.kill(collector, no_restart=True)
-            _wait_for_actor_death(ray_cluster, collector, "health")
+            module_ray_cluster.kill(collector, no_restart=True)
+            _wait_for_actor_death(module_ray_cluster, collector, "health")
         executor = _native_bound_executor(collector)
         executor.workflow_progress_limits = WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
         for index in range(4):
@@ -207,8 +198,8 @@ def test_native_concurrent_captures_finish_without_collector_ack(ray_cluster, un
             )
         markers = list(executor._pending_leaf_outcomes)
         assert len(markers) == len(executor._progress_node_ids) == 4
-        assert ray_cluster.get(refs, timeout=30) == list(range(4))
-        wires = ray_cluster.get(markers, timeout=10)
+        assert module_ray_cluster.get(refs, timeout=30) == list(range(4))
+        wires = module_ray_cluster.get(markers, timeout=10)
         for wire in wires:
             event = decode_workflow_progress_event(wire)
             assert event.payload["state"] == "SUCCEEDED"
@@ -220,7 +211,7 @@ def test_native_concurrent_captures_finish_without_collector_ack(ray_cluster, un
         if not unavailable:
             deadline = time.monotonic() + 10
             while True:
-                kinds = ray_cluster.get(collector.health.remote(), timeout=10)
+                kinds = module_ray_cluster.get(collector.health.remote(), timeout=10)
                 assert "application_progress" not in kinds
                 assert len(kinds) <= 8
                 if len(kinds) == 8:
@@ -230,16 +221,16 @@ def test_native_concurrent_captures_finish_without_collector_ack(ray_cluster, un
             assert kinds.count("node_registered") == kinds.count("submitted") == 4
     finally:
         for ref in refs + markers:
-            ray_cluster.cancel(ref, force=True, recursive=True)
-        ray_cluster.kill(collector, no_restart=True)
-        ray_cluster.kill(barrier, no_restart=True)
+            module_ray_cluster.cancel(ref, force=True, recursive=True)
+        module_ray_cluster.kill(collector, no_restart=True)
+        module_ray_cluster.kill(barrier, no_restart=True)
 
 
 @pytest.mark.real_ray
 @pytest.mark.parametrize("max_retries,failures", [(1, 1), (-1, 2), (1, 2)])
 @pytest.mark.parametrize("following", [False, True])
 def test_native_bound_leaf_graph_matches_final_retry_outcome(
-    ray_cluster, max_retries, failures, following
+    module_ray_cluster, max_retries, failures, following
 ):
     """Run the strict leaf boundary with actual Ray retries and actual ingestion."""
     from django_ray.runtime.remote import WorkflowProgressActor
@@ -257,10 +248,10 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
         def count(self):
             return self.calls
 
-    counter = ray_cluster.remote(num_cpus=0, max_restarts=0)(Counter).remote()
-    collector = ray_cluster.remote(num_cpus=0.25, max_restarts=0)(WorkflowProgressActor).remote(
-        _progress_wire(Kind.INITIALIZED, {"plan": _WORKFLOW_PLAN})
-    )
+    counter = module_ray_cluster.remote(num_cpus=0, max_restarts=0)(Counter).remote()
+    collector = module_ray_cluster.remote(num_cpus=0.25, max_restarts=0)(
+        WorkflowProgressActor
+    ).remote(_progress_wire(Kind.INITIALIZED, {"plan": _WORKFLOW_PLAN}))
     ref = marker_ref = downstream = downstream_marker = None
     try:
         from django_ray.workflows import Step
@@ -298,12 +289,12 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
             )
         succeeds = max_retries == -1 or failures <= max_retries
         if succeeds:
-            assert ray_cluster.get(downstream if following else ref, timeout=30) == 42
+            assert module_ray_cluster.get(downstream if following else ref, timeout=30) == 42
         else:
-            with pytest.raises(ray_cluster.exceptions.RayTaskError, match="transient"):
-                ray_cluster.get(downstream if following else ref, timeout=30)
+            with pytest.raises(module_ray_cluster.exceptions.RayTaskError, match="transient"):
+                module_ray_cluster.get(downstream if following else ref, timeout=30)
         expected_calls = failures + 1 if succeeds else max_retries + 1
-        assert ray_cluster.get(counter.count.remote(), timeout=10) == expected_calls
+        assert module_ray_cluster.get(counter.count.remote(), timeout=10) == expected_calls
 
         # Workers return one final marker and never hold collector handles.
         import time
@@ -314,7 +305,7 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
             assert executor.progress_actor is collector
             assert time.monotonic() < deadline, "final outcome metadata did not settle"
             time.sleep(0.01)
-        snapshot = ray_cluster.get(collector.snapshot.remote(), timeout=10)
+        snapshot = module_ray_cluster.get(collector.snapshot.remote(), timeout=10)
         node = next(node for node in snapshot["graph"]["nodes"] if node["node_id"] == "0.0")
         if following:
             following_node = next(
@@ -338,9 +329,9 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
     finally:
         for owned_ref in (ref, marker_ref, downstream, downstream_marker):
             if owned_ref is not None:
-                ray_cluster.cancel(owned_ref, force=True, recursive=True)
-        ray_cluster.kill(collector, no_restart=True)
-        ray_cluster.kill(counter, no_restart=True)
+                module_ray_cluster.cancel(owned_ref, force=True, recursive=True)
+        module_ray_cluster.kill(collector, no_restart=True)
+        module_ray_cluster.kill(counter, no_restart=True)
 
 
 @pytest.mark.parametrize("outcome", ["SUCCEEDED", "FAILED"])

@@ -299,7 +299,9 @@
           "tests/unit/test_lifecycle.py",
           "tests/unit/test_retry.py",
           "tests/unit/test_workflow_plans.py",
-          "tests/unit/test_workflows.py"
+          "tests/unit/test_workflows.py",
+          "tests/unit/test_workflows_progress_and_dispatch.py",
+          "tests/unit/test_workflows_real_ray.py"
         ]
       }
     },

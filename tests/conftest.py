@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 EXTERNAL_RESOURCE_FIXTURE_MARKERS = {
     "live_ray_cluster": "live_cluster",
+    "module_ray_cluster": "real_ray",
     "ray_cluster": "real_ray",
 }
 MARKER_IMPLICATIONS = {
@@ -303,6 +304,13 @@ def pytest_configure(config: object) -> None:
 @pytest.fixture()
 def ray_cluster() -> Iterator[object]:
     """Provide one bounded local Ray runtime to an explicitly marked test."""
+    with local_ray_runtime(num_cpus=2) as ray:
+        yield ray
+
+
+@pytest.fixture(scope="module")
+def module_ray_cluster() -> Iterator[object]:
+    """Share one bounded local Ray runtime across clean-teardown module cases."""
     with local_ray_runtime(num_cpus=2) as ray:
         yield ray
 
