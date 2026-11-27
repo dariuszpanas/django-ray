@@ -466,7 +466,7 @@ separate failure.
   Selective execution remains disabled, required checks remain unchanged, and
   this catalogue does not replace the separate transaction, data-upgrade,
   installed-artifact or deployment obligations. See the
-  [pilot contract](testing/test-planning-shadow.md).
+  pilot contract (subsequently retired).
 - Normalize authenticated qualification receipts and evaluate advisory plans with
   YAGA. Retain source-bound publication timing and explicit unavailable comparisons;
   these observations do not establish selective execution savings or release approval.

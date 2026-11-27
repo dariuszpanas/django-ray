@@ -1,11 +1,8 @@
 # Contributing
 
-The [test planning shadow pilot](testing/test-planning-shadow.md) compares
-qualification selection while preserving all existing required CI checks.
-Test planning shadow checks are advisory and never replace required CI.
-
-Required Linux CI executes the portable test suite directly through `pyrn`,
-superseding the retired advisory `pyrn Shadow (Advisory)` workflow.
+Required Linux CI executes the portable test suite directly through `pyrn` and
+validates conditional deployed qualifications through `Qualification Gate`. The
+retired advisory test-planning and `pyrn` shadow workflows have been removed.
 
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
@@ -1298,19 +1295,12 @@ versioned `scripts/qualification_policy.json` retains the prior path scopes.
 Changing the gate or policy selects every qualification. There is no expensive
 qualification job on an unaffected documentation-only change.
 
-Keep shared-helper and new runtime-module ownership explicit in the required
-selector and advisory `.yaga/test-planning-shadow.toml`. An isolated Docker
-scenario change selects native, latency and cancellation; the lease authority
-also selects its application, native, cancellation and monitoring consumers.
-The advisory application rule names eight reviewed test files individually,
-documented in the [shadow pilot guide](testing/test-planning-shadow.md). Do not
-generalize those entries to a wildcard: unknown files and changes combined with
-full triggers such as `uv.lock` must retain the full catalog. Add a regression
-for each ownership adjustment and preserve all native variants. Run
-`uv run pytest tests/unit/test_qualification_gate.py tests/unit/test_test_planning_shadow.py -q --no-cov`
-and validate actual planner behavior with the pinned YAGA implementation.
-Advisory ownership changes do not activate selective execution or replace any
-required workflow condition, full gate, or separate qualification obligation.
+Keep shared-helper and new runtime-module ownership explicit in
+`scripts/qualification_policy.json`. An isolated Docker scenario change selects
+native, latency and cancellation; the lease authority also selects its
+application, native, cancellation and monitoring consumers. Add a regression
+for each ownership adjustment and preserve all native variants by running
+`uv run pytest tests/unit/test_qualification_gate.py -q --no-cov`.
 
 Every selected reusable workflow must succeed. Missing, cancelled, skipped or
 failed selected jobs fail the aggregate. A skipped job passes only when selection
