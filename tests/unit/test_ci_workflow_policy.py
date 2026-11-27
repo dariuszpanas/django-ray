@@ -49,6 +49,9 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
         "Native exit controls are manual diagnostics and do not replace CI Gate"
     ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
+    ("pyrn-shadow.yml", "pyrn-shadow"): (
+        "Stage 1 pyrn shadow checks are advisory and never replace CI Gate"
+    ),
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),

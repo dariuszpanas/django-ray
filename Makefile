@@ -11,6 +11,7 @@
 .PHONY: docs-build docs-build-strict docs-serve workflow-check spelling-check
 .PHONY: linux-test-catalogue linux-test-stage linux-test-aggregate
 .PHONY: repository-check pre-push-check workflow-lint
+.PHONY: pyrn-doctor pyrn-plan test-pyrn test-pyrn-tia
 
 # Include optional modules (comment out if not needed)
 -include mk/docker.mk
@@ -135,6 +136,23 @@ test:
 test-xdist:
 	python scripts/require_linux.py
 	pytest -n $(TEST_XDIST_WORKERS) --max-worker-restart=0 \
+		-m "not real_ray and not live_cluster and not postgresql"
+
+# Local pyrn acceleration helpers; override PYRN=pyrn to use a global installation.
+PYRN ?= uvx --isolated pyrn==0.1.0
+pyrn-doctor:
+	$(PYRN) doctor --repo .
+
+pyrn-plan:
+	$(PYRN) plan --repo . --base "$(COMMIT_BASE)" --tier strict --metrics-kv
+
+test-pyrn:
+	$(PYRN) run --repo . -w auto --metrics-kv \
+		-m "not real_ray and not live_cluster and not postgresql"
+
+test-pyrn-tia:
+	$(PYRN) run --repo . --tia --base "$(COMMIT_BASE)" --cache --role agent --tier strict \
+		-w auto --metrics-kv \
 		-m "not real_ray and not live_cluster and not postgresql"
 
 # Run unit tests only
