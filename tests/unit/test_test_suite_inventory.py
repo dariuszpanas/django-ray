@@ -867,23 +867,39 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
 
     portable = by_name["Run portable tests with pyrn"]
     assert portable["uses"].startswith("dariuszpanas/pyrn@")
-    assert portable["with"]["cov-sysmon"] == "true"
-    assert portable["with"]["cov-out"] == ".coverage"
+    assert portable["with"]["cov-sysmon"] == (
+        "${{ matrix.python-version != '3.13' || github.event_name != 'pull_request' }}"
+    )
+    assert portable["with"]["cov-out"] == (
+        "${{ (matrix.python-version != '3.13' || github.event_name != 'pull_request') "
+        "&& '.coverage' || '' }}"
+    )
     assert (
         portable["with"]["markers"]
-        == "not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+        == "not live_cluster and not real_ray and not tooling and (not postgresql or sqlite_compatible)"
     )
 
     real_ray = by_name["Run real_ray tests"]
-    assert (
-        real_ray["if"] == "matrix.python-version == '3.12' || github.event_name == 'pull_request'"
+    assert real_ray["if"] == (
+        "matrix.python-version == '3.12' "
+        "|| (github.event_name == 'pull_request' && matrix.python-version == '3.14')"
     )
     assert real_ray["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert '-m "real_ray and not live_cluster"' in real_ray["run"]
     assert "--cov-append" in real_ray["run"]
 
-    validated = by_name["Validate suite taxonomy inventory"]
-    assert validated["if"] == "matrix.python-version == '3.12'"
+    tooling_steps = {
+        step["name"]: step for step in workflow["jobs"]["testproject"]["steps"] if "name" in step
+    }
+    tooling = tooling_steps["Run tooling tests with pyrn"]
+    assert tooling["uses"].startswith("dariuszpanas/pyrn@")
+    assert (
+        tooling["with"]["markers"]
+        == "tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+    )
+
+    validated = tooling_steps["Validate suite taxonomy inventory"]
+    assert "if" not in validated
     assert "scripts/test_suite_inventory.py collect" in validated["run"]
     assert (
         "--json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json"
@@ -894,8 +910,8 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
         in validated["run"]
     )
 
-    uploaded = by_name["Upload suite inventory evidence"]
-    assert uploaded["if"] == "always() && matrix.python-version == '3.12'"
+    uploaded = tooling_steps["Upload suite inventory evidence"]
+    assert uploaded["if"] == "always()"
     assert uploaded["with"]["if-no-files-found"] == "warn"
     assert uploaded["with"]["path"] == "artifacts/test-suite-inventory/"
 

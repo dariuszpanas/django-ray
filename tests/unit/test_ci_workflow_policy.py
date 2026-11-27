@@ -588,33 +588,18 @@ def test_dependency_security_floor_and_runtime_audit_are_blocking() -> None:
     assert '"msgpack==1.2.3"' in minimum_install["run"]
     assert '"virtualenv==21.14.13"' in minimum_install["run"]
     assert '"pip-audit==2.10.1"' in minimum_install["run"]
-    assert audit_job["name"] == (
-        "Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})"
-    )
-    assert audit_job["runs-on"] == "${{ matrix.os }}"
+    assert audit_job["name"] == "Runtime Dependency Audit (ubuntu-latest, Python 3.12)"
+    assert audit_job["runs-on"] == "ubuntu-latest"
     assert audit_job["timeout-minutes"] == "10"
-    assert audit_job["strategy"] == {
-        "fail-fast": "false",
-        "matrix": {
-            "include": [
-                {"os": "ubuntu-latest", "python-version": "3.12"},
-                {"os": "ubuntu-latest", "python-version": "3.13"},
-                {"os": "ubuntu-latest", "python-version": "3.14"},
-            ]
-        },
-    }
+    assert "strategy" not in audit_job
     audit_install = next(
         step["run"]
         for step in audit_job["steps"]
         if step.get("name") == "Install locked audit dependencies"
     )
-    assert audit_install == (
-        "uv sync --locked --only-group dev --no-install-project "
-        "--python ${{ matrix.python-version }}"
-    )
+    assert audit_install == "uv sync --locked --only-group dev --no-install-project --python 3.12"
     assert audit_command == (
-        "uv run --no-sync --python ${{ matrix.python-version }} "
-        "python scripts/audit_runtime_dependencies.py"
+        "uv run --no-sync --python 3.12 python scripts/audit_runtime_dependencies.py"
     )
     assert "dependency-audit" in _needs(_jobs()["build"])
     assert "dependency-audit" in _needs(_gate_job())
@@ -751,16 +736,22 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert portable["with"]["command"] == "run"
     assert portable["with"]["workers"] == "4"
     assert portable["with"]["role"] == "verify"
-    assert portable["with"]["cov-sysmon"] == "true"
-    assert portable["with"]["cov-out"] == ".coverage"
+    assert portable["with"]["cov-sysmon"] == (
+        "${{ matrix.python-version != '3.13' || github.event_name != 'pull_request' }}"
+    )
+    assert portable["with"]["cov-out"] == (
+        "${{ (matrix.python-version != '3.13' || github.event_name != 'pull_request') "
+        "&& '.coverage' || '' }}"
+    )
     assert (
         portable["with"]["markers"]
-        == "not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+        == "not live_cluster and not real_ray and not tooling and (not postgresql or sqlite_compatible)"
     )
     real_ray_default = steps["Run real_ray tests"]
     real_ray_native = steps["Run real_ray tests with native diagnostics"]
     assert real_ray_default["if"] == (
-        "matrix.python-version == '3.12' || github.event_name == 'pull_request'"
+        "matrix.python-version == '3.12' "
+        "|| (github.event_name == 'pull_request' && matrix.python-version == '3.14')"
     )
     assert real_ray_native["if"] == (
         "matrix.python-version != '3.12' && github.event_name != 'pull_request'"
@@ -848,47 +839,32 @@ def test_python315_compatibility_is_blocking_and_uses_an_isolated_installed_whee
 
 def test_ray_data_golden_path_runs_real_optional_dependency_endpoints() -> None:
     job = _jobs()["ray-data-golden-path"]
-    assert job["name"] == "Ray Data (${{ matrix.profile }}, Python ${{ matrix.python-version }})"
+    assert job["name"] == "Ray Data Golden Path"
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == "10"
-    assert job["strategy"] == {
-        "fail-fast": "false",
-        "matrix": {
-            "include": [
-                {
-                    "profile": "supported-min-python",
-                    "python-version": "3.12",
-                    "ray-version": "2.60.0",
-                },
-                {
-                    "profile": "newest-python",
-                    "python-version": "3.14",
-                    "ray-version": "2.60.0",
-                },
-            ]
-        },
-    }
+    assert "strategy" not in job
+    assert job["env"]["RAY_DATA_VERSION"] == "2.60.0"
 
-    commands = "\n".join(
-        str(step.get("run", "")) for step in job["steps"] if isinstance(step, dict)
-    )
-    assert "uv python install ${{ matrix.python-version }}" in commands
-    assert "uv run --isolated --no-project --python ${{ matrix.python-version }}" in commands
-    assert '--with-editable ".[sample]"' in commands
-    assert '--with "ray[data]==${{ matrix.ray-version }}"' in commands
-    assert "python scripts/ray_data_golden_path_probe.py" in commands
+    by_name = {
+        step["name"]: step
+        for step in job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+    py312 = by_name["Run the real Ray Data boundary (Python 3.12)"]
+    py314 = by_name["Run the real Ray Data boundary (Python 3.14)"]
+    assert "if" not in py312
+    assert py314["if"] == "github.event_name != 'pull_request'"
+    for version, step in (("3.12", py312), ("3.14", py314)):
+        assert f"uv run --isolated --no-project --python {version}" in step["run"]
+        assert '--with-editable ".[sample]"' in step["run"]
+        assert '--with "ray[data]==${{ env.RAY_DATA_VERSION }}"' in step["run"]
+        assert "python scripts/ray_data_golden_path_probe.py" in step["run"]
 
     lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
     locked_ray = Version(
         next(package["version"] for package in lock["package"] if package["name"] == "ray")
     )
-    endpoint_versions = {
-        Version(endpoint["ray-version"]) for endpoint in job["strategy"]["matrix"]["include"]
-    }
-    # The workflow deliberately pins its reproducible support-floor probe. The
-    # latest-dependency lane upgrades uv.lock before running this policy test,
-    # so a newer compatible lock must not rewrite that historical endpoint.
-    assert all(endpoint_version <= locked_ray for endpoint_version in endpoint_versions)
+    assert Version(job["env"]["RAY_DATA_VERSION"]) <= locked_ray
 
 
 def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
@@ -897,8 +873,15 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     live_cluster = jobs["live-cluster"]
     postgresql = jobs["postgresql-coordination"]
 
-    assert testproject["name"] == "Testproject Smoke"
+    assert testproject["name"] == "Testproject & Tooling"
+    assert testproject["env"]["DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS"] == "1"
     steps = {step.get("name"): step for step in testproject["steps"]}
+    tooling = steps["Run tooling tests with pyrn"]
+    assert tooling["uses"] == "dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a"
+    assert (
+        tooling["with"]["markers"]
+        == "tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+    )
     assert steps["Validate sample project"] == {
         "name": "Validate sample project",
         "run": "uv run make test-testproject",
