@@ -11,6 +11,8 @@ build/
 venv/
 node_modules/
 .pytest_cache/
+.pyrn/
+.pyrn-cache/
 .ruff_cache/
 .mypy_cache/
 .pyright/

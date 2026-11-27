@@ -1,0 +1,20 @@
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+source_roots = ["src", "testproject", "scripts"]
+
+[tia]
+symbol_level_tia = true
+conftest_policy = "smart_fixture_scoped"
+unknown_path_policy = "full"
+env_allowlist_prefixes = ["DJANGO_", "RAY_"]
+extra_full_triggers = [
+  ".pyrn.toml",
+  ".github/test-suite-taxonomy.json",
+  "scripts/pytest_taxonomy.py",
+]
+
+[runner]
+worker_mem_mb = 350
+pure_autouse_guards = []

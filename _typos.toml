@@ -4,6 +4,7 @@ extend-exclude = ["*.png", "*.ico"]
 
 [default.extend-words]
 certifi = "certifi"
+pyrn = "pyrn"
 
 # PowerShell case-insensitive inequality operator in the published recipe.
 [type.powershell-example]

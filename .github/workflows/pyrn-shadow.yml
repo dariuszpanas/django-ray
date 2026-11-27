@@ -1,0 +1,76 @@
+name: pyrn Shadow (Advisory)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pyrn-shadow-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pyrn-shadow:
+    name: pyrn Stage 1 Shadow (Advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "latest"
+          enable-cache: "false"
+
+      - name: Install locked Python 3.12 dependencies
+        run: |
+          uv python install 3.12
+          uv sync --frozen --python 3.12
+
+      - name: Run Stage 1 pyrn doctor, TIA shadow plan, and verify parity run
+        env:
+          PYTHONFAULTHANDLER: "1"
+          RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+          PYRN_SOURCE: pyrn==0.1.0
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          OUT_DIR: ${{ runner.temp }}/pyrn-shadow
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          base_ref="${BASE_SHA:-HEAD~1}"
+
+          uvx --isolated "$PYRN_SOURCE" doctor --repo . --json > "$OUT_DIR/doctor.json"
+          uvx --isolated "$PYRN_SOURCE" doctor --repo .
+
+          uvx --isolated "$PYRN_SOURCE" plan \
+            --repo . \
+            --base "$base_ref" \
+            --tier strict \
+            --metrics-kv \
+            --receipt-out "$OUT_DIR/plan-receipt.json"
+
+          uvx --isolated "$PYRN_SOURCE" run \
+            --repo . \
+            -w auto \
+            --role verify \
+            --metrics-kv \
+            --receipt-out "$OUT_DIR/run-receipt.json" \
+            -m "not real_ray and not live_cluster and not postgresql"
+
+      - name: Retain bounded Stage 1 pyrn receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pyrn-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pyrn-shadow/
+          retention-days: 14
+          if-no-files-found: error
