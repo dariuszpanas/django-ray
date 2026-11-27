@@ -34,7 +34,7 @@ from django_ray.ray_job_protocol import (
     validate_ray_job_request_expectation,
     validate_ray_job_request_reference_expectation,
 )
-from django_ray.redaction import redact_text
+from django_ray.redaction import materialize_exception_message, redact_text
 
 if TYPE_CHECKING:
     from django_ray.execution_codec import (
@@ -212,7 +212,7 @@ def _serialize_error(
         success=False,
         result=None,
         result_reference=None,
-        error=str(e),
+        error=materialize_exception_message(e),
         error_traceback=traceback.format_exc(),
         exception_type=type(e).__module__ + "." + type(e).__name__,
         retryable=not isinstance(
