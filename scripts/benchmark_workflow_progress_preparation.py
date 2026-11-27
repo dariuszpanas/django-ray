@@ -40,7 +40,7 @@ REPORT_SCHEMA_VERSION = 2
 DEFAULT_NODES = (100, 500)
 REQUIRED_SCALE_NODES = (25_000, 100_000, 250_000)
 DEFAULT_PROFILES = ("sparse", "high-edge")
-IMPLEMENTATIONS = ("prototype-composite", "production-topology")
+IMPLEMENTATIONS = ("production-topology",)
 DEFAULT_TIMEOUT_SECONDS = 1_800.0
 REQUIRED_SCALE_TIMEOUT_SECONDS = 7_200.0
 FORCED_TERMINATION_READY_TIMEOUT_SECONDS = 60.0
@@ -272,11 +272,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--implementation",
         choices=IMPLEMENTATIONS,
-        default="prototype-composite",
-        help=(
-            "prototype-composite measures issue #140 topology plus detail; "
-            "production-topology measures issue #141 including legacy detachment"
-        ),
+        default="production-topology",
+        help="production-topology measures issue #141 including legacy detachment",
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument(
@@ -381,7 +378,6 @@ def _implementation_digest() -> str:
     digest = hashlib.sha256()
     for path in (
         Path(__file__),
-        ROOT / "scripts" / "workflow_progress_preparation_prototype.py",
         ROOT / "src" / "django_ray" / "workflow" / "progress" / "preparation.py",
         ROOT / "src" / "django_ray" / "workflow" / "progress" / "storage.py",
     ):
@@ -695,7 +691,7 @@ def _v1_output_limits() -> dict[str, Any]:
 
 
 def _implementation(args: argparse.Namespace) -> str:
-    return str(getattr(args, "implementation", "prototype-composite"))
+    return str(getattr(args, "implementation", "production-topology"))
 
 
 def _workspace_config(args: argparse.Namespace):
@@ -708,28 +704,14 @@ def _workspace_config(args: argparse.Namespace):
         "batch_max_items": args.batch_items,
         "batch_max_decoded_bytes": args.batch_decoded_bytes,
     }
-    if _implementation(args) == "production-topology":
-        from django_ray.workflow.progress.preparation import SQLitePreparationConfig
+    from django_ray.workflow.progress.preparation import SQLitePreparationConfig
 
-        return SQLitePreparationConfig(**common).validated()
-
-    from scripts.workflow_progress_preparation_prototype import (
-        SQLitePreparationConfig,
-    )
-
-    return SQLitePreparationConfig(
-        **common,
-        max_detail_items=args.detail_max_items,
-    ).validated()
+    return SQLitePreparationConfig(**common).validated()
 
 
 def _workspace_type(args: argparse.Namespace):
-    if _implementation(args) == "production-topology":
-        from django_ray.workflow.progress.preparation import SQLitePreparationWorkspace
-
-        return SQLitePreparationWorkspace
-
-    from scripts.workflow_progress_preparation_prototype import SQLitePreparationWorkspace
+    del args
+    from django_ray.workflow.progress.preparation import SQLitePreparationWorkspace
 
     return SQLitePreparationWorkspace
 

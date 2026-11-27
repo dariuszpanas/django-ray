@@ -875,7 +875,9 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
     )
 
     real_ray = by_name["Run real_ray tests"]
-    assert real_ray["if"] == "matrix.python-version == '3.12'"
+    assert (
+        real_ray["if"] == "matrix.python-version == '3.12' || github.event_name == 'pull_request'"
+    )
     assert real_ray["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert '-m "real_ray and not live_cluster"' in real_ray["run"]
     assert "--cov-append" in real_ray["run"]

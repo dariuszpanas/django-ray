@@ -3390,7 +3390,7 @@ def test_benchmark_v2_rejects_unsupported_schema_and_missing_case_fields() -> No
     with pytest.raises(RuntimeError, match="report schema is unsupported"):
         benchmark._validate_report(report)
 
-    report = _benchmark_v2_report(implementation="prototype-composite")
+    report = _benchmark_v2_report()
     del report["cases"][0]["bounded_phase_rss_measurement"]
     with pytest.raises(RuntimeError, match="case evidence is incomplete"):
         benchmark._validate_report(report)
@@ -3510,11 +3510,6 @@ def test_benchmark_v2_requires_every_declared_evidence_field() -> None:
         with pytest.raises(RuntimeError):
             benchmark._validate_report(incomplete)
 
-    prototype = _benchmark_v2_report(implementation="prototype-composite")
-    del prototype["cases"][0]["budgets"]["max_detail_items"]
-    with pytest.raises(RuntimeError):
-        benchmark._validate_report(prototype)
-
 
 @pytest.mark.parametrize(
     ("cleanup_field", "failed_value"),
@@ -3612,28 +3607,10 @@ def test_benchmark_v2_rejects_inconsistent_generated_case_evidence(
         benchmark._validate_report(report)
 
 
-def test_benchmark_v2_rejects_inconsistent_prototype_detail_evidence() -> None:
-    mutations = []
-
-    retained = _benchmark_v2_report(implementation="prototype-composite")
-    retained["cases"][0]["retained_detail"] -= 1
-    mutations.append(retained)
-
-    reasons = _benchmark_v2_report(
-        implementation="prototype-composite",
-        required_scale=True,
-    )
-    high_edge = next(case for case in reasons["cases"] if case["profile"] == "high-edge")
-    high_edge["detail_truncation_reasons"] = []
-    mutations.append(reasons)
-
-    decoded = _benchmark_v2_report(implementation="prototype-composite")
-    decoded["cases"][0]["detail_decoded_bytes"] -= 1
-    mutations.append(decoded)
-
-    for report in mutations:
-        with pytest.raises(RuntimeError):
-            benchmark._validate_report(report)
+def test_benchmark_v2_rejects_retired_prototype_implementation() -> None:
+    report = _benchmark_v2_report(implementation="prototype-composite")
+    with pytest.raises(RuntimeError, match="preparation benchmark implementation is invalid"):
+        benchmark._validate_report(report)
 
 
 def test_benchmark_v2_rejects_impossible_budget_limit_rss_and_environment_evidence() -> None:

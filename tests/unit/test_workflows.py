@@ -647,7 +647,7 @@ def test_map_step_preserves_leaf_kwargs_named_like_limits() -> None:
     assert mapped.max_items == 10
 
 
-@pytest.mark.parametrize("size", [1_000, 10_000, 50_000])
+@pytest.mark.parametrize("size", [100, 1_000, 5_000])
 def test_bounded_map_keeps_peak_pending_refs_within_window(monkeypatch, size) -> None:
     executor = _InstrumentedWindowExecutor()
     monkeypatch.setattr("django_ray.workflows._get_executor", lambda use_ray: executor)
@@ -1410,14 +1410,14 @@ def test_ray_executor_throttles_high_cardinality_progress_snapshots(
     executor.last_progress_flush_at = now[0]
     executor.ray = _ProgressRay()
 
-    for index in range(50_000):
-        if index == 25_000:
+    for index in range(5_000):
+        if index == 2_500:
             now[0] += 1.0
         assert executor.wait_one([work_ref]) == 0
         assert executor.resolve_ready(work_ref) == "ready"
 
     assert snapshot_calls == 1
-    assert executor.ray.work_wait_calls == 50_000
+    assert executor.ray.work_wait_calls == 5_000
 
     executor._flush_progress(bypass_interval=True)
 

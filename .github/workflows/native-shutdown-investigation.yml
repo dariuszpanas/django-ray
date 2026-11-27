@@ -105,7 +105,7 @@ jobs:
           # the full-suite percentage gate, which remains enforced by CI Gate.
           cases=(
             "tests/unit/test_workflow_progress_producer.py::test_real_ray_map_progress_has_one_pending_call_and_final_handoff"
-            "tests/unit/test_result_buffer.py::test_real_ray_non_detached_buffer_dies_with_owner"
+            "tests/unit/test_result_buffer.py::test_real_ray_overflow_stops_admission_and_preserves_actor_error"
             "tests/unit/test_distributed.py::TestDistributedWithRay::test_failed_fanout_stops_sibling_and_preserves_primary_error"
           )
           for attempt in 1 2 3; do

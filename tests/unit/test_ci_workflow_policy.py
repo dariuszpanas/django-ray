@@ -49,9 +49,6 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
         "Native exit controls are manual diagnostics and do not replace CI Gate"
     ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
-    ("pyrn-shadow.yml", "pyrn-shadow"): (
-        "Stage 1 pyrn shadow checks are advisory and never replace CI Gate"
-    ),
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
     ),
@@ -412,7 +409,8 @@ def test_native_shutdown_actor_control_keeps_fixed_selection_and_deadlines() -> 
     assert re.findall(r'"(tests/[^"\s]+::[^"\s]+)"', run) == [
         "tests/unit/test_workflow_progress_producer.py::"
         "test_real_ray_map_progress_has_one_pending_call_and_final_handoff",
-        "tests/unit/test_result_buffer.py::test_real_ray_non_detached_buffer_dies_with_owner",
+        "tests/unit/test_result_buffer.py::"
+        "test_real_ray_overflow_stops_admission_and_preserves_actor_error",
         "tests/unit/test_distributed.py::TestDistributedWithRay::"
         "test_failed_fanout_stops_sibling_and_preserves_primary_error",
     ]
@@ -774,23 +772,31 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
         portable["with"]["markers"]
         == "not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
     )
-    real_ray_py312 = steps["Run real_ray tests"]
+    real_ray_default = steps["Run real_ray tests"]
     real_ray_native = steps["Run real_ray tests with native diagnostics"]
-    assert real_ray_py312["if"] == "matrix.python-version == '3.12'"
-    assert real_ray_native["if"] == "matrix.python-version != '3.12'"
-    assert real_ray_py312["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
+    assert real_ray_default["if"] == (
+        "matrix.python-version == '3.12' || github.event_name == 'pull_request'"
+    )
+    assert real_ray_native["if"] == (
+        "matrix.python-version != '3.12' && github.event_name != 'pull_request'"
+    )
+    assert real_ray_default["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert real_ray_native["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
-    assert "observe_pytest_exit.py --" in real_ray_py312["run"]
-    assert '-m "real_ray and not live_cluster"' in real_ray_py312["run"]
-    assert "--cov-append" in real_ray_py312["run"]
-    assert real_ray_py312["run"].strip().endswith("-v")
+    assert "observe_pytest_exit.py --" in real_ray_default["run"]
+    assert '-m "real_ray and not live_cluster"' in real_ray_default["run"]
+    assert "--cov-append" in real_ray_default["run"]
+    assert real_ray_default["run"].strip().endswith("-v")
     assert "observe_pytest_exit.py --native-debug --" in real_ray_native["run"]
     assert '-m "real_ray and not live_cluster"' in real_ray_native["run"]
     assert "--cov-append" in real_ray_native["run"]
     assert real_ray_native["run"].strip().endswith("-v")
     debugger = steps["Install native shutdown debugger"]
     smoke = steps["Verify native shutdown diagnostics"]
-    assert debugger["if"] == smoke["if"] == "matrix.python-version != '3.12'"
+    assert (
+        debugger["if"]
+        == smoke["if"]
+        == "matrix.python-version != '3.12' && github.event_name != 'pull_request'"
+    )
     assert debugger["timeout-minutes"] == "3"
     assert debugger["run"] == "sudo --non-interactive python3 scripts/install_ci_debugger.py"
     assert "continue-on-error" not in debugger

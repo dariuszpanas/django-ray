@@ -24,7 +24,7 @@ def _run(command: list[str], *, directory: Path, environment: dict[str, str]) ->
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=25)
+        stdout, stderr = process.communicate(timeout=35)
         if stderr or len(stdout) > 32768:
             raise RuntimeError("Installed doctor emitted unexpected output")
         return process.returncode, stdout
@@ -80,6 +80,10 @@ def verify() -> None:
                 "owned_doctor_settings",
                 "--format",
                 "json",
+                "--total-seconds",
+                "25",
+                "--probe-seconds",
+                "15",
             ],
             directory=directory,
             environment=environment,
