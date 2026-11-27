@@ -234,22 +234,29 @@ jobs:
           markers: not live_cluster and not real_ray and not tooling and (not postgresql or sqlite_compatible)
 
       - name: Run real_ray tests
-        if: matrix.python-version == '3.12' || (github.event_name == 'pull_request' && matrix.python-version == '3.14')
+        if: matrix.python-version == '3.12' || github.event_name == 'pull_request'
         env:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
+          COLLECT_COVERAGE: ${{ matrix.python-version != '3.13' }}
         run: |
           mapfile -t real_ray_files < <(
             .venv/bin/python -c 'from pathlib import Path; files = sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8")); files.sort(key=lambda p: (0 if p in {"tests/integration/test_task_execution.py", "tests/unit/test_result_buffer.py"} else 1, p)); print("\n".join(files))'
           )
+          cov_args=()
+          if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
+            cov_args=(
+              --cov=src
+              --cov-append
+              --cov-report=xml
+              --cov-report=term
+              "--cov-fail-under=${COVERAGE_GLOBAL_MIN}"
+            )
+          fi
           uv run --python ${{ matrix.python-version }} python \
             scripts/observe_pytest_exit.py -- \
             "${real_ray_files[@]}" \
             -m "real_ray and not live_cluster" \
-            --cov=src \
-            --cov-append \
-            --cov-report=xml \
-            --cov-report=term \
-            --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} \
+            "${cov_args[@]}" \
             -v
 
       - name: Run real_ray tests with native diagnostics

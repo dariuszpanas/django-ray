@@ -750,13 +750,13 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     real_ray_default = steps["Run real_ray tests"]
     real_ray_native = steps["Run real_ray tests with native diagnostics"]
     assert real_ray_default["if"] == (
-        "matrix.python-version == '3.12' "
-        "|| (github.event_name == 'pull_request' && matrix.python-version == '3.14')"
+        "matrix.python-version == '3.12' || github.event_name == 'pull_request'"
     )
     assert real_ray_native["if"] == (
         "matrix.python-version != '3.12' && github.event_name != 'pull_request'"
     )
     assert real_ray_default["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
+    assert real_ray_default["env"]["COLLECT_COVERAGE"] == "${{ matrix.python-version != '3.13' }}"
     assert real_ray_native["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert "observe_pytest_exit.py --" in real_ray_default["run"]
     assert '-m "real_ray and not live_cluster"' in real_ray_default["run"]
