@@ -52,7 +52,7 @@ from django_ray.workflows import (
     map_step,
     step,
 )
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime
 
 SIDE_EFFECTS: list[int] = []
 
@@ -1635,14 +1635,8 @@ class _ResultFoldOwner:
 
 @pytest.fixture(scope="module")
 def ray_cluster():
-    import ray
-
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=4, resources={"result_fold": 1})
-    try:
+    with local_ray_runtime(num_cpus=4, resources={"result_fold": 1}) as ray:
         yield ray
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray

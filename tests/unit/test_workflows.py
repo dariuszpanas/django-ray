@@ -44,7 +44,7 @@ from django_ray.workflows import (
     report_progress,
     step,
 )
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime
 
 
 def make_range(limit: int) -> list[int]:
@@ -3074,14 +3074,8 @@ def test_ray_executor_does_not_write_legacy_snapshot_after_cancellation(
 
 @pytest.fixture(scope="module")
 def ray_cluster():
-    import ray
-
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=4)
-    try:
+    with local_ray_runtime(num_cpus=4) as ray:
         yield ray
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray

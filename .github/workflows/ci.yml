@@ -190,7 +190,6 @@ jobs:
       RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
       # Use Python 3.12+ PEP 669 sys.monitoring coverage instead of slow ctrace hooks.
       COVERAGE_CORE: "sysmon"
-      PYRN_SOURCE: pyrn==0.1.1
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
       COVERAGE_RAY_JOB_MIN: "90"
@@ -231,41 +230,55 @@ jobs:
           tests/unit/test_observe_pytest_exit.py -q
 
       - name: Run portable tests with pyrn
-        run: >-
-          uvx --isolated "$PYRN_SOURCE" run
-          --repo .
-          --python .venv/bin/python
-          -w auto
-          --role verify
-          --cov-sysmon
-          --cov-out .coverage
-          --metrics-kv
-          -m "not live_cluster and not real_ray"
+        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        with:
+          command: run
+          repo: .
+          python: .venv/bin/python
+          workers: "4"
+          role: verify
+          tier: full
+          cov-sysmon: "true"
+          cov-out: .coverage
+          metrics-kv: "true"
+          markers: not live_cluster and not real_ray
 
       - name: Run real_ray tests
         if: matrix.python-version == '3.12'
-        run: >-
-          uv run --python ${{ matrix.python-version }} python -m pytest
-          -m "real_ray and not live_cluster"
-          --cov=src
-          --cov-append
-          --cov-report=xml
-          --cov-report=term
-          --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
-          -v
+        env:
+          DJANGO_RAY_SHARED_LOCAL_RAY: "1"
+        run: |
+          mapfile -t real_ray_files < <(
+            .venv/bin/python -c 'from pathlib import Path; print("\n".join(sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8"))))'
+          )
+          uv run --python ${{ matrix.python-version }} python -m pytest \
+            "${real_ray_files[@]}" \
+            -m "real_ray and not live_cluster" \
+            --cov=src \
+            --cov-append \
+            --cov-report=xml \
+            --cov-report=term \
+            --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} \
+            -v
 
       - name: Run real_ray tests with native diagnostics
         if: matrix.python-version != '3.12'
-        run: >-
-          uv run --python ${{ matrix.python-version }} python
-          scripts/observe_pytest_exit.py --native-debug --
-          -m "real_ray and not live_cluster"
-          --cov=src
-          --cov-append
-          --cov-report=xml
-          --cov-report=term
-          --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
-          -v
+        env:
+          DJANGO_RAY_SHARED_LOCAL_RAY: "1"
+        run: |
+          mapfile -t real_ray_files < <(
+            .venv/bin/python -c 'from pathlib import Path; print("\n".join(sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8"))))'
+          )
+          uv run --python ${{ matrix.python-version }} python \
+            scripts/observe_pytest_exit.py --native-debug -- \
+            "${real_ray_files[@]}" \
+            -m "real_ray and not live_cluster" \
+            --cov=src \
+            --cov-append \
+            --cov-report=xml \
+            --cov-report=term \
+            --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} \
+            -v
 
       - name: Validate suite taxonomy inventory
         if: matrix.python-version == '3.12'
@@ -816,15 +829,16 @@ jobs:
         env:
           PYTHONFAULTHANDLER: "1"
           RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
-          PYRN_SOURCE: pyrn==0.1.1
-        run: >-
-          uvx --isolated "$PYRN_SOURCE" run
-          --repo .
-          --python .venv/bin/python
-          -w auto
-          --role verify
-          --metrics-kv
-          -m "not live_cluster and not real_ray"
+        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        with:
+          command: run
+          repo: .
+          python: .venv/bin/python
+          workers: "4"
+          role: verify
+          tier: full
+          metrics-kv: "true"
+          markers: not live_cluster and not real_ray
 
   ray-data-golden-path:
     if: github.event_name != 'pull_request_target'

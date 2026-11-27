@@ -9,21 +9,15 @@ import pytest
 from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
 from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 from django_ray.workflows import _RayExecutor
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime
 from tests.unit.test_workflow_progress_publication import _execution, _identity
 
 
 @pytest.fixture(scope="module")
 def ray_cluster() -> Iterator[object]:
     """Share one bounded local Ray runtime across this module's clean-teardown cases."""
-    import ray
-
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=2)
-    try:
+    with local_ray_runtime(num_cpus=2) as ray:
         yield ray
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 def _executor(monkeypatch):

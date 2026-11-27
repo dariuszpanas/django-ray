@@ -7,20 +7,14 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from scripts.workflow_terminal_admission_budget import Reservation, TerminalAdmissionBudget
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime
 
 
 @pytest.fixture(scope="module")
 def ray_cluster() -> Iterator[object]:
     """Share one bounded local Ray runtime across this module's clean-teardown cases."""
-    import ray
-
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=2)
-    try:
+    with local_ray_runtime(num_cpus=2) as ray:
         yield ray
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 def assert_reconciled(budget):

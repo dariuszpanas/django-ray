@@ -20,7 +20,7 @@ from django_ray.workflow.progress.protocol import (
     WorkflowProgressEventKind,
     decode_workflow_progress_event,
 )
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime
 
 _RUN_IDENTITY = {
     "schema_version": 1,
@@ -108,14 +108,8 @@ def _run_bounded_context_leaf(
 
 @pytest.fixture(scope="module")
 def ray_runtime() -> Iterator[Any]:
-    import ray
-
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=2)
-    try:
+    with local_ray_runtime(num_cpus=2) as ray:
         yield ray
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 def _decoded(actor: _Actor) -> list[Any]:

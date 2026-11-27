@@ -26,7 +26,7 @@ from django_ray.runtime.result_buffer import (
 )
 from django_ray.workflow.plans import WorkflowPlanValidationError
 from django_ray.workflows import _Executor, _RayExecutor, chain, map_step, step
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime
 
 SIDE_EFFECTS: list[int] = []
 
@@ -887,14 +887,12 @@ def test_buffered_map_cancellation_cleans_dependencies_and_actor(
 
 @pytest.fixture(scope="module")
 def ray_cluster():
-    import ray
-
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=4, include_dashboard=True, resources={"result_buffer": 1})
-    try:
+    with local_ray_runtime(
+        num_cpus=4,
+        include_dashboard=True,
+        resources={"result_buffer": 1},
+    ) as ray:
         yield ray
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray

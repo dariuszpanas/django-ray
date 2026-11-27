@@ -21,7 +21,6 @@ from django_ray.runtime import distributed, entrypoint
 from django_ray.runtime.context import durable_task_execution, get_current_task_context
 from django_ray.runtime.runtime_env import normalize_runtime_env
 from django_ray.workflow.plans import runtime_env_plan_identity
-from tests.local_ray import init_local_ray
 
 
 # Module-level functions for Ray tests (must be picklable)
@@ -282,13 +281,10 @@ class TestDistributedWithRay:
     @pytest.fixture(scope="class", autouse=True)
     def ray_cluster(self):
         """Initialize Ray once for this class's clean-teardown tests."""
-        import ray
+        from tests.local_ray import local_ray_runtime
 
-        init_local_ray()
-        try:
+        with local_ray_runtime():
             yield
-        finally:
-            ray.shutdown(wait_for_processes=True)
 
     def test_parallel_map_with_ray(self) -> None:
         """Test parallel_map uses Ray when available."""
