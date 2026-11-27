@@ -36,7 +36,7 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
     && apt-get install -y --no-install-recommends postgresql-common \
     && printf 'create_main_cluster = false\n' > /etc/postgresql-common/createcluster.conf \
     && apt-get install -y --no-install-recommends \
-        postgresql-17=17.11-0+deb13u1 postgresql-client-17=17.11-0+deb13u1 \
+        postgresql-17=17.12-0+deb13u1 postgresql-client-17=17.12-0+deb13u1 \
     && test ! -d /var/lib/postgresql/17/main \
     && rm -rf /var/lib/apt/lists/* \
     && rm /usr/sbin/policy-rc.d

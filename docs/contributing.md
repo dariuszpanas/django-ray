@@ -1214,8 +1214,12 @@ qualification job on an unaffected documentation-only change.
 Keep shared-helper and new runtime-module ownership explicit in
 `scripts/qualification_policy.json`. An isolated Docker scenario change selects
 native, latency and cancellation; the lease authority also selects its
-application, native, cancellation and monitoring consumers. Add a regression
-for each ownership adjustment and preserve all native variants by running
+application, native, cancellation and monitoring consumers. Every file
+under `src/django_ray/` (modules, templates, and static assets) must be
+explicitly classified in `application` paths or in the unreachable
+offline/dormant exemption list enforced by
+`tests/unit/test_qualification_gate.py`. Add a regression for each ownership
+adjustment and preserve all native variants by running
 `uv run pytest tests/unit/test_qualification_gate.py -q --no-cov`.
 
 Every selected reusable workflow must succeed. Missing, cancelled, skipped or
