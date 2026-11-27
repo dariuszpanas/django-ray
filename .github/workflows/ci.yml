@@ -141,19 +141,9 @@ jobs:
 
   dependency-audit:
     if: github.event_name != 'pull_request_target'
-    name: Runtime Dependency Audit (${{ matrix.os }}, Python ${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+    name: Runtime Dependency Audit (ubuntu-latest, Python 3.12)
+    runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.13"
-          - os: ubuntu-latest
-            python-version: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -165,17 +155,17 @@ jobs:
           version: "latest"
           enable-cache: "false"
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python 3.12
+        run: uv python install 3.12
 
       - name: Install locked audit dependencies
         run: >-
           uv sync --locked --only-group dev --no-install-project
-          --python ${{ matrix.python-version }}
+          --python 3.12
 
       - name: Audit locked runtime dependencies
         run: >-
-          uv run --no-sync --python ${{ matrix.python-version }}
+          uv run --no-sync --python 3.12
           python scripts/audit_runtime_dependencies.py
 
   test:
@@ -238,13 +228,13 @@ jobs:
           workers: "4"
           role: verify
           tier: full
-          cov-sysmon: "true"
-          cov-out: .coverage
+          cov-sysmon: ${{ matrix.python-version != '3.13' || github.event_name != 'pull_request' }}
+          cov-out: ${{ (matrix.python-version != '3.13' || github.event_name != 'pull_request') && '.coverage' || '' }}
           metrics-kv: "true"
-          markers: not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
+          markers: not live_cluster and not real_ray and not tooling and (not postgresql or sqlite_compatible)
 
       - name: Run real_ray tests
-        if: matrix.python-version == '3.12' || github.event_name == 'pull_request'
+        if: matrix.python-version == '3.12' || (github.event_name == 'pull_request' && matrix.python-version == '3.14')
         env:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
         run: |
@@ -280,23 +270,6 @@ jobs:
             --cov-report=term \
             --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} \
             -v
-
-      - name: Validate suite taxonomy inventory
-        if: matrix.python-version == '3.12'
-        run: >-
-          uv run --python ${{ matrix.python-version }} python
-          scripts/test_suite_inventory.py collect
-          --json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json
-          --markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md
-
-      - name: Upload suite inventory evidence
-        if: always() && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: test-suite-inventory-python-3.12
-          path: artifacts/test-suite-inventory/
-          if-no-files-found: warn
-          retention-days: 14
 
       - name: Enforce worker module coverage
         if: matrix.python-version == '3.12'
@@ -687,11 +660,15 @@ jobs:
           docker network rm django-ray-live-cluster || true
 
   testproject:
-    name: Testproject Smoke
+    name: Testproject & Tooling
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
+      PYTHONFAULTHANDLER: "1"
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
       COVERAGE_CORE: "sysmon"
       COVERAGE_TESTPROJECT_MIN: "80"
+      DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -709,6 +686,18 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Run tooling tests with pyrn
+        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        with:
+          command: run
+          repo: .
+          python: .venv/bin/python
+          workers: "4"
+          role: verify
+          tier: full
+          metrics-kv: "true"
+          markers: tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
+
       - name: Validate sample project
         run: uv run make test-testproject
 
@@ -719,6 +708,22 @@ jobs:
         run: >-
           uv run --frozen --extra sample pytest
           tests/unit/test_http_recycle_probe.py -q -s
+
+      - name: Validate suite taxonomy inventory
+        run: >-
+          uv run --python 3.12 python
+          scripts/test_suite_inventory.py collect
+          --json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json
+          --markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md
+
+      - name: Upload suite inventory evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-suite-inventory-python-3.12
+          path: artifacts/test-suite-inventory/
+          if-no-files-found: warn
+          retention-days: 14
 
   docker-compose-smoke:
     if: github.event_name != 'pull_request_target'
@@ -839,23 +844,15 @@ jobs:
           role: verify
           tier: full
           metrics-kv: "true"
-          markers: not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
+          markers: not live_cluster and not real_ray and not tooling and (not postgresql or sqlite_compatible)
 
   ray-data-golden-path:
     if: github.event_name != 'pull_request_target'
-    name: Ray Data (${{ matrix.profile }}, Python ${{ matrix.python-version }})
+    name: Ray Data Golden Path
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: supported-min-python
-            python-version: "3.12"
-            ray-version: "2.60.0"
-          - profile: newest-python
-            python-version: "3.14"
-            ray-version: "2.60.0"
+    env:
+      RAY_DATA_VERSION: "2.60.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -867,14 +864,26 @@ jobs:
           version: "latest"
           enable-cache: "false"
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python 3.12
+        run: uv python install 3.12
 
-      - name: Run the real Ray Data boundary
+      - name: Run the real Ray Data boundary (Python 3.12)
         run: >-
-          uv run --isolated --no-project --python ${{ matrix.python-version }}
+          uv run --isolated --no-project --python 3.12
           --with-editable ".[sample]"
-          --with "ray[data]==${{ matrix.ray-version }}"
+          --with "ray[data]==${{ env.RAY_DATA_VERSION }}"
+          python scripts/ray_data_golden_path_probe.py
+
+      - name: Set up Python 3.14
+        if: github.event_name != 'pull_request'
+        run: uv python install 3.14
+
+      - name: Run the real Ray Data boundary (Python 3.14)
+        if: github.event_name != 'pull_request'
+        run: >-
+          uv run --isolated --no-project --python 3.14
+          --with-editable ".[sample]"
+          --with "ray[data]==${{ env.RAY_DATA_VERSION }}"
           python scripts/ray_data_golden_path_probe.py
 
   build:

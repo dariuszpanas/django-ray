@@ -39,13 +39,85 @@ EXTERNAL_RESOURCE_FIXTURE_MARKERS = {
 MARKER_IMPLICATIONS = {
     "compiled_graph_opt_in": "real_ray",
 }
+TOOLING_TEST_PREFIXES: tuple[str, ...] = (
+    "test_application_",
+    "test_audit_runtime_dependencies",
+    "test_cancellation_qualification",
+    "test_check_commits",
+    "test_check_conventional_commits",
+    "test_check_spelling",
+    "test_ci_checkpoint",
+    "test_ci_workflow_policy",
+    "test_coverage_debt",
+    "test_distributed_preparation_benchmark",
+    "test_docker_qualification",
+    "test_docker_quickstart",
+    "test_docs_",
+    "test_grafana_dashboard_importer",
+    "test_http_recycle_probe",
+    "test_install_ci_debugger",
+    "test_installed_candidate_requirements",
+    "test_kuberay_",
+    "test_kubernetes_",
+    "test_latency_",
+    "test_linux_test_",
+    "test_live_witness_observation",
+    "test_local_kuberay_",
+    "test_local_ray",
+    "test_locustfile",
+    "test_makefile_test_targets",
+    "test_monitoring_",
+    "test_native_exit_investigation",
+    "test_native_shutdown_investigation",
+    "test_observe_pytest_exit",
+    "test_package_metadata",
+    "test_platform_auth",
+    "test_pr_review_admission",
+    "test_prometheus_targets",
+    "test_python315_compatibility",
+    "test_qualification_gate",
+    "test_ray_ecosystem_docs",
+    "test_ray_serve_gateway_docs",
+    "test_release",
+    "test_repository_policy",
+    "test_require_linux",
+    "test_result_read_qualification",
+    "test_retry_pypi_audit",
+    "test_runtime_qualification",
+    "test_soak_contract",
+    "test_stability_contract",
+    "test_test_resource_ownership",
+    "test_test_suite_",
+    "test_transaction_qualification",
+    "test_upgrade_qualification",
+    "test_verify_doctor_wheel",
+    "test_verify_wheel",
+    "test_worker_image_qualification",
+    "test_worker_mode_qualification",
+    "test_workflow_preparation_benchmark_platform",
+)
+_EXTERNAL_RESOURCE_MARKERS = ("real_ray", "postgresql", "live_cluster")
 _REAL_RAY_OWNERSHIP_KEY: pytest.StashKey[RealRayOwnershipLock] = pytest.StashKey()
+
+
+def _is_tooling_test_item(item: pytest.Item) -> bool:
+    item_path = getattr(item, "path", None)
+    if item_path is None:
+        return False
+    path = Path(str(item_path))
+    if path.parent.name != "unit" or path.parent.parent.name != "tests":
+        return False
+    if not any(path.stem.startswith(prefix) for prefix in TOOLING_TEST_PREFIXES):
+        return False
+    return all(item.get_closest_marker(marker) is None for marker in _EXTERNAL_RESOURCE_MARKERS)
 
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Require external-resource fixtures to declare their execution contract."""
     for item in items:
+        if _is_tooling_test_item(item) and item.get_closest_marker("tooling") is None:
+            item.add_marker(pytest.mark.tooling)
         for marker_name, required_marker_name in MARKER_IMPLICATIONS.items():
             if item.get_closest_marker(marker_name) is None:
                 continue
@@ -145,6 +217,11 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 def pytest_configure(config: object) -> None:
     """Configure Django for testing."""
+    if isinstance(config, pytest.Config):
+        config.addinivalue_line(
+            "markers",
+            "tooling: Repository policy, qualification-harness, KubeRay, packaging, and docs tooling tests",
+        )
     settings_module = os.environ.get("DJANGO_SETTINGS_MODULE")
     if not settings.configured and not settings_module:
         settings.configure(
