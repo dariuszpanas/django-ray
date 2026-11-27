@@ -95,103 +95,12 @@ The private hard-timeout self-test executes in the Linux Ray head pod. It reject
 other platforms before launching a child. The host-side runner retains its Windows
 command containment and source-path defenses when invoking Docker and Kubernetes.
 
-The Dockerfile, Dockerfile-specific ignore policy, profile, and RayCluster template live
-under `k8s/pilots/compiled-graph/`. The runner captures one clean full Git revision, validates a
-bounded regular-file inventory, and safely materializes a tracked-only `git archive` build
-context. The Dockerfile-specific policy remains a required deny-by-default second boundary, so
-ignored credentials, generated source artifacts, `.vault`, Git metadata, tests, docs, and unrelated
-Kubernetes assets are not sent to the daemon. The runner verifies the pinned local Docker context
-before it builds. Configuration and build-policy identities use a strict UTF-8 source-text
-contract that maps clean-checkout CRLF pairs to the Git archive's LF bytes while preserving every
-other byte; a BOM, NUL byte, or bare carriage return fails closed. The same commit therefore keeps
-one identity across Windows and Linux checkouts. The runner refuses a dirty source tree, a changed
-Kubernetes context, any namespace except `django-ray-cgraph-pilot`, a changed KubeRay operator
-identity, a mutable/restarted Ray pod image, or an unowned cleanup target. The operator check
-requires the exact Deployment, ReplicaSet, and pod names and UIDs; their controller ownership;
-the sole spec/status container; the configured image and running digest; linked Ready status; and
-an exact nonnegative restart count. The restart count is retained as observational evidence, not
-required to be zero, and the runner never rolls or otherwise mutates the shared operator. The full
-observation is compared for exact equality immediately before RayCluster creation, after the
-operator reports the pilot pods ready, and after the final runtime capture. An operator rollout,
-container restart, readiness change, or controller/container identity drift at any bracket
-invalidates the run. The runner builds a source-labelled immutable local image, calculates
-configuration and rendered manifest identities, and verifies the sole regular container, the pinned
-KubeRay worker init-container inventory, running image IDs, exact restart counts, identity
-environment, and every profile-declared effective Ray start parameter before native execution. The
-profile distinguishes ordinary valued parameters
-from KubeRay's valueless `--disable-usage-stats` true switch. Pod evidence retains each
-parameter's sanitized lexical form, lexical value, and effective semantic value, so a
-valued, duplicated, missing, or changed switch cannot pass as the pinned form. Namespace
-discovery uses explicit structured
-not-found semantics; an API failure cannot fall through to creation, and every existing
-namespace is refused. A successful namespace create response supplies a cryptographically random
-run-token label and immutable UID lease. The RayCluster is also create-only: its create-response UID,
-the namespace UID, and the run token form a second lease. Those values are rendered into RayCluster
-and pod labels, annotations, and identity environment, and each pod must have the exact RayCluster
-controller reference. Namespace and RayCluster leases are checked before and after pod reads and
-exec boundaries. Cleanup first verifies the exact live namespace lease, deletes only through
-name/profile/run-token selectors, and fails if either the leased UID or a replacement namespace
-remains.
-
-Kubernetes does not offer this runner a namespace-UID precondition on namespaced create, and
-`kubectl delete namespace` exposes neither a UID nor resource-version precondition. The pre/post
-lease checks, create-only RayCluster, embedded identities, selector-bound delete, and absence check
-make any replacement fail evidence collection; they do not make those API calls atomic. External
-namespace deletion and recreation inside a check/call window is outside the supported pilot
-coordination contract and is not claimed safe from a scoped create reaching the replacement.
-
-Before creating the RayCluster, the runner starts the same immutable local image ID in a
-network-isolated, read-only one-shot container with a physically smaller 256 MiB
-`/dev/shm`. It requires the complete policy identity to differ only on that declared and
-observed resource. A pilot-specific admission layer proves that the tracked baseline is
-admitted, then rejects the changed identity as `PILOT_PROFILE_MISMATCH` before the
-hardened probe or any native command can be invoked. Both policy decisions and both
-admission outcomes are retained. This is the required physical near-neighbor rejection,
-not a claim that a changed KubeRay profile was executed natively.
-
-From a clean commit on the supported local Docker Desktop/KubeRay setup, run:
-
-```powershell
-uv run python scripts/kuberay_compiled_graph_pilot.py run `
-  --context docker-desktop
-```
-
-The active profile's `django-ray` dependency must equal the source package version in
-`pyproject.toml`, and the image build derives the same expectation from its archived
-project metadata. A source version change therefore fails closed until the tracked
-profile is updated and creates a new profile identity. Retained evidence embeds its
-original dependency profile and remains immutable. Its self-contained record is
-validated against that embedded profile, while the fresh-evidence writer separately
-requires the current tracked profile and configuration. Updating the active profile
-therefore does not rewrite or reclassify an older record.
-
-The reference operator installation uses the versioned upstream chart and tag; the
-runner then verifies the running image digest before it creates the pilot namespace:
-
-```powershell
-helm repo add kuberay https://ray-project.github.io/kuberay-helm/
-helm repo update kuberay
-helm upgrade --install kuberay-operator kuberay/kuberay-operator `
-  --namespace kuberay-system --create-namespace `
-  --version 1.6.2 `
-  --set image.repository=quay.io/kuberay/operator `
-  --set image.tag=v1.6.2 `
-  --wait
-```
-
-The command starts each subprocess inside an operating-system process-tree boundary, actively caps
-and concurrently drains its streams, bounds post-termination waits, and terminates descendants that
-retain inherited pipes. It accepts exactly one complete JSON document, prints one bounded allowlisted
-record, and deletes only its dedicated pilot namespace by default. Retained subprocess records contain structured status,
-exit, timing, decision, and private control-record observations; they omit stdout,
-stderr, tracebacks, and arbitrary process errors.
-The runner does not read or print Kubernetes Secrets. Retain a successful record under
-`docs/investigations/` and open a
-separate capability promotion review; the runner does not edit `_VERIFIED_CAPABILITIES`,
-enable product execution, or turn a candidate-native probe into support by itself. A
-changed image, Ray/Python dependency, Docker context/engine/build-context policy,
-KubeRay operator, kernel/runtime, `/dev/shm`, object store, topology, or submission
-transport requires a new profile identity and evidence.
+The pinned local KubeRay pilot manifests and host runner used to collect that blocked
+evidence have been retired while upstream Ray shared-memory reclamation remains unresolved.
+Historical blocked evidence remains immutable under `docs/investigations/` (including the
+2026-07-21 KubeRay blocked record), and native Compiled Graph execution remains rejected by
+default. Re-evaluating native KubeRay support after upstream Ray resolves shared-memory
+cleanup requires a fresh, separately reviewed capability promotion and evidence record.
 
 The hard wall-clock containment self-test deliberately kills and reaps a Linux process
 group. Each direct and nested native suite separately exercises a one-shot Compiled
