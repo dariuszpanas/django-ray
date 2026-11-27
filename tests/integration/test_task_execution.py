@@ -20,7 +20,7 @@ from django_ray.execution_codec import (
     decode_execution_completion,
     encode_execution_request,
 )
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime
 
 # Get project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -74,16 +74,8 @@ def _ray_worker_execution_metadata_probe() -> dict[str, object]:
 @pytest.fixture(scope="module")
 def ray_cluster():
     """Start the required local Ray cluster for the serial real-Ray lane."""
-    if ray.is_initialized():
-        raise RuntimeError("Required local Ray fixture found an initialized runtime")
-    try:
-        init_local_ray(include_dashboard=True)
-    except Exception as exc:
-        raise RuntimeError("Required local Ray startup failed") from exc
-    try:
+    with local_ray_runtime(include_dashboard=True, wrap_startup_error=True):
         yield
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.fixture

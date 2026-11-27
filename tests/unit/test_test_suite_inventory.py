@@ -866,12 +866,14 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
     by_name = {step["name"]: step for step in steps if "name" in step}
 
     portable = by_name["Run portable tests with pyrn"]
-    assert "--cov-sysmon" in portable["run"]
-    assert "--cov-out .coverage" in portable["run"]
-    assert '-m "not live_cluster and not real_ray"' in portable["run"]
+    assert portable["uses"].startswith("dariuszpanas/pyrn@")
+    assert portable["with"]["cov-sysmon"] == "true"
+    assert portable["with"]["cov-out"] == ".coverage"
+    assert portable["with"]["markers"] == "not live_cluster and not real_ray"
 
     real_ray = by_name["Run real_ray tests"]
     assert real_ray["if"] == "matrix.python-version == '3.12'"
+    assert real_ray["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert '-m "real_ray and not live_cluster"' in real_ray["run"]
     assert "--cov-append" in real_ray["run"]
 

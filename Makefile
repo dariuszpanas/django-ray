@@ -140,7 +140,7 @@ test-xdist:
 		-m "not real_ray and not live_cluster and not postgresql"
 
 # Local pyrn acceleration helpers; override PYRN=pyrn to use a global installation.
-PYRN ?= uvx --isolated pyrn==0.1.1
+PYRN ?= uvx --isolated pyrn==0.2.1
 pyrn-doctor:
 	$(PYRN) doctor --repo .
 

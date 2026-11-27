@@ -13,7 +13,7 @@ import pytest
 from django.conf import settings
 
 from scripts.require_linux import require_linux
-from tests.local_ray import init_local_ray
+from tests.local_ray import local_ray_runtime, shutdown_shared_local_ray
 from tests.real_ray_ownership import (
     RealRayOwnershipLock,
     RealRayOwnershipPathError,
@@ -127,14 +127,20 @@ def _release_real_ray_ownership(config: pytest.Config) -> None:
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Release local-Ray ownership after the selected session finishes."""
+    """Shut down any shared local Ray runtime before releasing host ownership."""
     del exitstatus
-    _release_real_ray_ownership(session.config)
+    try:
+        shutdown_shared_local_ray()
+    finally:
+        _release_real_ray_ownership(session.config)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
     """Release ownership on pytest exits that bypass normal session finish."""
-    _release_real_ray_ownership(config)
+    try:
+        shutdown_shared_local_ray()
+    finally:
+        _release_real_ray_ownership(config)
 
 
 def pytest_configure(config: object) -> None:
@@ -220,14 +226,8 @@ def pytest_configure(config: object) -> None:
 @pytest.fixture()
 def ray_cluster() -> Iterator[object]:
     """Provide one bounded local Ray runtime to an explicitly marked test."""
-    import ray
-
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=2)
-    try:
+    with local_ray_runtime(num_cpus=2) as ray:
         yield ray
-    finally:
-        ray.shutdown(wait_for_processes=True)
 
 
 _DATABASE_FIXTURES = frozenset(

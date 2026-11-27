@@ -36,38 +36,48 @@ jobs:
           uv python install 3.12
           uv sync --frozen --python 3.12
 
-      - name: Run Stage 1 pyrn doctor, TIA shadow plan, and verify parity run
+      - name: Run pyrn doctor diagnostics
+        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        with:
+          command: doctor
+          repo: .
+          python: .venv/bin/python
+          role: verify
+
+      - name: Run pyrn TIA shadow plan
+        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        with:
+          command: plan
+          repo: .
+          base: ${{ github.event.pull_request.base.sha || 'HEAD~1' }}
+          role: verify
+          tier: strict
+          metrics-kv: "true"
+          receipt-out: ${{ runner.temp }}/pyrn-shadow/plan-receipt.json
+
+      - name: Run pyrn verify parity suite
         env:
           PYTHONFAULTHANDLER: "1"
           RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
-          PYRN_SOURCE: pyrn==0.1.1
-          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        uses: dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a # v0.2.1
+        with:
+          command: run
+          repo: .
+          python: .venv/bin/python
+          workers: "4"
+          role: verify
+          tier: full
+          cov-sysmon: "true"
+          cov-out: ${{ runner.temp }}/pyrn-shadow/.coverage
+          metrics-kv: "true"
+          receipt-out: ${{ runner.temp }}/pyrn-shadow/run-receipt.json
+          markers: not real_ray and not live_cluster and not postgresql
+
+      - name: Record shadow coverage summary
+        env:
           OUT_DIR: ${{ runner.temp }}/pyrn-shadow
         run: |
           set -euo pipefail
-          mkdir -p "$OUT_DIR"
-          base_ref="${BASE_SHA:-HEAD~1}"
-
-          uvx --isolated "$PYRN_SOURCE" doctor --repo . --json > "$OUT_DIR/doctor.json"
-          uvx --isolated "$PYRN_SOURCE" doctor --repo .
-
-          uvx --isolated "$PYRN_SOURCE" plan \
-            --repo . \
-            --base "$base_ref" \
-            --tier strict \
-            --metrics-kv \
-            --receipt-out "$OUT_DIR/plan-receipt.json"
-
-          uvx --isolated "$PYRN_SOURCE" run \
-            --repo . \
-            -w auto \
-            --role verify \
-            --cov-sysmon \
-            --cov-out "$OUT_DIR/.coverage" \
-            --metrics-kv \
-            --receipt-out "$OUT_DIR/run-receipt.json" \
-            -m "not real_ray and not live_cluster and not postgresql"
-
           COVERAGE_FILE="$OUT_DIR/.coverage" .venv/bin/python -m coverage report --fail-under=0 > "$OUT_DIR/coverage-summary.txt"
           tail -n 15 "$OUT_DIR/coverage-summary.txt"
 

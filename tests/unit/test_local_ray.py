@@ -111,6 +111,34 @@ def test_shared_fixture_waits_for_owned_processes_after_test(fake_ray, test_fail
     assert fake_ray.shutdowns == [{"wait_for_processes": True}]
 
 
+def test_shared_local_ray_session_reuses_single_runtime_until_shutdown(
+    fake_ray, monkeypatch
+) -> None:
+    monkeypatch.setenv(local_ray.SHARED_LOCAL_RAY_ENV, "1")
+    monkeypatch.setattr(local_ray, "_shared_local_ray_active", False)
+
+    try:
+        with local_ray.local_ray_runtime(num_cpus=2) as first_ray:
+            assert first_ray is sys.modules["ray"]
+            assert len(fake_ray.calls) == 1
+            assert fake_ray.calls[0]["num_cpus"] == local_ray.MAX_LOGICAL_CPUS
+            assert fake_ray.calls[0]["include_dashboard"] is True
+            assert fake_ray.calls[0]["resources"] == {"result_buffer": 1, "result_fold": 1}
+
+        assert fake_ray.shutdowns == []
+
+        with local_ray.local_ray_runtime(num_cpus=4) as second_ray:
+            assert second_ray is sys.modules["ray"]
+            assert len(fake_ray.calls) == 1
+
+        assert fake_ray.shutdowns == []
+    finally:
+        local_ray.shutdown_shared_local_ray()
+
+    assert fake_ray.shutdowns == [{"wait_for_processes": True}]
+    assert local_ray._shared_local_ray_active is False
+
+
 def test_non_linux_is_rejected_before_startup_or_cleanup(fake_ray, monkeypatch) -> None:
     def refuse() -> None:
         raise SystemExit("Linux required")

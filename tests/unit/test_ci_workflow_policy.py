@@ -760,27 +760,30 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert test_job["env"]["PYTHONFAULTHANDLER"] == "1"
     assert test_job["env"]["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] == "0"
     assert test_job["env"]["COVERAGE_CORE"] == "sysmon"
-    assert test_job["env"]["PYRN_SOURCE"] == "pyrn==0.1.1"
     assert strategy["fail-fast"] == "false"
     assert matrix == {"python-version": ["3.12", "3.13", "3.14"]}
     portable = steps["Run portable tests with pyrn"]
     assert "if" not in portable
-    assert 'uvx --isolated "$PYRN_SOURCE" run' in portable["run"]
-    assert "--cov-sysmon" in portable["run"]
-    assert "--cov-out .coverage" in portable["run"]
-    assert "--role verify" in portable["run"]
-    assert '-m "not live_cluster and not real_ray"' in portable["run"]
+    assert portable["uses"] == "dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a"
+    assert portable["with"]["command"] == "run"
+    assert portable["with"]["workers"] == "4"
+    assert portable["with"]["role"] == "verify"
+    assert portable["with"]["cov-sysmon"] == "true"
+    assert portable["with"]["cov-out"] == ".coverage"
+    assert portable["with"]["markers"] == "not live_cluster and not real_ray"
     real_ray_py312 = steps["Run real_ray tests"]
     real_ray_native = steps["Run real_ray tests with native diagnostics"]
     assert real_ray_py312["if"] == "matrix.python-version == '3.12'"
     assert real_ray_native["if"] == "matrix.python-version != '3.12'"
+    assert real_ray_py312["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
+    assert real_ray_native["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert '-m "real_ray and not live_cluster"' in real_ray_py312["run"]
     assert "--cov-append" in real_ray_py312["run"]
-    assert real_ray_py312["run"].endswith("-v")
+    assert real_ray_py312["run"].strip().endswith("-v")
     assert "observe_pytest_exit.py --native-debug --" in real_ray_native["run"]
     assert '-m "real_ray and not live_cluster"' in real_ray_native["run"]
     assert "--cov-append" in real_ray_native["run"]
-    assert real_ray_native["run"].endswith("-v")
+    assert real_ray_native["run"].strip().endswith("-v")
     debugger = steps["Install native shutdown debugger"]
     smoke = steps["Verify native shutdown diagnostics"]
     assert debugger["if"] == smoke["if"] == "matrix.python-version != '3.12'"
