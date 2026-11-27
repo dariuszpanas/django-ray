@@ -10761,8 +10761,6 @@ def test_gate_document_retains_trigger_matrix_reference_evidence_and_preservatio
     assert "Required" in guide
     assert "Recommended" in guide
     assert "Not applicable" in guide
-    assert "k8s/pilots/compiled-graph/" in guide
-    assert "scripts/kuberay_compiled_graph_pilot.py" in guide
     assert "#102" in guide
     assert "Issues #144, #145, #146, and #147" in guide
     assert "PRs #148, #149, #150, and #151" in guide

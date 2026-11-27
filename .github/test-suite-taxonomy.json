@@ -153,7 +153,6 @@
           "tests/unit/test_compiled_graph.py",
           "tests/unit/test_compiled_graph_lifecycle.py",
           "tests/unit/test_compiled_graph_probe.py",
-          "tests/unit/test_kuberay_compiled_graph_pilot.py",
           "tests/unit/test_kuberay_resource_profiles.py",
           "tests/unit/test_kubernetes_web_probes.py",
           "tests/unit/test_kubernetes_secret_policy.py",

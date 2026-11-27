@@ -170,10 +170,6 @@ def test_release_versions_match_repository_sources() -> None:
     assert release._read_pyproject_version(ROOT) == "0.8.0"
     assert release._read_module_version(ROOT) == "0.8.0"
     assert release._read_lock_version(ROOT) == "0.8.0"
-    pilot_profile = json.loads((ROOT / "k8s/pilots/compiled-graph/profile.json").read_text())
-    assert pilot_profile["dependency_profile"]["django-ray"] == release._read_pyproject_version(
-        ROOT
-    )
 
 
 def test_readiness_v1_contract_latches_criterion_ownership() -> None:
