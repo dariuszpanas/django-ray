@@ -40,7 +40,7 @@ jobs:
         env:
           PYTHONFAULTHANDLER: "1"
           RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
-          PYRN_SOURCE: pyrn==0.1.0
+          PYRN_SOURCE: pyrn==0.1.1
           BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           OUT_DIR: ${{ runner.temp }}/pyrn-shadow
         run: |

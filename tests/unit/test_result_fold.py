@@ -1633,6 +1633,18 @@ class _ResultFoldOwner:
         return child
 
 
+@pytest.fixture(scope="module")
+def ray_cluster():
+    import ray
+
+    assert not ray.is_initialized()
+    init_local_ray(num_cpus=4, resources={"result_fold": 1})
+    try:
+        yield ray
+    finally:
+        ray.shutdown(wait_for_processes=True)
+
+
 @pytest.mark.real_ray
 def test_real_ray_strict_fold_ready_rejection_is_typed_and_has_no_effects(
     ray_cluster: Any,
@@ -1654,92 +1666,92 @@ def test_real_ray_strict_fold_ready_rejection_is_typed_and_has_no_effects(
         sort_keys=True,
     )
     counter = ray_cluster.remote(num_cpus=0)(_RealInvocationCounter).remote()
-    cases = (
-        (
-            tampered_protocol,
-            callable_path,
-            NestedExecutionRequestRejection.PROTOCOL_MISMATCH,
+    try:
+        cases = (
+            (
+                tampered_protocol,
+                callable_path,
+                NestedExecutionRequestRejection.PROTOCOL_MISMATCH,
+            ),
+            (
+                serialized,
+                f"{__name__}.alternate_reducer",
+                NestedExecutionRequestRejection.CALLABLE_MISMATCH,
+            ),
+        )
+
+        for submitted_request, submitted_callable, classification in cases:
+            actor = (
+                ray_cluster.remote(WorkflowMapResultFold)
+                .options(num_cpus=0.25, max_restarts=0, max_task_retries=0)
+                .remote(
+                    1,
+                    1,
+                    1024 * 1024,
+                    submitted_callable,
+                    False,
+                    (counter,),
+                    {},
+                    0,
+                    **{**kwargs, "nested_execution_request": submitted_request},
+                )
+            )
+            try:
+                with pytest.raises(RayTaskError) as caught:
+                    ray_cluster.get(actor.ready.remote())
+
+                cause = caught.value.cause
+                assert isinstance(cause, NestedExecutionRequestRejected)
+                assert cause.classification is classification
+                assert str(cause) == (f"nested execution request rejected: {classification.value}")
+                assert cause.retryable is False
+            finally:
+                ray_cluster.kill(actor, no_restart=True)
+
+        assert ray_cluster.get(counter.value.remote()) == 0
+    finally:
+        ray_cluster.kill(counter, no_restart=True)
+
+
+@pytest.mark.real_ray
+def test_real_ray_production_summary_stays_out_of_coordinator_until_final_result(
+    ray_cluster: Any,
+) -> None:
+    del ray_cluster
+    payload_bytes = 64 * 1024
+    reducer = step(
+        merge_sync_summary,
+        "fold-runtime",
+        runtime_env={"env_vars": {"DJANGO_RAY_FOLD_ENV": "fold-runtime"}},
+    )
+    workflow = chain(
+        step(identity),
+        map_step(build_sync_resource, os.getpid(), payload_bytes)
+        .with_limits(max_items=8, max_concurrency=3)
+        .reduce(
+            reducer,
+            initial={"count": 0, "names": [], "manifest_bytes": 0},
+            max_serialized_bytes=2 * 1024 * 1024,
+            actor_options={
+                "num_cpus": 0.25,
+                "memory": 4 * 1024 * 1024,
+                "scheduling_strategy": "SPREAD",
+            },
         ),
-        (
-            serialized,
-            f"{__name__}.alternate_reducer",
-            NestedExecutionRequestRejection.CALLABLE_MISMATCH,
-        ),
+        step(summary_count),
     )
 
-    for submitted_request, submitted_callable, classification in cases:
-        actor = (
-            ray_cluster.remote(WorkflowMapResultFold)
-            .options(num_cpus=0.25, max_restarts=0, max_task_retries=0)
-            .remote(
-                1,
-                1,
-                1024 * 1024,
-                submitted_callable,
-                False,
-                (counter,),
-                {},
-                0,
-                **{**kwargs, "nested_execution_request": submitted_request},
-            )
-        )
-        try:
-            with pytest.raises(RayTaskError) as caught:
-                ray_cluster.get(actor.ready.remote())
-
-            cause = caught.value.cause
-            assert isinstance(cause, NestedExecutionRequestRejected)
-            assert cause.classification is classification
-            assert str(cause) == (f"nested execution request rejected: {classification.value}")
-            assert cause.retryable is False
-        finally:
-            ray_cluster.kill(actor, no_restart=True)
-
-    assert ray_cluster.get(counter.value.remote()) == 0
+    assert workflow.run([0, 1, 2, 3], use_ray=True) == 4
 
 
 @pytest.mark.real_ray
-def test_real_ray_production_summary_stays_out_of_coordinator_until_final_result() -> None:
-    import ray
-
-    init_local_ray(num_cpus=4)
-    try:
-        payload_bytes = 64 * 1024
-        reducer = step(
-            merge_sync_summary,
-            "fold-runtime",
-            runtime_env={"env_vars": {"DJANGO_RAY_FOLD_ENV": "fold-runtime"}},
-        )
-        workflow = chain(
-            step(identity),
-            map_step(build_sync_resource, os.getpid(), payload_bytes)
-            .with_limits(max_items=8, max_concurrency=3)
-            .reduce(
-                reducer,
-                initial={"count": 0, "names": [], "manifest_bytes": 0},
-                max_serialized_bytes=2 * 1024 * 1024,
-                actor_options={
-                    "num_cpus": 0.25,
-                    "memory": 4 * 1024 * 1024,
-                    "scheduling_strategy": "SPREAD",
-                },
-            ),
-            step(summary_count),
-        )
-
-        assert workflow.run([0, 1, 2, 3], use_ray=True) == 4
-    finally:
-        ray.shutdown(wait_for_processes=True)
-
-
-@pytest.mark.real_ray
-def test_real_ray_item_overflow_stops_admission_and_preserves_actor_error() -> None:
-    import ray
+def test_real_ray_item_overflow_stops_admission_and_preserves_actor_error(
+    ray_cluster: Any,
+) -> None:
     from ray.exceptions import RayTaskError
 
-    init_local_ray(num_cpus=3)
+    tracker = ray_cluster.remote(num_cpus=0)(_RealEventTracker).remote()
     try:
-        tracker = ray.remote(num_cpus=0)(_RealEventTracker).remote()
         workflow = chain(
             step(identity),
             map_step(build_oversized_fold_item, tracker)
@@ -1754,107 +1766,99 @@ def test_real_ray_item_overflow_stops_admission_and_preserves_actor_error() -> N
 
         with pytest.raises(RayTaskError, match="item serialization.*max_serialized_bytes=256"):
             workflow.run(range(10), use_ray=True)
-        assert ray.get(tracker.snapshot.remote()) == [0]
+        assert ray_cluster.get(tracker.snapshot.remote()) == [0]
     finally:
-        ray.shutdown(wait_for_processes=True)
+        ray_cluster.kill(tracker, no_restart=True)
 
 
 @pytest.mark.real_ray
-def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup() -> None:
-    import ray
+def test_real_ray_exact_resources_runtime_env_direct_return_and_cleanup(
+    ray_cluster: Any,
+) -> None:
     from ray._private.state import actors
     from ray.exceptions import RayActorError
 
-    init_local_ray(num_cpus=2, resources={"result_fold": 1})
-    try:
-        reducer = step(
-            env_sum,
-            runtime_env={"env_vars": {"DJANGO_RAY_FOLD_DIRECT_ENV": "ready"}},
-        )
-        signature = (
-            map_step(identity)
-            .with_limits(max_items=2, max_concurrency=2)
-            .reduce(
-                reducer,
-                initial=0,
-                max_serialized_bytes=1024 * 1024,
-                actor_options={
-                    "num_cpus": 0.25,
-                    "memory": 2 * 1024 * 1024,
-                    "resources": {"result_fold": 0.5},
-                    "scheduling_strategy": "SPREAD",
-                },
-            )
-        )
-        materialized = materialize_workflow_plan(signature, invocation_args=([1, 2],))
-        executor = _RayExecutor(materialized)
-        assert signature.result_fold is not None
-        session = executor.start_result_fold(
-            max_items=2,
-            max_concurrency=2,
-            max_serialized_bytes=1024 * 1024,
-            actor_options=dict(signature.result_fold.actor_options),
-            reducer=reducer,
-            reducer_node_id="0.reducer",
+    reducer = step(
+        env_sum,
+        runtime_env={"env_vars": {"DJANGO_RAY_FOLD_DIRECT_ENV": "ready"}},
+    )
+    signature = (
+        map_step(identity)
+        .with_limits(max_items=2, max_concurrency=2)
+        .reduce(
+            reducer,
             initial=0,
+            max_serialized_bytes=1024 * 1024,
+            actor_options={
+                "num_cpus": 0.25,
+                "memory": 2 * 1024 * 1024,
+                "resources": {"result_fold": 0.5},
+                "scheduling_strategy": "SPREAD",
+            },
         )
-        actor_state = actors(actor_id=session.actor._actor_id.hex())
-        assert actor_state["IsDetached"] is False
-        assert actor_state["NumRestarts"] == 0
+    )
+    materialized = materialize_workflow_plan(signature, invocation_args=([1, 2],))
+    executor = _RayExecutor(materialized)
+    assert signature.result_fold is not None
+    session = executor.start_result_fold(
+        max_items=2,
+        max_concurrency=2,
+        max_serialized_bytes=1024 * 1024,
+        actor_options=dict(signature.result_fold.actor_options),
+        reducer=reducer,
+        reducer_node_id="0.reducer",
+        initial=0,
+    )
+    actor_state = actors(actor_id=session.actor._actor_id.hex())
+    assert actor_state["IsDetached"] is False
+    assert actor_state["NumRestarts"] == 0
 
-        assert (
-            executor.append_result_fold(
-                session,
-                index=1,
-                value=ray.put(2),
-            )
-            == 0
+    assert (
+        executor.append_result_fold(
+            session,
+            index=1,
+            value=ray_cluster.put(2),
         )
-        assert (
-            executor.append_result_fold(
-                session,
-                index=0,
-                value=ray.put(1),
-            )
-            == 2
+        == 0
+    )
+    assert (
+        executor.append_result_fold(
+            session,
+            index=0,
+            value=ray_cluster.put(1),
         )
-        payload_ref = executor.finalize_result_fold(session, expected_items=2)
+        == 2
+    )
+    payload_ref = executor.finalize_result_fold(session, expected_items=2)
 
-        assert isinstance(payload_ref, ray.ObjectRef)
-        assert ray.get(payload_ref) == 3
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                ray.get(session.actor.ready.remote(), timeout=0.5)
-            except RayActorError:
-                break
-            if time.monotonic() >= deadline:
-                pytest.fail("result-fold actor survived successful cleanup")
-            time.sleep(0.05)
-    finally:
-        ray.shutdown(wait_for_processes=True)
+    assert isinstance(payload_ref, ray_cluster.ObjectRef)
+    assert ray_cluster.get(payload_ref) == 3
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            ray_cluster.get(session.actor.ready.remote(), timeout=0.5)
+        except RayActorError:
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("result-fold actor survived successful cleanup")
+        time.sleep(0.05)
 
 
 @pytest.mark.real_ray
-def test_real_ray_non_detached_fold_dies_with_owner() -> None:
-    import ray
+def test_real_ray_non_detached_fold_dies_with_owner(ray_cluster: Any) -> None:
     from ray.exceptions import RayActorError, RayTaskError
 
-    init_local_ray(num_cpus=2)
-    try:
-        owner = ray.remote(num_cpus=0.1)(_ResultFoldOwner).remote()
-        child = ray.get(owner.spawn.remote())
-        assert validate_result_fold_ack(ray.get(child.ready.remote()), state="ready")
+    owner = ray_cluster.remote(num_cpus=0.1)(_ResultFoldOwner).remote()
+    child = ray_cluster.get(owner.spawn.remote())
+    assert validate_result_fold_ack(ray_cluster.get(child.ready.remote()), state="ready")
 
-        ray.kill(owner, no_restart=True)
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                ray.get(child.ready.remote(), timeout=0.5)
-            except (RayActorError, RayTaskError):
-                break
-            if time.monotonic() >= deadline:
-                pytest.fail("non-detached result fold survived owner death")
-            time.sleep(0.05)
-    finally:
-        ray.shutdown(wait_for_processes=True)
+    ray_cluster.kill(owner, no_restart=True)
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            ray_cluster.get(child.ready.remote(), timeout=0.5)
+        except (RayActorError, RayTaskError):
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("non-detached result fold survived owner death")
+        time.sleep(0.05)

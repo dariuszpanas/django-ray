@@ -190,6 +190,7 @@ jobs:
       RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
       # Use Python 3.12+ PEP 669 sys.monitoring coverage instead of slow ctrace hooks.
       COVERAGE_CORE: "sysmon"
+      PYRN_SOURCE: pyrn==0.1.1
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
       COVERAGE_RAY_JOB_MIN: "90"
@@ -229,44 +230,59 @@ jobs:
           uv run --python ${{ matrix.python-version }} python -m pytest
           tests/unit/test_observe_pytest_exit.py -q
 
-      - name: Run tests with suite timing
+      - name: Run portable tests with pyrn
+        run: >-
+          uvx --isolated "$PYRN_SOURCE" run
+          --repo .
+          --python .venv/bin/python
+          -w auto
+          --role verify
+          --cov-sysmon
+          --cov-out .coverage
+          --metrics-kv
+          -m "not live_cluster and not real_ray"
+
+      - name: Run real_ray tests
         if: matrix.python-version == '3.12'
         run: >-
-          uv run --python ${{ matrix.python-version }} python
-          scripts/test_suite_inventory.py run
-          --lane supported-python
-          --observation github-actions-ubuntu-py312
-          --variant locked-dependencies
-          --timing-output artifacts/test-suite-inventory/github-actions-py312.json
-          --external-note "GitHub Actions queue and environment setup are recorded by workflow metadata; this record starts at pytest instrumentation"
-          --
+          uv run --python ${{ matrix.python-version }} python -m pytest
+          -m "real_ray and not live_cluster"
           --cov=src
+          --cov-append
           --cov-report=xml
           --cov-report=term
           --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
           -v
 
-      - name: Validate suite timing evidence
+      - name: Run real_ray tests with native diagnostics
+        if: matrix.python-version != '3.12'
+        run: >-
+          uv run --python ${{ matrix.python-version }} python
+          scripts/observe_pytest_exit.py --native-debug --
+          -m "real_ray and not live_cluster"
+          --cov=src
+          --cov-append
+          --cov-report=xml
+          --cov-report=term
+          --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }}
+          -v
+
+      - name: Validate suite taxonomy inventory
         if: matrix.python-version == '3.12'
         run: >-
           uv run --python ${{ matrix.python-version }} python
           scripts/test_suite_inventory.py collect
-          --timing artifacts/test-suite-inventory/github-actions-py312.json
           --json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json
           --markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md
 
-      - name: Upload suite timing evidence
+      - name: Upload suite inventory evidence
         if: always() && matrix.python-version == '3.12'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: test-suite-timing-python-3.12
+          name: test-suite-inventory-python-3.12
           path: artifacts/test-suite-inventory/
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Run tests
-        if: matrix.python-version != '3.12'
-        run: uv run --python ${{ matrix.python-version }} python scripts/observe_pytest_exit.py --native-debug -- -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} -v
 
       - name: Enforce worker module coverage
         if: matrix.python-version == '3.12'
@@ -343,13 +359,15 @@ jobs:
           POSTGRES_DB: django_ray
           POSTGRES_USER: django_ray
           POSTGRES_PASSWORD: django_ray
+          POSTGRES_INITDB_ARGS: "--no-sync"
         ports:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U django_ray -d django_ray"
-          --health-interval 5s
+          --health-interval 2s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 15
+          --tmpfs /var/lib/postgresql/data:rw,nosuid,nodev,size=1g
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -798,7 +816,7 @@ jobs:
         env:
           PYTHONFAULTHANDLER: "1"
           RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
-          PYRN_SOURCE: pyrn==0.1.0
+          PYRN_SOURCE: pyrn==0.1.1
         run: >-
           uvx --isolated "$PYRN_SOURCE" run
           --repo .

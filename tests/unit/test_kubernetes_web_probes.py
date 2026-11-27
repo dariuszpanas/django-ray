@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -35,21 +36,35 @@ def _kubectl_executable() -> str:
     pytest.skip("kubectl is not installed; skipping Kustomize probe regression tests")
 
 
+@pytest.fixture(scope="session")
+def _rendered_kustomizations() -> dict[Path, list[dict[str, Any]]]:
+    executable = _kubectl_executable()
+
+    def _render(path: Path) -> tuple[Path, list[dict[str, Any]]]:
+        result = subprocess.run(
+            [executable, "kustomize", str(path)],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        resources = [resource for resource in yaml.safe_load_all(result.stdout) if resource]
+        return path, resources
+
+    with ThreadPoolExecutor(max_workers=len(KUSTOMIZATIONS)) as executor:
+        return dict(executor.map(_render, KUSTOMIZATIONS))
+
+
 @pytest.fixture(
     scope="session",
     params=tuple(pytest.param(path, id=path.as_posix()) for path in KUSTOMIZATIONS),
 )
-def rendered_kustomization(request: pytest.FixtureRequest) -> tuple[Path, list[dict[str, Any]]]:
+def rendered_kustomization(
+    request: pytest.FixtureRequest,
+    _rendered_kustomizations: dict[Path, list[dict[str, Any]]],
+) -> tuple[Path, list[dict[str, Any]]]:
     path: Path = request.param
-    result = subprocess.run(
-        [_kubectl_executable(), "kustomize", str(path)],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    resources = [resource for resource in yaml.safe_load_all(result.stdout) if resource]
-    return path, resources
+    return path, _rendered_kustomizations[path]
 
 
 def _resource(resources: list[dict[str, Any]], *, kind: str, name: str) -> dict[str, Any]:

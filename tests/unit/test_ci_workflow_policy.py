@@ -759,12 +759,28 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert test_job["timeout-minutes"] == "20"
     assert test_job["env"]["PYTHONFAULTHANDLER"] == "1"
     assert test_job["env"]["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] == "0"
+    assert test_job["env"]["COVERAGE_CORE"] == "sysmon"
+    assert test_job["env"]["PYRN_SOURCE"] == "pyrn==0.1.1"
     assert strategy["fail-fast"] == "false"
     assert matrix == {"python-version": ["3.12", "3.13", "3.14"]}
-    assert "--lane supported-python" in steps["Run tests with suite timing"]["run"]
-    assert steps["Run tests with suite timing"]["run"].endswith("-v")
-    assert steps["Run tests"]["run"].endswith("-v")
-    assert "observe_pytest_exit.py --native-debug --" in steps["Run tests"]["run"]
+    portable = steps["Run portable tests with pyrn"]
+    assert "if" not in portable
+    assert 'uvx --isolated "$PYRN_SOURCE" run' in portable["run"]
+    assert "--cov-sysmon" in portable["run"]
+    assert "--cov-out .coverage" in portable["run"]
+    assert "--role verify" in portable["run"]
+    assert '-m "not live_cluster and not real_ray"' in portable["run"]
+    real_ray_py312 = steps["Run real_ray tests"]
+    real_ray_native = steps["Run real_ray tests with native diagnostics"]
+    assert real_ray_py312["if"] == "matrix.python-version == '3.12'"
+    assert real_ray_native["if"] == "matrix.python-version != '3.12'"
+    assert '-m "real_ray and not live_cluster"' in real_ray_py312["run"]
+    assert "--cov-append" in real_ray_py312["run"]
+    assert real_ray_py312["run"].endswith("-v")
+    assert "observe_pytest_exit.py --native-debug --" in real_ray_native["run"]
+    assert '-m "real_ray and not live_cluster"' in real_ray_native["run"]
+    assert "--cov-append" in real_ray_native["run"]
+    assert real_ray_native["run"].endswith("-v")
     debugger = steps["Install native shutdown debugger"]
     smoke = steps["Verify native shutdown diagnostics"]
     assert debugger["if"] == smoke["if"] == "matrix.python-version != '3.12'"
@@ -778,7 +794,8 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert (
         names.index("Install native shutdown debugger")
         < names.index("Verify native shutdown diagnostics")
-        < names.index("Run tests")
+        < names.index("Run portable tests with pyrn")
+        < names.index("Run real_ray tests with native diagnostics")
     )
     test_commands = "\n".join(
         str(step.get("run", "")) for step in test_job["steps"] if isinstance(step, dict)
