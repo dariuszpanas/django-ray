@@ -159,6 +159,9 @@
           "tests/unit/test_local_kuberay_auth.py",
           "tests/unit/test_local_kuberay_gate.py",
           "tests/unit/test_local_kuberay_gate_images_and_diagnostics.py",
+          "tests/unit/test_local_kuberay_gate_inventory_and_rq2.py",
+          "tests/unit/test_local_kuberay_gate_protocol_handoff.py",
+          "tests/unit/test_local_kuberay_gate_upgrade_recovery.py",
           "tests/unit/test_local_kuberay_gate_workflows.py",
           "tests/unit/test_local_kuberay_gate_workflow_admin.py"
         ]
