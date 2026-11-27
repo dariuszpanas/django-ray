@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections.abc import Generator, Iterator
@@ -229,25 +230,65 @@ def ray_cluster() -> Iterator[object]:
         ray.shutdown(wait_for_processes=True)
 
 
-@pytest.fixture(autouse=True)
-def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> None:
-    """Restore migration-seeded protocol rows after transactional test flushes."""
-    database_fixtures = {
+_DATABASE_FIXTURES = frozenset(
+    {
         "db",
         "django_db_reset_sequences",
         "django_db_serialized_rollback",
         "live_server",
         "transactional_db",
     }
-    has_database_marker = request.node.get_closest_marker("django_db") is not None
-    has_database_fixture = not database_fixtures.isdisjoint(request.fixturenames)
-    if not has_database_marker and not has_database_fixture:
+)
+_TRANSACTIONAL_DATABASE_FIXTURES = frozenset(
+    {
+        "django_db_reset_sequences",
+        "django_db_serialized_rollback",
+        "live_server",
+        "transactional_db",
+    }
+)
+_rollout_seed_needs_restore = True
+
+
+def _is_transactional_db_request(request: pytest.FixtureRequest, marker: object | None) -> bool:
+    fixturenames = getattr(request, "fixturenames", ())
+    if not _TRANSACTIONAL_DATABASE_FIXTURES.isdisjoint(fixturenames):
+        return True
+    if marker is not None:
+        args = getattr(marker, "args", ())
+        kwargs = getattr(marker, "kwargs", {})
+        if (args and bool(args[0])) or any(
+            bool(kwargs.get(name))
+            for name in ("transaction", "reset_sequences", "serialized_rollback")
+        ):
+            return True
+    instance = getattr(request, "instance", None)
+    if instance is not None:
+        from django.test import TestCase, TransactionTestCase
+
+        if isinstance(instance, TransactionTestCase) and not isinstance(instance, TestCase):
+            return True
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> None:
+    """Restore migration-seeded protocol rows after transactional test flushes."""
+    global _rollout_seed_needs_restore
+    django_db_marker = request.node.get_closest_marker("django_db")
+    has_database_fixture = not _DATABASE_FIXTURES.isdisjoint(request.fixturenames)
+    if django_db_marker is None and not has_database_fixture:
+        return
+
+    is_transactional = _is_transactional_db_request(request, django_db_marker)
+    if not _rollout_seed_needs_restore and not is_transactional:
         return
 
     request.getfixturevalue("django_db_setup")
     django_db_blocker = request.getfixturevalue("django_db_blocker")
 
     from django.apps import apps
+    from django.db import connections
     from django.utils import timezone
 
     from django_ray.models import (
@@ -257,13 +298,15 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
     )
 
     with django_db_blocker.unblock():
-        TaskWorkerLeasePolicy.objects.get_or_create(singleton_key=1)
+        _, lease_created = TaskWorkerLeasePolicy.objects.get_or_create(singleton_key=1)
+        created_any = lease_created
         if apps.is_installed("testproject"):
             SampleAdmissionBudget = apps.get_model("testproject", "SampleAdmissionBudget")
-            SampleAdmissionBudget.objects.get_or_create(
+            _, budget_created = SampleAdmissionBudget.objects.get_or_create(
                 pk=1, defaults={"window_started_at": timezone.now()}
             )
-        policy, _ = TaskExecutionProtocolPolicy.objects.get_or_create(
+            created_any = created_any or budget_created
+        policy, policy_created = TaskExecutionProtocolPolicy.objects.get_or_create(
             singleton_key=1,
             defaults={
                 "schema_version": 1,
@@ -272,35 +315,38 @@ def _restore_execution_protocol_rollout_seed(request: pytest.FixtureRequest) -> 
                 "revision": 1,
             },
         )
+        created_any = created_any or policy_created
         if policy.legacy_worker_admission_enabled:
-            LegacyWorkerAdmissionToken.objects.get_or_create(singleton_key=1)
+            _, token_created = LegacyWorkerAdmissionToken.objects.get_or_create(singleton_key=1)
+            created_any = created_any or token_created
+        in_atomic_block = connections["default"].in_atomic_block
+    # Only clear the restore flag when the seed rows are guaranteed to survive
+    # test teardown: transactional tests flush on teardown, and rows newly
+    # created inside a rollback-isolated atomic block will be rolled back.
+    rows_persisted = not is_transactional and (not created_any or not in_atomic_block)
+    _rollout_seed_needs_restore = not rows_persisted
 
 
 @pytest.fixture(autouse=True)
-def _clear_django_ray_remote_caches():
-    try:
-        import django_ray.runner.ray_core as ray_core
-
+def _clear_django_ray_remote_caches() -> None:
+    ray_core = sys.modules.get("django_ray.runner.ray_core")
+    if ray_core is not None:
         ray_core._execute_django_task_remote_cached = None
-    except ImportError:
-        pass
 
-    try:
-        import django_ray.workflows as workflows
-
+    workflows = sys.modules.get("django_ray.workflows")
+    if workflows is not None:
         workflows._execute_workflow_step_remote_cached = None
         workflows._collect_workflow_results_remote_cached = None
         workflows._workflow_progress_actor_cached = None
         workflows._workflow_result_buffer_actor_cached = None
         workflows._workflow_result_fold_actor_cached = None
-    except ImportError:
-        pass
 
-    try:
-        import django_ray.runtime.distributed as distributed
-
+    distributed = sys.modules.get("django_ray.runtime.distributed")
+    if distributed is not None:
         distributed._parallel_map_remote_cached = None
         distributed._parallel_starmap_remote_cached = None
         distributed._scatter_gather_remote_cached = None
-    except ImportError:
-        pass
+
+    django_ray_logger = logging.getLogger("django_ray")
+    if not django_ray_logger.propagate:
+        django_ray_logger.propagate = True

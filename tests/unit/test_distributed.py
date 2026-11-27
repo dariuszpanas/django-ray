@@ -279,9 +279,9 @@ class TestDistributedUtilities:
 class TestDistributedWithRay:
     """Tests that require Ray to be running."""
 
-    @pytest.fixture(autouse=True)
+    @pytest.fixture(scope="class", autouse=True)
     def ray_cluster(self):
-        """Initialize Ray for these tests."""
+        """Initialize Ray once for this class's clean-teardown tests."""
         import ray
 
         init_local_ray()
@@ -477,43 +477,46 @@ class TestDistributedWithRay:
         from ray.exceptions import RayTaskError
 
         counter = ray.remote(_InvocationCounter).remote()
-        pickled_func = pickle.dumps(_counted_value)
-        controls = _strict_map_controls(pickled_func)
-        serialized = controls[0]
-        if tamper == "protocol":
-            value = json.loads(serialized)
-            value["execution_protocol_version"] += 1
-            serialized = json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
+        try:
+            pickled_func = pickle.dumps(_counted_value)
+            controls = _strict_map_controls(pickled_func)
+            serialized = controls[0]
+            if tamper == "protocol":
+                value = json.loads(serialized)
+                value["execution_protocol_version"] += 1
+                serialized = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                submitted_callable = pickled_func
+            else:
+                submitted_callable = pickle.dumps(_square)
+
+            remote = distributed._get_cached_remote("map").options(num_cpus=1.0, num_gpus=0.0)
+            # Ray necessarily deserializes these ordinary handler arguments first. The
+            # actor proves that the separately bound application callable is not
+            # invoked after the strict request is rejected; the mocked tests separately
+            # guard ``pickle.loads`` with a zero-call sentinel.
+            ref = remote.remote(
+                submitted_callable,
+                (counter, 17),
+                {},
+                serialized,
+                *controls[1:],
             )
-            submitted_callable = pickled_func
-        else:
-            submitted_callable = pickle.dumps(_square)
+            with pytest.raises(RayTaskError) as caught:
+                ray.get(ref)
 
-        remote = distributed._get_cached_remote("map").options(num_cpus=1.0, num_gpus=0.0)
-        # Ray necessarily deserializes these ordinary handler arguments first. The
-        # actor proves that the separately bound application callable is not
-        # invoked after the strict request is rejected; the mocked tests separately
-        # guard ``pickle.loads`` with a zero-call sentinel.
-        ref = remote.remote(
-            submitted_callable,
-            (counter, 17),
-            {},
-            serialized,
-            *controls[1:],
-        )
-        with pytest.raises(RayTaskError) as caught:
-            ray.get(ref)
-
-        cause = caught.value.cause
-        assert isinstance(cause, NestedExecutionRequestRejected)
-        assert cause.classification is classification
-        assert str(cause) == f"nested execution request rejected: {classification.value}"
-        assert cause.retryable is False
-        assert ray.get(counter.value.remote()) == 0
+            cause = caught.value.cause
+            assert isinstance(cause, NestedExecutionRequestRejected)
+            assert cause.classification is classification
+            assert str(cause) == f"nested execution request rejected: {classification.value}"
+            assert cause.retryable is False
+            assert ray.get(counter.value.remote()) == 0
+        finally:
+            ray.kill(counter, no_restart=True)
 
     def test_get_ray_resources_with_ray(self) -> None:
         """Test get_ray_resources returns actual resources."""

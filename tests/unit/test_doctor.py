@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import shutil
 import sqlite3
 import sys
 import time
@@ -411,10 +412,10 @@ def test_missing_migration_recorder_preserves_connection_observation(owned_datab
         connections[alias] = original
 
 
-@pytest.fixture
-def owned_database(tmp_path, django_db_blocker, transactional_db):
-    alias = "doctor_owned_test"
-    path = tmp_path / "owned.sqlite3"
+@pytest.fixture(scope="module")
+def _owned_database_template(tmp_path_factory, django_db_blocker):
+    alias = "doctor_owned_template"
+    path = tmp_path_factory.mktemp("doctor_owned_template") / "owned.sqlite3"
     source = {"ENGINE": "django.db.backends.sqlite3", "NAME": str(path)}
     configured = ConnectionHandler({"default": source}).settings["default"]
     wrapper = ConnectionHandler({"default": configured})["default"]
@@ -424,6 +425,27 @@ def owned_database(tmp_path, django_db_blocker, transactional_db):
     with django_db_blocker.unblock():
         try:
             call_command("migrate", database=alias, verbosity=0, interactive=False)
+        finally:
+            connections[alias].close()
+            del connections[alias]
+            del connections.databases[alias]
+    return path
+
+
+@pytest.fixture
+def owned_database(tmp_path, django_db_blocker, db, _owned_database_template):
+    del db
+    alias = "doctor_owned_test"
+    path = tmp_path / "owned.sqlite3"
+    shutil.copyfile(_owned_database_template, path)
+    source = {"ENGINE": "django.db.backends.sqlite3", "NAME": str(path)}
+    configured = ConnectionHandler({"default": source}).settings["default"]
+    wrapper = ConnectionHandler({"default": configured})["default"]
+    wrapper.alias = alias
+    connections.databases[alias] = configured
+    connections[alias] = wrapper
+    with django_db_blocker.unblock():
+        try:
             yield alias, path
         finally:
             connections[alias].close()

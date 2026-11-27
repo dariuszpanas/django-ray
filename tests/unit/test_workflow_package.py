@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import pickle
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -198,9 +199,18 @@ def test_repository_does_not_use_removed_workflow_imports() -> None:
         *sorted((ROOT / "testproject").rglob("*.py")),
         *sorted((ROOT / "tests").rglob("*.py")),
     ]
-
+    # Any Python import resolving to REMOVED_WORKFLOW_IMPORTS must either match
+    # one of those module paths (allowing whitespace around dots) or import from `django_ray`.
+    candidate_re = re.compile(
+        r"\bdjango_ray\s*\.\s*(?:admin_workflow_graph|workflow\s*\.\s*_compat|"
+        r"workflow_output_previews|workflow_plans|workflow_progress)"
+        r"|\bfrom\s+django_ray\s+import\b"
+    )
     for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        if candidate_re.search(source) is None:
+            continue
+        tree = ast.parse(source, filename=str(path))
         imported_modules = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

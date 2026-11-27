@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -22,15 +23,16 @@ def _git(root: Path, *arguments: str) -> bytes:
     return subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True).stdout
 
 
-@pytest.fixture
-def candidate(tmp_path: Path) -> tuple[Path, Path, Path]:
-    root = tmp_path / "checkout"
+@pytest.fixture(scope="module")
+def _candidate_template(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    base = tmp_path_factory.mktemp("source_candidate_template")
+    root = base / "checkout"
     root.mkdir()
     _git(root, "init", "-q")
     _git(root, "config", "user.name", "Source Test")
     _git(root, "config", "user.email", "source-test@example.invalid")
     _git(root, "config", "core.autocrlf", "false")
-    _git(root, "config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    _git(root, "config", "core.hooksPath", str(base / "no-hooks"))
     (root / ".github").mkdir()
     (root / source.DEFAULT_MANIFEST).write_text("{}\n", encoding="utf-8")
     (root / ".gitignore").write_text(".venv/\n__pycache__/\n", encoding="utf-8")
@@ -41,12 +43,22 @@ def candidate(tmp_path: Path) -> tuple[Path, Path, Path]:
     baseline.write_text("{}\n", encoding="utf-8")
     _git(root, "add", "--all")
     _git(root, "commit", "-qm", "test: prepare miniature committed source")
-    archive = tmp_path / "archive"
+    archive = base / "archive"
     archive.mkdir()
     with tarfile.open(
         fileobj=io.BytesIO(_git(root, "-c", "core.autocrlf=false", "archive", "HEAD"))
     ) as bundle:
         bundle.extractall(archive, filter="data")
+    return root, archive
+
+
+@pytest.fixture
+def candidate(tmp_path: Path, _candidate_template: tuple[Path, Path]) -> tuple[Path, Path, Path]:
+    template_root, template_archive = _candidate_template
+    root = tmp_path / "checkout"
+    archive = tmp_path / "archive"
+    shutil.copytree(template_root, root)
+    shutil.copytree(template_archive, archive)
     return root, archive, tmp_path / "source.json"
 
 
