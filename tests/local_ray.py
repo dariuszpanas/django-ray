@@ -60,14 +60,14 @@ def use_shared_local_ray() -> bool:
 
 
 def ensure_shared_local_ray() -> Any:
-    """Boot the bounded session-shared local Ray runtime once and return the ray module."""
+    """Boot the bounded dashboard-free session Ray runtime once and return the ray module."""
     global _shared_local_ray_active
     import ray
 
     if not _shared_local_ray_active:
         init_local_ray(
             num_cpus=MAX_LOGICAL_CPUS,
-            include_dashboard=True,
+            include_dashboard=False,
             resources=dict(_SHARED_LOCAL_RAY_RESOURCES),
         )
         _shared_local_ray_active = True
@@ -94,11 +94,15 @@ def local_ray_runtime(
     include_dashboard: bool = False,
     resources: dict[str, float] | None = None,
     wrap_startup_error: bool = False,
+    isolated: bool = False,
 ) -> Generator[Any, None, None]:
-    """Yield the shared session runtime when opted in, else an isolated bounded runtime."""
-    if use_shared_local_ray():
+    """Yield the shared session runtime when compatible, else an isolated bounded runtime."""
+    if use_shared_local_ray() and not isolated and not include_dashboard:
         yield ensure_shared_local_ray()
         return
+
+    if _shared_local_ray_active:
+        shutdown_shared_local_ray()
 
     import ray
 

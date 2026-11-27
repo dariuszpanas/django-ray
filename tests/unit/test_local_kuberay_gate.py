@@ -9,8 +9,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -2329,24 +2331,32 @@ def test_overlay_copy_replaces_tags_without_editing_repository(tmp_path: Path) -
     ) == original
 
 
-def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound(tmp_path: Path) -> None:
+@lru_cache(maxsize=1)
+def _render_real_kuberay_overlay_yaml() -> str | None:
     kubectl = shutil.which("kubectl")
     if kubectl is None:
-        pytest.skip("kubectl is required to render the KubeRay overlay")
-    overlay = configure_overlay_copy(
-        source_k8s=ROOT / "k8s",
-        destination_k8s=tmp_path / "k8s",
-        tag=TAG,
-    )
-    result = subprocess.run(
-        [kubectl, "kustomize", str(overlay)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+        return None
+    with tempfile.TemporaryDirectory(prefix="kuberay-overlay-") as temp_dir:
+        overlay = configure_overlay_copy(
+            source_k8s=ROOT / "k8s",
+            destination_k8s=Path(temp_dir) / "k8s",
+            tag=TAG,
+        )
+        return subprocess.run(
+            [kubectl, "kustomize", str(overlay)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
 
-    resources = load_rendered_resources(result.stdout)
+
+def test_real_kuberay_overlay_is_namespace_scoped_and_source_bound() -> None:
+    rendered = _render_real_kuberay_overlay_yaml()
+    if rendered is None:
+        pytest.skip("kubectl is required to render the KubeRay overlay")
+
+    resources = load_rendered_resources(rendered)
     inspect_rendered_resources(resources, namespace=EXPECTED_NAMESPACE, tag=TAG)
     inspect_runtime_env_encryption_overlay(resources)
     inspect_ray_job_request_storage_overlay(resources)
@@ -2447,22 +2457,10 @@ def test_preserved_secret_rejects_runtime_env_selector_injection(
         gate._secret_token()
 
 
-def test_real_kuberay_overlay_pins_exact_lean_ray_topology(tmp_path: Path) -> None:
-    kubectl = shutil.which("kubectl")
-    if kubectl is None:
+def test_real_kuberay_overlay_pins_exact_lean_ray_topology() -> None:
+    rendered = _render_real_kuberay_overlay_yaml()
+    if rendered is None:
         pytest.skip("kubectl is required to render the KubeRay overlay")
-    overlay = configure_overlay_copy(
-        source_k8s=ROOT / "k8s",
-        destination_k8s=tmp_path / "k8s",
-        tag=TAG,
-    )
-    rendered = subprocess.run(
-        [kubectl, "kustomize", str(overlay)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
     ray_cluster = next(
         resource
         for resource in load_rendered_resources(rendered)

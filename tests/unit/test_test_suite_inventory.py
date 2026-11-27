@@ -869,7 +869,10 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
     assert portable["uses"].startswith("dariuszpanas/pyrn@")
     assert portable["with"]["cov-sysmon"] == "true"
     assert portable["with"]["cov-out"] == ".coverage"
-    assert portable["with"]["markers"] == "not live_cluster and not real_ray"
+    assert (
+        portable["with"]["markers"]
+        == "not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+    )
 
     real_ray = by_name["Run real_ray tests"]
     assert real_ray["if"] == "matrix.python-version == '3.12'"

@@ -891,6 +891,7 @@ def ray_cluster():
         num_cpus=4,
         include_dashboard=True,
         resources={"result_buffer": 1},
+        isolated=True,
     ) as ray:
         yield ray
 
