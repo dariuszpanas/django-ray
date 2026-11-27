@@ -62,9 +62,14 @@ jobs:
             --repo . \
             -w auto \
             --role verify \
+            --cov-sysmon \
+            --cov-out "$OUT_DIR/.coverage" \
             --metrics-kv \
             --receipt-out "$OUT_DIR/run-receipt.json" \
             -m "not real_ray and not live_cluster and not postgresql"
+
+          COVERAGE_FILE="$OUT_DIR/.coverage" .venv/bin/python -m coverage report --fail-under=0 > "$OUT_DIR/coverage-summary.txt"
+          tail -n 15 "$OUT_DIR/coverage-summary.txt"
 
       - name: Retain bounded Stage 1 pyrn receipts
         if: always()

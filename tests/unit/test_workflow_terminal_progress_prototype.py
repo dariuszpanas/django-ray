@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
 from scripts.workflow_terminal_progress_prototype import MAX_METADATA_BYTES, execute_with_metadata
+from tests.local_ray import init_local_ray
+
+
+@pytest.fixture(scope="module")
+def ray_cluster() -> Iterator[object]:
+    """Share one bounded local Ray runtime across this module's clean-teardown cases."""
+    import ray
+
+    assert not ray.is_initialized()
+    init_local_ray(num_cpus=2)
+    try:
+        yield ray
+    finally:
+        ray.shutdown(wait_for_processes=True)
 
 
 def test_admitted_capture_keeps_one_bounded_latest_value():

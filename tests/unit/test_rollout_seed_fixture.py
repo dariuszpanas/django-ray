@@ -65,3 +65,65 @@ print('rollout seed verified')
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "rollout seed verified" in result.stdout
+
+
+@pytest.mark.django_db(transaction=True)
+def test_rollout_seed_survives_transactional_flush_followed_by_rollback_db_tests():
+    """Rows recreated inside a rollback DB transaction must not clear the restore flag."""
+    import contextlib
+    from types import SimpleNamespace
+
+    from django.core.management import call_command
+    from django.db import transaction
+
+    from django_ray.models import (
+        LegacyWorkerAdmissionToken,
+        TaskExecutionProtocolPolicy,
+        TaskWorkerLeasePolicy,
+    )
+    from tests import conftest as root_conftest
+
+    values = {
+        "django_db_setup": None,
+        "django_db_blocker": SimpleNamespace(unblock=contextlib.nullcontext),
+    }
+    ordinary_db_request = SimpleNamespace(
+        node=SimpleNamespace(
+            get_closest_marker=lambda name: (
+                SimpleNamespace(args=(), kwargs={}) if name == "django_db" else None
+            )
+        ),
+        fixturenames=["db"],
+        getfixturevalue=values.__getitem__,
+    )
+
+    # 1. Transactional teardown flushes the database and flags restore needed.
+    call_command("flush", verbosity=0, interactive=False)
+    root_conftest._rollout_seed_needs_restore = True
+
+    # 2. First ordinary django_db test recreates rows inside an atomic block that rolls back.
+    with transaction.atomic():
+        root_conftest._restore_execution_protocol_rollout_seed.__wrapped__(ordinary_db_request)
+        assert TaskWorkerLeasePolicy.objects.exists()
+        assert TaskExecutionProtocolPolicy.objects.exists()
+        assert LegacyWorkerAdmissionToken.objects.exists()
+        transaction.set_rollback(True)
+
+    assert not TaskExecutionProtocolPolicy.objects.exists()
+    assert root_conftest._rollout_seed_needs_restore is True
+
+    # 3. Second ordinary django_db test must still reseed instead of seeing an empty table.
+    with transaction.atomic():
+        root_conftest._restore_execution_protocol_rollout_seed.__wrapped__(ordinary_db_request)
+        assert TaskWorkerLeasePolicy.objects.exists()
+        assert TaskExecutionProtocolPolicy.objects.exists()
+        assert LegacyWorkerAdmissionToken.objects.exists()
+        transaction.set_rollback(True)
+
+    # 4. Once rows exist persistently outside an atomic block, rollback tests clear the flag.
+    root_conftest._restore_execution_protocol_rollout_seed.__wrapped__(ordinary_db_request)
+    assert root_conftest._rollout_seed_needs_restore is False
+    root_conftest._rollout_seed_needs_restore = True
+    with transaction.atomic():
+        root_conftest._restore_execution_protocol_rollout_seed.__wrapped__(ordinary_db_request)
+        assert root_conftest._rollout_seed_needs_restore is False

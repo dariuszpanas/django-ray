@@ -11,7 +11,7 @@
 .PHONY: docs-build docs-build-strict docs-serve workflow-check spelling-check
 .PHONY: linux-test-catalogue linux-test-stage linux-test-aggregate
 .PHONY: repository-check pre-push-check workflow-lint
-.PHONY: pyrn-doctor pyrn-plan test-pyrn test-pyrn-tia
+.PHONY: pyrn-doctor pyrn-plan test-pyrn test-pyrn-tia test-pyrn-cov pyrn-daemon-start pyrn-daemon-stop pyrn-daemon-status
 
 # Include optional modules (comment out if not needed)
 -include mk/docker.mk
@@ -19,6 +19,7 @@
 -include mk/tls.mk
 -include mk/loadtest.mk
 
+export COVERAGE_CORE ?= sysmon
 COVERAGE_GLOBAL_MIN ?= 95
 COVERAGE_WORKER_MIN ?= 90
 COVERAGE_RAY_JOB_MIN ?= 90
@@ -154,6 +155,20 @@ test-pyrn-tia:
 	$(PYRN) run --repo . --tia --base "$(COMMIT_BASE)" --cache --role agent --tier strict \
 		-w auto --metrics-kv \
 		-m "not real_ray and not live_cluster and not postgresql"
+
+test-pyrn-cov:
+	$(PYRN) run --repo . -w auto --role verify --cov-sysmon --cov-out .coverage --metrics-kv \
+		-m "not real_ray and not live_cluster and not postgresql"
+	coverage report --fail-under=0
+
+pyrn-daemon-start:
+	$(PYRN) daemon start --repo . -w auto --role agent
+
+pyrn-daemon-stop:
+	$(PYRN) daemon stop --repo . --role agent
+
+pyrn-daemon-status:
+	$(PYRN) daemon status --repo . --role agent
 
 # Run unit tests only
 test-unit:

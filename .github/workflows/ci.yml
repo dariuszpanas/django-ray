@@ -188,6 +188,8 @@ jobs:
       PYTHONFAULTHANDLER: "1"
       # Reuse the synchronized interpreter instead of rebuilding uv virtual environments.
       RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+      # Use Python 3.12+ PEP 669 sys.monitoring coverage instead of slow ctrace hooks.
+      COVERAGE_CORE: "sysmon"
       COVERAGE_GLOBAL_MIN: "95"
       COVERAGE_WORKER_MIN: "90"
       COVERAGE_RAY_JOB_MIN: "90"
@@ -656,6 +658,7 @@ jobs:
     name: Testproject Smoke
     runs-on: ubuntu-latest
     env:
+      COVERAGE_CORE: "sysmon"
       COVERAGE_TESTPROJECT_MIN: "80"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -792,9 +795,18 @@ jobs:
           uv sync --python ${{ matrix.python-version }}
 
       - name: Run tests
+        env:
+          PYTHONFAULTHANDLER: "1"
+          RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+          PYRN_SOURCE: pyrn==0.1.0
         run: >-
-          uv run --no-sync --python ${{ matrix.python-version }}
-          pytest -m "not live_cluster and not real_ray" -q
+          uvx --isolated "$PYRN_SOURCE" run
+          --repo .
+          --python .venv/bin/python
+          -w auto
+          --role verify
+          --metrics-kv
+          -m "not live_cluster and not real_ray"
 
   ray-data-golden-path:
     if: github.event_name != 'pull_request_target'

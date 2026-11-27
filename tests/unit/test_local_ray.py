@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -122,8 +123,12 @@ def test_non_linux_is_rejected_before_startup_or_cleanup(fake_ray, monkeypatch) 
 
 def test_test_sources_use_owned_allocation_or_explicit_live_cluster() -> None:
     direct_calls = []
+    ray_init_re = re.compile(r"\bray\s*\.\s*init\b")
     for path in sorted((ROOT / "tests").rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        if ray_init_re.search(source) is None:
+            continue
+        tree = ast.parse(source)
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)

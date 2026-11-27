@@ -17,4 +17,4 @@ extra_full_triggers = [
 
 [runner]
 worker_mem_mb = 350
-pure_autouse_guards = []
+pure_autouse_guards = ["_restore_execution_protocol_rollout_seed"]

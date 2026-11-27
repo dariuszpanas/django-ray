@@ -1,14 +1,29 @@
 """Final workflow node outcomes must agree with retrying callable outcomes."""
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import pytest
 
+from tests.local_ray import init_local_ray
 from tests.unit.test_remote import (
     _WORKFLOW_RUN_IDENTITY,
     _execute_bound_workflow_step,
     _progress_actor,
 )
+
+
+@pytest.fixture(scope="module")
+def ray_cluster() -> Iterator[object]:
+    """Share one bounded local Ray runtime across this module's clean-teardown cases."""
+    import ray
+
+    assert not ray.is_initialized()
+    init_local_ray(num_cpus=2)
+    try:
+        yield ray
+    finally:
+        ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.parametrize("failures", [0, 1, 2])

@@ -1,12 +1,15 @@
 """Offline parser tests; synthetic provenance never establishes live CI success."""
 
+import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import traceback
 import urllib.request
 from dataclasses import asdict, replace
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -21,12 +24,25 @@ LATENCY = "job-latency-qualification/latency-receipts/execution-manifest.json"
 CANCEL = "cancellation-qualification/cancellation-receipts/execution-manifest.json"
 
 
-def fixture_context():
+@lru_cache(maxsize=1)
+def _fixture_context_cached():
     return json.loads((FIXTURES / "context.json").read_bytes())
 
 
+def fixture_context():
+    return copy.deepcopy(_fixture_context_cached())
+
+
+@lru_cache(maxsize=1)
+def _fixture_files_cached():
+    return {
+        path: value.encode()
+        for path, value in json.loads((FIXTURES / "files.json").read_bytes()).items()
+    }
+
+
 def context(attempt=1):
-    fixture = fixture_context()
+    fixture = _fixture_context_cached()
     observation = next(row for row in fixture["observations"] if row["attempt"] == attempt)
     return results.ExpectedRun(
         **{
@@ -52,12 +68,22 @@ def inventory(files):
     )
 
 
-def acquisition(expected, files):
-    producers = {
+@lru_cache(maxsize=1)
+def _default_inventory_cached():
+    return inventory(_fixture_files_cached())
+
+
+@lru_cache(maxsize=1)
+def _producers_cached():
+    return {
         results.Cell(**producer["cell"]): producer
-        for observation in fixture_context()["observations"]
+        for observation in _fixture_context_cached()["observations"]
         for producer in observation["producers"]
     }
+
+
+def acquisition(expected, files, *, verified_files=None):
+    producers = _producers_cached()
     return results.VerifiedRun(
         expected.execution_commit,
         expected.execution_tree,
@@ -74,22 +100,28 @@ def acquisition(expected, files):
             )
             for cell in expected.selected
         ),
-        inventory(files),
+        _default_inventory_cached()
+        if verified_files is None and files is _fixture_files_cached()
+        else (verified_files if verified_files is not None else inventory(files)),
     )
 
 
-@pytest.fixture
-def bundle(tmp_path):
-    files = {
-        path: value.encode()
-        for path, value in json.loads((FIXTURES / "files.json").read_bytes()).items()
-    }
-    for path, value in files.items():
-        destination = tmp_path / path
+@pytest.fixture(scope="module")
+def _bundle_template_dir(tmp_path_factory):
+    root = tmp_path_factory.mktemp("test_planning_receipts_template")
+    for path, value in _fixture_files_cached().items():
+        destination = root / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(value)
+    return root
+
+
+@pytest.fixture
+def bundle(tmp_path, _bundle_template_dir):
+    shutil.copytree(_bundle_template_dir, tmp_path, dirs_exist_ok=True)
+    cached_files = _fixture_files_cached()
     expected = context()
-    return tmp_path, expected, acquisition(expected, files), files
+    return tmp_path, expected, acquisition(expected, cached_files), dict(cached_files)
 
 
 def normalize(bundle):
