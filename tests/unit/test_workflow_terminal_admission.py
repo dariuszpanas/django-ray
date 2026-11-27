@@ -1,6 +1,5 @@
 """Aggregate terminal admission and honest summary-only degradation."""
 
-from collections.abc import Iterator
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -9,15 +8,7 @@ import pytest
 from django_ray.workflow.progress.limits import WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS
 from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 from django_ray.workflows import _RayExecutor
-from tests.local_ray import local_ray_runtime
 from tests.unit.test_workflow_progress_publication import _execution, _identity
-
-
-@pytest.fixture(scope="module")
-def ray_cluster() -> Iterator[object]:
-    """Share one bounded local Ray runtime across this module's clean-teardown cases."""
-    with local_ray_runtime(num_cpus=2) as ray:
-        yield ray
 
 
 def _executor(monkeypatch):
@@ -116,7 +107,7 @@ def test_slow_map_reporting_is_bounded_across_lifetime_admission(monkeypatch):
 
 @pytest.mark.real_ray
 @pytest.mark.parametrize("unavailable", [False, True])
-def test_native_map_lifetime_admission_bounds_pending_calls(ray_cluster, unavailable):
+def test_native_map_lifetime_admission_bounds_pending_calls(module_ray_cluster, unavailable):
     """Retired maps cannot multiply unresolved calls beyond lifetime admission."""
     import asyncio
     import time
@@ -142,11 +133,11 @@ def test_native_map_lifetime_admission_bounds_pending_calls(ray_cluster, unavail
         async def observed(self):
             return self.events
 
-    collector = ray_cluster.remote(num_cpus=0, max_restarts=0, max_concurrency=32)(
+    collector = module_ray_cluster.remote(num_cpus=0, max_restarts=0, max_concurrency=32)(
         Collector
     ).remote()
     try:
-        assert ray_cluster.get(collector.observed.remote(), timeout=10) == []
+        assert module_ray_cluster.get(collector.observed.remote(), timeout=10) == []
         executor = _native_bound_executor(collector)
         executor.workflow_progress_limits = replace(
             WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS, topology_node_max_items=4
@@ -169,7 +160,7 @@ def test_native_map_lifetime_admission_bounds_pending_calls(ray_cluster, unavail
         def observe_count(kind, expected):
             deadline = time.monotonic() + 10
             while True:
-                events = ray_cluster.get(collector.observed.remote(), timeout=10)
+                events = module_ray_cluster.get(collector.observed.remote(), timeout=10)
                 count = sum(name == kind for name, _size in events)
                 assert count <= expected
                 if count == expected:
@@ -182,11 +173,11 @@ def test_native_map_lifetime_admission_bounds_pending_calls(ray_cluster, unavail
             limit * executor.workflow_progress_limits.event_wire_max_bytes
         )
         if unavailable:
-            ray_cluster.kill(collector, no_restart=True)
-            _wait_for_actor_death(ray_cluster, collector, "observed")
+            module_ray_cluster.kill(collector, no_restart=True)
+            _wait_for_actor_death(module_ray_cluster, collector, "observed")
             for producer in executor._map_progress_producers.values():
-                with pytest.raises(ray_cluster.exceptions.RayActorError):
-                    ray_cluster.get(producer._outstanding, timeout=10)
+                with pytest.raises(module_ray_cluster.exceptions.RayActorError):
+                    module_ray_cluster.get(producer._outstanding, timeout=10)
         for index in range(limit):
             executor.map_finished(
                 str(index), "map", submitted=1000, completed=1000, input_exhausted=True
@@ -233,7 +224,7 @@ def test_native_map_lifetime_admission_bounds_pending_calls(ray_cluster, unavail
             assert all(report["pending_acknowledgements"] == 0 for report in reports)
             assert all(report["terminal_handoff"] == "not_needed" for report in reports)
     finally:
-        ray_cluster.kill(collector, no_restart=True)
+        module_ray_cluster.kill(collector, no_restart=True)
 
 
 @pytest.mark.django_db
