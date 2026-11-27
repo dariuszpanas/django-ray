@@ -885,52 +885,61 @@ def test_buffered_map_cancellation_cleans_dependencies_and_actor(
     assert len(executor.cancelled) == 2
 
 
-@pytest.mark.real_ray
-def test_real_ray_production_payload_stays_out_of_coordinator_until_reducer() -> None:
+@pytest.fixture(scope="module")
+def ray_cluster():
     import ray
 
-    init_local_ray(num_cpus=4)
+    assert not ray.is_initialized()
+    init_local_ray(num_cpus=4, include_dashboard=True, resources={"result_buffer": 1})
     try:
-        payload_bytes = 64 * 1024
-        workflow = chain(
-            step(identity),
-            map_step(
-                build_k8s_resource,
-                os.getpid(),
-                payload_bytes,
-            )
-            .with_limits(
-                max_concurrency=2,
-                max_items=8,
-            )
-            .with_result_buffer(
-                max_serialized_bytes=2 * 1024 * 1024,
-                actor_options={
-                    "num_cpus": 0.25,
-                    "memory": 4 * 1024 * 1024,
-                    "scheduling_strategy": "SPREAD",
-                },
-            ),
-            step(reduce_k8s_resources),
-        )
-
-        assert workflow.run([0, 1, 2, 3], use_ray=True) == {
-            "count": 4,
-            "names": ["workload-0", "workload-1", "workload-2", "workload-3"],
-            "manifest_bytes": 4 * payload_bytes,
-        }
+        yield ray
     finally:
         ray.shutdown(wait_for_processes=True)
 
 
 @pytest.mark.real_ray
-def test_real_ray_overflow_stops_admission_and_preserves_actor_error() -> None:
-    import ray
+def test_real_ray_production_payload_stays_out_of_coordinator_until_reducer(
+    ray_cluster: Any,
+) -> None:
+    del ray_cluster
+    payload_bytes = 64 * 1024
+    workflow = chain(
+        step(identity),
+        map_step(
+            build_k8s_resource,
+            os.getpid(),
+            payload_bytes,
+        )
+        .with_limits(
+            max_concurrency=2,
+            max_items=8,
+        )
+        .with_result_buffer(
+            max_serialized_bytes=2 * 1024 * 1024,
+            actor_options={
+                "num_cpus": 0.25,
+                "memory": 4 * 1024 * 1024,
+                "scheduling_strategy": "SPREAD",
+            },
+        ),
+        step(reduce_k8s_resources),
+    )
+
+    assert workflow.run([0, 1, 2, 3], use_ray=True) == {
+        "count": 4,
+        "names": ["workload-0", "workload-1", "workload-2", "workload-3"],
+        "manifest_bytes": 4 * payload_bytes,
+    }
+
+
+@pytest.mark.real_ray
+def test_real_ray_overflow_stops_admission_and_preserves_actor_error(
+    ray_cluster: Any,
+) -> None:
     from ray.exceptions import RayTaskError
 
-    init_local_ray(num_cpus=3)
+    tracker = ray_cluster.remote(num_cpus=0)(_RealEventTracker).remote()
     try:
-        tracker = ray.remote(num_cpus=0)(_RealEventTracker).remote()
         workflow = chain(
             step(identity),
             map_step(build_oversized_resource, tracker)
@@ -944,98 +953,90 @@ def test_real_ray_overflow_stops_admission_and_preserves_actor_error() -> None:
         with pytest.raises(RayTaskError, match="max_serialized_bytes=256"):
             workflow.run(range(10), use_ray=True)
 
-        assert ray.get(tracker.snapshot.remote()) == [0]
+        assert ray_cluster.get(tracker.snapshot.remote()) == [0]
     finally:
-        ray.shutdown(wait_for_processes=True)
+        ray_cluster.kill(tracker, no_restart=True)
 
 
 @pytest.mark.real_ray
-def test_real_ray_actor_resources_direct_returns_and_success_cleanup() -> None:
-    import ray
+def test_real_ray_actor_resources_direct_returns_and_success_cleanup(
+    ray_cluster: Any,
+) -> None:
     from ray.exceptions import RayActorError
     from ray.util.state import get_actor
 
-    init_local_ray(num_cpus=2, include_dashboard=True, resources={"result_buffer": 1})
-    try:
-        options = normalize_result_buffer_actor_options(
-            {
-                "num_cpus": 0.25,
-                "memory": 2 * 1024 * 1024,
-                "resources": {"result_buffer": 0.5},
-                "scheduling_strategy": "SPREAD",
-            },
-            max_serialized_bytes=1024 * 1024,
-        )
-        assert options["max_concurrency"] == RESULT_BUFFER_ACTOR_MAX_CONCURRENCY == 1
-        assert options["max_pending_calls"] == RESULT_BUFFER_ACTOR_MAX_PENDING_CALLS == 2
-        executor = _RayExecutor()
-        session = executor.start_result_buffer(
-            max_items=2,
-            max_serialized_bytes=1024 * 1024,
-            actor_options=options,
-        )
-        actor_state = get_actor(session.actor._actor_id.hex())
-        assert actor_state is not None
-        assert actor_state.required_resources == {
-            "CPU": 0.25,
-            "memory": float(2 * 1024 * 1024),
-            "result_buffer": 0.5,
-        }
-        assert actor_state.is_detached is False
-        assert actor_state.num_restarts == 0
+    options = normalize_result_buffer_actor_options(
+        {
+            "num_cpus": 0.25,
+            "memory": 2 * 1024 * 1024,
+            "resources": {"result_buffer": 0.5},
+            "scheduling_strategy": "SPREAD",
+        },
+        max_serialized_bytes=1024 * 1024,
+    )
+    assert options["max_concurrency"] == RESULT_BUFFER_ACTOR_MAX_CONCURRENCY == 1
+    assert options["max_pending_calls"] == RESULT_BUFFER_ACTOR_MAX_PENDING_CALLS == 2
+    executor = _RayExecutor()
+    session = executor.start_result_buffer(
+        max_items=2,
+        max_serialized_bytes=1024 * 1024,
+        actor_options=options,
+    )
+    actor_state = get_actor(session.actor._actor_id.hex())
+    assert actor_state is not None
+    assert actor_state.required_resources == {
+        "CPU": 0.25,
+        "memory": float(2 * 1024 * 1024),
+        "result_buffer": 0.5,
+    }
+    assert actor_state.is_detached is False
+    assert actor_state.num_restarts == 0
 
-        executor.append_result_buffer(
-            session,
-            index=0,
-            value=ray.put({"namespace": "application-0"}),
-        )
-        executor.append_result_buffer(
-            session,
-            index=1,
-            value=ray.put({"namespace": "application-1"}),
-        )
-        payload_ref = executor.finalize_result_buffer(session, expected_items=2)
+    executor.append_result_buffer(
+        session,
+        index=0,
+        value=ray_cluster.put({"namespace": "application-0"}),
+    )
+    executor.append_result_buffer(
+        session,
+        index=1,
+        value=ray_cluster.put({"namespace": "application-1"}),
+    )
+    payload_ref = executor.finalize_result_buffer(session, expected_items=2)
 
-        assert isinstance(payload_ref, ray.ObjectRef)
-        payload = ray.get(payload_ref)
-        assert payload == [
-            {"namespace": "application-0"},
-            {"namespace": "application-1"},
-        ]
-        assert not isinstance(payload, ray.ObjectRef)
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                ray.get(session.actor.ready.remote(), timeout=0.5)
-            except RayActorError:
-                break
-            if time.monotonic() >= deadline:
-                pytest.fail("result buffer survived successful cleanup")
-            time.sleep(0.05)
-    finally:
-        ray.shutdown(wait_for_processes=True)
+    assert isinstance(payload_ref, ray_cluster.ObjectRef)
+    payload = ray_cluster.get(payload_ref)
+    assert payload == [
+        {"namespace": "application-0"},
+        {"namespace": "application-1"},
+    ]
+    assert not isinstance(payload, ray_cluster.ObjectRef)
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            ray_cluster.get(session.actor.ready.remote(), timeout=0.5)
+        except RayActorError:
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("result buffer survived successful cleanup")
+        time.sleep(0.05)
 
 
 @pytest.mark.real_ray
-def test_real_ray_non_detached_buffer_dies_with_owner() -> None:
-    import ray
+def test_real_ray_non_detached_buffer_dies_with_owner(ray_cluster: Any) -> None:
     from ray.exceptions import RayActorError, RayTaskError
 
-    init_local_ray(num_cpus=2)
-    try:
-        owner = ray.remote(num_cpus=0.1)(_ResultBufferOwner).remote()
-        child = ray.get(owner.spawn.remote())
-        assert validate_result_buffer_ack(ray.get(child.ready.remote()), state="ready")
+    owner = ray_cluster.remote(num_cpus=0.1)(_ResultBufferOwner).remote()
+    child = ray_cluster.get(owner.spawn.remote())
+    assert validate_result_buffer_ack(ray_cluster.get(child.ready.remote()), state="ready")
 
-        ray.kill(owner, no_restart=True)
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                ray.get(child.ready.remote(), timeout=0.5)
-            except (RayActorError, RayTaskError):
-                break
-            if time.monotonic() >= deadline:
-                pytest.fail("non-detached result buffer survived owner death")
-            time.sleep(0.05)
-    finally:
-        ray.shutdown(wait_for_processes=True)
+    ray_cluster.kill(owner, no_restart=True)
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            ray_cluster.get(child.ready.remote(), timeout=0.5)
+        except (RayActorError, RayTaskError):
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("non-detached result buffer survived owner death")
+        time.sleep(0.05)

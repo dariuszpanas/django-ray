@@ -3072,16 +3072,22 @@ def test_ray_executor_does_not_write_legacy_snapshot_after_cancellation(
     assert workflow_progress_warning_records == []
 
 
-@pytest.mark.real_ray
-def test_workflow_executes_on_real_ray() -> None:
+@pytest.fixture(scope="module")
+def ray_cluster():
     import ray
 
-    init_local_ray()
+    assert not ray.is_initialized()
+    init_local_ray(num_cpus=4)
     try:
-        outer_task = ray.remote(run_nested_workflow)
-        assert ray.get(outer_task.remote(5)) == 40
+        yield ray
     finally:
         ray.shutdown(wait_for_processes=True)
+
+
+@pytest.mark.real_ray
+def test_workflow_executes_on_real_ray(ray_cluster: Any) -> None:
+    outer_task = ray_cluster.remote(run_nested_workflow)
+    assert ray_cluster.get(outer_task.remote(5)) == 40
 
 
 @pytest.mark.django_db
@@ -3089,8 +3095,9 @@ def test_workflow_executes_on_real_ray() -> None:
 def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
     monkeypatch,
     settings,
+    ray_cluster: Any,
 ) -> None:
-    import ray
+    del ray_cluster
 
     import django_ray.workflows as workflow_module
     from django_ray.models import RayTaskExecution, TaskState, WorkflowProgressRunStorage
@@ -3122,37 +3129,33 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
             actor_creation_attempts.append("created")
             raise AssertionError("actor-free reporting policy created a progress actor")
 
-    init_local_ray()
-    try:
-        remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
-        monkeypatch.setattr(
-            workflow_module,
-            "_get_cached_workflow_remotes",
-            lambda: (remote_step, remote_collect, ForbiddenProgressActor),
+    remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
+    monkeypatch.setattr(
+        workflow_module,
+        "_get_cached_workflow_remotes",
+        lambda: (remote_step, remote_collect, ForbiddenProgressActor),
+    )
+    results = {}
+    for (policy, requested_strategy), execution in executions.items():
+        settings.DJANGO_RAY = {
+            **settings.DJANGO_RAY,
+            "WORKFLOW_PROGRESS_REPORTING_POLICY": (
+                policy if requested_strategy is not None else "full"
+            ),
+        }
+        workflow = step(report_and_increment)
+        configured = (
+            workflow.with_progress_reporting(policy)
+            if requested_strategy is None
+            else workflow.with_execution_strategy(requested_strategy)
         )
-        results = {}
-        for (policy, requested_strategy), execution in executions.items():
-            settings.DJANGO_RAY = {
-                **settings.DJANGO_RAY,
-                "WORKFLOW_PROGRESS_REPORTING_POLICY": (
-                    policy if requested_strategy is not None else "full"
-                ),
-            }
-            workflow = step(report_and_increment)
-            configured = (
-                workflow.with_progress_reporting(policy)
-                if requested_strategy is None
-                else workflow.with_execution_strategy(requested_strategy)
-            )
-            with durable_task_execution(
-                execution.pk,
-                attempt_number=execution.attempt_number,
-                execution_generation=execution.execution_generation,
-                **_strict_workflow_fixture_identity(execution),
-            ):
-                results[policy, requested_strategy] = configured.run(5, use_ray=True)
-    finally:
-        ray.shutdown(wait_for_processes=True)
+        with durable_task_execution(
+            execution.pk,
+            attempt_number=execution.attempt_number,
+            execution_generation=execution.execution_generation,
+            **_strict_workflow_fixture_identity(execution),
+        ):
+            results[policy, requested_strategy] = configured.run(5, use_ray=True)
 
     assert actor_creation_attempts == []
     assert results == dict.fromkeys(cases, (False, 6))
@@ -3168,12 +3171,9 @@ def test_real_ray_actor_free_reporting_policies_create_no_actor_evidence(
 
 
 @pytest.mark.real_ray
-def test_real_ray_bounded_map_preserves_order_and_limits_concurrency() -> None:
-    import ray
-
-    init_local_ray(num_cpus=4)
+def test_real_ray_bounded_map_preserves_order_and_limits_concurrency(ray_cluster: Any) -> None:
+    tracker = ray_cluster.remote(num_cpus=0)(_ConcurrencyTracker).remote()
     try:
-        tracker = ray.remote(num_cpus=0)(_ConcurrencyTracker).remote()
         workflow = chain(
             step(identity),
             map_step(
@@ -3185,19 +3185,17 @@ def test_real_ray_bounded_map_preserves_order_and_limits_concurrency() -> None:
         items = [0, 1, 2, 3]
 
         assert workflow.run(items, use_ray=True) == [0, 1, 2, 3]
-        assert ray.get(tracker.snapshot.remote()) == (0, 2)
+        assert ray_cluster.get(tracker.snapshot.remote()) == (0, 2)
     finally:
-        ray.shutdown(wait_for_processes=True)
+        ray_cluster.kill(tracker, no_restart=True)
 
 
 @pytest.mark.real_ray
-def test_real_ray_mapped_group_cleans_sibling_ref_before_failure_returns() -> None:
-    import ray
+def test_real_ray_mapped_group_cleans_sibling_ref_before_failure_returns(ray_cluster: Any) -> None:
     from ray.exceptions import RayTaskError
 
-    init_local_ray(num_cpus=4)
+    tracker = ray_cluster.remote(num_cpus=0)(_LifecycleTracker).remote()
     try:
-        tracker = ray.remote(num_cpus=0)(_LifecycleTracker).remote()
         cancel_timeout_seconds = 1.5
         workflow = chain(
             step(identity),
@@ -3225,7 +3223,7 @@ def test_real_ray_mapped_group_cleans_sibling_ref_before_failure_returns() -> No
             required_events = {"failing_started", "sibling_started"}
             deadline = time.monotonic() + 15.0
             while True:
-                events = ray.get(tracker.snapshot.remote())
+                events = ray_cluster.get(tracker.snapshot.remote())
                 if required_events <= set(events):
                     break
                 if workflow_result.done():
@@ -3236,28 +3234,26 @@ def test_real_ray_mapped_group_cleans_sibling_ref_before_failure_returns() -> No
                 time.sleep(0.01)
 
             started_at = time.monotonic()
-            ray.get(tracker.record.remote("release_failure"))
+            ray_cluster.get(tracker.record.remote("release_failure"))
             with pytest.raises(RayTaskError, match="original mapped group failure"):
                 workflow_result.result(timeout=5.0)
             elapsed = time.monotonic() - started_at
 
-        events = ray.get(tracker.snapshot.remote())
+        events = ray_cluster.get(tracker.snapshot.remote())
         assert "failing_started" in events
         assert "sibling_started" in events
         assert {"sibling_cancelled", "sibling_completed"} & set(events)
         assert elapsed < cancel_timeout_seconds + 1.0
     finally:
-        ray.shutdown(wait_for_processes=True)
+        ray_cluster.kill(tracker, no_restart=True)
 
 
 @pytest.mark.real_ray
-def test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure() -> None:
-    import ray
+def test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure(ray_cluster: Any) -> None:
     from ray.exceptions import RayTaskError
 
-    init_local_ray(num_cpus=4)
+    tracker = ray_cluster.remote(num_cpus=0)(_LifecycleTracker).remote()
     try:
-        tracker = ray.remote(num_cpus=0)(_LifecycleTracker).remote()
         workflow = chain(
             step(identity),
             map_step(
@@ -3283,10 +3279,10 @@ def test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure() -> No
         with pytest.raises(RayTaskError, match="original mapped chain failure"):
             workflow.run([1], use_ray=True)
 
-        events = ray.get(tracker.snapshot.remote())
+        events = ray_cluster.get(tracker.snapshot.remote())
         assert events == ["upstream_completed", "terminal_started"]
     finally:
-        ray.shutdown(wait_for_processes=True)
+        ray_cluster.kill(tracker, no_restart=True)
 
 
 @pytest.mark.real_ray
@@ -3294,9 +3290,8 @@ def test_real_ray_mapped_chain_drains_upstream_ref_and_preserves_failure() -> No
 def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
     monkeypatch,
     settings,
+    ray_cluster: Any,
 ) -> None:
-    import ray
-
     import django_ray.workflows as workflow_module
     from django_ray.models import RayTaskExecution, WorkflowProgressRunStorage
 
@@ -3315,26 +3310,22 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
         step(multiply, factor=2),
     )
 
-    init_local_ray()
-    try:
-        remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
-        delayed_progress_actor = ray.remote(num_cpus=0)(DelayedFirstSnapshotProgressActor)
-        monkeypatch.setattr(
-            workflow_module,
-            "_get_cached_workflow_remotes",
-            lambda: (remote_step, remote_collect, delayed_progress_actor),
-        )
-        with durable_task_execution(
-            execution.pk,
-            attempt_number=execution.attempt_number,
-            execution_generation=execution.execution_generation,
-            runtime_env_profile="test",
-            runtime_env_hash="abc123",
-            **_strict_workflow_fixture_identity(execution, profile="test"),
-        ):
-            assert workflow.run(2, use_ray=True) == 6
-    finally:
-        ray.shutdown(wait_for_processes=True)
+    remote_step, remote_collect, _ = workflow_module._get_cached_workflow_remotes()
+    delayed_progress_actor = ray_cluster.remote(num_cpus=0)(DelayedFirstSnapshotProgressActor)
+    monkeypatch.setattr(
+        workflow_module,
+        "_get_cached_workflow_remotes",
+        lambda: (remote_step, remote_collect, delayed_progress_actor),
+    )
+    with durable_task_execution(
+        execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+        runtime_env_profile="test",
+        runtime_env_hash="abc123",
+        **_strict_workflow_fixture_identity(execution, profile="test"),
+    ):
+        assert workflow.run(2, use_ray=True) == 6
 
     from django_ray.workflow.progress.reads import (
         get_workflow_node_detail,
@@ -3374,8 +3365,9 @@ def test_real_ray_workflow_persists_graph_after_delayed_progress_actor_snapshot(
 @pytest.mark.django_db
 def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
     settings,
+    ray_cluster: Any,
 ) -> None:
-    import ray
+    del ray_cluster
 
     import django_ray.workflows as workflow_module
     from django_ray.models import (
@@ -3413,20 +3405,15 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
         map_step(increment).with_limits(max_concurrency=2, max_items=10),
     )
 
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=2)
-    try:
-        _, _, cached_progress_actor = workflow_module._get_cached_workflow_remotes()
-        assert cached_progress_actor is workflow_module._workflow_progress_actor_cached
-        with durable_task_execution(
-            execution.pk,
-            attempt_number=execution.attempt_number,
-            execution_generation=execution.execution_generation,
-            **_strict_workflow_fixture_identity(execution),
-        ):
-            assert workflow.run(6, use_ray=True) == [1, 2, 3, 4, 5, 6]
-    finally:
-        ray.shutdown(wait_for_processes=True)
+    _, _, cached_progress_actor = workflow_module._get_cached_workflow_remotes()
+    assert cached_progress_actor is workflow_module._workflow_progress_actor_cached
+    with durable_task_execution(
+        execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+        **_strict_workflow_fixture_identity(execution),
+    ):
+        assert workflow.run(6, use_ray=True) == [1, 2, 3, 4, 5, 6]
 
     execution.refresh_from_db()
     assert execution.progress_data is None
@@ -3709,8 +3696,11 @@ def test_real_ray_cached_actor_publishes_schema_v3_through_production_path(
 
 @pytest.mark.real_ray
 @pytest.mark.django_db
-def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None:
-    import ray
+def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(
+    settings,
+    ray_cluster: Any,
+) -> None:
+    del ray_cluster
     from ray.exceptions import RayTaskError
 
     from django_ray.models import (
@@ -3738,19 +3728,14 @@ def test_real_ray_failed_leaf_publishes_failed_schema_v3_graph(settings) -> None
         step(fail_workflow_step),
     )
 
-    assert not ray.is_initialized()
-    init_local_ray(num_cpus=2)
-    try:
-        with durable_task_execution(
-            execution.pk,
-            attempt_number=execution.attempt_number,
-            execution_generation=execution.execution_generation,
-            **_strict_workflow_fixture_identity(execution),
-        ):
-            with pytest.raises(RayTaskError, match="intentional workflow failure"):
-                workflow.run(1, use_ray=True)
-    finally:
-        ray.shutdown(wait_for_processes=True)
+    with durable_task_execution(
+        execution.pk,
+        attempt_number=execution.attempt_number,
+        execution_generation=execution.execution_generation,
+        **_strict_workflow_fixture_identity(execution),
+    ):
+        with pytest.raises(RayTaskError, match="intentional workflow failure"):
+            workflow.run(1, use_ray=True)
 
     execution.refresh_from_db()
 

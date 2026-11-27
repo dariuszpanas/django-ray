@@ -865,20 +865,29 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
     steps = workflow["jobs"]["test"]["steps"]
     by_name = {step["name"]: step for step in steps if "name" in step}
 
-    timed = by_name["Run tests with suite timing"]
-    assert timed["if"] == "matrix.python-version == '3.12'"
-    assert "scripts/test_suite_inventory.py run" in timed["run"]
-    assert "--lane supported-python" in timed["run"]
-    assert "--observation github-actions-ubuntu-py312" in timed["run"]
-    assert "--variant locked-dependencies" in timed["run"]
-    assert "--runner-queue-seconds" not in timed["run"]
-    assert "--environment-setup-seconds" not in timed["run"]
+    portable = by_name["Run portable tests with pyrn"]
+    assert "--cov-sysmon" in portable["run"]
+    assert "--cov-out .coverage" in portable["run"]
+    assert '-m "not live_cluster and not real_ray"' in portable["run"]
 
-    validated = by_name["Validate suite timing evidence"]
+    real_ray = by_name["Run real_ray tests"]
+    assert real_ray["if"] == "matrix.python-version == '3.12'"
+    assert '-m "real_ray and not live_cluster"' in real_ray["run"]
+    assert "--cov-append" in real_ray["run"]
+
+    validated = by_name["Validate suite taxonomy inventory"]
+    assert validated["if"] == "matrix.python-version == '3.12'"
     assert "scripts/test_suite_inventory.py collect" in validated["run"]
-    assert "--timing artifacts/test-suite-inventory/github-actions-py312.json" in validated["run"]
+    assert (
+        "--json-output artifacts/test-suite-inventory/github-actions-py312-inventory.json"
+        in validated["run"]
+    )
+    assert (
+        "--markdown-output artifacts/test-suite-inventory/github-actions-py312-inventory.md"
+        in validated["run"]
+    )
 
-    uploaded = by_name["Upload suite timing evidence"]
+    uploaded = by_name["Upload suite inventory evidence"]
     assert uploaded["if"] == "always() && matrix.python-version == '3.12'"
     assert uploaded["with"]["if-no-files-found"] == "warn"
     assert uploaded["with"]["path"] == "artifacts/test-suite-inventory/"
