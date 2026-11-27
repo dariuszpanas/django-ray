@@ -221,7 +221,10 @@
           "tests/unit/test_worker_command_coverage.py",
           "tests/unit/test_worker_command_runtime.py",
           "tests/unit/test_worker_mode_selection.py",
-          "tests/unit/test_worker_reconnect_poll_reconcile.py"
+          "tests/unit/test_worker_reconnect_cancellation_and_shutdown.py",
+          "tests/unit/test_worker_reconnect_completion_and_timeout.py",
+          "tests/unit/test_worker_reconnect_poll_reconcile.py",
+          "tests/unit/test_worker_reconnect_request_reconcile.py"
         ]
       }
     },
@@ -255,7 +258,10 @@
           "tests/unit/test_polling_benchmark_command.py",
           "tests/unit/test_reconciliation.py",
           "tests/unit/test_target_execution_evidence.py",
-          "tests/unit/test_worker_reconnect_poll_reconcile.py"
+          "tests/unit/test_worker_reconnect_cancellation_and_shutdown.py",
+          "tests/unit/test_worker_reconnect_completion_and_timeout.py",
+          "tests/unit/test_worker_reconnect_poll_reconcile.py",
+          "tests/unit/test_worker_reconnect_request_reconcile.py"
         ]
       }
     },
