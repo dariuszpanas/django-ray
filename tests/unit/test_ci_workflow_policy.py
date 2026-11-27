@@ -732,10 +732,22 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert matrix == {"python-version": ["3.12", "3.13", "3.14"]}
     portable = steps["Run portable tests with pyrn"]
     assert "if" not in portable
-    assert portable["uses"] == "dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a"
+    assert portable["uses"] == "dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5"
     assert portable["with"]["command"] == "run"
     assert portable["with"]["workers"] == "4"
     assert portable["with"]["role"] == "verify"
+    assert portable["with"]["tier"] == (
+        "${{ (matrix.python-version == '3.13' && github.event_name == 'pull_request') "
+        "&& 'strict' || 'full' }}"
+    )
+    assert (
+        portable["with"]["tia"]
+        == "${{ matrix.python-version == '3.13' && github.event_name == 'pull_request' }}"
+    )
+    assert portable["with"]["base"] == (
+        "${{ (matrix.python-version == '3.13' && github.event_name == 'pull_request') "
+        "&& github.event.pull_request.base.sha || '' }}"
+    )
     assert portable["with"]["cov-sysmon"] == (
         "${{ matrix.python-version != '3.13' || github.event_name != 'pull_request' }}"
     )
@@ -876,11 +888,35 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     assert testproject["name"] == "Testproject & Tooling"
     assert testproject["env"]["DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS"] == "1"
     steps = {step.get("name"): step for step in testproject["steps"]}
+    restore = steps["Restore pyrn CAS cache"]
+    assert restore["if"] == "github.event_name == 'pull_request'"
+    assert restore["uses"] == "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
     tooling = steps["Run tooling tests with pyrn"]
-    assert tooling["uses"] == "dariuszpanas/pyrn@ef9976f6c7e82d0371902791b2d1ffddb004d23a"
+    assert tooling["uses"] == "dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5"
+    assert tooling["with"]["tier"] == (
+        "${{ github.event_name == 'pull_request' && 'strict' || 'full' }}"
+    )
+    assert tooling["with"]["tia"] == "${{ github.event_name == 'pull_request' }}"
+    assert tooling["with"]["cache"] == "true"
+    assert tooling["with"]["cache-dir"] == "${{ runner.temp }}/pyrn-cache"
     assert (
         tooling["with"]["markers"]
         == "tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+    )
+    save = steps["Save pyrn CAS cache"]
+    assert save["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert save["uses"] == "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+    deps_steps = {step.get("name"): step for step in jobs["dependency-compatibility"]["steps"]}
+    deps_run = deps_steps["Run tests"]
+    assert deps_run["uses"] == "dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5"
+    assert deps_run["with"]["cache"] == "true"
+    assert deps_run["with"]["cache-dir"] == "${{ runner.temp }}/pyrn-cache"
+    assert deps_run["with"]["tia"] == (
+        "${{ github.event_name == 'pull_request' "
+        "&& steps.restore-pyrn-cache.outputs.cache-matched-key != '' }}"
+    )
+    assert deps_steps["Save pyrn CAS cache"]["if"] == (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
     )
     assert steps["Validate sample project"] == {
         "name": "Validate sample project",
