@@ -28,6 +28,10 @@ def fake_ray(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             raise state.init_error
         state.initialized = True
 
+    def shutdown(**options: Any) -> None:
+        state.shutdowns.append(options)
+        state.initialized = False
+
     monkeypatch.setattr(local_ray, "require_linux", lambda: None)
     monkeypatch.setitem(
         sys.modules,
@@ -35,7 +39,7 @@ def fake_ray(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         SimpleNamespace(
             is_initialized=lambda: state.initialized,
             init=init,
-            shutdown=lambda **options: state.shutdowns.append(options),
+            shutdown=shutdown,
         ),
     )
     return state
@@ -122,7 +126,7 @@ def test_shared_local_ray_session_reuses_single_runtime_until_shutdown(
             assert first_ray is sys.modules["ray"]
             assert len(fake_ray.calls) == 1
             assert fake_ray.calls[0]["num_cpus"] == local_ray.MAX_LOGICAL_CPUS
-            assert fake_ray.calls[0]["include_dashboard"] is True
+            assert fake_ray.calls[0]["include_dashboard"] is False
             assert fake_ray.calls[0]["resources"] == {"result_buffer": 1, "result_fold": 1}
 
         assert fake_ray.shutdowns == []
@@ -136,6 +140,38 @@ def test_shared_local_ray_session_reuses_single_runtime_until_shutdown(
         local_ray.shutdown_shared_local_ray()
 
     assert fake_ray.shutdowns == [{"wait_for_processes": True}]
+    assert local_ray._shared_local_ray_active is False
+
+
+@pytest.mark.parametrize("explicit_isolated", [True, False])
+def test_isolated_local_ray_runtime_tears_down_shared_runtime_and_cleans_up(
+    fake_ray, monkeypatch, explicit_isolated: bool
+) -> None:
+    monkeypatch.setenv(local_ray.SHARED_LOCAL_RAY_ENV, "1")
+    monkeypatch.setattr(local_ray, "_shared_local_ray_active", False)
+
+    try:
+        with local_ray.local_ray_runtime(num_cpus=2):
+            assert len(fake_ray.calls) == 1
+            assert fake_ray.calls[0]["include_dashboard"] is False
+
+        with local_ray.local_ray_runtime(include_dashboard=True, isolated=explicit_isolated):
+            assert len(fake_ray.shutdowns) == 1
+            assert len(fake_ray.calls) == 2
+            assert fake_ray.calls[1]["include_dashboard"] is True
+            assert local_ray._shared_local_ray_active is False
+
+        assert len(fake_ray.shutdowns) == 2
+        assert fake_ray.initialized is False
+
+        with local_ray.local_ray_runtime(num_cpus=2):
+            assert len(fake_ray.calls) == 3
+            assert fake_ray.calls[2]["include_dashboard"] is False
+            assert local_ray._shared_local_ray_active is True
+    finally:
+        local_ray.shutdown_shared_local_ray()
+
+    assert len(fake_ray.shutdowns) == 3
     assert local_ray._shared_local_ray_active is False
 
 

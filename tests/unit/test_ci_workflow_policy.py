@@ -770,13 +770,17 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert portable["with"]["role"] == "verify"
     assert portable["with"]["cov-sysmon"] == "true"
     assert portable["with"]["cov-out"] == ".coverage"
-    assert portable["with"]["markers"] == "not live_cluster and not real_ray"
+    assert (
+        portable["with"]["markers"]
+        == "not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+    )
     real_ray_py312 = steps["Run real_ray tests"]
     real_ray_native = steps["Run real_ray tests with native diagnostics"]
     assert real_ray_py312["if"] == "matrix.python-version == '3.12'"
     assert real_ray_native["if"] == "matrix.python-version != '3.12'"
     assert real_ray_py312["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert real_ray_native["env"]["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
+    assert "observe_pytest_exit.py --" in real_ray_py312["run"]
     assert '-m "real_ray and not live_cluster"' in real_ray_py312["run"]
     assert "--cov-append" in real_ray_py312["run"]
     assert real_ray_py312["run"].strip().endswith("-v")

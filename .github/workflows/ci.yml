@@ -241,7 +241,7 @@ jobs:
           cov-sysmon: "true"
           cov-out: .coverage
           metrics-kv: "true"
-          markers: not live_cluster and not real_ray
+          markers: not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
 
       - name: Run real_ray tests
         if: matrix.python-version == '3.12'
@@ -249,9 +249,10 @@ jobs:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
         run: |
           mapfile -t real_ray_files < <(
-            .venv/bin/python -c 'from pathlib import Path; print("\n".join(sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8"))))'
+            .venv/bin/python -c 'from pathlib import Path; files = sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8")); files.sort(key=lambda p: (0 if p in {"tests/integration/test_task_execution.py", "tests/unit/test_result_buffer.py"} else 1, p)); print("\n".join(files))'
           )
-          uv run --python ${{ matrix.python-version }} python -m pytest \
+          uv run --python ${{ matrix.python-version }} python \
+            scripts/observe_pytest_exit.py -- \
             "${real_ray_files[@]}" \
             -m "real_ray and not live_cluster" \
             --cov=src \
@@ -267,7 +268,7 @@ jobs:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
         run: |
           mapfile -t real_ray_files < <(
-            .venv/bin/python -c 'from pathlib import Path; print("\n".join(sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8"))))'
+            .venv/bin/python -c 'from pathlib import Path; files = sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8")); files.sort(key=lambda p: (0 if p in {"tests/integration/test_task_execution.py", "tests/unit/test_result_buffer.py"} else 1, p)); print("\n".join(files))'
           )
           uv run --python ${{ matrix.python-version }} python \
             scripts/observe_pytest_exit.py --native-debug -- \
@@ -838,7 +839,7 @@ jobs:
           role: verify
           tier: full
           metrics-kv: "true"
-          markers: not live_cluster and not real_ray
+          markers: not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
 
   ray-data-golden-path:
     if: github.event_name != 'pull_request_target'

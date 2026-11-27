@@ -73,8 +73,8 @@ def _ray_worker_execution_metadata_probe() -> dict[str, object]:
 
 @pytest.fixture(scope="module")
 def ray_cluster():
-    """Start the required local Ray cluster for the serial real-Ray lane."""
-    with local_ray_runtime(include_dashboard=True, wrap_startup_error=True):
+    """Start an isolated dashboard-backed local Ray cluster for job API tests."""
+    with local_ray_runtime(include_dashboard=True, wrap_startup_error=True, isolated=True):
         yield
 
 
