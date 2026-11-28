@@ -287,7 +287,7 @@ def test_execute_django_task_remote_executes_strict_request_with_bound_context(
         return {"increment": increment, "value": value}
 
     monkeypatch.setattr(
-        "django_ray.runtime.import_utils.import_callable",
+        "django_ray.runtime.import_utils.resolve_task_callable",
         lambda path: observed.update(callable_path=path) or strict_task,
     )
 
@@ -343,7 +343,7 @@ def test_execute_django_task_remote_returns_enriched_strict_failure(
     def fail() -> None:
         raise ValueError(secret)
 
-    monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", lambda _path: fail)
+    monkeypatch.setattr("django_ray.runtime.import_utils.resolve_task_callable", lambda _path: fail)
 
     result = _execute_strict_request(encode_execution_request(_strict_execution_request()))
     decoded = decode_execution_completion(
@@ -410,7 +410,7 @@ def test_strict_request_rejection_precedes_all_application_side_effects(
 
     monkeypatch.setattr("django_ray.runtime.entrypoint.bootstrap_django", unexpected)
     monkeypatch.setattr("django_ray.runtime.entrypoint.load_task_input", unexpected)
-    monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", unexpected)
+    monkeypatch.setattr("django_ray.runtime.import_utils.resolve_task_callable", unexpected)
     monkeypatch.setattr("django_ray.runtime.entrypoint._invoke_task_callable", unexpected)
     monkeypatch.setattr("django_ray.runtime.entrypoint.execute_task", unexpected)
 
@@ -638,7 +638,7 @@ def test_strict_workflow_step_rejects_mixed_positional_node_before_import(
         node_id=node_id,
     )
     monkeypatch.setattr(
-        "django_ray.runtime.import_utils.import_callable",
+        "django_ray.runtime.import_utils.resolve_workflow_callable",
         lambda _path: pytest.fail("callable imported before node binding rejection"),
     )
 
@@ -678,7 +678,7 @@ def test_strict_workflow_step_rejects_mixed_output_preview_before_import(
         output_preview_path=output_preview_path,
     )
     monkeypatch.setattr(
-        "django_ray.runtime.import_utils.import_callable",
+        "django_ray.runtime.import_utils.resolve_workflow_callable",
         lambda _path: pytest.fail("callable imported before preview binding rejection"),
     )
 
@@ -766,7 +766,7 @@ def test_workflow_step_sanitizes_nested_rejection_before_progress_and_logging(
 
     safe_logs: list[str] = []
     monkeypatch.setattr(
-        "django_ray.runtime.import_utils.import_callable",
+        "django_ray.runtime.import_utils.resolve_workflow_callable",
         lambda _path: reject,
     )
     monkeypatch.setattr("django_ray.logging.configure_default_logging", lambda: None)
@@ -941,14 +941,14 @@ def test_output_preview_import_obeys_exception_boundary(
     monkeypatch.setattr(remote_module, "_ray_execution_metadata", dict)
     from django_ray.runtime import import_utils
 
-    original_import = import_utils.import_callable
+    original_import = import_utils.resolve_workflow_callable
 
     def import_with_preview_failure(path: str):
         if path == "tests.unit.test_remote.preview-workflow-import-failure":
             raise failure_type("preview import boundary")
         return original_import(path)
 
-    monkeypatch.setattr(import_utils, "import_callable", import_with_preview_failure)
+    monkeypatch.setattr(import_utils, "resolve_workflow_callable", import_with_preview_failure)
 
     if failure_type is KeyboardInterrupt:
         with pytest.raises(KeyboardInterrupt, match="preview import boundary"):

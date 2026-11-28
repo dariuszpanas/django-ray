@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
@@ -293,12 +292,12 @@ def test_ray_executor_throttles_high_cardinality_progress_snapshots(
         assert executor.wait_one([work_ref]) == 0
         assert executor.resolve_ready(work_ref) == "ready"
 
-    assert snapshot_calls == 1
+    assert snapshot_calls == 0
     assert executor.ray.work_wait_calls == 5_000
 
     executor._flush_progress(bypass_interval=True)
 
-    assert snapshot_calls == 2
+    assert snapshot_calls == 1
     assert persisted == []
 
 
@@ -656,8 +655,8 @@ def test_finish_progress_contains_persistence_failure_without_leaking_exception(
     )
     executor.finish_progress()
 
-    assert executor.progress_actor is not None
-    assert disabled == []
+    assert executor.progress_actor is None
+    assert disabled == [True]
     assert sleeps == []
     assert workflow_progress_warning_records == [
         {
@@ -1311,10 +1310,13 @@ def test_ray_executor_submit_uses_ingest_and_ignores_missing_ray_task_id() -> No
 
     executor.submit_step(step(increment), (), {}, "0.0", ())
 
+    from django_ray.runtime.import_utils import get_driver_allowed_callable_modules
+
     events = _decoded_ingests(actor, identity)
     assert remote_calls == [
         {
             "workflow_run_identity": identity.as_dict(),
+            "allowed_callable_modules": get_driver_allowed_callable_modules(),
             "return_outcome_marker": True,
         }
     ]
@@ -1363,11 +1365,14 @@ def test_ray_executor_submits_explicit_output_preview_contract() -> None:
         (),
     )
 
+    from django_ray.runtime.import_utils import get_driver_allowed_callable_modules
+
     events = _decoded_ingests(actor, identity)
     assert remote_calls == [
         {
             "output_preview_path": "tests.unit.test_workflows.preview_increment",
             "workflow_run_identity": identity.as_dict(),
+            "allowed_callable_modules": get_driver_allowed_callable_modules(),
             "return_outcome_marker": True,
         }
     ]
@@ -1417,10 +1422,12 @@ def test_terminal_only_submit_omits_all_progress_transport_metadata() -> None:
         (),
     )
 
+    from django_ray.runtime.import_utils import get_driver_allowed_callable_modules
+
     assert len(remote_calls) == 1
     args, kwargs = remote_calls[0]
     assert args[6] is None
-    assert kwargs == {}
+    assert kwargs == {"allowed_callable_modules": get_driver_allowed_callable_modules()}
 
 
 def test_strict_ray_executor_submits_exact_nested_workflow_request() -> None:
@@ -1595,10 +1602,13 @@ def test_ray_executor_submit_passes_strict_pilot_limits_to_remote_step() -> None
 
     executor.submit_step(step(increment), (), {}, "0.0", ())
 
+    from django_ray.runtime.import_utils import get_driver_allowed_callable_modules
+
     assert remote_calls == [
         {
             "workflow_progress_limits": WORKFLOW_PROGRESS_SCHEMA_V3_PILOT_LIMITS,
             "workflow_run_identity": identity.as_dict(),
+            "allowed_callable_modules": get_driver_allowed_callable_modules(),
             "return_outcome_marker": True,
         }
     ]
@@ -1808,6 +1818,7 @@ def test_ray_map_cleanup_has_a_hard_deadline() -> None:
     class _SlowRay:
         def __init__(self) -> None:
             self.cancelled: list[object] = []
+            self.wait_calls: list[tuple[list[object], int, float, bool]] = []
             self.wait_timeouts: list[float] = []
             self.get_calls = 0
 
@@ -1818,11 +1829,11 @@ def test_ray_map_cleanup_has_a_hard_deadline() -> None:
 
         def wait(self, refs, *, num_returns, timeout, fetch_local=True):
             assert num_returns == len(refs)
+            self.wait_calls.append((list(refs), num_returns, timeout, fetch_local))
             if timeout == 0:
                 assert fetch_local is False
                 return [], refs
             self.wait_timeouts.append(timeout)
-            time.sleep(timeout)
             return [], refs
 
         def get(self, ref):
@@ -1833,15 +1844,16 @@ def test_ray_map_cleanup_has_a_hard_deadline() -> None:
     executor = object.__new__(_RayExecutor)
     executor.ray = ray
     refs = [object(), object()]
-    started_at = time.monotonic()
 
     executor.cancel_and_drain(refs, timeout_seconds=0.02)
 
-    elapsed = time.monotonic() - started_at
     assert ray.cancelled == refs
     assert ray.wait_timeouts == [0.02]
+    assert ray.wait_calls == [
+        (refs, len(refs), 0, False),
+        (refs, len(refs), 0.02, True),
+    ]
     assert ray.get_calls == 0
-    assert elapsed < 0.1
 
 
 def test_ray_map_cleanup_skips_cancelling_already_ready_refs_but_drains_them() -> None:

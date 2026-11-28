@@ -29,8 +29,10 @@ REMOVED_WORKFLOW_IMPORTS = (
 )
 WORKFLOW_MODULES = {
     "__init__.py",
+    "_types.py",
     "admin_graph.py",
     "contracts.py",
+    "dsl.py",
     "plans.py",
     "previews.py",
     "checkpoints.py",

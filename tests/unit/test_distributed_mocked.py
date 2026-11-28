@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import contextvars
 import json
 import pickle
 import sys
@@ -110,7 +111,9 @@ class _FakeRay:
                 @staticmethod
                 def remote(*args: Any, **kwargs: Any) -> _DistRef:
                     self.remote_invocations.append((fn.__name__, args, kwargs))
-                    return _DistRef(fn(*args, **kwargs))
+                    # Real Ray executes remote functions in a clean worker context
+                    # without inheriting the driver's Python ContextVars.
+                    return _DistRef(contextvars.Context().run(fn, *args, **kwargs))
 
             return _RemoteCallable()
 
@@ -149,7 +152,7 @@ class TestDistributedMocked:
         assert calls == ["setup"]
         assert distributed._django_bootstrapped is True
 
-    def test_bootstrap_marks_done_even_without_settings_module(self, monkeypatch) -> None:
+    def test_bootstrap_does_not_latch_without_settings_module(self, monkeypatch) -> None:
         calls: list[str] = []
         monkeypatch.setattr(distributed, "_django_bootstrapped", False)
         monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
@@ -159,6 +162,12 @@ class TestDistributedMocked:
         distributed._bootstrap_django_if_needed()
 
         assert calls == []
+        assert distributed._django_bootstrapped is False
+
+        monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "testproject.settings")
+        distributed._bootstrap_django_if_needed()
+
+        assert calls == ["setup"]
         assert distributed._django_bootstrapped is True
 
     def test_bootstrap_returns_when_already_complete(self, monkeypatch) -> None:

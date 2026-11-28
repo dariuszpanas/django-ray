@@ -74,9 +74,10 @@ def test_collection_failure_cancels_owned_refs_and_preserves_exception(
         _collect_remote_results(ray, ray, [(i,) for i in range(4)], window)
     assert caught.value is ray.failure
     expected_submitted = [0, 1] if window == 2 else [0, 1, 2, 3]
-    # In bounded mode ray.wait() already reported ref 1 ready before ray.get(),
-    # so only the still-unready sibling ref 0 should be cancelled.
-    expected_cancelled = [0] if window == 2 else [0, 1, 2, 3]
+    # Both bounded and unbounded modes now wait fail-fast (num_returns=1).
+    # _CollectorRay.wait() reports the last submitted ref ready before ray.get(),
+    # so only the still-unready siblings are cancelled.
+    expected_cancelled = [0] if window == 2 else [0, 1, 2]
     assert ray.submitted == expected_submitted
     assert ray.cancelled == [(ref, False, True) for ref in expected_cancelled]
 
@@ -89,7 +90,9 @@ def test_unbounded_collection_failure_skips_already_ready_refs() -> None:
         _collect_remote_results(ray, ray, [(i,) for i in range(4)], None)
     assert caught.value is ray.failure
     assert ray.submitted == [0, 1, 2, 3]
-    assert ray.cancelled == [(0, False, True), (3, False, True)]
+    # Ref 3 was already reported ready by ray.wait() before ray.get() failed,
+    # and refs 1 & 2 are already ready, leaving only ref 0 to cancel.
+    assert ray.cancelled == [(0, False, True)]
 
 
 @pytest.mark.parametrize("window", [None, 2, 8])

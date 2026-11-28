@@ -1,4 +1,8 @@
-"""Bounded, chunked, balanced list-preserving map result transport (#91).
+"""Bounded, chunked, balanced list-preserving map result transport (#91, #829).
+
+.. warning::
+   **Experimental reference module**: this Ray-free state machine is not yet
+   wired into the active ``django-ray`` worker runtime.
 
 When a workflow ``Map`` step does not use ``.reduce(...)`` or ``.fold(...)``,
 it produces an ordered ``list`` output matching the input item indices
@@ -314,7 +318,15 @@ class InMemoryChunkObjectStore:
         byte_size: int,
     ) -> MapChunkHandle:
         with self._lock:
-            if not items or end_index - start_index + 1 != len(items) or byte_size < 0:
+            if (
+                not items
+                or type(start_index) is not int
+                or type(end_index) is not int
+                or type(byte_size) is not int
+                or start_index < 0
+                or end_index - start_index + 1 != len(items)
+                or byte_size < 0
+            ):
                 raise MapResultTransportError("Chunk range and payload metadata must agree")
             leaf = _ChunkLeaf(tuple(items), start_index, end_index, byte_size)
             handle = self._publish_root(leaf, prefix="map-chunk")
@@ -452,9 +464,12 @@ class BoundedMapListAggregator:
         if index < self._next_expected_index or index in self._out_of_order:
             raise MapResultTransportError(f"Duplicate completion for leaf index {index}")
 
-        resolved_bytes = _estimate_item_bytes(value) if byte_size is None else int(byte_size)
-        if resolved_bytes < 0:
-            raise MapResultTransportError("byte_size must be non-negative")
+        if byte_size is None:
+            resolved_bytes = _estimate_item_bytes(value)
+        else:
+            if type(byte_size) is not int or byte_size < 0:
+                raise MapResultTransportError("byte_size must be non-negative (expected int)")
+            resolved_bytes = byte_size
         if resolved_bytes > self.config.max_chunk_bytes:
             self._fail(
                 MapResultTransportLimitError(

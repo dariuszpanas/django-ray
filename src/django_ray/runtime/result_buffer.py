@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 RESULT_BUFFER_PROTOCOL = "django-ray.workflow-map-result-buffer"
@@ -316,6 +316,85 @@ class WorkflowMapResultBuffer:
             "retained_bytes": next_bytes,
         }
 
+    def append_batch(self, items: Sequence[tuple[int, Any]]) -> list[dict[str, Any]]:
+        """Atomically serialize and retain a batch of items in one actor call."""
+        if self._finalized:
+            raise ResultBufferProtocolError("Cannot append after result-buffer finalization")
+        if isinstance(items, str | bytes | bytearray) or not isinstance(items, Sequence):
+            raise ResultBufferProtocolError("Result-buffer batch must be a sequence of pairs")
+
+        import ray.cloudpickle as cloudpickle
+
+        staged: list[tuple[int, bytes, int, int]] = []
+        seen_indices: set[int] = set()
+        next_count = len(self._serialized)
+        next_bytes = self.retained_bytes
+
+        for entry in items:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ResultBufferProtocolError(
+                    "Result-buffer batch entries must be (index, value) tuples"
+                )
+            index, value = entry
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                raise ResultBufferProtocolError(
+                    "Result-buffer index must be a non-negative integer"
+                )
+            if index >= self.max_items:
+                raise ResultBufferOverflowError(
+                    f"Result-buffer item index {index} exceeds max_items={self.max_items}"
+                )
+            if index in self._serialized or index in seen_indices:
+                raise ResultBufferProtocolError(f"Result-buffer index {index} was appended twice")
+
+            serialized = cloudpickle.dumps(value, protocol=RESULT_BUFFER_PICKLE_PROTOCOL)
+            next_count += 1
+            next_bytes += len(serialized)
+            if next_count > self.max_items:
+                raise ResultBufferOverflowError(
+                    f"Result-buffer item count exceeds max_items={self.max_items}"
+                )
+            if next_bytes > self.max_serialized_bytes:
+                raise ResultBufferOverflowError(
+                    "Result-buffer retained serialization exceeds "
+                    f"max_serialized_bytes={self.max_serialized_bytes}"
+                )
+            seen_indices.add(index)
+            staged.append((index, serialized, next_count, next_bytes))
+
+        acks: list[dict[str, Any]] = []
+        for index, serialized, count, total_bytes in staged:
+            self._serialized[index] = serialized
+            acks.append(
+                {
+                    **_ack_base("retained"),
+                    "index": index,
+                    "item_count": count,
+                    "retained_bytes": total_bytes,
+                }
+            )
+        self.retained_bytes = next_bytes
+        return acks
+
+    def append_batch_values(
+        self,
+        indices: Sequence[int],
+        *values: Any,
+    ) -> list[dict[str, Any]]:
+        """Atomically retain items passed as top-level Ray arguments.
+
+        Receiving ``*values`` as top-level positional arguments ensures Ray
+        auto-dereferences leaf ``ObjectRef`` arguments directly on the buffer
+        actor instead of passing unresolved ``ObjectRef`` objects inside a list.
+        """
+        if isinstance(indices, str | bytes | bytearray) or not isinstance(indices, Sequence):
+            raise ResultBufferProtocolError("Result-buffer batch indices must be a sequence")
+        if len(indices) != len(values):
+            raise ResultBufferProtocolError(
+                "Result-buffer batch index and value counts do not match"
+            )
+        return self.append_batch(list(zip(indices, values, strict=True)))
+
     def finalize(self, expected_items: int) -> tuple[list[Any], dict[str, Any]]:
         """Materialize ordered values as a direct Ray return plus a small acknowledgement."""
         if self._finalized:
@@ -327,8 +406,9 @@ class WorkflowMapResultBuffer:
             or expected_items > self.max_items
         ):
             raise ResultBufferProtocolError("Invalid result-buffer final item count")
-        expected_indices = list(range(expected_items))
-        if sorted(self._serialized) != expected_indices:
+        if len(self._serialized) != expected_items or any(
+            index not in self._serialized for index in range(expected_items)
+        ):
             raise ResultBufferProtocolError(
                 "Result-buffer finalization found missing or unexpected item indices"
             )
@@ -336,9 +416,14 @@ class WorkflowMapResultBuffer:
         import ray.cloudpickle as cloudpickle
 
         retained_bytes = self.retained_bytes
-        values = [cloudpickle.loads(self._serialized[index]) for index in expected_indices]
-        self._serialized.clear()
-        self.retained_bytes = 0
+        values: list[Any] = []
+        # Pop and release each serialized buffer as its object materializes so
+        # peak memory does not simultaneously hold all serialized and decoded data.
+        for index in range(expected_items):
+            payload = self._serialized.pop(index)
+            self.retained_bytes -= len(payload)
+            values.append(cloudpickle.loads(payload))
+            del payload
         self._finalized = True
         return values, {
             **_ack_base("finalized"),

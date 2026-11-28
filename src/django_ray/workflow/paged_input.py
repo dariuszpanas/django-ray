@@ -1,4 +1,8 @@
-"""Bounded, backpressure-aware paged workflow map input stream (#94).
+"""Bounded, backpressure-aware paged workflow map input stream (#94, #829).
+
+.. warning::
+   **Experimental reference module**: this Ray-free state machine is not yet
+   wired into the active ``django-ray`` worker runtime.
 
 Instead of materializing an entire paginated external collection (such as a
 Kubernetes ``list`` with ``continue`` tokens and ``resourceVersion``, a REST
@@ -17,6 +21,7 @@ input stream with:
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections import deque
 from collections.abc import Callable
@@ -75,9 +80,23 @@ class PagedSourceThrottledError(PagedMapInputError):
         retry_after_seconds: float = 1.0,
     ) -> None:
         super().__init__(message)
-        self.retry_after_seconds = max(
-            0.0, min(float(retry_after_seconds), MAX_THROTTLE_BACKOFF_SECONDS)
-        )
+        if not isinstance(retry_after_seconds, int | float) or isinstance(
+            retry_after_seconds, bool
+        ):
+            raise PagedMapInputConfigurationError(
+                "retry_after_seconds must be a finite non-negative number"
+            )
+        try:
+            normalized = float(retry_after_seconds)
+        except OverflowError:
+            raise PagedMapInputConfigurationError(
+                "retry_after_seconds must be a finite non-negative number"
+            ) from None
+        if not math.isfinite(normalized) or normalized < 0.0:
+            raise PagedMapInputConfigurationError(
+                "retry_after_seconds must be a finite non-negative number"
+            )
+        self.retry_after_seconds = min(normalized, MAX_THROTTLE_BACKOFF_SECONDS)
 
 
 class PagedMapStreamAbortedError(PagedMapInputError):
@@ -278,6 +297,23 @@ class BoundedPagedMapInputStream:
         self._pages_fetched += 1
         page_number = self._pages_fetched
 
+        declared_batch_bytes: int | None = None
+        if batch.byte_size is not None:
+            if type(batch.byte_size) is not int or batch.byte_size < 0:
+                self._fail_and_close(
+                    PagedMapInputConfigurationError(
+                        "PageBatch.byte_size must be a non-negative int when provided"
+                    )
+                )
+            declared_batch_bytes = batch.byte_size
+            if self.total_outstanding_bytes + declared_batch_bytes > self.config.max_buffered_bytes:
+                self._fail_and_close(
+                    PagedMapInputLimitError(
+                        f"Paged source batch byte_size ({declared_batch_bytes} B) exceeded "
+                        f"max_buffered_bytes ({self.config.max_buffered_bytes} B)"
+                    )
+                )
+
         if batch.snapshot_token is not None:
             if self._snapshot_token is None:
                 self._snapshot_token = batch.snapshot_token
@@ -335,6 +371,28 @@ class BoundedPagedMapInputStream:
             self._next_item_index += 1
             page_items.append(item)
             page_bytes += item_bytes
+
+        if declared_batch_bytes is not None and page_items and declared_batch_bytes > page_bytes:
+            extra_bytes = declared_batch_bytes - page_bytes
+            base_extra, remainder = divmod(extra_bytes, len(page_items))
+            adjusted_items: deque[PagedMapItem] = deque()
+            for idx, item in enumerate(page_items):
+                adjusted_items.append(
+                    PagedMapItem(
+                        index=item.index,
+                        page_number=item.page_number,
+                        value=item.value,
+                        byte_size=item.byte_size + base_extra + (1 if idx < remainder else 0),
+                        snapshot_token=item.snapshot_token,
+                    )
+                )
+            page_items = adjusted_items
+            page_bytes = declared_batch_bytes
+        elif declared_batch_bytes is not None and not page_items:
+            self._peak_buffered_bytes = max(
+                self._peak_buffered_bytes,
+                self.total_outstanding_bytes + declared_batch_bytes,
+            )
 
         if page_items:
             self._page_queue.append(page_items)

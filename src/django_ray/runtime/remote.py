@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import sys
 import time
+from collections.abc import Sequence
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -66,6 +68,48 @@ def _event_timestamp_us(value: str) -> int:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     delta = parsed - datetime(1970, 1, 1, tzinfo=UTC)
     return (delta.days * 24 * 60 * 60 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _logger_writes_to_stream(base_logger: logging.Logger, stream: Any) -> bool:
+    """Return True if ``base_logger`` or an active ancestor writes directly to ``stream``."""
+    current: logging.Logger | None = base_logger
+    while current is not None:
+        for handler in current.handlers:
+            if isinstance(handler, logging.StreamHandler) and handler.stream is stream:
+                return True
+        if not current.propagate:
+            break
+        current = current.parent
+    return False
+
+
+def _emit_remote_task_lifecycle_log(
+    task_execution_pk: int,
+    message: str,
+    *,
+    is_error: bool = False,
+    callable_path: str | None = None,
+) -> None:
+    """Emit structured remote task logs while preserving Ray stdout/stderr stream markers."""
+    from django_ray.logging import get_logger
+    from django_ray.redaction import redact_text
+
+    safe_message = redact_text(message)
+    task_logger = get_logger(
+        "django_ray.runtime.remote",
+        component="remote_task",
+        django_task_execution_pk=task_execution_pk,
+        callable_path=callable_path,
+    )
+    if is_error:
+        task_logger.error(safe_message)
+    else:
+        task_logger.info(safe_message)
+
+    stream = sys.stderr if is_error else sys.stdout
+    if not _logger_writes_to_stream(task_logger.logger, stream):
+        stream.write(f"{safe_message}\n")
+        stream.flush()
 
 
 def _fixed_legacy_request_rejection(classification: str) -> str:
@@ -162,9 +206,10 @@ def _execute_target_bound_django_task_remote(
     from django_ray.runtime.context import durable_task_execution
     from django_ray.runtime.entrypoint import execute_task
 
-    print(
+    _emit_remote_task_lifecycle_log(
+        request.identity.task_execution_pk,
         f"[Task {request.identity.task_execution_pk}] Starting: {request.callable_path}",
-        flush=True,
+        callable_path=request.callable_path,
     )
     with durable_task_execution(
         request.identity.task_execution_pk,
@@ -186,8 +231,15 @@ def _execute_target_bound_django_task_remote(
             request.serialized_args,
             request.serialized_kwargs,
             input_reference=request.input_reference,
+            allow_result_offload=True,
+            _strict_encoding=True,
         )
-    application_completion = decode_target_application_completion(raw_application_result)
+    serialized_application_result: object = (
+        str(raw_application_result)
+        if isinstance(raw_application_result, str)
+        else raw_application_result
+    )
+    application_completion = decode_target_application_completion(serialized_application_result)
     result = encode_target_execution_result(
         TargetExecutionCompletion(
             identity=request.identity,
@@ -203,13 +255,18 @@ def _execute_target_bound_django_task_remote(
         )
     )
     if application_completion.success:
-        print(f"[Task {request.identity.task_execution_pk}] SUCCESS", flush=True)
+        _emit_remote_task_lifecycle_log(
+            request.identity.task_execution_pk,
+            f"[Task {request.identity.task_execution_pk}] SUCCESS",
+            callable_path=request.callable_path,
+        )
     else:
-        print(
+        _emit_remote_task_lifecycle_log(
+            request.identity.task_execution_pk,
             f"[Task {request.identity.task_execution_pk}] FAILED: "
             f"{redact_text(application_completion.error)}",
-            file=sys.stderr,
-            flush=True,
+            is_error=True,
+            callable_path=request.callable_path,
         )
     return result
 
@@ -317,9 +374,10 @@ def execute_django_task_remote(
         from django_ray.runtime.context import durable_task_execution
         from django_ray.runtime.entrypoint import execute_task
 
-        print(
+        _emit_remote_task_lifecycle_log(
+            request.identity.task_execution_pk,
             f"[Task {request.identity.task_execution_pk}] Starting: {request.callable_path}",
-            flush=True,
+            callable_path=request.callable_path,
         )
         with durable_task_execution(
             request.identity.task_execution_pk,
@@ -340,19 +398,30 @@ def execute_django_task_remote(
                 input_reference=request.input_reference,
                 _completion_identity=request.identity,
                 _execution_protocol_version=request.execution_protocol_version,
+                allow_result_offload=True,
             )
 
-        parsed = json.loads(result)
-        if parsed.get("success"):
-            print(f"[Task {request.identity.task_execution_pk}] SUCCESS", flush=True)
+        if hasattr(result, "completion_success"):
+            succeeded = bool(result.completion_success)
+            error_message = getattr(result, "completion_error", None)
         else:
-            print(
-                f"[Task {request.identity.task_execution_pk}] FAILED: "
-                f"{redact_text(parsed.get('error'))}",
-                file=sys.stderr,
-                flush=True,
+            parsed = json.loads(result)
+            succeeded = bool(parsed.get("success"))
+            error_message = parsed.get("error")
+        if succeeded:
+            _emit_remote_task_lifecycle_log(
+                request.identity.task_execution_pk,
+                f"[Task {request.identity.task_execution_pk}] SUCCESS",
+                callable_path=request.callable_path,
             )
-        return result
+        else:
+            _emit_remote_task_lifecycle_log(
+                request.identity.task_execution_pk,
+                f"[Task {request.identity.task_execution_pk}] FAILED: {redact_text(error_message)}",
+                is_error=True,
+                callable_path=request.callable_path,
+            )
+        return str(result)
 
     # Old positional durable-task carriers are outside the coordinated Beta
     # execution boundary. Never bootstrap or trust their submitted identity.
@@ -537,6 +606,7 @@ def execute_workflow_step_remote(
     expected_node_id: str | None = None,
     expected_runtime_env_plan_digest: str | None = None,
     expected_runtime_env_transport_digest: str | None = None,
+    allowed_callable_modules: Sequence[str] | None = None,
 ) -> Any:
     """Execute one strict durable leaf or a standalone workflow call."""
     if type(return_outcome_marker) is not bool:
@@ -590,6 +660,7 @@ def execute_workflow_step_remote(
             workflow_run_identity=workflow_run_identity,
             workflow_progress_limits=workflow_progress_limits,
             return_outcome_marker=return_outcome_marker,
+            allowed_callable_modules=allowed_callable_modules,
         )
 
 
@@ -607,123 +678,151 @@ def _execute_workflow_step(
     workflow_run_identity: dict[str, Any] | None = None,
     workflow_progress_limits: WorkflowProgressLimits = WORKFLOW_PROGRESS_LIMITS_V1,
     return_outcome_marker: bool = False,
+    allowed_callable_modules: Sequence[str] | None = None,
 ) -> Any:
     """Run a workflow step after its outer boundary has been selected."""
+    from django_ray.runtime.entrypoint import (
+        _close_stale_db_connections,
+        _invoke_task_callable,
+    )
+
     if bootstrap_django:
         from django_ray.runtime.entrypoint import bootstrap_django as setup_django
 
         setup_django()
+    _close_stale_db_connections()
 
     from django_ray.logging import configure_default_logging, get_logger
+    from django_ray.runtime import import_utils
     from django_ray.runtime.context import workflow_step_execution
-    from django_ray.runtime.import_utils import import_callable
 
-    callable_obj = import_callable(callable_path)
-    kwargs = {**input_kwargs, **bound_kwargs}
-    label = callable_path.rsplit(".", 1)[-1]
-    execution = _ray_execution_metadata()
-    configure_default_logging()
-    logger = get_logger(
-        "django_ray.workflow",
-        component="workflow_step",
-        django_task_execution_pk=task_execution_pk,
-        workflow_node_id=node_id,
-        callable_path=callable_path,
-        workflow_run_id=(workflow_run_identity or {}).get("run_id"),
-        workflow_attempt_number=(workflow_run_identity or {}).get("attempt_number"),
-        workflow_execution_generation=(workflow_run_identity or {}).get("execution_generation"),
-        **execution,
+    allowlist_ctx = (
+        import_utils.active_allowed_callable_modules(allowed_callable_modules)
+        if allowed_callable_modules is not None
+        else nullcontext()
     )
-    _send_step_progress_event(
-        progress_actor,
-        workflow_run_identity,
-        WorkflowProgressEventKind.STARTED,
-        {
-            "node_id": node_id,
-            "label": label,
-            "execution": execution,
-        },
-        limits=workflow_progress_limits,
-    )
-    logger.info("Workflow step started")
-    try:
-        with workflow_step_execution(
-            progress_actor,
-            node_id,
-            workflow_run_identity,
-            workflow_progress_limits,
-            capture_terminal=return_outcome_marker and progress_actor is None,
-        ) as step_context:
-            result = callable_obj(*input_args, *bound_args, **kwargs)
-    except BaseException as error:
-        nested_rejection = None
-        if isinstance(error, Exception):
-            from django_ray.execution_codec import (
-                find_nested_execution_request_rejection,
-            )
-
-            nested_rejection = find_nested_execution_request_rejection(error)
-        try:
-            failure_payload = {
-                "node_id": node_id,
-                "label": label,
-                "error": str(nested_rejection or error),
-            }
-        except Exception:
-            failure_payload = {
-                "node_id": node_id,
-                "label": label,
-                "error": "Workflow step failed",
-            }
-        _send_step_progress_event(
-            progress_actor,
-            workflow_run_identity,
-            WorkflowProgressEventKind.FAILED,
-            failure_payload,
-            limits=workflow_progress_limits,
-        )
-        if nested_rejection is not None:
-            try:
-                logger.error("Workflow step rejected nested execution request")
-            except Exception:
-                pass
-            raise nested_rejection from None
-        logger.exception("Workflow step failed")
-        raise
-    output_preview = None
-    if output_preview_path is not None:
-        from django_ray.workflow.previews import (
-            WorkflowOutputPreviewAvailability,
-            project_workflow_output_preview,
-            unavailable_workflow_output_preview,
-        )
-
-        try:
-            projector = import_callable(output_preview_path)
-        except Exception:
-            output_preview = unavailable_workflow_output_preview(
-                WorkflowOutputPreviewAvailability.FAILED
-            )
+    with allowlist_ctx:
+        workflow_resolver = import_utils.resolve_workflow_callable
+        if allowed_callable_modules is None:
+            callable_obj = workflow_resolver(callable_path)
         else:
-            output_preview = project_workflow_output_preview(projector, result)
+            callable_obj = workflow_resolver(
+                callable_path,
+                allowed_modules=allowed_callable_modules,
+            )
+        kwargs = {**input_kwargs, **bound_kwargs}
+        label = callable_path.rsplit(".", 1)[-1]
+        execution = _ray_execution_metadata()
+        configure_default_logging()
+        logger = get_logger(
+            "django_ray.workflow",
+            component="workflow_step",
+            django_task_execution_pk=task_execution_pk,
+            workflow_node_id=node_id,
+            callable_path=callable_path,
+            workflow_run_id=(workflow_run_identity or {}).get("run_id"),
+            workflow_attempt_number=(workflow_run_identity or {}).get("attempt_number"),
+            workflow_execution_generation=(workflow_run_identity or {}).get("execution_generation"),
+            **execution,
+        )
         _send_step_progress_event(
             progress_actor,
             workflow_run_identity,
-            WorkflowProgressEventKind.OUTPUT_PREVIEW,
+            WorkflowProgressEventKind.STARTED,
             {
                 "node_id": node_id,
-                "output_preview": output_preview,
+                "label": label,
+                "execution": execution,
             },
             limits=workflow_progress_limits,
         )
-        if output_preview["availability"] not in {"AVAILABLE", "REDACTED"}:
-            try:
-                logger.warning(
-                    "Workflow output preview unavailable",
-                    extra={"output_preview_availability": output_preview["availability"]},
+        logger.info("Workflow step started")
+        try:
+            with workflow_step_execution(
+                progress_actor,
+                node_id,
+                workflow_run_identity,
+                workflow_progress_limits,
+                capture_terminal=return_outcome_marker and progress_actor is None,
+            ) as step_context:
+                result = _invoke_task_callable(callable_obj, [*input_args, *bound_args], kwargs)
+        except BaseException as error:
+            nested_rejection = None
+            if isinstance(error, Exception):
+                from django_ray.execution_codec import (
+                    find_nested_execution_request_rejection,
                 )
+
+                nested_rejection = find_nested_execution_request_rejection(error)
+            try:
+                failure_payload = {
+                    "node_id": node_id,
+                    "label": label,
+                    "error": str(nested_rejection or error),
+                }
             except Exception:
-                pass
+                failure_payload = {
+                    "node_id": node_id,
+                    "label": label,
+                    "error": "Workflow step failed",
+                }
+            _send_step_progress_event(
+                progress_actor,
+                workflow_run_identity,
+                WorkflowProgressEventKind.FAILED,
+                failure_payload,
+                limits=workflow_progress_limits,
+            )
+            if nested_rejection is not None:
+                try:
+                    logger.error("Workflow step rejected nested execution request")
+                except Exception:
+                    pass
+                raise nested_rejection from None
+            logger.exception("Workflow step failed")
+            raise
+        finally:
+            _close_stale_db_connections()
+        output_preview = None
+        if output_preview_path is not None:
+            from django_ray.workflow.previews import (
+                WorkflowOutputPreviewAvailability,
+                project_workflow_output_preview,
+                unavailable_workflow_output_preview,
+            )
+
+            try:
+                if allowed_callable_modules is None:
+                    projector = workflow_resolver(output_preview_path)
+                else:
+                    projector = workflow_resolver(
+                        output_preview_path,
+                        allowed_modules=allowed_callable_modules,
+                    )
+            except Exception:
+                output_preview = unavailable_workflow_output_preview(
+                    WorkflowOutputPreviewAvailability.FAILED
+                )
+            else:
+                output_preview = project_workflow_output_preview(projector, result)
+            _send_step_progress_event(
+                progress_actor,
+                workflow_run_identity,
+                WorkflowProgressEventKind.OUTPUT_PREVIEW,
+                {
+                    "node_id": node_id,
+                    "output_preview": output_preview,
+                },
+                limits=workflow_progress_limits,
+            )
+            if output_preview["availability"] not in {"AVAILABLE", "REDACTED"}:
+                try:
+                    logger.warning(
+                        "Workflow output preview unavailable",
+                        extra={"output_preview_availability": output_preview["availability"]},
+                    )
+                except Exception:
+                    pass
     _send_step_progress_event(
         progress_actor,
         workflow_run_identity,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import sys
 import threading
@@ -10,6 +11,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -369,25 +371,51 @@ def test_abrupt_exit_is_classified_with_native_exit_code(monkeypatch) -> None:
 @pytest.mark.skipif(sys.platform != "linux", reason="probe subprocess execution requires Linux")
 def test_abrupt_root_exit_cleans_real_grandchild(monkeypatch, tmp_path: Path) -> None:
     _force_supported(monkeypatch)
+    ready_pid_file = tmp_path / "grandchild.pid"
     sentinel = tmp_path / "leaked-grandchild.txt"
     grandchild = (
-        "import pathlib,time; "
-        "time.sleep(0.75); "
+        "import os,pathlib,time; "
+        f"p=pathlib.Path({str(ready_pid_file)!r}); "
+        "tmp=p.with_suffix('.tmp'); "
+        "tmp.write_text(str(os.getpid()), encoding='utf-8'); "
+        "tmp.replace(p); "
+        "time.sleep(10.0); "
         f"pathlib.Path({str(sentinel)!r}).write_text('leaked', encoding='utf-8')"
     )
     root = (
-        "import os,subprocess,sys; "
+        "import os,pathlib,subprocess,sys,time; "
         f"subprocess.Popen([sys.executable, '-c', {grandchild!r}]); "
-        "os._exit(7)"
+        f"ready=pathlib.Path({str(ready_pid_file)!r}); "
+        "deadline=time.monotonic()+5.0; "
+        "\nwhile not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "os._exit(7 if ready.exists() else 9)"
     )
 
     outcome = run_compiled_graph_probe(
         _request(),
         _command=[sys.executable, "-c", root],
     )
-    time.sleep(1)
 
     assert outcome.status is CompiledGraphProbeStatus.NATIVE_CRASH
+    assert outcome.exit_code == 7
+    assert ready_pid_file.exists()
+    grandchild_pid = int(ready_pid_file.read_text(encoding="utf-8").strip())
+
+    deadline = time.monotonic() + 3.0
+    reaped = False
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            reaped = True
+            break
+        except PermissionError:  # pragma: no cover - PID reused by another user
+            reaped = True
+            break
+        time.sleep(0.02)
+
+    assert reaped, f"grandchild process {grandchild_pid} survived abrupt root exit"
     assert sentinel.exists() is False
 
 
@@ -892,3 +920,186 @@ def test_programmatic_probe_outcome_serialization_is_end_to_end_bounded() -> Non
     assert serialized["details"]["control_record_details_truncated"] is True
     assert len(serialized["details"]["sha256"]) == 64
     assert len(encoded) < 1_000_000
+
+
+@pytest.mark.parametrize(
+    "killpg_error",
+    [PermissionError("pid reused under another uid"), ProcessLookupError("already exited")],
+)
+def test_terminate_process_tree_ignores_pid_reuse_permission_and_lookup_errors(
+    monkeypatch,
+    killpg_error: OSError,
+) -> None:
+    kill_calls: list[str] = []
+
+    class FakeProcess:
+        def __init__(self, *, exit_code: int | None) -> None:
+            self.pid = 4242
+            self._exit_code = exit_code
+
+        def poll(self) -> int | None:
+            return self._exit_code
+
+        def kill(self) -> None:
+            kill_calls.append("kill")
+
+    def fake_killpg(_pid: int, _sig: int) -> None:
+        raise killpg_error
+
+    monkeypatch.setattr(probe.os, "killpg", fake_killpg, raising=False)
+    monkeypatch.setattr(probe.signal, "SIGKILL", 9, raising=False)
+
+    exited_process = FakeProcess(exit_code=0)
+    probe._terminate_process_tree(exited_process)  # type: ignore[arg-type]
+    assert kill_calls == []
+
+    running_process = FakeProcess(exit_code=None)
+    probe._terminate_process_tree(running_process)  # type: ignore[arg-type]
+    assert kill_calls == ["kill"]
+
+
+def test_native_probe_helpers_cover_driver_nested_and_teardown_paths(monkeypatch) -> None:
+    import logging
+    import types
+
+    events: list[tuple[str, object]] = []
+    compile_behavior = {"result": "django-ray-compiled-graph-probe", "fail_compile": False}
+    initialized = {"state": False}
+
+    class FakeInputNode:
+        def __enter__(self) -> str:
+            return "input-node"
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class FakeCompiledGraph:
+        def execute(self, value: str) -> tuple[str, str]:
+            events.append(("execute", value))
+            return ("ref", str(compile_behavior["result"]))
+
+        def teardown(self, *, kill_actors: bool = False) -> None:
+            events.append(("teardown", kill_actors))
+
+    class FakeBoundNode:
+        def __init__(self, arg: object) -> None:
+            self.arg = arg
+
+        def experimental_compile(self) -> FakeCompiledGraph:
+            if compile_behavior["fail_compile"]:
+                raise RuntimeError("compile boom")
+            events.append(("compile", self.arg))
+            return FakeCompiledGraph()
+
+    class FakeMethodHandle:
+        def __init__(self, fn: Any) -> None:
+            self._fn = fn
+
+        def bind(self, graph_input: object) -> FakeBoundNode:
+            assert self._fn("ping") == "ping"
+            return FakeBoundNode(graph_input)
+
+    class FakeActorHandle:
+        def __init__(self, cls: type[Any]) -> None:
+            instance = cls()
+            self.echo = FakeMethodHandle(instance.echo)
+
+    class FakeRemoteDecorator:
+        def __init__(self, target: Any, **options: Any) -> None:
+            self._target = target
+            self._options = options
+
+        def remote(self) -> Any:
+            if isinstance(self._target, type):
+                return FakeActorHandle(self._target)
+            events.append(("nested-remote", self._options))
+            return ("nested-ref", self._target())
+
+    def fake_remote(target: Any = None, **options: Any) -> Any:
+        if target is None:
+            return lambda fn: FakeRemoteDecorator(fn, **options)
+        return FakeRemoteDecorator(target, **options)
+
+    def fake_init(**kwargs: Any) -> None:
+        initialized["state"] = True
+        events.append(("init", kwargs))
+
+    def fake_shutdown() -> None:
+        initialized["state"] = False
+        events.append(("shutdown", None))
+
+    def fake_get(ref: tuple[str, Any], *, timeout: int | None = None) -> Any:
+        events.append(("get", timeout))
+        return ref[1]
+
+    def fake_kill(actor: Any, *, no_restart: bool = False) -> None:
+        events.append(("kill", (type(actor).__name__, no_restart)))
+
+    fake_ray = types.ModuleType("ray")
+    fake_ray.__version__ = "2.60.0-test"  # type: ignore[attr-defined]
+    fake_ray.is_initialized = lambda: initialized["state"]  # type: ignore[attr-defined]
+    fake_ray.init = fake_init  # type: ignore[attr-defined]
+    fake_ray.shutdown = fake_shutdown  # type: ignore[attr-defined]
+    fake_ray.remote = fake_remote  # type: ignore[attr-defined]
+    fake_ray.get = fake_get  # type: ignore[attr-defined]
+    fake_ray.kill = fake_kill  # type: ignore[attr-defined]
+
+    fake_dag = types.ModuleType("ray.dag")
+    fake_dag.InputNode = FakeInputNode  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setitem(sys.modules, "ray.dag", fake_dag)
+
+    # 1. DIRECT_DRIVER initializes local 2-CPU Ray, runs graph, and shuts down.
+    direct = probe._run_native_probe(CompiledGraphTopology.DIRECT_DRIVER)
+    assert direct == {"ray_version": "2.60.0-test", "result_verified": True}
+    assert (
+        "init",
+        {"num_cpus": 2, "include_dashboard": False, "logging_level": logging.ERROR},
+    ) in events
+    assert ("teardown", True) in events
+    assert ("shutdown", None) in events
+
+    # 2. RAY_JOB_DRIVER initializes with address="auto".
+    events.clear()
+    job_driver = probe._run_native_probe(CompiledGraphTopology.RAY_JOB_DRIVER)
+    assert job_driver == {"ray_version": "2.60.0-test", "result_verified": True}
+    assert (
+        "init",
+        {"address": "auto", "include_dashboard": False, "logging_level": logging.ERROR},
+    ) in events
+
+    # 3. NESTED_RAY_TASK dispatches through _nested_compiler_owner and shuts down.
+    events.clear()
+    nested = probe._run_native_probe(CompiledGraphTopology.NESTED_RAY_TASK)
+    assert nested == {"ray_version": "2.60.0-test", "result_verified": True}
+    assert ("nested-remote", {"max_retries": 0}) in events
+    assert ("shutdown", None) in events
+
+    # 4. Unsupported topology fails closed before touching Ray.
+    with pytest.raises(ValueError, match="does not implement topology"):
+        probe._run_native_probe(CompiledGraphTopology.RAY_CLIENT_DRIVER)
+
+    # 5. Pre-initialized Ray is not re-initialized or shut down, and result mismatch raises.
+    events.clear()
+    initialized["state"] = True
+    compile_behavior["result"] = "unexpected"
+    with pytest.raises(AssertionError, match="Unexpected Compiled Graph result"):
+        probe._run_driver_probe(CompiledGraphTopology.DIRECT_DRIVER)
+    assert not any(kind in {"init", "shutdown"} for kind, _ in events)
+    assert ("teardown", True) in events
+
+    # 6. Compile failure falls back to ray.kill(actor, no_restart=True).
+    events.clear()
+    compile_behavior["fail_compile"] = True
+    with pytest.raises(RuntimeError, match="compile boom"):
+        probe._execute_compiled_graph_once()
+    assert ("kill", ("FakeActorHandle", True)) in events
+
+
+def test_compiled_graph_modules_declare_experimental_quarantine() -> None:
+    from django_ray.runtime import compiled_graph, compiled_graph_lifecycle
+
+    for module in (compiled_graph, compiled_graph_lifecycle, probe):
+        doc = module.__doc__ or ""
+        assert "Experimental quarantined module" in doc

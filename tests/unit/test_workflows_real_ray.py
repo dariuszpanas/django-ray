@@ -51,9 +51,33 @@ def ray_cluster():
         yield ray
 
 
+def _run_nested_workflow_with_test_allowlist(limit: int) -> int:
+    """Run the nested workflow inside a Ray worker with explicit test module allowlist."""
+    from django.conf import settings as django_settings
+
+    if not django_settings.configured:
+        django_settings.configure(DJANGO_RAY={"ALLOWED_CALLABLE_MODULES": ["tests"]})
+        return run_nested_workflow(limit)
+
+    previous = getattr(django_settings, "DJANGO_RAY", None)
+    current = dict(previous) if isinstance(previous, dict) else {}
+    configured = list(current.get("ALLOWED_CALLABLE_MODULES") or ())
+    if "tests" not in configured:
+        configured.append("tests")
+    current["ALLOWED_CALLABLE_MODULES"] = configured
+    django_settings.DJANGO_RAY = current
+    try:
+        return run_nested_workflow(limit)
+    finally:
+        if previous is None:
+            delattr(django_settings, "DJANGO_RAY")
+        else:
+            django_settings.DJANGO_RAY = previous
+
+
 @pytest.mark.real_ray
 def test_workflow_executes_on_real_ray(ray_cluster: Any) -> None:
-    outer_task = ray_cluster.remote(run_nested_workflow)
+    outer_task = ray_cluster.remote(max_calls=1)(_run_nested_workflow_with_test_allowlist)
     assert ray_cluster.get(outer_task.remote(5)) == 40
 
 

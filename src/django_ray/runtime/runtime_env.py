@@ -103,7 +103,13 @@ def normalize_runtime_env(
         )
 
     try:
-        serialized = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        serialized = json.dumps(
+            spec,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
         encoded = serialized.encode("utf-8")
     except (TypeError, ValueError, RecursionError, UnicodeError) as error:
         raise ImproperlyConfigured(
@@ -473,25 +479,30 @@ def prepare_runtime_env_for_ray_core(
         return spec
 
     try:
+        from ray._private.ray_constants import RAY_RUNTIME_ENV_IGNORE_GITIGNORE
         from ray._private.runtime_env.py_modules import upload_py_modules_if_needed
         from ray._private.runtime_env.working_dir import upload_working_dir_if_needed
 
+        include_gitignore = os.environ.get(RAY_RUNTIME_ENV_IGNORE_GITIGNORE, "0") != "1"
         with tempfile.TemporaryDirectory(prefix="django-ray-runtime-env-") as scratch_dir:
             spec = upload_working_dir_if_needed(
                 spec,
-                include_gitignore=True,
+                include_gitignore=include_gitignore,
                 scratch_dir=scratch_dir,
             )
             spec = upload_py_modules_if_needed(
                 spec,
-                include_gitignore=True,
+                include_gitignore=include_gitignore,
                 scratch_dir=scratch_dir,
             )
     except ImproperlyConfigured:
         raise
     except Exception as error:
+        from django_ray.redaction import materialize_exception_message, redact_text
+
         raise ImproperlyConfigured(
-            f"django-ray: Failed to package local RuntimeEnv paths: {error}"
+            "django-ray: Failed to package local RuntimeEnv paths: "
+            f"{redact_text(materialize_exception_message(error))}"
         ) from error
     return spec
 
@@ -553,10 +564,11 @@ def snapshot_local_runtime_env(
             source = Path(value)
             if not source.exists():
                 return value
-            if source.is_dir():
+            resolved_source = source.resolve()
+            if resolved_source.is_dir():
                 target = scratch_path / f"{label}.zip"
                 create_package(
-                    str(source),
+                    str(resolved_source),
                     target,
                     include_gitignore=include_gitignore,
                     include_parent_dir=include_parent_dir,
@@ -571,15 +583,15 @@ def snapshot_local_runtime_env(
                         unlink_zip=False,
                     )
                     snapshotted_directory = (
-                        extracted / source.name if include_parent_dir else extracted
+                        extracted / resolved_source.name if include_parent_dir else extracted
                     )
                     snapshotted_directory.mkdir(exist_ok=True)
                     return str(snapshotted_directory)
                 return str(target)
             target_directory = scratch_path / label
             target_directory.mkdir()
-            target = target_directory / source.name
-            shutil.copy2(source, target)
+            target = target_directory / resolved_source.name
+            shutil.copy2(resolved_source, target)
             return str(target)
 
         working_dir = spec.get("working_dir")

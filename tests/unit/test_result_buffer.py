@@ -673,8 +673,8 @@ def test_ack_resolution_and_payload_polling_flush_normal_progress(
     fake_ray = _FakeRay()
     executor = _ray_executor(fake_ray)
     executor.progress_actor = SimpleNamespace()
-    flushes: list[bool] = []
-    executor._flush_progress = lambda **kwargs: flushes.append(True)  # type: ignore[method-assign]
+    polls: list[bool] = []
+    executor._poll_leaf_outcomes = lambda: polls.append(True)  # type: ignore[method-assign]
     monkeypatch.setattr(
         "django_ray.workflows._get_cached_result_buffer_actor",
         lambda: actor_cls,
@@ -695,7 +695,7 @@ def test_ack_resolution_and_payload_polling_flush_normal_progress(
     executor.finalize_result_buffer(session, expected_items=1)
 
     # ready resolve, leaf readiness, append resolve, final readiness, final ack resolve
-    assert len(flushes) == 5
+    assert len(polls) == 5
 
 
 @dataclass(eq=False)

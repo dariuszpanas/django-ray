@@ -1,4 +1,8 @@
-"""Cross-run workflow concurrency coordination and shared service budgets (#95).
+"""Cross-run workflow concurrency coordination and shared service budgets (#95, #829).
+
+.. warning::
+   **Experimental reference module**: this Ray-free state machine is not yet
+   wired into the active ``django-ray`` worker runtime.
 
 This module provides strategy-neutral coordination for:
 1. Overlapping workflow runs targeting the same logical ``scope_key``
@@ -85,6 +89,32 @@ def _positive_finite_float(value: object, *, field_name: str) -> float:
     except OverflowError:
         raise WorkflowConcurrencyConfigurationError(message) from None
     if not math.isfinite(normalized) or normalized <= 0.0:
+        raise WorkflowConcurrencyConfigurationError(message)
+    return normalized
+
+
+def _non_negative_finite_float(value: object, *, field_name: str) -> float:
+    message = f"{field_name} must be finite and >= 0"
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise WorkflowConcurrencyConfigurationError(message)
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise WorkflowConcurrencyConfigurationError(message) from None
+    if not math.isfinite(normalized) or normalized < 0.0:
+        raise WorkflowConcurrencyConfigurationError(message)
+    return normalized
+
+
+def _finite_float(value: object, *, field_name: str) -> float:
+    message = f"{field_name} must be a finite number"
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise WorkflowConcurrencyConfigurationError(message)
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise WorkflowConcurrencyConfigurationError(message) from None
+    if not math.isfinite(normalized):
         raise WorkflowConcurrencyConfigurationError(message)
     return normalized
 
@@ -220,7 +250,9 @@ class WorkflowConcurrencyCoordinator:
         if spec is None:
             raise WorkflowConcurrencyConfigurationError(f"Unregistered scope_key: {scope_key!r}")
 
+        now_monotonic = _finite_float(now_monotonic, field_name="now_monotonic")
         self._reclaim_expired(scope_key, now_monotonic)
+        self.advance_queue(scope_key, now_monotonic=now_monotonic)
         active = self._active_leases[scope_key]
 
         # Idempotent re-admission check for an already active owner.
@@ -346,6 +378,7 @@ class WorkflowConcurrencyCoordinator:
         now_monotonic: float = 0.0,
     ) -> list[FencedConcurrencyLease]:
         spec = self._specs[scope_key]
+        now_monotonic = _finite_float(now_monotonic, field_name="now_monotonic")
         self._reclaim_expired(scope_key, now_monotonic)
         active = self._active_leases[scope_key]
         queue = self._wait_queues[scope_key]
@@ -497,8 +530,12 @@ class SharedServiceBudgetController:
             raise WorkflowConcurrencyConfigurationError(
                 f"Unregistered service_key: {service_key!r}"
             )
-        bounded_backoff = max(0.0, min(float(retry_after_seconds), 300.0))
-        target = now_monotonic + bounded_backoff
+        validated_retry_after = _non_negative_finite_float(
+            retry_after_seconds, field_name="retry_after_seconds"
+        )
+        validated_now = _finite_float(now_monotonic, field_name="now_monotonic")
+        bounded_backoff = min(validated_retry_after, 300.0)
+        target = validated_now + bounded_backoff
         self._cooldown_until[service_key] = max(self._cooldown_until[service_key], target)
         self._tokens[service_key] = 0.0
         self._last_refill[service_key] = self._cooldown_until[service_key]

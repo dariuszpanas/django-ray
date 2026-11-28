@@ -8,6 +8,8 @@ import time
 from typing import Any
 
 import pytest
+from django.conf import settings as django_settings
+from django.tasks import task
 
 from django_ray.execution_codec import (
     ExecutionCompletionSource,
@@ -123,6 +125,10 @@ def _strict_entrypoint_parallel_map(counter_name: str) -> list[int]:
 
     counter = ray.get_actor(counter_name)
     return distributed.parallel_map(_counted_value, [(counter, 17)])
+
+
+if django_settings.configured:
+    _strict_entrypoint_parallel_map = task(_strict_entrypoint_parallel_map)
 
 
 def _strict_runtime_env_identity() -> dict[str, Any]:

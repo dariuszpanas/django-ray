@@ -279,12 +279,18 @@ def test_checkpoint_spec_envelope_and_forced_reexecute_edge_cases() -> None:
             ),
         ],
     )
-    with pytest.raises(CheckpointFencingError, match="target_attempt_number > 1"):
+    with pytest.raises(CheckpointFencingError, match="retry authority"):
         planner.build_resume_plan(
             target_attempt_number=1,
-            target_execution_generation=2,
+            target_execution_generation=0,
             checkpoints=[],
         )
+    manual_retry_plan = planner.build_resume_plan(
+        target_attempt_number=1,
+        target_execution_generation=1,
+        checkpoints=[_cp("a", "app.a", attempt=1, gen=0)],
+    )
+    assert manual_retry_plan.reused_node_ids == ("a",)
     with pytest.raises(CheckpointConfigurationError, match="unknown nodes"):
         planner.build_resume_plan(
             target_attempt_number=2,

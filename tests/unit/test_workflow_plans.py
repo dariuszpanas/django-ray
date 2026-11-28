@@ -1444,11 +1444,8 @@ def test_worker_only_runtime_env_callable_remains_dynamic_compatible(tmp_path) -
 
 
 def test_submitter_import_side_effect_failure_remains_dynamic_compatible(monkeypatch) -> None:
-    import django_ray.workflow.plans as plan_module
-
     monkeypatch.setattr(
-        plan_module,
-        "import_callable",
+        "django_ray.runtime.import_utils.resolve_workflow_callable",
         lambda _path: (_ for _ in ()).throw(RuntimeError("worker-only dependency missing")),
     )
 
@@ -2333,7 +2330,7 @@ def test_terminal_only_result_serialization_failure_publishes_only_failed_summar
 
     monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
     monkeypatch.setattr(
-        "django_ray.runtime.import_utils.import_callable",
+        "django_ray.runtime.import_utils.resolve_task_callable",
         lambda _path: return_unserializable_result,
     )
 

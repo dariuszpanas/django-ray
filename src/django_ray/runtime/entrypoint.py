@@ -9,19 +9,26 @@ import argparse
 import asyncio
 import base64
 import binascii
+import errno
 import json
+import math
 import os
 import sys
+import time
 import traceback
 from contextlib import nullcontext
 from dataclasses import dataclass
-from inspect import iscoroutinefunction
+from inspect import isawaitable, iscoroutine, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 
 import django
 from django.apps import apps
+from django.db import DatabaseError, InterfaceError, OperationalError, close_old_connections
 
-from django_ray.execution_codec import EXECUTION_REQUEST_MAX_BYTES
+from django_ray.execution_codec import (
+    EXECUTION_COMPLETION_DIAGNOSTIC_MAX_BYTES,
+    EXECUTION_REQUEST_MAX_BYTES,
+)
 from django_ray.logging import get_logger
 from django_ray.ray_job_protocol import (
     RAY_JOB_CONFIG_JSON_ENV_VAR,
@@ -49,10 +56,186 @@ _COMPLETION_ENCODING_MESSAGE = (
     "Task completion could not be encoded. Application effects may "
     "have occurred; assess them before manually retrying."
 )
+RAY_JOB_COMPLETION_PERSISTENCE_FAILED_EXIT_CODE = 75
+_COMPLETION_PERSIST_MAX_ATTEMPTS = 5
+_COMPLETION_PERSIST_BACKOFF_SECONDS = (0.1, 0.25, 0.5, 1.0)
+_RESULT_STORAGE_STORE_MAX_ATTEMPTS = 3
+_RESULT_STORAGE_STORE_BACKOFF_SECONDS = (0.1, 0.25)
+_DIAGNOSTIC_EXCEPTION_TYPE_MAX_BYTES = 512
+_NON_TRANSIENT_STORAGE_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
 
 
 class _ResultEncodingError(ValueError):
     """Mark a result encoding failure after the callable has returned."""
+
+    def __init__(self, *, offending_type: str | None = None) -> None:
+        self.offending_type = offending_type
+        super().__init__(_completion_encoding_message(offending_type))
+
+
+class ResultStoragePersistenceError(RuntimeError):
+    """Raised when configured external result storage fails after execution."""
+
+
+class _EncodedCompletionResult(str):
+    """Serialized completion JSON carrying lightweight status metadata."""
+
+    completion_success: bool
+    completion_error: str | None
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        completion_success: bool,
+        completion_error: str | None,
+    ) -> _EncodedCompletionResult:
+        obj = super().__new__(cls, value)
+        obj.completion_success = completion_success
+        obj.completion_error = completion_error
+        return obj
+
+    def __reduce__(self) -> tuple[type[str], tuple[str]]:
+        """Serialize as a plain string across pickle/cloudpickle boundaries."""
+        return (str, (str(self),))
+
+
+class _CompletionPersistenceFailedResult(_EncodedCompletionResult):
+    """Mark one completion whose durable DB write failed after retries."""
+
+
+def _completion_encoding_message(offending_type: str | None = None) -> str:
+    if not offending_type:
+        return _COMPLETION_ENCODING_MESSAGE
+    return (
+        f"Task completion could not be encoded ({offending_type}). "
+        "Application effects may have occurred; assess them before manually retrying."
+    )
+
+
+def _offending_non_json_type(value: Any, *, max_depth: int = 64) -> str | None:
+    """Identify the first non-JSON-serializable type without retaining values."""
+    ancestors: set[int] = set()
+    stack: list[tuple[Any, int, int | None]] = [(value, 0, None)]
+    visited = 0
+    while stack:
+        current, depth, container_id = stack.pop()
+        if container_id is not None:
+            ancestors.discard(container_id)
+            continue
+        visited += 1
+        if visited > 100_000:
+            return None
+        if current is None or type(current) in (bool, int):
+            continue
+        if type(current) is float:
+            if not math.isfinite(current):
+                return "non-finite float"
+            continue
+        if isinstance(current, str):
+            try:
+                current.encode("utf-8")
+            except UnicodeEncodeError:
+                return "invalid Unicode surrogate"
+            continue
+        if isinstance(current, dict):
+            if depth >= max_depth:
+                return "nesting depth exceeded"
+            obj_id = id(current)
+            if obj_id in ancestors:
+                return "circular reference"
+            for key in current:
+                if not isinstance(key, str):
+                    return (
+                        f"non-string dict key of type "
+                        f"{type(key).__module__}.{type(key).__qualname__}"
+                    )
+            ancestors.add(obj_id)
+            stack.append((None, depth, obj_id))
+            for item_val in current.values():
+                stack.append((item_val, depth + 1, None))
+            continue
+        if isinstance(current, (list, tuple)):
+            if depth >= max_depth:
+                return "nesting depth exceeded"
+            obj_id = id(current)
+            if obj_id in ancestors:
+                return "circular reference"
+            ancestors.add(obj_id)
+            stack.append((None, depth, obj_id))
+            for item_val in current:
+                stack.append((item_val, depth + 1, None))
+            continue
+        return f"non-JSON-serializable value of type {type(current).__module__}.{type(current).__qualname__}"
+    return None
+
+
+def _truncate_utf8_prefix(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return encoded.decode("utf-8")
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _truncate_utf8_suffix(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return encoded.decode("utf-8")
+    return encoded[-max_bytes:].decode("utf-8", errors="ignore")
+
+
+def _sanitize_and_bound_diagnostic(
+    value: str | None,
+    *,
+    max_bytes: int,
+    marker: str = "\n... [truncated] ...\n",
+    preserve_tail: bool = True,
+) -> str | None:
+    """Sanitize NUL/surrogates and bound UTF-8 size while preserving diagnostics."""
+    if value is None:
+        return None
+    cleaned = value.replace("\x00", "\\x00")
+    encoded = cleaned.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return encoded.decode("utf-8")
+    marker_bytes = marker.encode("utf-8")
+    if len(marker_bytes) >= max_bytes:
+        return _truncate_utf8_prefix(cleaned, max_bytes)
+    budget = max_bytes - len(marker_bytes)
+    if not preserve_tail:
+        return _truncate_utf8_prefix(cleaned, budget) + marker
+    # Keep more of the tail (final traceback frames & exception line) than head.
+    head_budget = budget // 3
+    tail_budget = budget - head_budget
+    return (
+        _truncate_utf8_prefix(cleaned, head_budget)
+        + marker
+        + _truncate_utf8_suffix(cleaned, tail_budget)
+    )
+
+
+def _close_stale_db_connections() -> None:
+    """Close expired or broken Django DB connections outside atomic blocks."""
+    if not apps.ready:
+        return
+    try:
+        from django.db import close_old_connections as django_close_old_connections
+        from django.db import connections
+
+        if close_old_connections is django_close_old_connections:
+            initialized = connections.all(initialized_only=True)
+            if any(conn.in_atomic_block for conn in initialized):
+                for conn in initialized:
+                    if not conn.in_atomic_block:
+                        conn.close_if_unusable_or_obsolete()
+                return
+        close_old_connections()
+    except Exception:
+        pass
 
 
 def get_settings() -> dict[str, Any]:
@@ -113,6 +296,7 @@ def _serialize_completion(
     retryable: bool | None,
     completion_identity: ExecutionIdentity | None = None,
     execution_protocol_version: int | None = None,
+    strict_encoding: bool = False,
 ) -> str:
     """Keep bound outcomes versioned even when their body cannot be encoded."""
     payload = {
@@ -129,7 +313,7 @@ def _serialize_completion(
         from django_ray.execution_codec import ExecutionCompletion, encode_execution_completion
 
         try:
-            return encode_execution_completion(
+            encoded = encode_execution_completion(
                 ExecutionCompletion(
                     identity=completion_identity,
                     execution_protocol_version=execution_protocol_version,
@@ -143,11 +327,19 @@ def _serialize_completion(
                     retryable=retryable,
                 )
             )
+            return _EncodedCompletionResult(
+                encoded,
+                completion_success=success,
+                completion_error=error,
+            )
         except (TypeError, ValueError):
             # The callable may already have produced effects. Encoding failure
             # must neither discard its identity nor authorize automatic replay.
             # Do not recurse: invalid identity/protocol still fails closed.
-            return encode_execution_completion(
+            fallback_error = _completion_encoding_message(
+                _offending_non_json_type(result) if success else None
+            )
+            encoded = encode_execution_completion(
                 ExecutionCompletion(
                     identity=completion_identity,
                     execution_protocol_version=execution_protocol_version,
@@ -155,20 +347,60 @@ def _serialize_completion(
                     success=False,
                     result=None,
                     result_reference=None,
-                    error=_COMPLETION_ENCODING_MESSAGE,
+                    error=fallback_error,
                     traceback=None,
                     exception_type="RayExecutionCompletionEncodingError",
                     retryable=False,
                 )
             )
-    return json.dumps(payload)
+            return _EncodedCompletionResult(
+                encoded,
+                completion_success=False,
+                completion_error=fallback_error,
+            )
+    if strict_encoding:
+        try:
+            encoded = json.dumps(payload, allow_nan=False)
+            return _EncodedCompletionResult(
+                encoded,
+                completion_success=success,
+                completion_error=error,
+            )
+        except (TypeError, ValueError):
+            fallback_error = _completion_encoding_message(
+                _offending_non_json_type(result) if success else None
+            )
+            encoded = json.dumps(
+                {
+                    "success": False,
+                    "result": None,
+                    "result_reference": None,
+                    "error": fallback_error,
+                    "traceback": None,
+                    "exception_type": "RayExecutionCompletionEncodingError",
+                    "retryable": False,
+                },
+                allow_nan=False,
+            )
+            return _EncodedCompletionResult(
+                encoded,
+                completion_success=False,
+                completion_error=fallback_error,
+            )
+    encoded = json.dumps(payload)
+    return _EncodedCompletionResult(
+        encoded,
+        completion_success=success,
+        completion_error=error,
+    )
 
 
 def _serialize_error(
-    e: Exception,
+    e: BaseException,
     *,
     completion_identity: ExecutionIdentity | None = None,
     execution_protocol_version: int | None = None,
+    strict_encoding: bool = False,
 ) -> str:
     """Serialize an exception as a task result JSON string."""
     from django_ray.execution_codec import (
@@ -178,20 +410,40 @@ def _serialize_error(
     from django_ray.input_storage import InputPayloadValidationError
     from django_ray.workflow.plans import WorkflowPlanMismatchError
 
+    if isinstance(e, ResultStoragePersistenceError):
+        return _serialize_completion(
+            success=False,
+            result=None,
+            result_reference=None,
+            error=_sanitize_and_bound_diagnostic(
+                materialize_exception_message(e),
+                max_bytes=EXECUTION_COMPLETION_DIAGNOSTIC_MAX_BYTES,
+            ),
+            error_traceback=None,
+            exception_type="ResultStoragePersistenceError",
+            retryable=False,
+            completion_identity=completion_identity,
+            execution_protocol_version=execution_protocol_version,
+            strict_encoding=strict_encoding,
+        )
+
     if isinstance(e, _ResultEncodingError):
         return _serialize_completion(
             success=False,
             result=None,
             result_reference=None,
-            error=_COMPLETION_ENCODING_MESSAGE,
+            error=_completion_encoding_message(e.offending_type),
             error_traceback=None,
             exception_type="RayExecutionCompletionEncodingError",
             retryable=False,
             completion_identity=completion_identity,
             execution_protocol_version=execution_protocol_version,
+            strict_encoding=strict_encoding,
         )
 
-    nested_rejection = find_nested_execution_request_rejection(e)
+    nested_rejection = (
+        find_nested_execution_request_rejection(e) if isinstance(e, Exception) else None
+    )
     if nested_rejection is not None:
         return _serialize_completion(
             success=False,
@@ -206,21 +458,48 @@ def _serialize_error(
             retryable=False,
             completion_identity=completion_identity,
             execution_protocol_version=execution_protocol_version,
+            strict_encoding=strict_encoding,
         )
+
+    raw_error = materialize_exception_message(e)
+    raw_traceback = traceback.format_exc()
+    raw_exception_type = type(e).__module__ + "." + type(e).__name__
+
+    bounded_error = _sanitize_and_bound_diagnostic(
+        raw_error,
+        max_bytes=EXECUTION_COMPLETION_DIAGNOSTIC_MAX_BYTES,
+        marker="\n... [error truncated to fit 64 KiB limit] ...\n",
+    )
+    bounded_traceback = _sanitize_and_bound_diagnostic(
+        raw_traceback,
+        max_bytes=EXECUTION_COMPLETION_DIAGNOSTIC_MAX_BYTES,
+        marker="\n... [traceback truncated to fit 64 KiB limit] ...\n",
+    )
+    bounded_exception_type = _sanitize_and_bound_diagnostic(
+        raw_exception_type,
+        max_bytes=_DIAGNOSTIC_EXCEPTION_TYPE_MAX_BYTES,
+        marker="",
+        preserve_tail=False,
+    )
 
     return _serialize_completion(
         success=False,
         result=None,
         result_reference=None,
-        error=materialize_exception_message(e),
-        error_traceback=traceback.format_exc(),
-        exception_type=type(e).__module__ + "." + type(e).__name__,
+        error=bounded_error or raw_exception_type,
+        error_traceback=bounded_traceback,
+        exception_type=bounded_exception_type,
         retryable=not isinstance(
             e,
-            (InputPayloadValidationError, WorkflowPlanMismatchError),
+            (
+                InputPayloadValidationError,
+                WorkflowPlanMismatchError,
+                asyncio.CancelledError,
+            ),
         ),
         completion_identity=completion_identity,
         execution_protocol_version=execution_protocol_version,
+        strict_encoding=strict_encoding,
     )
 
 
@@ -234,26 +513,75 @@ def bootstrap_django() -> None:
         django.setup()
 
 
+def _unwrap_django_task_callable(callable_obj: Any) -> Any:
+    """Unwrap a Django 6 Task instance without unwrapping functools.partial."""
+    try:
+        from django.tasks.base import Task
+    except ImportError:
+        return callable_obj
+    if isinstance(callable_obj, Task):
+        return callable_obj.func
+    return callable_obj
+
+
 def _invoke_task_callable(
     callable_obj: Any,
     args: list[Any],
     kwargs: dict[str, Any],
 ) -> Any:
     """Invoke a task callable at the executor's synchronous boundary."""
-    if not iscoroutinefunction(callable_obj):
-        return callable_obj(*args, **kwargs)
+    task_cls: type[Any] | None
+    try:
+        from django.tasks.base import Task as task_cls  # noqa: N813
+    except ImportError:
+        task_cls = None
+
+    if task_cls is not None and isinstance(callable_obj, task_cls) and callable_obj.takes_context:
+        from django_ray.backends import build_task_context_for_active_execution
+
+        args = [
+            build_task_context_for_active_execution(
+                callable_obj,
+                args=args,
+                kwargs=kwargs,
+            ),
+            *args,
+        ]
+    target = _unwrap_django_task_callable(callable_obj)
+    if iscoroutinefunction(target):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(
+                "django-ray cannot execute a coroutine task from a thread "
+                "that already has a running event loop"
+            )
+        try:
+            return asyncio.run(target(*args, **kwargs))
+        finally:
+            _close_stale_db_connections()
+
+    outcome = target(*args, **kwargs)
+    if not isawaitable(outcome):
+        return outcome
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         pass
     else:
+        if iscoroutine(outcome):
+            outcome.close()
         raise RuntimeError(
             "django-ray cannot execute a coroutine task from a thread "
             "that already has a running event loop"
         )
-
-    return asyncio.run(callable_obj(*args, **kwargs))
+    try:
+        return asyncio.run(outcome)
+    finally:
+        _close_stale_db_connections()
 
 
 def _persist_task_completion(
@@ -261,37 +589,76 @@ def _persist_task_completion(
     attempt_number: int | None,
     execution_generation: int | None,
     completion_data: str,
-) -> None:
+) -> bool:
     """Persist the structured completion envelope for Ray Job reconciliation.
 
     The update is conditional on the task still being RUNNING (and, when
     available, on the attempt number) so a stale Ray Job cannot overwrite a
-    newer retry. Failure to write the channel is intentionally logged only;
-    the worker will keep the task non-terminal when the envelope is absent.
+    newer retry. Transient database errors are retried with bounded backoff
+    after closing stale connections. Returns ``True`` when the DB update ran
+    cleanly (or no persistence was requested), and ``False`` if persistence
+    failed after all retry attempts.
     """
     if task_execution_pk is None or attempt_number is None or execution_generation is None:
-        return
+        return True
 
-    try:
-        from django_ray.models import RayTaskExecution, TaskState
+    from django_ray.models import RayTaskExecution, TaskState
 
-        filters: dict[str, Any] = {
-            "pk": task_execution_pk,
-            "state": TaskState.RUNNING,
-        }
-        if attempt_number is not None:
-            filters["attempt_number"] = attempt_number
-        filters["execution_generation"] = execution_generation
-        updated = RayTaskExecution.objects.filter(**filters).update(
-            completion_data=completion_data,
-        )
-        if not updated:
-            logger.warning(
-                "Could not persist completion envelope for task %s (stale or non-running attempt)",
-                task_execution_pk,
+    filters: dict[str, Any] = {
+        "pk": task_execution_pk,
+        "state": TaskState.RUNNING,
+    }
+    if attempt_number is not None:
+        filters["attempt_number"] = attempt_number
+    filters["execution_generation"] = execution_generation
+
+    max_attempts = max(1, int(_COMPLETION_PERSIST_MAX_ATTEMPTS))
+    for attempt in range(max_attempts):
+        _close_stale_db_connections()
+        try:
+            updated = RayTaskExecution.objects.filter(**filters).update(
+                completion_data=completion_data,
             )
-    except Exception:
-        logger.exception("Failed to persist completion envelope for task %s", task_execution_pk)
+            if not updated:
+                logger.warning(
+                    "Could not persist completion envelope for task %s (stale or non-running attempt)",
+                    task_execution_pk,
+                )
+            return True
+        except (OperationalError, InterfaceError, DatabaseError):
+            _close_stale_db_connections()
+            if attempt + 1 < max_attempts:
+                delay = _COMPLETION_PERSIST_BACKOFF_SECONDS[
+                    min(attempt, len(_COMPLETION_PERSIST_BACKOFF_SECONDS) - 1)
+                ]
+                logger.warning(
+                    "Transient DB error persisting completion envelope for task %s "
+                    "(attempt %s/%s); retrying",
+                    task_execution_pk,
+                    attempt + 1,
+                    max_attempts,
+                )
+                time.sleep(delay)
+                continue
+            logger.exception("Failed to persist completion envelope for task %s", task_execution_pk)
+            return False
+        except Exception:
+            logger.exception("Failed to persist completion envelope for task %s", task_execution_pk)
+            return False
+    return False
+
+
+def _is_non_transient_storage_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, PermissionError):
+            return True
+        if isinstance(current, OSError) and current.errno in _NON_TRANSIENT_STORAGE_ERRNOS:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _prepare_completion_result(
@@ -301,16 +668,29 @@ def _prepare_completion_result(
     attempt_number: int | None,
     execution_generation: int | None,
     strict_encoding: bool = False,
+    allow_result_offload: bool = False,
 ) -> tuple[Any | None, str | None]:
     """Keep the durable completion envelope bounded for oversized results."""
-    if task_execution_pk is None or attempt_number is None or execution_generation is None:
+    should_offload = allow_result_offload or (
+        task_execution_pk is not None
+        and attempt_number is not None
+        and execution_generation is not None
+    )
+    if not should_offload:
+        if strict_encoding:
+            try:
+                json.dumps(result, allow_nan=False)
+            except (TypeError, ValueError, RecursionError):
+                raise _ResultEncodingError(
+                    offending_type=_offending_non_json_type(result)
+                ) from None
         return result, None
 
     try:
         serialized_result = json.dumps(result, allow_nan=not strict_encoding)
     except (TypeError, ValueError, RecursionError):
         if strict_encoding:
-            raise _ResultEncodingError from None
+            raise _ResultEncodingError(offending_type=_offending_non_json_type(result)) from None
         raise
     settings = get_settings()
     max_result_size = int(settings.get("MAX_RESULT_SIZE_BYTES", 1024 * 1024))
@@ -318,24 +698,41 @@ def _prepare_completion_result(
         return result, None
 
     from django_ray.result_storage import (
-        DigestResultStorage,
         ResultStorageError,
         get_result_storage_backend,
     )
 
-    try:
-        result_reference = get_result_storage_backend(settings).store(
-            serialized_result=serialized_result
-        )
-    except ResultStorageError as error:
-        logger.warning(
-            "Result storage backend failed for task %s (%s); using digest-only reference",
-            task_execution_pk,
-            error,
-        )
-        result_reference = DigestResultStorage().store(serialized_result=serialized_result)
+    backend = get_result_storage_backend(settings)
+    max_attempts = max(1, int(_RESULT_STORAGE_STORE_MAX_ATTEMPTS))
+    last_error: ResultStorageError | None = None
+    for attempt in range(max_attempts):
+        try:
+            result_reference = backend.store(serialized_result=serialized_result)
+            return None, result_reference
+        except ResultStorageError as error:
+            last_error = error
+            if _is_non_transient_storage_error(error) or attempt + 1 >= max_attempts:
+                break
+            delay = _RESULT_STORAGE_STORE_BACKOFF_SECONDS[
+                min(attempt, len(_RESULT_STORAGE_STORE_BACKOFF_SECONDS) - 1)
+            ]
+            time.sleep(delay)
 
-    return None, result_reference
+    assert last_error is not None
+    redacted_detail = redact_text(materialize_exception_message(last_error))
+    error_name = type(last_error).__name__
+    logger.error(
+        "Result storage backend failed for task %s after %s attempt(s) (%s: %s); "
+        "refusing silent digest downgrade",
+        task_execution_pk,
+        max_attempts,
+        error_name,
+        redacted_detail,
+    )
+    raise ResultStoragePersistenceError(
+        f"Failed to persist oversized task result to configured result storage "
+        f"({error_name}): {redacted_detail}"
+    ) from last_error
 
 
 def execute_task(
@@ -354,6 +751,9 @@ def execute_task(
     _completion_identity: ExecutionIdentity | None = None,
     _execution_protocol_version: int | None = None,
     _strict_execution_request: bool = False,
+    *,
+    allow_result_offload: bool = False,
+    _strict_encoding: bool | None = None,
 ) -> str:
     """Execute a Django Task and return JSON result.
 
@@ -368,22 +768,34 @@ def execute_task(
         execution_generation: Monotonic execution token, used to isolate manual retries.
         input_reference: Durable combined-input reference for external payloads.
         ray_job_driver: Override execution-context mode for synchronous workers.
+        allow_result_offload: Enable executor-side ``result_storage`` spillover
+            without writing Ray Job ``completion_data`` rows to PostgreSQL.
 
     Returns:
         JSON-serialized TaskResult.
     """
     completion_task_execution_pk = task_execution_pk if ray_job_driver is not False else None
+    effective_strict_encoding = (
+        _strict_encoding
+        if _strict_encoding is not None
+        else (
+            (_completion_identity is not None and _execution_protocol_version is not None)
+            or ray_job_driver is False
+        )
+    )
     try:
         bootstrap_django()
+        _close_stale_db_connections()
 
-        from django_ray.runtime.import_utils import import_callable
+        import django_ray.runtime.import_utils as import_utils
 
+        resolver = getattr(import_utils, "resolve_task_callable", import_utils.import_callable)
         args, kwargs = load_task_input(
             args_json=serialized_args,
             kwargs_json=serialized_kwargs,
             input_reference=input_reference,
         )
-        callable_obj = import_callable(callable_path)
+        callable_obj = resolver(callable_path)
 
         if task_execution_pk is None:
             execution_context = nullcontext()
@@ -413,17 +825,19 @@ def execute_task(
                 strict_execution_request=_strict_execution_request,
             )
 
-        with execution_context:
-            result = _invoke_task_callable(callable_obj, args, kwargs)
+        try:
+            with execution_context:
+                result = _invoke_task_callable(callable_obj, args, kwargs)
+        finally:
+            _close_stale_db_connections()
 
         result_value, result_reference = _prepare_completion_result(
             result,
             task_execution_pk=completion_task_execution_pk,
             attempt_number=attempt_number,
             execution_generation=execution_generation,
-            strict_encoding=(
-                _completion_identity is not None and _execution_protocol_version is not None
-            ),
+            strict_encoding=effective_strict_encoding,
+            allow_result_offload=allow_result_offload,
         )
         result_json = _serialize_completion(
             success=True,
@@ -435,21 +849,29 @@ def execute_task(
             retryable=None,
             completion_identity=_completion_identity,
             execution_protocol_version=_execution_protocol_version,
+            strict_encoding=effective_strict_encoding,
         )
 
-    except Exception as e:
+    except (Exception, asyncio.CancelledError) as e:
         result_json = _serialize_error(
             e,
             completion_identity=_completion_identity,
             execution_protocol_version=_execution_protocol_version,
+            strict_encoding=effective_strict_encoding,
         )
 
-    _persist_task_completion(
+    persisted = _persist_task_completion(
         completion_task_execution_pk,
         attempt_number,
         execution_generation,
         result_json,
     )
+    if completion_task_execution_pk is not None and persisted is False:
+        return _CompletionPersistenceFailedResult(
+            result_json,
+            completion_success=getattr(result_json, "completion_success", False),
+            completion_error=getattr(result_json, "completion_error", None),
+        )
     return result_json
 
 
@@ -759,6 +1181,7 @@ def main(argv: list[str] | None = None) -> int:
         assert args.payload_b64 is not None
         result_json = execute_task_from_payload(args.payload_b64)
     strict_rejection = isinstance(result_json, _StrictRequestRejectionResult)
+    persistence_failed = isinstance(result_json, _CompletionPersistenceFailedResult)
     try:
         result = json.loads(result_json)
     except (TypeError, json.JSONDecodeError):
@@ -779,6 +1202,8 @@ def main(argv: list[str] | None = None) -> int:
             )
     if strict_rejection:
         return RAY_JOB_REQUEST_REJECTED_EXIT_CODE
+    if persistence_failed:
+        return RAY_JOB_COMPLETION_PERSISTENCE_FAILED_EXIT_CODE
     return 0
 
 

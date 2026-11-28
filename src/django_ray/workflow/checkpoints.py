@@ -1,4 +1,8 @@
-"""Ray-free reference state machine for durable step checkpoints and resume planning (#289).
+"""Ray-free reference state machine for durable step checkpoints and resume planning (#289, #829).
+
+.. warning::
+   **Experimental reference module**: this Ray-free state machine is not yet
+   wired into the active ``django-ray`` worker runtime.
 
 Implements the fail-closed resume planning contract defined in ADR-0007:
 - Explicit node resumability classes (``PURE_DETERMINISTIC``,
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -141,14 +146,16 @@ class DurableStepCheckpointEnvelope:
             or SHA256_DIGEST_RE.match(self.output_digest_sha256) is None
         ):
             raise CheckpointConfigurationError("output_digest_sha256 must be sha256:<64-hex>")
+        if type(self.source_attempt_number) is not int or self.source_attempt_number <= 0:
+            raise CheckpointConfigurationError(
+                "source_attempt_number must use positive ints (>= 1)"
+            )
         if (
-            type(self.source_attempt_number) is not int
-            or self.source_attempt_number <= 0
-            or type(self.source_execution_generation) is not int
-            or self.source_execution_generation <= 0
+            type(self.source_execution_generation) is not int
+            or self.source_execution_generation < 0
         ):
             raise CheckpointConfigurationError(
-                "source_attempt_number and source_execution_generation must be positive ints"
+                "source_execution_generation must be a non-negative int (>= 0)"
             )
         return self
 
@@ -234,17 +241,19 @@ class WorkflowCheckpointResumePlanner:
         | tuple[DurableStepCheckpointEnvelope, ...],
         corrupted_output_node_ids: set[str] | frozenset[str] = frozenset(),
         force_reexecute_node_ids: set[str] | frozenset[str] = frozenset(),
+        expected_input_digests: Mapping[str, str] | None = None,
     ) -> WorkflowResumePlan:
         """Compute a fail-closed ``WorkflowResumePlan`` for a resuming attempt."""
         if (
             type(target_attempt_number) is not int
-            or target_attempt_number <= 1
+            or target_attempt_number < 1
             or type(target_execution_generation) is not int
-            or target_execution_generation <= 1
+            or target_execution_generation < 0
+            or (target_execution_generation == 0 and target_attempt_number <= 1)
         ):
             raise CheckpointFencingError(
-                "Resumed execution requires target_attempt_number > 1 and "
-                "target_execution_generation > 1"
+                "Resumed execution requires target_attempt_number >= 1, "
+                "target_execution_generation >= 0, and a retry authority beyond (gen=0, attempt=1)"
             )
 
         unknown_forced = set(force_reexecute_node_ids) - set(self._nodes_by_id)
@@ -252,6 +261,20 @@ class WorkflowCheckpointResumePlanner:
             raise CheckpointConfigurationError(
                 f"force_reexecute_node_ids contains unknown nodes: {sorted(unknown_forced)}"
             )
+
+        validated_expected_inputs: dict[str, str] = {}
+        if expected_input_digests is not None:
+            unknown_expected = set(expected_input_digests) - set(self._nodes_by_id)
+            if unknown_expected:
+                raise CheckpointConfigurationError(
+                    f"expected_input_digests contains unknown nodes: {sorted(unknown_expected)}"
+                )
+            for node_id, digest in expected_input_digests.items():
+                if not isinstance(digest, str) or SHA256_DIGEST_RE.match(digest) is None:
+                    raise CheckpointConfigurationError(
+                        f"expected_input_digests[{node_id!r}] must be sha256:<64-hex>"
+                    )
+                validated_expected_inputs[node_id] = digest
 
         cp_by_node: dict[str, DurableStepCheckpointEnvelope] = {}
         for raw_cp in checkpoints:
@@ -270,9 +293,14 @@ class WorkflowCheckpointResumePlanner:
                 raise CheckpointPlanMismatchError(
                     f"Checkpoint callable_path {cp.callable_path!r} != {node_spec.callable_path!r}"
                 )
-            if (
-                cp.source_attempt_number >= target_attempt_number
-                or cp.source_execution_generation >= target_execution_generation
+            if cp.resumability_class != node_spec.resumability_class:
+                raise CheckpointPlanMismatchError(
+                    f"Checkpoint resumability_class {cp.resumability_class!r} != "
+                    f"{node_spec.resumability_class!r}"
+                )
+            if (cp.source_execution_generation, cp.source_attempt_number) >= (
+                target_execution_generation,
+                target_attempt_number,
             ):
                 raise CheckpointFencingError(
                     f"Checkpoint for node {cp.node_id!r} carries non-prior authority "
@@ -382,13 +410,10 @@ class WorkflowCheckpointResumePlanner:
                 )
                 continue
 
-            if node_id in corrupted_output_node_ids or cp.output_digest_sha256 is None:
-                if (
-                    cp.side_effect_disposition == SideEffectDisposition.IN_FLIGHT_INDETERMINATE
-                    and spec.resumability_class == NodeResumabilityClass.IDEMPOTENT_SIDE_EFFECT
-                ):
-                    invalidated_nodes.add(node_id)
-                    reexecuted_ids.append(node_id)
+            if cp.side_effect_disposition == SideEffectDisposition.IN_FLIGHT_INDETERMINATE:
+                invalidated_nodes.add(node_id)
+                reexecuted_ids.append(node_id)
+                if spec.resumability_class == NodeResumabilityClass.IDEMPOTENT_SIDE_EFFECT:
                     decisions.append(
                         NodeResumeDecision(
                             node_id=node_id,
@@ -396,7 +421,85 @@ class WorkflowCheckpointResumePlanner:
                             invalidation_reason="indeterminate_idempotent_retry",
                         )
                     )
+                else:
+                    decisions.append(
+                        NodeResumeDecision(
+                            node_id=node_id,
+                            disposition=ResumeNodeDisposition.EXECUTE_FRESH,
+                            invalidation_reason="indeterminate_checkpoint",
+                        )
+                    )
+                continue
+
+            if cp.side_effect_disposition in (
+                SideEffectDisposition.NOT_STARTED,
+                SideEffectDisposition.ROLLED_BACK,
+            ):
+                invalidated_nodes.add(node_id)
+                reexecuted_ids.append(node_id)
+                decisions.append(
+                    NodeResumeDecision(
+                        node_id=node_id,
+                        disposition=ResumeNodeDisposition.EXECUTE_FRESH,
+                        invalidation_reason=f"side_effect_{cp.side_effect_disposition.value}",
+                    )
+                )
+                continue
+
+            if spec.resumability_class in (
+                NodeResumabilityClass.IDEMPOTENT_SIDE_EFFECT,
+                NodeResumabilityClass.NON_IDEMPOTENT_SIDE_EFFECT,
+            ):
+                if cp.side_effect_disposition != SideEffectDisposition.COMMITTED:
+                    invalidated_nodes.add(node_id)
+                    reexecuted_ids.append(node_id)
+                    decisions.append(
+                        NodeResumeDecision(
+                            node_id=node_id,
+                            disposition=ResumeNodeDisposition.EXECUTE_FRESH,
+                            invalidation_reason="uncommitted_side_effect",
+                        )
+                    )
                     continue
+                if (
+                    spec.resumability_class == NodeResumabilityClass.IDEMPOTENT_SIDE_EFFECT
+                    and cp.idempotency_key != spec.idempotency_key
+                ):
+                    raise CheckpointPlanMismatchError(
+                        f"Checkpoint for node {node_id!r} has mismatched idempotency_key"
+                    )
+
+            if (
+                node_id in validated_expected_inputs
+                and cp.input_digest_sha256 != validated_expected_inputs[node_id]
+            ):
+                if (
+                    cp.side_effect_disposition == SideEffectDisposition.COMMITTED
+                    and spec.resumability_class == NodeResumabilityClass.NON_IDEMPOTENT_SIDE_EFFECT
+                ):
+                    raise CheckpointNonIdempotentInvalidationError(
+                        f"Input digest changed for committed non-idempotent node {node_id!r}; "
+                        "automatic re-execution refused"
+                    )
+                invalidated_nodes.add(node_id)
+                reexecuted_ids.append(node_id)
+                decisions.append(
+                    NodeResumeDecision(
+                        node_id=node_id,
+                        disposition=ResumeNodeDisposition.EXECUTE_FRESH,
+                        invalidation_reason="input_digest_mismatch",
+                    )
+                )
+                continue
+
+            missing_output_ref = (
+                not isinstance(cp.output_reference, str) or not cp.output_reference.strip()
+            )
+            if (
+                node_id in corrupted_output_node_ids
+                or cp.output_digest_sha256 is None
+                or missing_output_ref
+            ):
                 if (
                     cp.side_effect_disposition == SideEffectDisposition.COMMITTED
                     and spec.resumability_class == NodeResumabilityClass.NON_IDEMPOTENT_SIDE_EFFECT

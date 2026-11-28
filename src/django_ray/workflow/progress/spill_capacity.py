@@ -25,6 +25,10 @@ from threading import Lock
 from typing import Any
 from uuid import UUID
 
+from django_ray._blob_storage import (
+    acquire_stale_safe_lock_dir,
+    release_stale_safe_lock_dir,
+)
 from django_ray.workflow.progress.preparation import (
     _DATABASE_NAME,
     _LEASE_NAME,
@@ -407,33 +411,38 @@ class SpillCapacityController:
 
     def _acquire_cross_process_lock(self, root: Path) -> Path:
         lock_dir = root / _LOCK_DIR_NAME
-        deadline = time.monotonic() + float(self.config.lock_timeout_seconds)
-        while True:
-            try:
-                os.mkdir(lock_dir, mode=0o700)
-                return lock_dir
-            except FileExistsError:
-                if time.monotonic() >= deadline:
-                    self._record_refusal("lock_contention")
-                    raise WorkflowProgressSpillCapacityUnavailableError(
-                        "Timed out acquiring cross-process spill capacity lock",
-                        reason="lock_contention",
-                    ) from None
-                time.sleep(0.005)
-            except OSError as error:
-                self._record_refusal("lock_acquisition_failed")
-                raise WorkflowProgressSpillCapacityUnavailableError(
-                    "Failed to acquire cross-process spill capacity lock",
-                    reason="lock_acquisition_failed",
-                ) from error
+        stale_grace = max(
+            float(self.config.stale_lease_grace_seconds),
+            float(self.config.lock_timeout_seconds) * 2.0,
+        )
+        try:
+            return acquire_stale_safe_lock_dir(
+                lock_dir,
+                timeout_seconds=float(self.config.lock_timeout_seconds),
+                stale_grace_seconds=stale_grace,
+                pid_alive_fn=self._pid_alive_fn,
+                process_start_token_fn=self._process_start_token_fn,
+                clock_ns=self._clock_ns,
+                mkdir_fn=os.mkdir,
+                monotonic_fn=time.monotonic,
+                sleep_fn=time.sleep,
+            )
+        except TimeoutError:
+            self._record_refusal("lock_contention")
+            raise WorkflowProgressSpillCapacityUnavailableError(
+                "Timed out acquiring cross-process spill capacity lock",
+                reason="lock_contention",
+            ) from None
+        except OSError as error:
+            self._record_refusal("lock_acquisition_failed")
+            raise WorkflowProgressSpillCapacityUnavailableError(
+                "Failed to acquire cross-process spill capacity lock",
+                reason="lock_acquisition_failed",
+            ) from error
 
     @staticmethod
     def _release_cross_process_lock(lock_dir: Path) -> None:
-        try:
-            if os.path.lexists(lock_dir):
-                os.rmdir(lock_dir)
-        except OSError:
-            pass
+        release_stale_safe_lock_dir(lock_dir)
 
     def _classify_reservation_payload(
         self,

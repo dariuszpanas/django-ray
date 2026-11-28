@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -38,6 +39,7 @@ class DurableTaskContext:
     task_id: str | None = None
     execution_protocol_version: int | None = None
     strict_execution_request: bool = False
+    read_only_replay: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,11 @@ class WorkflowRunIdentity:
         Fresh durable ownership is allocated by ``allocate_workflow_run()``. A value
         returned here cannot bootstrap ownership through the reclaim-only claim API.
         """
-        if task_context.attempt_number is None or task_context.execution_generation is None:
+        if (
+            task_context.read_only_replay
+            or task_context.attempt_number is None
+            or task_context.execution_generation is None
+        ):
             return None
         return cls(
             task_execution_pk=task_context.task_pk,
@@ -238,6 +244,7 @@ def durable_task_execution(
     ray_job_driver: bool = False,
     compiled_graph_submission_transport: str | None = None,
     strict_execution_request: bool = False,
+    read_only_replay: bool = False,
 ) -> Generator[None, None, None]:
     """Expose a durable task identity to nested workflow coordination."""
     token = _current_task.set(
@@ -257,6 +264,7 @@ def durable_task_execution(
             ray_job_driver=ray_job_driver,
             compiled_graph_submission_transport=compiled_graph_submission_transport,
             strict_execution_request=strict_execution_request,
+            read_only_replay=read_only_replay,
         )
     )
     try:
@@ -347,8 +355,16 @@ def report_workflow_progress(
         raise AssertionError("a workflow progress actor requires a complete run identity")
     if context.producer is None:
         return False
+    if isinstance(total, bool) or not isinstance(total, (int, float)) or not math.isfinite(total):
+        raise ValueError("total must be a finite number")
     if total <= 0:
         raise ValueError("total must be greater than zero")
+    if (
+        isinstance(current, bool)
+        or not isinstance(current, (int, float))
+        or not math.isfinite(current)
+    ):
+        raise ValueError("current must be a finite number")
     if current < 0 or current > total:
         raise ValueError("current must be between zero and total")
     return context.producer.offer(
