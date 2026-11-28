@@ -241,7 +241,9 @@ jobs:
         env:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
           COLLECT_COVERAGE: ${{ matrix.python-version != '3.13' }}
+          RAY_TMPDIR: /tmp/dr-ci-${{ matrix.python-version }}
         run: |
+          mkdir -p "$RAY_TMPDIR"
           mapfile -t real_ray_files < <(
             .venv/bin/python -c 'from pathlib import Path; files = sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8")); files.sort(key=lambda p: (0 if p in {"tests/integration/test_task_execution.py", "tests/unit/test_result_buffer.py"} else 1, p)); print("\n".join(files))'
           )
@@ -266,7 +268,9 @@ jobs:
         if: matrix.python-version != '3.12' && github.event_name != 'pull_request'
         env:
           DJANGO_RAY_SHARED_LOCAL_RAY: "1"
+          RAY_TMPDIR: /tmp/dr-ci-${{ matrix.python-version }}
         run: |
+          mkdir -p "$RAY_TMPDIR"
           mapfile -t real_ray_files < <(
             .venv/bin/python -c 'from pathlib import Path; files = sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8")); files.sort(key=lambda p: (0 if p in {"tests/integration/test_task_execution.py", "tests/unit/test_result_buffer.py"} else 1, p)); print("\n".join(files))'
           )
@@ -280,6 +284,20 @@ jobs:
             --cov-report=term \
             --cov-fail-under=${{ env.COVERAGE_GLOBAL_MIN }} \
             -v
+
+      - name: Show bounded real_ray failure diagnostics
+        if: failure()
+        env:
+          RAY_TMPDIR: /tmp/dr-ci-${{ matrix.python-version }}
+        run: |
+          if [[ -d "$RAY_TMPDIR/ray" && -x .venv/bin/python ]]; then
+            .venv/bin/python scripts/investigate_native_exit.py --dump-ray-logs "$RAY_TMPDIR" 2>&1 |
+              python3 scripts/bounded_redact.py \
+                --max-chars 32768 \
+                --secret-env CODECOV_TOKEN \
+                --secret-env GITHUB_TOKEN \
+                --secret-env DJANGO_API_TOKEN || true
+          fi
 
       - name: Enforce worker module coverage
         if: matrix.python-version == '3.12'

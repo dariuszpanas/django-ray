@@ -145,7 +145,8 @@ its failure remains visible, and a successful sample does not establish a crash 
 Review its evidence when investigating issue #557 before release acceptance.
 Native exit controls are manual diagnostics and do not replace CI Gate. The
 same workflow offers historical/current source comparisons for issue #707;
-see the native pytest exit investigation guide in `docs/contributing.md`.
+Real Ray stress sampling is a manual diagnostic and does not replace CI Gate.
+See the native pytest exit investigation guide in `docs/contributing.md`.
 
 Automated pull-request review verdicts publish GitHub review states without replacing CI Gate.
 The `Pull Request Review Verdict` and `Pull Request Review Wake` workflows evaluate the trusted

@@ -33,6 +33,9 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
     ("native-shutdown-investigation.yml", "native-exit"): (
         "Native exit controls are manual diagnostics and do not replace CI Gate"
     ),
+    ("native-shutdown-investigation.yml", "real-ray-stress"): (
+        "Real Ray stress sampling is a manual diagnostic and does not replace CI Gate"
+    ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
     ("transaction-qualification.yml", "receipts"): (
         "Path-selected deployed evidence is reviewed under the affected-gate policy"
@@ -402,6 +405,21 @@ def test_native_shutdown_actor_control_keeps_fixed_selection_and_deadlines() -> 
     assert 'tail -c 262144 | tee "artifacts/native-shutdown-investigation/actor-control-' in run
     assert "|| true" not in run
     assert "investigate_pytest_shutdown.py" not in run
+
+    stress_job = workflow["jobs"]["real-ray-stress"]
+    assert stress_job["if"] == (
+        "github.event_name == 'workflow_dispatch' && inputs.probe == 'real-ray-stress'"
+    )
+    assert stress_job["timeout-minutes"] == "30"
+    assert stress_job["strategy"]["matrix"] == {"python-version": ["3.12", "3.13", "3.14"]}
+    stress_steps = {step["name"]: step for step in stress_job["steps"] if "name" in step}
+    assert stress_steps["Install native debugger"]["run"] == (
+        "sudo --non-interactive python3 scripts/install_ci_debugger.py"
+    )
+    assert (
+        "--probe real-ray-stress" in stress_steps["Observe bounded repeated real_ray runs"]["run"]
+    )
+    assert stress_steps["Retain bounded stress evidence"]["if"] == "always()"
 
 
 def test_release_never_checks_out_dispatch_input_or_persists_credentials() -> None:
@@ -778,6 +796,13 @@ def test_supported_python_matrix_keeps_visible_interpreter_boundaries() -> None:
     assert '-m "real_ray and not live_cluster"' in real_ray_native["run"]
     assert "--cov-append" in real_ray_native["run"]
     assert real_ray_native["run"].strip().endswith("-v")
+    assert real_ray_default["env"]["RAY_TMPDIR"] == "/tmp/dr-ci-${{ matrix.python-version }}"
+    assert real_ray_native["env"]["RAY_TMPDIR"] == "/tmp/dr-ci-${{ matrix.python-version }}"
+    failure_diag = steps["Show bounded real_ray failure diagnostics"]
+    assert failure_diag["if"] == "failure()"
+    assert failure_diag["env"]["RAY_TMPDIR"] == "/tmp/dr-ci-${{ matrix.python-version }}"
+    assert "--dump-ray-logs" in failure_diag["run"]
+    assert "scripts/bounded_redact.py" in failure_diag["run"]
     debugger = steps["Install native shutdown debugger"]
     smoke = steps["Verify native shutdown diagnostics"]
     assert (

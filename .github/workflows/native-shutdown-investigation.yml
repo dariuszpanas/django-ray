@@ -7,7 +7,7 @@ on:
         description: Diagnostic workload (a passing sample is not a crash repair)
         type: choice
         default: shutdown
-        options: [shutdown, distributed, prefix]
+        options: [shutdown, distributed, prefix, real-ray-stress]
       source:
         description: Source and locked dependencies for the native-exit comparison
         type: choice
@@ -17,6 +17,15 @@ on:
         description: Observe libc _exit callers (direct syscalls can bypass this)
         type: boolean
         default: false
+      iterations:
+        description: Maximum fresh-interpreter iterations for real-ray-stress
+        type: choice
+        default: "25"
+        options: ["5", "15", "25"]
+      shared-local-ray:
+        description: Use DJANGO_RAY_SHARED_LOCAL_RAY=1 during real-ray-stress
+        type: boolean
+        default: true
   pull_request:
     branches: [main]
     paths:
@@ -127,7 +136,7 @@ jobs:
           if-no-files-found: warn
 
   native-exit:
-    if: github.event_name == 'workflow_dispatch' && inputs.probe != 'shutdown'
+    if: github.event_name == 'workflow_dispatch' && (inputs.probe == 'distributed' || inputs.probe == 'prefix')
     name: Native exit (${{ inputs.source }}, hook ${{ matrix.hook }})
     runs-on: ubuntu-latest
     # Dedicated disposable VM per cell; no shared Docker, Ray, or Kubernetes.
@@ -218,5 +227,85 @@ jobs:
             ${{ runner.temp }}/native-exit-evidence/*.log
             ${{ runner.temp }}/native-exit-evidence/*.txt
             ${{ runner.temp }}/native-exit-evidence/ray-session-*
+          retention-days: 14
+          if-no-files-found: warn
+
+  real-ray-stress:
+    if: github.event_name == 'workflow_dispatch' && inputs.probe == 'real-ray-stress'
+    name: Real Ray stress (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Dedicated disposable VM per Python version: setup 4m + debugger 3m + smoke 2m + stress 18m + artifacts.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      PYTHONFAULTHANDLER: "1"
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: latest
+          enable-cache: "false"
+
+      - name: Install locked interpreter
+        timeout-minutes: 4
+        run: |
+          uv python install ${{ matrix.python-version }}
+          uv sync --frozen --python ${{ matrix.python-version }}
+
+      - name: Install native debugger
+        timeout-minutes: 3
+        run: sudo --non-interactive python3 scripts/install_ci_debugger.py
+
+      - name: Verify native exit attribution
+        timeout-minutes: 2
+        env:
+          DJANGO_RAY_REQUIRE_NATIVE_DEBUGGER: "1"
+        run: >-
+          .venv/bin/python -m pytest
+          tests/unit/test_observe_pytest_exit.py
+          tests/unit/test_native_exit_investigation.py -q
+
+      - name: Observe bounded repeated real_ray runs
+        timeout-minutes: 19
+        env:
+          MAX_ITERATIONS: ${{ inputs.iterations }}
+          TRACE_NATIVE_EXIT: ${{ inputs.trace-native-exit }}
+          SHARED_LOCAL_RAY: ${{ inputs.shared-local-ray }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(nproc)" -ge 4
+          awk '/MemTotal/ { exit ($2 < 14000000) }' /proc/meminfo
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')" -ge 5000000
+          mkdir -p "$RUNNER_TEMP/real-ray-stress-evidence"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/real-ray-stress-evidence/source.txt"
+          extra=()
+          if [[ "$TRACE_NATIVE_EXIT" == "true" ]]; then extra+=(--trace-native-exit); fi
+          if [[ "$SHARED_LOCAL_RAY" != "true" ]]; then extra+=(--isolated-local-ray); fi
+          .venv/bin/python scripts/investigate_native_exit.py \
+            --source "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/real-ray-stress-evidence" \
+            --probe real-ray-stress \
+            --max-iterations "$MAX_ITERATIONS" \
+            --timeout-seconds 1080 "${extra[@]}"
+
+      - name: Retain bounded stress evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: real-ray-stress-python-${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/real-ray-stress-evidence/*.json
+            ${{ runner.temp }}/real-ray-stress-evidence/*.log
+            ${{ runner.temp }}/real-ray-stress-evidence/*.txt
+            ${{ runner.temp }}/real-ray-stress-evidence/ray-session-*
           retention-days: 14
           if-no-files-found: warn
