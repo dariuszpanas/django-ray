@@ -223,6 +223,7 @@ test-testproject:
 	python scripts/require_linux.py
 	python testproject/manage.py check
 	pytest tests/integration/test_api.py \
+		tests/integration/test_api_executions.py \
 		tests/integration/test_sample_bearer_input.py \
 		tests/integration/test_sample_admission.py \
 		tests/unit/test_sample_workload_limits.py \
