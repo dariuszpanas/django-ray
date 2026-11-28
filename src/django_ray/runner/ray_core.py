@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from django_ray.redaction import materialize_exception_message, safe_exception_type_name
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
+from django_ray.runtime.ray_cancel import is_ray_ref_ready
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
@@ -882,6 +883,12 @@ class RayCoreRunner(BaseRunner):
 
         def request_exact_cancellation() -> None:
             try:
+                if is_ray_ref_ready(ray, handle.object_ref):
+                    result[0] = CancellationOutcome(
+                        CancellationOutcomeStatus.FAILED,
+                        "Ray Core cancellation was rejected or the task was already terminal",
+                    )
+                    return
                 # Graceful cancellation raises TaskCancelledError in the task
                 # instead of killing its shared Ray worker process.
                 ray.cancel(handle.object_ref, force=False)

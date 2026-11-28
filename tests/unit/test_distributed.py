@@ -389,7 +389,9 @@ class TestDistributedWithRay:
                 finally:
                     # Teardown is independent of the behavior under test and owns
                     # only this scenario's refs and observation actor.
-                    for ref in submitted:
+                    from django_ray.runtime.ray_cancel import select_unready_ray_refs
+
+                    for ref in select_unready_ray_refs(ray, submitted):
                         cancel(ref, force=True, recursive=True)
                     ray.kill(probe)
 

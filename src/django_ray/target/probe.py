@@ -350,6 +350,40 @@ def _remaining_seconds(deadline: float) -> float:
     return remaining
 
 
+def _select_unready_refs(ray_module: Any, refs: Sequence[object]) -> list[object]:
+    """Return unique refs not yet ready without importing Django runtime modules."""
+    unique_refs: list[object] = []
+    seen: set[object] = set()
+    for ref in refs:
+        if ref not in seen:
+            seen.add(ref)
+            unique_refs.append(ref)
+    if not unique_refs:
+        return []
+    wait: Any = getattr(ray_module, "wait", None)
+    if not callable(wait):
+        return unique_refs
+    try:
+        _, unready = wait(
+            unique_refs,
+            num_returns=len(unique_refs),
+            timeout=0,
+            fetch_local=False,
+        )
+    except TypeError:
+        try:
+            _, unready = wait(
+                unique_refs,
+                num_returns=len(unique_refs),
+                timeout=0,
+            )
+        except BaseException:
+            return unique_refs
+    except BaseException:
+        return unique_refs
+    return list(unready)
+
+
 def _cancel_refs_bounded(
     ray_module: Any,
     refs: Sequence[object],
@@ -363,9 +397,13 @@ def _cancel_refs_bounded(
     if not _CANCEL_THREAD_SLOT.acquire(blocking=False):
         return
 
+    unready_box: list[list[object]] = []
+
     def cancel_owned() -> None:
         try:
-            for ref in owned_refs:
+            unready = _select_unready_refs(ray_module, owned_refs)
+            unready_box.append(unready)
+            for ref in unready:
                 try:
                     ray_module.cancel(ref, force=True, recursive=True)
                 except Exception:
@@ -389,11 +427,12 @@ def _cancel_refs_bounded(
     except Exception:
         return
     remaining = deadline - time.monotonic()
-    if remaining > 0:
+    drain_refs = unready_box[0] if unready_box else list(owned_refs)
+    if remaining > 0 and drain_refs:
         try:
             ray_module.wait(
-                list(owned_refs),
-                num_returns=len(owned_refs),
+                drain_refs,
+                num_returns=len(drain_refs),
                 timeout=remaining,
                 fetch_local=False,
             )
@@ -652,7 +691,18 @@ def _make_cluster_probe_coordinator() -> Callable[[float, int, int], dict[str, o
         }
 
     def cancel_refs(ray_module: Any, refs: list[object]) -> None:
-        for ref in refs:
+        if not refs:
+            return
+        try:
+            _, unready = ray_module.wait(
+                list(refs),
+                num_returns=len(refs),
+                timeout=0,
+                fetch_local=False,
+            )
+        except Exception:
+            unready = refs
+        for ref in unready:
             try:
                 ray_module.cancel(ref, force=True, recursive=True)
             except Exception:
@@ -696,7 +746,7 @@ def _make_cluster_probe_coordinator() -> Callable[[float, int, int], dict[str, o
             cancel_refs(ray, refs)
             reject("node_probe_unavailable")
         if unfinished:
-            cancel_refs(ray, refs)
+            cancel_refs(ray, unfinished)
             reject("node_probe_timeout")
         try:
             raw_observations = ray.get(ready, timeout=remaining(deadline))
@@ -815,12 +865,11 @@ def _run_cluster_coordinator(
         _cancel_refs_bounded(ray_module, owned_refs, deadline=deadline)
         _reject(RayTargetProbeFailure.NODE_PROBE_UNAVAILABLE)
     if unfinished:
-        _cancel_refs_bounded(ray_module, owned_refs, deadline=deadline)
+        _cancel_refs_bounded(ray_module, unfinished, deadline=deadline)
         _reject(RayTargetProbeFailure.NODE_PROBE_TIMEOUT)
     try:
         raw_interval = ray_module.get(ready[0], timeout=_remaining_seconds(deadline))
     except RayTargetProbeError:
-        _cancel_refs_bounded(ray_module, owned_refs, deadline=deadline)
         raise
     except Exception:
         _reject(RayTargetProbeFailure.NODE_PROBE_UNAVAILABLE)

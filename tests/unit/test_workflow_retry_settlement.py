@@ -220,8 +220,9 @@ def test_native_concurrent_captures_finish_without_collector_ack(module_ray_clus
                 time.sleep(0.01)
             assert kinds.count("node_registered") == kinds.count("submitted") == 4
     finally:
-        for ref in refs + markers:
-            module_ray_cluster.cancel(ref, force=True, recursive=True)
+        from django_ray.runtime.ray_cancel import cancel_unready_ray_refs
+
+        cancel_unready_ray_refs(module_ray_cluster, refs + markers, force=True, recursive=True)
         module_ray_cluster.kill(collector, no_restart=True)
         module_ray_cluster.kill(barrier, no_restart=True)
 
@@ -327,9 +328,18 @@ def test_native_bound_leaf_graph_matches_final_retry_outcome(
             assert "transient workflow failure" in node["error"]
             assert "capture" not in snapshot["ingress"]
     finally:
-        for owned_ref in (ref, marker_ref, downstream, downstream_marker):
-            if owned_ref is not None:
-                module_ray_cluster.cancel(owned_ref, force=True, recursive=True)
+        from django_ray.runtime.ray_cancel import cancel_unready_ray_refs
+
+        cancel_unready_ray_refs(
+            module_ray_cluster,
+            [
+                owned_ref
+                for owned_ref in (ref, marker_ref, downstream, downstream_marker)
+                if owned_ref is not None
+            ],
+            force=True,
+            recursive=True,
+        )
         module_ray_cluster.kill(collector, no_restart=True)
         module_ray_cluster.kill(counter, no_restart=True)
 

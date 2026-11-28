@@ -1325,7 +1325,8 @@ def test_fold_failure_stops_admission_uses_payload_safe_cleanup_and_preserves_er
 
 
 class _PayloadSafeRay:
-    def __init__(self) -> None:
+    def __init__(self, *, ready_refs: set[Any] | None = None) -> None:
+        self.ready_refs = set(ready_refs or ())
         self.cancelled: list[Any] = []
         self.waits: list[dict[str, Any]] = []
         self.get_calls = 0
@@ -1344,6 +1345,10 @@ class _PayloadSafeRay:
                 "fetch_local": fetch_local,
             }
         )
+        if timeout == 0:
+            ready = [value for value in values if value in self.ready_refs]
+            unready = [value for value in values if value not in self.ready_refs]
+            return ready, unready
         return list(values), []
 
     def get(self, value):
@@ -1353,22 +1358,30 @@ class _PayloadSafeRay:
 
 
 def test_ray_fold_cleanup_never_fetches_or_decodes_mapped_payloads() -> None:
-    fake_ray = _PayloadSafeRay()
+    ready_payload = _FoldRef("done", "done")
+    pending_payloads = [_FoldRef("large", "leaf"), _FoldRef("nested", "nested")]
+    all_payloads = [ready_payload, *pending_payloads]
+    fake_ray = _PayloadSafeRay(ready_refs={ready_payload})
     executor = object.__new__(_RayExecutor)
     executor.ray = fake_ray
-    payloads = [_FoldRef("large", "leaf"), _FoldRef("nested", "nested")]
 
-    executor.cancel_and_drain_fold_payloads(payloads, timeout_seconds=0.5)
+    executor.cancel_and_drain_fold_payloads(all_payloads, timeout_seconds=0.5)
 
-    assert fake_ray.cancelled == payloads
+    assert fake_ray.cancelled == pending_payloads
     assert fake_ray.get_calls == 0
     assert fake_ray.waits == [
         {
-            "values": payloads,
+            "values": all_payloads,
+            "num_returns": 3,
+            "timeout": 0,
+            "fetch_local": False,
+        },
+        {
+            "values": pending_payloads,
             "num_returns": 2,
             "timeout": 0.5,
             "fetch_local": False,
-        }
+        },
     ]
 
 
@@ -1462,6 +1475,108 @@ def test_ray_fold_rejects_invalid_ready_state_and_cleans_actor(
     )
 
     with pytest.raises(ResultFoldProtocolError, match="invalid initial state"):
+        executor.start_result_fold(
+            max_items=4,
+            max_concurrency=2,
+            max_serialized_bytes=4096,
+            actor_options=options,
+            reducer=step(sum_items),
+            reducer_node_id="0.reducer",
+            initial=0,
+        )
+
+    # ready-ref already resolved before protocol validation failed, so it is
+    # not cancelled while the actor is still discarded and killed.
+    assert fake_ray.cancelled == []
+    assert fake_ray.killed == [actor]
+
+
+def test_ray_fold_cancels_unready_ready_ref_when_resolve_is_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RemoteCall:
+        def __init__(self, result: Any) -> None:
+            self.result = result
+
+        def remote(self, *args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            return self.result
+
+    class _FoldActor:
+        def __init__(self) -> None:
+            self.ready = _RemoteCall("ready-ref")
+            self.discard = _RemoteCall("discard-ref")
+
+    class _FoldActorClass:
+        def __init__(self, actor: _FoldActor) -> None:
+            self.actor = actor
+
+        def options(self, **options: Any) -> _FoldActorClass:
+            del options
+            return self
+
+        def remote(self, *args: Any) -> _FoldActor:
+            del args
+            return self.actor
+
+    class _InterruptCleanupRay:
+        def __init__(self) -> None:
+            self.cancelled: list[Any] = []
+            self.killed: list[Any] = []
+
+        def cancel(self, value: Any, *, force: bool, recursive: bool) -> None:
+            assert force is False
+            assert recursive is True
+            self.cancelled.append(value)
+
+        def wait(
+            self,
+            values: list[Any],
+            *,
+            num_returns: int,
+            timeout: float,
+            fetch_local: bool,
+        ) -> tuple[list[Any], list[Any]]:
+            assert num_returns == 1
+            assert timeout == 0
+            assert fetch_local is False
+            if values == ["ready-ref"]:
+                return [], values
+            return values, []
+
+        def get(self, value: Any) -> dict[str, Any]:
+            assert value == "discard-ref"
+            return {"state": "discarded"}
+
+        def kill(self, actor: Any, *, no_restart: bool) -> None:
+            assert no_restart is True
+            self.killed.append(actor)
+
+    actor = _FoldActor()
+    actor_class = _FoldActorClass(actor)
+    fake_ray = _InterruptCleanupRay()
+    executor = object.__new__(_RayExecutor)
+    executor.ray = fake_ray
+    monkeypatch.setattr(
+        "django_ray.workflows._get_cached_result_fold_actor",
+        lambda: actor_class,
+    )
+    monkeypatch.setattr(
+        _RayExecutor,
+        "resolve",
+        lambda self, value: (_ for _ in ()).throw(KeyboardInterrupt("interrupted")),
+    )
+    monkeypatch.setattr(
+        _RayExecutor,
+        "_result_fold_runtime_env",
+        lambda self, reducer, reducer_node_id: None,
+    )
+    options = normalize_result_fold_actor_options(
+        _actor_options(),
+        max_serialized_bytes=4096,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="interrupted"):
         executor.start_result_fold(
             max_items=4,
             max_concurrency=2,

@@ -52,6 +52,7 @@
       "src/django_ray/runtime/distributed.py",
       "src/django_ray/runtime/entrypoint.py",
       "src/django_ray/runtime/import_utils.py",
+      "src/django_ray/runtime/ray_cancel.py",
       "src/django_ray/runtime/remote.py",
       "src/django_ray/runtime/result_buffer.py",
       "src/django_ray/runtime/result_fold.py",
@@ -153,6 +154,7 @@
       "src/django_ray/runtime/runtime_env_encryption.py",
       "src/django_ray/runtime/serialization.py",
       "src/django_ray/runtime/import_utils.py",
+      "src/django_ray/runtime/ray_cancel.py",
       "pyproject.toml",
       "uv.lock"
     ]

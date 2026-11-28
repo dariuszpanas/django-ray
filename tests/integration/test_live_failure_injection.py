@@ -456,7 +456,9 @@ class TestLiveFailureInjection:
             finally:
                 try:
                     if object_ref is not None:
-                        ray.cancel(object_ref, force=True, recursive=True)
+                        from django_ray.runtime.ray_cancel import cancel_unready_ray_refs
+
+                        cancel_unready_ray_refs(ray, (object_ref,), force=True, recursive=True)
                 finally:
                     try:
                         ray.kill(witness, no_restart=True)

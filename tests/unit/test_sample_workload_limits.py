@@ -91,7 +91,8 @@ def test_sample_window_cleans_children_after_failure_or_cancellation(failure):
     with pytest.raises(type(failure)):
         _collect_remote_results(ray, ray, [(i,) for i in range(100)], 4)
     assert ray.submitted == [0, 1, 2, 3]
-    assert ray.cancelled == [(i, False, True) for i in range(4)]
+    # Ref 3 was already reported ready by ray.wait(); only unready siblings are cancelled.
+    assert ray.cancelled == [(i, False, True) for i in range(3)]
 
 
 def test_all_sample_dynamic_fanout_sites_declare_limits():

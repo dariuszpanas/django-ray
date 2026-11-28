@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.import_utils import import_callable
+from django_ray.runtime.ray_cancel import cancel_unready_ray_refs, select_unready_ray_refs
 from django_ray.workflow.contracts import WorkflowDefinitionKind
 
 if TYPE_CHECKING:
@@ -1296,13 +1297,12 @@ class _RayExecutor(_Executor):
         ready_ref = None
         try:
             ready_ref = actor.ready.remote()
-            validate_result_buffer_ack(self.resolve(ready_ref), state="ready")
+            raw_ready = self.resolve(ready_ref)
+            ready_ref = None
+            validate_result_buffer_ack(raw_ready, state="ready")
         except BaseException:
             if ready_ref is not None:
-                try:
-                    self.ray.cancel(ready_ref, force=False, recursive=True)
-                except BaseException:
-                    pass
+                cancel_unready_ray_refs(self.ray, (ready_ref,), force=False, recursive=True)
             self.discard_result_buffer(session, timeout_seconds=0)
             raise
         return session
@@ -1320,19 +1320,18 @@ class _RayExecutor(_Executor):
     ) -> None:
         from django_ray.runtime.result_buffer import validate_result_buffer_ack
 
-        ack_ref = buffer.actor.append.remote(index, value)
+        ack_ref: Any | None = buffer.actor.append.remote(index, value)
         try:
             ack = self.resolve(ack_ref)
+            ack_ref = None
             validate_result_buffer_ack(
                 ack,
                 state="retained",
                 expected_index=index,
             )
         except BaseException:
-            try:
-                self.ray.cancel(ack_ref, force=False, recursive=True)
-            except BaseException:
-                pass
+            if ack_ref is not None:
+                cancel_unready_ray_refs(self.ray, (ack_ref,), force=False, recursive=True)
             raise
 
     def finalize_result_buffer(
@@ -1347,11 +1346,13 @@ class _RayExecutor(_Executor):
         # never ray.get()'d here; only a downstream worker or the terminal caller
         # materializes the ordered Python value.
         payload_ref, ack_ref = buffer.actor.finalize.options(num_returns=2).remote(expected_items)
+        pending_refs: tuple[Any, ...] = (payload_ref, ack_ref)
         try:
             self._wait_result_buffer_refs(
                 [payload_ref, ack_ref],
                 num_returns=2,
             )
+            pending_refs = ()
             ack = self.resolve(ack_ref)
             validate_result_buffer_ack(
                 ack,
@@ -1359,11 +1360,8 @@ class _RayExecutor(_Executor):
                 expected_items=expected_items,
             )
         except BaseException:
-            for value in (payload_ref, ack_ref):
-                try:
-                    self.ray.cancel(value, force=False, recursive=True)
-                except BaseException:
-                    pass
+            if pending_refs:
+                cancel_unready_ray_refs(self.ray, pending_refs, force=False, recursive=True)
             raise
 
         try:
@@ -1500,7 +1498,9 @@ class _RayExecutor(_Executor):
         ready_ref = None
         try:
             ready_ref = actor.ready.remote()
-            ready = validate_result_fold_ack(self.resolve(ready_ref), state="ready")
+            raw_ready = self.resolve(ready_ref)
+            ready_ref = None
+            ready = validate_result_fold_ack(raw_ready, state="ready")
             if (
                 ready["folded_items"] != 0
                 or ready["out_of_order_items"] != 0
@@ -1513,10 +1513,7 @@ class _RayExecutor(_Executor):
                 )
         except BaseException:
             if ready_ref is not None:
-                try:
-                    self.ray.cancel(ready_ref, force=False, recursive=True)
-                except BaseException:
-                    pass
+                cancel_unready_ray_refs(self.ray, (ready_ref,), force=False, recursive=True)
             self.discard_result_fold(session, timeout_seconds=0)
             raise
         return session
@@ -1537,19 +1534,18 @@ class _RayExecutor(_Executor):
             validate_result_fold_ack,
         )
 
-        ack_ref = fold.actor.append.remote(index, value)
+        ack_ref: Any | None = fold.actor.append.remote(index, value)
         try:
             ack = self.resolve(ack_ref)
+            ack_ref = None
             validated = validate_result_fold_ack(
                 ack,
                 state="folded",
                 expected_index=index,
             )
         except BaseException:
-            try:
-                self.ray.cancel(ack_ref, force=False, recursive=True)
-            except BaseException:
-                pass
+            if ack_ref is not None:
+                cancel_unready_ray_refs(self.ray, (ack_ref,), force=False, recursive=True)
             raise
         folded_items = int(validated["folded_items"])
         released_credits = int(validated["released_credits"])
@@ -1582,18 +1578,21 @@ class _RayExecutor(_Executor):
         *,
         timeout_seconds: float,
     ) -> None:
-        for value in values:
+        if not values:
+            return
+        unready = select_unready_ray_refs(self.ray, values)
+        for value in unready:
             try:
                 self.ray.cancel(value, force=False, recursive=True)
             except BaseException:
                 pass
-        if not values:
+        if not unready:
             return
         # Fold cleanup must not fetch or ray.get mapped payloads in the outer
         # coordinator, including error paths.
         self.ray.wait(
-            list(values),
-            num_returns=len(values),
+            unready,
+            num_returns=len(unready),
             timeout=timeout_seconds,
             fetch_local=False,
         )
@@ -1607,11 +1606,13 @@ class _RayExecutor(_Executor):
         from django_ray.runtime.result_fold import validate_result_fold_ack
 
         payload_ref, ack_ref = fold.actor.finalize.options(num_returns=2).remote(expected_items)
+        pending_refs: tuple[Any, ...] = (payload_ref, ack_ref)
         try:
             self._wait_result_buffer_refs(
                 [payload_ref, ack_ref],
                 num_returns=2,
             )
+            pending_refs = ()
             ack = self.resolve(ack_ref)
             validated = validate_result_fold_ack(
                 ack,
@@ -1625,11 +1626,8 @@ class _RayExecutor(_Executor):
                     "Result-fold final acknowledgement exceeded the serialized-byte bound"
                 )
         except BaseException:
-            for value in (payload_ref, ack_ref):
-                try:
-                    self.ray.cancel(value, force=False, recursive=True)
-                except BaseException:
-                    pass
+            if pending_refs:
+                cancel_unready_ray_refs(self.ray, pending_refs, force=False, recursive=True)
             raise
 
         try:
@@ -1675,14 +1673,11 @@ class _RayExecutor(_Executor):
         *,
         timeout_seconds: float,
     ) -> None:
-        for value in values:
-            try:
-                self.ray.cancel(value, force=False, recursive=True)
-            except BaseException:
-                # Cleanup is deliberately subordinate to the original map error.
-                pass
         if not values:
             return
+        # Only cancel still-unready refs; already-ready refs are drained below
+        # without risking Ray's task_manager.cc:1329 completion/cancel race.
+        cancel_unready_ray_refs(self.ray, values, force=False, recursive=True)
         ready, _ = self.ray.wait(
             list(values),
             num_returns=len(values),

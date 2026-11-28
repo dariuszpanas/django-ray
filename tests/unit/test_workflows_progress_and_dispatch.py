@@ -1816,8 +1816,11 @@ def test_ray_map_cleanup_has_a_hard_deadline() -> None:
             assert recursive is True
             self.cancelled.append(ref)
 
-        def wait(self, refs, *, num_returns, timeout):
+        def wait(self, refs, *, num_returns, timeout, fetch_local=True):
             assert num_returns == len(refs)
+            if timeout == 0:
+                assert fetch_local is False
+                return [], refs
             self.wait_timeouts.append(timeout)
             time.sleep(timeout)
             return [], refs
@@ -1839,6 +1842,40 @@ def test_ray_map_cleanup_has_a_hard_deadline() -> None:
     assert ray.wait_timeouts == [0.02]
     assert ray.get_calls == 0
     assert elapsed < 0.1
+
+
+def test_ray_map_cleanup_skips_cancelling_already_ready_refs_but_drains_them() -> None:
+    ready_ref = object()
+    running_ref = object()
+
+    class _MixedReadinessRay:
+        def __init__(self) -> None:
+            self.cancelled: list[object] = []
+            self.drained: list[object] = []
+
+        def cancel(self, ref, *, force, recursive):
+            assert force is False
+            assert recursive is True
+            self.cancelled.append(ref)
+
+        def wait(self, refs, *, num_returns, timeout, fetch_local=True):
+            assert num_returns == len(refs)
+            if timeout == 0:
+                assert fetch_local is False
+                return [ready_ref], [running_ref]
+            return list(refs), []
+
+        def get(self, ref):
+            self.drained.append(ref)
+
+    ray = _MixedReadinessRay()
+    executor = object.__new__(_RayExecutor)
+    executor.ray = ray
+
+    executor.cancel_and_drain([ready_ref, running_ref], timeout_seconds=0.05)
+
+    assert ray.cancelled == [running_ref]
+    assert ray.drained == [ready_ref, running_ref]
 
 
 @pytest.mark.django_db
