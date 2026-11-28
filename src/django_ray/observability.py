@@ -392,12 +392,14 @@ def _validated_workflow_plan_selection(
 
 
 def get_queue_depths(*, generated_at: datetime | None = None) -> dict[str, Any]:
-    """Return ready, delayed, and running counts for every observed queue."""
+    """Return ready, delayed, and running (including cancelling) counts per queue."""
     from django_ray.models import RayTaskExecution, TaskState
 
     observed_at = generated_at or datetime.now(UTC)
     rows = (
-        RayTaskExecution.objects.filter(state__in=[TaskState.QUEUED, TaskState.RUNNING])
+        RayTaskExecution.objects.filter(
+            state__in=[TaskState.QUEUED, TaskState.RUNNING, TaskState.CANCELLING]
+        )
         .values("queue_name")
         .annotate(
             queued=Count("pk", filter=Q(state=TaskState.QUEUED)),
@@ -410,7 +412,10 @@ def get_queue_depths(*, generated_at: datetime | None = None) -> dict[str, Any]:
                 "pk",
                 filter=Q(state=TaskState.QUEUED, run_after__gt=observed_at),
             ),
-            running=Count("pk", filter=Q(state=TaskState.RUNNING)),
+            running=Count(
+                "pk",
+                filter=Q(state__in=[TaskState.RUNNING, TaskState.CANCELLING]),
+            ),
             oldest_queued_at=Min("created_at", filter=Q(state=TaskState.QUEUED)),
         )
         .order_by("queue_name")
@@ -458,9 +463,32 @@ def get_attempt_history(
     generated_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Return archived attempts plus the unarchived current execution snapshot."""
-    attempts = list(execution.attempts.all())
+    from django_ray.models import TaskState
+
+    attempts = list(
+        execution.attempts.only(
+            "attempt_number",
+            "state",
+            "started_at",
+            "finished_at",
+            "error_message",
+        )
+    )
     archived_numbers = {attempt.attempt_number for attempt in attempts}
-    summaries = [_attempt_summary(attempt, current=False) for attempt in attempts]
+    is_terminal = execution.state in {
+        TaskState.SUCCEEDED,
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+        TaskState.LOST,
+        TaskState.EXPIRED,
+    }
+    summaries = [
+        _attempt_summary(
+            attempt,
+            current=is_terminal and attempt.attempt_number == execution.attempt_number,
+        )
+        for attempt in attempts
+    ]
     if execution.attempt_number not in archived_numbers:
         summaries.append(_attempt_summary(execution, current=True))
     summaries.sort(key=lambda attempt: attempt["attempt_number"])
@@ -487,9 +515,11 @@ def get_workflow_progress(execution: RayTaskExecution) -> dict[str, Any] | None:
     return redact_value(progress)
 
 
-def get_workflow_graph(execution: RayTaskExecution) -> dict[str, Any] | None:
-    """Return the UI-ready graph from a durable workflow snapshot."""
-    progress = get_workflow_progress(execution)
+def _workflow_graph_from_progress(
+    execution: RayTaskExecution,
+    progress: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Extract the UI-ready graph from a pre-loaded workflow progress payload."""
     if progress is None:
         return None
     if progress.get("schema_version") == WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION:
@@ -523,6 +553,56 @@ def get_workflow_graph(execution: RayTaskExecution) -> dict[str, Any] | None:
     }
 
 
+def get_workflow_graph(execution: RayTaskExecution) -> dict[str, Any] | None:
+    """Return the UI-ready graph from a durable workflow snapshot."""
+    return _workflow_graph_from_progress(execution, get_workflow_progress(execution))
+
+
+def _workflow_node_from_progress(
+    execution: RayTaskExecution,
+    node_id: str,
+    progress: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if progress is None:
+        return None
+    if progress.get("schema_version") == WORKFLOW_PROGRESS_SUMMARY_SCHEMA_VERSION:
+        from django_ray.workflow.progress.reads import (
+            WorkflowProgressReadError,
+            WorkflowProgressReadErrorCode,
+            get_workflow_node_detail,
+        )
+
+        try:
+            detail_envelope = get_workflow_node_detail(
+                execution,
+                node_id,
+                authorize=lambda _execution: True,
+            )
+        except WorkflowProgressReadError as error:
+            if error.code in {
+                WorkflowProgressReadErrorCode.NOT_FOUND,
+                WorkflowProgressReadErrorCode.MISSING,
+            }:
+                return None
+            raise WorkflowObservabilityError(
+                f"Task {execution.task_id} workflow node detail is unavailable"
+            ) from error
+        node = detail_envelope.get("node")
+        return redact_value(node) if isinstance(node, dict) else None
+
+    graph = _workflow_graph_from_progress(execution, progress)
+    if graph is None:
+        return None
+    return next(
+        (
+            node
+            for node in graph.get("nodes", [])
+            if isinstance(node, dict) and node.get("node_id") == node_id
+        ),
+        None,
+    )
+
+
 def get_workflow_snapshot(
     execution: RayTaskExecution,
     *,
@@ -547,18 +627,9 @@ def get_workflow_node(
     execution: RayTaskExecution,
     node_id: str,
 ) -> dict[str, Any] | None:
-    """Find one node in the latest workflow graph."""
-    graph = get_workflow_graph(execution)
-    if graph is None:
-        return None
-    return next(
-        (
-            node
-            for node in graph.get("nodes", [])
-            if isinstance(node, dict) and node.get("node_id") == node_id
-        ),
-        None,
-    )
+    """Find one node in the latest workflow graph or schema-v3 detail store."""
+    progress = get_workflow_progress(execution)
+    return _workflow_node_from_progress(execution, node_id, progress)
 
 
 def _address_pinned_state_client(address: str) -> Any:
@@ -570,17 +641,22 @@ def _address_pinned_state_client(address: str) -> Any:
     SDK's dependency check and base initialization rather than copying its HTTP,
     authentication or TLS fields.
     """
+    from django_ray.runner.ray_job import (
+        _resolve_submission_address,
+        validate_trusted_ray_address,
+    )
+
+    validated = validate_trusted_ray_address(address)
+
     from ray.dashboard.modules.dashboard_sdk import SubmissionClient
     from ray.util.state import api as state_api
-
-    from django_ray.runner.ray_job import _resolve_submission_address
 
     if state_api.requests is None:
         raise RuntimeError(
             "The Ray state CLI & SDK require the ray[default] "
             "installation: `pip install 'ray[default']``"
         )
-    endpoint = _resolve_submission_address(address)
+    endpoint = _resolve_submission_address(validated)
     client = state_api.StateApiClient.__new__(state_api.StateApiClient)
     SubmissionClient.__init__(
         client,
@@ -601,6 +677,8 @@ def get_ray_task_state(
     try:
         from ray.util.state import get_task
 
+        from django_ray.runner.ray_job import validate_trusted_ray_address
+
         selected = _state_api_address(address)
         timeout = _state_api_timeout()
         if not selected:
@@ -608,7 +686,8 @@ def get_ray_task_state(
         else:
             from ray.util.state.common import GetApiOptions, StateResource
 
-            client = _address_pinned_state_client(selected)
+            validated = validate_trusted_ray_address(selected)
+            client = _address_pinned_state_client(validated)
             task_id = ray_task_id if isinstance(ray_task_id, str) else ray_task_id.task_id().hex()
             result = client.get(
                 StateResource.TASKS,
@@ -636,17 +715,22 @@ def _attempt_to_dict(attempt: Any) -> dict[str, Any]:
 
 
 def _bounded_log_text(chunks: Iterable[str], *, max_bytes: int) -> tuple[str, bool]:
-    """Consume at most ``max_bytes`` of one Ray log stream."""
+    """Consume at most ``max_bytes`` of one Ray log stream and close the stream."""
     content = bytearray()
-    for chunk in chunks:
-        encoded = str(chunk).encode("utf-8", errors="replace")
-        remaining = max_bytes + 1 - len(content)
-        if len(encoded) > remaining:
-            content.extend(encoded[:remaining])
-            break
-        content.extend(encoded)
-        if len(content) > max_bytes:
-            break
+    try:
+        for chunk in chunks:
+            encoded = str(chunk).encode("utf-8", errors="replace")
+            remaining = max_bytes + 1 - len(content)
+            if len(encoded) > remaining:
+                content.extend(encoded[:remaining])
+                break
+            content.extend(encoded)
+            if len(content) > max_bytes:
+                break
+    finally:
+        close = getattr(chunks, "close", None)
+        if callable(close):
+            close()
     truncated = len(content) > max_bytes
     text = content[:max_bytes].decode("utf-8", errors="ignore")
     # A truncated prefix may split a secret-bearing token before the redaction
@@ -666,6 +750,62 @@ def _validate_log_bounds(*, tail: int, max_bytes: int) -> None:
         raise ValueError(f"max_bytes must be between 1 and {MAX_RAY_LOG_MAX_BYTES}")
 
 
+def _address_pinned_log_stream(
+    endpoint: str,
+    *,
+    task_id: str,
+    tail: int,
+    suffix: str,
+    timeout: int,
+) -> Iterable[str]:
+    """Stream logs directly from an address-pinned Ray State API endpoint."""
+    from urllib.parse import urlencode
+
+    from ray.dashboard.modules.dashboard_sdk import get_auth_headers_if_auth_enabled
+    from ray.util.state import api as state_api
+    from ray.util.state.exception import RayStateApiException
+
+    if state_api.requests is None:
+        raise RuntimeError(
+            "The Ray state CLI & SDK require the ray[default] "
+            "installation: `pip install 'ray[default']``"
+        )
+    params = urlencode(
+        {
+            "task_id": task_id,
+            "lines": tail,
+            "media_type": "file",
+            "timeout": timeout,
+            "suffix": suffix,
+            "filter_ansi_code": True,
+        }
+    )
+    url = f"{endpoint.rstrip('/')}/api/v0/logs/file?{params}"
+
+    def _stream() -> Iterable[str]:
+        with state_api.requests.get(
+            url,
+            stream=True,
+            timeout=timeout,
+            allow_redirects=False,
+            headers=get_auth_headers_if_auth_enabled({}),
+        ) as response:
+            if 300 <= response.status_code < 400:
+                raise RayStateApiException(
+                    f"Ray State API redirected log request (HTTP {response.status_code}); "
+                    "redirects are disabled for authenticated log streaming"
+                )
+            if response.status_code != 200:
+                raise RayStateApiException(response.text)
+            for chunk in response.iter_content(chunk_size=None):
+                if isinstance(chunk, bytes):
+                    yield chunk.decode("utf-8", errors="replace")
+                else:
+                    yield str(chunk)
+
+    return _stream()
+
+
 def _get_ray_task_logs_with_metadata(
     ray_task_id: str,
     *,
@@ -675,19 +815,43 @@ def _get_ray_task_logs_with_metadata(
 ) -> tuple[dict[str, str], dict[str, bool]]:
     from ray.util.state import get_log
 
+    from django_ray.runner.ray_job import (
+        _resolve_submission_address,
+        validate_trusted_ray_address,
+    )
+
     state_address = _state_api_address(address)
+    timeout = _state_api_timeout()
+    resolved_endpoint: str | None = None
+    if state_address:
+        validated = validate_trusted_ray_address(state_address)
+        resolved_endpoint = _resolve_submission_address(validated)
+    use_pinned_http = bool(
+        resolved_endpoint and getattr(get_log, "__module__", "") == "ray.util.state.api"
+    )
     logs: dict[str, str] = {}
     truncated: dict[str, bool] = {}
     for suffix in ("out", "err"):
-        logs[suffix], truncated[suffix] = _bounded_log_text(
-            get_log(
-                address=state_address,
+        stream = (
+            _address_pinned_log_stream(
+                resolved_endpoint or "",
                 task_id=ray_task_id,
                 tail=tail,
                 suffix=suffix,
-                timeout=_state_api_timeout(),
+                timeout=timeout,
+            )
+            if use_pinned_http
+            else get_log(
+                address=resolved_endpoint,
+                task_id=ray_task_id,
+                tail=tail,
+                suffix=suffix,
+                timeout=timeout,
                 filter_ansi_code=True,
-            ),
+            )
+        )
+        logs[suffix], truncated[suffix] = _bounded_log_text(
+            stream,
             max_bytes=max_bytes,
         )
     return logs, truncated
@@ -725,11 +889,12 @@ def get_workflow_node_snapshot(
     generated_at: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Return durable node data first and add best-effort live Ray details."""
-    node = get_workflow_node(execution, node_id)
+    progress = get_workflow_progress(execution)
+    node = _workflow_node_from_progress(execution, node_id, progress)
     if node is None:
         return None
 
-    progress = get_workflow_progress(execution) or {}
+    progress = progress or {}
     live: dict[str, Any] = {
         "status": "not_requested",
         "reason": None,

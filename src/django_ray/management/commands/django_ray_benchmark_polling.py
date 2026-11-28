@@ -36,6 +36,10 @@ from django_ray.runner.polling import AdaptivePollingPolicy
 _PROTOCOL_PREDICATE_EVIDENCE_SCHEMA_VERSION = 1
 _PROTOCOL_PREDICATE_METHOD = "paired_counterbalanced_production_claim"
 _PROTOCOL_PREDICATE_MAX_ROWS = 256
+_PROTOCOL_PREDICATE_MAX_ROWS_LIMIT = 100_000
+_BACKGROUND_TERMINAL_ROWS_LIMIT = 100_000
+_BULK_SEED_CHUNK_SIZE = 1_000
+_BULK_DELETE_CHUNK_SIZE = 5_000
 _PROTOCOL_PREDICATE_TIMED_PAIRS = 12
 _PRODUCTION_VARIANT = "production_protocol_predicate"
 _CONTROL_VARIANT = "control_without_protocol_predicate"
@@ -333,16 +337,91 @@ class Command(BaseCommand):
     help = "Benchmark fixed and adaptive production worker polling on PostgreSQL"
 
     def add_arguments(self, parser: CommandParser) -> None:
-        parser.add_argument("--workers", type=int, default=4)
-        parser.add_argument("--tasks", type=int, default=100)
-        parser.add_argument("--idle-seconds", type=float, default=2.0)
-        parser.add_argument("--enqueue-interval-seconds", type=float, default=0.05)
-        parser.add_argument("--base-interval-seconds", type=float, default=0.1)
-        parser.add_argument("--max-interval-seconds", type=float, default=0.5)
-        parser.add_argument("--overlap-window-ms", type=float, default=25.0)
-        parser.add_argument("--seed", type=int, default=53)
-        parser.add_argument("--barrier-timeout-seconds", type=float, default=10.0)
-        parser.add_argument("--json", action="store_true", dest="json_output")
+        parser.add_argument(
+            "--workers",
+            type=int,
+            default=4,
+            help="Number of concurrent benchmark worker threads to run (default: 4)",
+        )
+        parser.add_argument(
+            "--tasks",
+            type=int,
+            default=100,
+            help="Number of probe tasks enqueued per benchmark phase (default: 100)",
+        )
+        parser.add_argument(
+            "--idle-seconds",
+            type=float,
+            default=2.0,
+            help="Duration in seconds for the idle polling measurement phase (default: 2.0)",
+        )
+        parser.add_argument(
+            "--enqueue-interval-seconds",
+            type=float,
+            default=0.05,
+            help="Delay in seconds between enqueued probe tasks during latency measurement (default: 0.05)",
+        )
+        parser.add_argument(
+            "--base-interval-seconds",
+            type=float,
+            default=0.1,
+            help="Base worker poll interval in seconds for fixed and adaptive policies (default: 0.1)",
+        )
+        parser.add_argument(
+            "--max-interval-seconds",
+            type=float,
+            default=0.5,
+            help="Maximum backoff poll interval in seconds for adaptive polling (default: 0.5)",
+        )
+        parser.add_argument(
+            "--overlap-window-ms",
+            type=float,
+            default=25.0,
+            help="Time window in milliseconds used to count cross-worker claim query overlap (default: 25.0)",
+        )
+        parser.add_argument(
+            "--seed",
+            type=int,
+            default=53,
+            help="Deterministic PRNG seed for jitter and counterbalanced query ordering (default: 53)",
+        )
+        parser.add_argument(
+            "--barrier-timeout-seconds",
+            type=float,
+            default=10.0,
+            help="Maximum seconds to wait for benchmark workers to reach the startup barrier (default: 10.0)",
+        )
+        parser.add_argument(
+            "--protocol-predicate-max-rows",
+            type=int,
+            default=_PROTOCOL_PREDICATE_MAX_ROWS,
+            help=(
+                "Maximum queued rows seeded for protocol-predicate EXPLAIN/timing evidence "
+                f"(default: {_PROTOCOL_PREDICATE_MAX_ROWS}, max: {_PROTOCOL_PREDICATE_MAX_ROWS_LIMIT})"
+            ),
+        )
+        parser.add_argument(
+            "--background-terminal-rows",
+            type=int,
+            default=0,
+            help=(
+                "Optional count of background SUCCEEDED rows seeded during protocol-predicate "
+                "evidence to test realistic higher-cardinality query plans "
+                f"(default: 0, max: {_BACKGROUND_TERMINAL_ROWS_LIMIT})"
+            ),
+        )
+        parser.add_argument(
+            "--format",
+            choices=("text", "json"),
+            default="text",
+            help="Output format: text or json (default: text)",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            dest="json_output",
+            help="Emit benchmark results as JSON (alias for --format json)",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         del args
@@ -355,6 +434,16 @@ class Command(BaseCommand):
         workers = self._positive_int(options["workers"], "--workers")
         tasks = self._positive_int(options["tasks"], "--tasks")
         seed = self._integer(options["seed"], "--seed")
+        protocol_predicate_max_rows = self._bounded_positive_int(
+            options.get("protocol_predicate_max_rows", _PROTOCOL_PREDICATE_MAX_ROWS),
+            "--protocol-predicate-max-rows",
+            maximum=_PROTOCOL_PREDICATE_MAX_ROWS_LIMIT,
+        )
+        background_terminal_rows = self._bounded_non_negative_int(
+            options.get("background_terminal_rows", 0),
+            "--background-terminal-rows",
+            maximum=_BACKGROUND_TERMINAL_ROWS_LIMIT,
+        )
         idle_seconds = self._positive_float(options["idle_seconds"], "--idle-seconds")
         enqueue_interval = self._positive_float(
             options["enqueue_interval_seconds"], "--enqueue-interval-seconds"
@@ -405,6 +494,8 @@ class Command(BaseCommand):
         protocol_predicate_evidence = self._run_protocol_predicate_evidence(
             task_count=tasks,
             seed=seed,
+            max_rows=protocol_predicate_max_rows,
+            background_terminal_rows=background_terminal_rows,
         )
 
         payload = {
@@ -415,11 +506,14 @@ class Command(BaseCommand):
                 enqueue_interval=enqueue_interval,
                 overlap_window=overlap_window,
                 seed=seed,
+                protocol_predicate_max_rows=protocol_predicate_max_rows,
+                background_terminal_rows=background_terminal_rows,
             ),
             "results": [asdict(result) for result in results],
             "protocol_predicate_evidence": asdict(protocol_predicate_evidence),
         }
-        if options["json_output"]:
+        use_json = bool(options.get("json_output")) or options.get("format", "text") == "json"
+        if use_json:
             self.stdout.write(json.dumps(payload, sort_keys=True))
             return
 
@@ -449,6 +543,18 @@ class Command(BaseCommand):
         return value
 
     @staticmethod
+    def _bounded_positive_int(value: object, option: str, *, maximum: int) -> int:
+        if type(value) is not int or value <= 0 or value > maximum:
+            raise CommandError(f"{option} must be an integer between 1 and {maximum}")
+        return value
+
+    @staticmethod
+    def _bounded_non_negative_int(value: object, option: str, *, maximum: int) -> int:
+        if type(value) is not int or value < 0 or value > maximum:
+            raise CommandError(f"{option} must be an integer between 0 and {maximum}")
+        return value
+
+    @staticmethod
     def _integer(value: object, option: str) -> int:
         if type(value) is not int:
             raise CommandError(f"{option} must be an integer")
@@ -472,6 +578,8 @@ class Command(BaseCommand):
         enqueue_interval: float,
         overlap_window: float,
         seed: int,
+        protocol_predicate_max_rows: int = _PROTOCOL_PREDICATE_MAX_ROWS,
+        background_terminal_rows: int = 0,
     ) -> dict[str, object]:
         return {
             "database": connection.vendor,
@@ -486,6 +594,8 @@ class Command(BaseCommand):
             "enqueue_interval_seconds": enqueue_interval,
             "overlap_window_ms": overlap_window * 1000,
             "seed": seed,
+            "protocol_predicate_max_rows": protocol_predicate_max_rows,
+            "background_terminal_rows": background_terminal_rows,
         }
 
     @staticmethod
@@ -497,32 +607,99 @@ class Command(BaseCommand):
         )
         return applied[-1] if applied else "unmigrated"
 
+    @staticmethod
+    def _bulk_seed_executions(
+        *,
+        task_prefix: str,
+        queue_name: str,
+        count: int,
+        state: str,
+    ) -> list[int]:
+        created_pks: list[int] = []
+        for start in range(0, count, _BULK_SEED_CHUNK_SIZE):
+            end = min(start + _BULK_SEED_CHUNK_SIZE, count)
+            batch_ids = [f"{task_prefix}{index}" for index in range(start, end)]
+            with transaction.atomic():
+                RayTaskExecution.objects.bulk_create(
+                    [
+                        RayTaskExecution(
+                            task_id=task_id,
+                            callable_path="django_ray.benchmark.noop",
+                            queue_name=queue_name,
+                            state=state,
+                            metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
+                            execution_protocol_version=EXECUTION_PROTOCOL_VERSION,
+                        )
+                        for task_id in batch_ids
+                    ],
+                    batch_size=_BULK_SEED_CHUNK_SIZE,
+                )
+                batch_pks = list(
+                    RayTaskExecution.objects.filter(
+                        queue_name=queue_name,
+                        task_id__in=batch_ids,
+                    )
+                    .order_by("pk")
+                    .values_list("pk", flat=True)
+                )
+            if len(batch_pks) != len(batch_ids):
+                raise CommandError("protocol predicate benchmark could not retain row ownership")
+            created_pks.extend(int(pk) for pk in batch_pks)
+        return created_pks
+
+    @staticmethod
+    def _delete_owned_pks(pks: list[int]) -> None:
+        for start in range(0, len(pks), _BULK_DELETE_CHUNK_SIZE):
+            chunk = pks[start : start + _BULK_DELETE_CHUNK_SIZE]
+            RayTaskExecution.objects.filter(pk__in=chunk).delete()
+            if RayTaskExecution.objects.filter(pk__in=chunk).exists():
+                raise CommandError("protocol predicate benchmark row cleanup was incomplete")
+
     def _run_protocol_predicate_evidence(
         self,
         *,
         task_count: int,
         seed: int,
+        max_rows: int = _PROTOCOL_PREDICATE_MAX_ROWS,
+        background_terminal_rows: int = 0,
     ) -> ProtocolPredicateEvidence:
         """Compare the exact production claim predicate with a paired control."""
         run_id = uuid.uuid4().hex
         queue_name = f"django-ray-poll-protocol-{run_id}"
         task_prefix = f"poll-protocol-{run_id}-"
-        row_count = min(task_count, _PROTOCOL_PREDICATE_MAX_ROWS)
+        row_count = min(task_count, max_rows)
         created_pks: list[int] = []
+        background_pks: list[int] = []
         try:
-            for index in range(row_count):
-                task_id = f"{task_prefix}{index}"
-                with transaction.atomic():
-                    execution = self._create_execution(
-                        task_id=task_id,
-                        queue_name=queue_name,
-                    )
-                    if execution.pk is None:
-                        raise CommandError(
-                            "protocol predicate benchmark could not retain row ownership"
+            if row_count <= _PROTOCOL_PREDICATE_MAX_ROWS:
+                for index in range(row_count):
+                    task_id = f"{task_prefix}{index}"
+                    with transaction.atomic():
+                        execution = self._create_execution(
+                            task_id=task_id,
+                            queue_name=queue_name,
                         )
-                    created_pk = int(execution.pk)
-                created_pks.append(created_pk)
+                        if execution.pk is None:
+                            raise CommandError(
+                                "protocol predicate benchmark could not retain row ownership"
+                            )
+                        created_pk = int(execution.pk)
+                    created_pks.append(created_pk)
+            else:
+                created_pks = self._bulk_seed_executions(
+                    task_prefix=task_prefix,
+                    queue_name=queue_name,
+                    count=row_count,
+                    state=TaskState.QUEUED,
+                )
+
+            if background_terminal_rows > 0:
+                background_pks = self._bulk_seed_executions(
+                    task_prefix=f"poll-protocol-bg-{run_id}-",
+                    queue_name=f"django-ray-poll-bg-{run_id}",
+                    count=background_terminal_rows,
+                    state=TaskState.SUCCEEDED,
+                )
 
             claim_now = datetime.now(UTC)
             captured_sql = self._capture_production_claim_sql(
@@ -632,11 +809,9 @@ class Command(BaseCommand):
                 variants=variants,
             )
         finally:
-            if created_pks:
-                owned_rows = RayTaskExecution.objects.filter(pk__in=created_pks)
-                owned_rows.delete()
-                if RayTaskExecution.objects.filter(pk__in=created_pks).exists():
-                    raise CommandError("protocol predicate benchmark row cleanup was incomplete")
+            all_owned_pks = created_pks + background_pks
+            if all_owned_pks:
+                self._delete_owned_pks(all_owned_pks)
 
     @staticmethod
     def _claim_queryset(

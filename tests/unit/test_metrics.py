@@ -8,7 +8,11 @@ import pytest
 from django.db import OperationalError, ProgrammingError, connection
 from prometheus_client.parser import text_string_to_metric_families
 
-from django_ray.metrics import _collect_lease_health, render_prometheus_metrics
+from django_ray.metrics import (
+    _collect_lease_health,
+    clear_metrics_cache,
+    render_prometheus_metrics,
+)
 from django_ray.models import (
     RayTaskExecution,
     TaskAttempt,
@@ -16,6 +20,13 @@ from django_ray.models import (
     TaskWorkerLease,
     TaskWorkerLeasePolicy,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_metrics_cache():
+    clear_metrics_cache()
+    yield
+    clear_metrics_cache()
 
 
 def _samples(metrics: str) -> dict[str, float]:
@@ -246,7 +257,7 @@ def test_metrics_use_durable_state_and_bounded_labels(db, settings) -> None:
 
 
 def test_metrics_scrape_uses_bounded_aggregate_queries(db, django_assert_num_queries):
-    with django_assert_num_queries(8):
+    with django_assert_num_queries(4):
         render_prometheus_metrics(queue_names=["default"])
 
 

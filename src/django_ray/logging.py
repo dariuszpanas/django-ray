@@ -63,12 +63,118 @@ def _format_redacted_message(msg: object, args: tuple[Any, ...]) -> str:
     return redact_text(formatted)
 
 
+_STDLIB_LOG_KWARGS: frozenset[str] = frozenset({"exc_info", "stack_info", "stacklevel", "extra"})
+_RESERVED_LOG_RECORD_ATTRS: frozenset[str] = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys() | {"message", "asctime"}
+)
+
+
+def _safe_log_record_extra(extra: Mapping[str, Any]) -> dict[str, Any]:
+    """Prefix keys that collide with ``logging.LogRecord`` attributes."""
+    safe: dict[str, Any] = {}
+    for key, value in extra.items():
+        target = key
+        if target in _RESERVED_LOG_RECORD_ATTRS:
+            target = f"ray_{key}"
+            while target in _RESERVED_LOG_RECORD_ATTRS or target in safe:
+                target = f"ray_{target}"
+        safe[target] = value
+    return safe
+
+
+def _extract_exc_info(exc_info: object) -> tuple[BaseException | None, object]:
+    """Normalize ``exc_info`` (bool, BaseException, or 3-tuple) without dropping instances."""
+    if not exc_info:
+        return None, None
+    if exc_info is True:
+        resolved = sys.exc_info()
+        exception = (
+            resolved[1] if len(resolved) > 1 and isinstance(resolved[1], BaseException) else None
+        )
+        return exception, resolved if exception is not None else None
+    if isinstance(exc_info, BaseException):
+        return exc_info, (type(exc_info), exc_info, exc_info.__traceback__)
+    if isinstance(exc_info, tuple) and len(exc_info) > 1:
+        exception = exc_info[1] if isinstance(exc_info[1], BaseException) else None
+        return exception, exc_info if exception is not None else None
+    return None, None
+
+
 class StructuredLogAdapter(logging.LoggerAdapter):
     """Log adapter that adds structured context to log messages.
 
     This adapter formats log messages with JSON-structured extra data
-    for better parsing by log aggregators (ELK, Splunk, etc.).
+    for better parsing by log aggregators (ELK, Splunk, etc.) and supports
+    both ``extra={...}`` and keyword-argument structured context.
     """
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        extra: Mapping[str, object] | None = None,
+        *,
+        preserve_exc_info: bool = False,
+    ) -> None:
+        super().__init__(logger, extra)
+        self.preserve_exc_info = preserve_exc_info
+
+    def _process_message(
+        self,
+        msg: object,
+        kwargs: MutableMapping[str, Any],
+        *,
+        already_redacted: bool,
+    ) -> tuple[object, MutableMapping[str, Any]]:
+        # Collect documented call-time keyword arguments (e.g., worker_id="abc")
+        # alongside explicit ``extra={...}`` without leaking unexpected kwargs
+        # into ``logging.Logger._log()``.
+        raw_extra = kwargs.get("extra")
+        kwarg_extra: dict[str, Any] = {}
+        for key in list(kwargs):
+            if key not in _STDLIB_LOG_KWARGS:
+                kwarg_extra[key] = kwargs.pop(key)
+
+        if kwarg_extra:
+            if isinstance(raw_extra, Mapping):
+                call_extra: object = {**raw_extra, **kwarg_extra}
+            else:
+                call_extra = kwarg_extra
+        else:
+            call_extra = raw_extra if raw_extra is not None else {}
+
+        if not already_redacted:
+            msg = redact_text(msg)
+
+        # Normalize bool, BaseException instance, and 3-tuple exc_info forms so
+        # exception instances are never silently dropped. By default, retain a
+        # compact redacted exception description and clear raw exc_info so
+        # unredacted tracebacks do not leak into log streams; opt in via
+        # ``preserve_exc_info=True`` when downstream handlers (e.g. Sentry)
+        # require the normalized exc_info tuple.
+        exc_info = kwargs.get("exc_info")
+        exception, normalized_exc_info = _extract_exc_info(exc_info)
+        exception_description: str | None = None
+        if exc_info:
+            if exception is not None:
+                exception_description = redact_exception(exception)
+            kwargs["exc_info"] = normalized_exc_info if self.preserve_exc_info else None
+
+        redacted_extra = _redacted_combined_extra(self.extra, call_extra)
+        if exception_description is not None:
+            redacted_extra["exception"] = exception_description
+
+        # Format structured data as JSON suffix
+        if redacted_extra:
+            try:
+                json_extra = json.dumps(redacted_extra, default=str)
+                msg = f"{msg} | {json_extra}"
+            except (TypeError, ValueError):
+                # This should be unreachable because redact_value converts
+                # non-JSON objects to type markers, but keep logging resilient.
+                msg = f"{msg} | {redacted_extra}"
+
+        kwargs["extra"] = _safe_log_record_extra(redacted_extra)
+        return msg, kwargs
 
     def process(
         self, msg: object, kwargs: MutableMapping[str, Any]
@@ -82,56 +188,31 @@ class StructuredLogAdapter(logging.LoggerAdapter):
         Returns:
             Tuple of (formatted message, kwargs).
         """
-        # Extract extra fields from kwargs.  Redaction is applied before the
-        # values are handed to the logging framework so downstream handlers do
-        # not receive the original sensitive payload either.
-        extra = kwargs.get("extra", {})
-
-        # Merge adapter's extra with call-time extra
-        msg = redact_text(msg)
-
-        # Python's logging formatter appends exc_info outside ``msg``.  Keep a
-        # compact, redacted exception description and suppress the raw
-        # traceback, which can contain credentials or personal data.
-        exc_info = kwargs.get("exc_info")
-        exception_description: str | None = None
-        if exc_info:
-            if exc_info is True:
-                exc_info = sys.exc_info()
-            exception = exc_info[1] if isinstance(exc_info, tuple) and len(exc_info) > 1 else None
-            if isinstance(exception, BaseException):
-                exception_description = redact_exception(exception)
-            kwargs["exc_info"] = None
-
-        redacted_extra = _redacted_combined_extra(self.extra, extra)
-        if exception_description is not None:
-            redacted_extra["exception"] = exception_description
-
-        # Format structured data as JSON suffix
-        if redacted_extra:
-            # Filter out None values
-            try:
-                json_extra = json.dumps(redacted_extra, default=str)
-                msg = f"{msg} | {json_extra}"
-            except (TypeError, ValueError):
-                # This should be unreachable because redact_value converts
-                # non-JSON objects to type markers, but keep logging resilient.
-                msg = f"{msg} | {redacted_extra}"
-
-        kwargs["extra"] = redacted_extra
-        return msg, kwargs
+        return self._process_message(msg, kwargs, already_redacted=False)
 
     def log(self, level: int, msg: object, *args: Any, **kwargs: Any) -> None:
-        """Redact format arguments before delegating to ``logging``."""
+        """Redact format arguments once before delegating to ``logging``."""
         if self.isEnabledFor(level):
-            super().log(level, _format_redacted_message(msg, args), **kwargs)
+            formatted = _format_redacted_message(msg, args)
+            processed_msg, processed_kwargs = self._process_message(
+                formatted, kwargs, already_redacted=True
+            )
+            self.logger.log(level, processed_msg, **processed_kwargs)
 
 
-def get_logger(name: str, **extra: Any) -> StructuredLogAdapter:
+def get_logger(
+    name: str,
+    *,
+    preserve_exc_info: bool = False,
+    **extra: Any,
+) -> StructuredLogAdapter:
     """Get a structured logger for the given module.
 
     Args:
         name: Logger name (typically __name__).
+        preserve_exc_info: When True, preserve normalized ``exc_info`` tuples on
+            emitted LogRecords for handlers such as Sentry while still recording
+            redacted exception summaries in structured context (default: False).
         **extra: Default extra context to include in all messages.
 
     Returns:
@@ -143,7 +224,7 @@ def get_logger(name: str, **extra: Any) -> StructuredLogAdapter:
         # Output: Starting | {"component": "worker", "worker_id": "abc123"}
     """
     base_logger = logging.getLogger(name)
-    return StructuredLogAdapter(base_logger, extra)
+    return StructuredLogAdapter(base_logger, extra, preserve_exc_info=preserve_exc_info)
 
 
 # Pre-configured loggers for common components
@@ -194,18 +275,24 @@ def get_backend_logger() -> StructuredLogAdapter:
 
 
 # Configure default logging format if not already configured
-def configure_default_logging(level: int = logging.INFO) -> None:
-    """Configure default logging for django-ray.
+def configure_default_logging(
+    level: int = logging.INFO,
+    *,
+    propagate: bool | None = None,
+) -> None:
+    """Configure default logging for django-ray without hijacking root handlers.
 
-    This sets up a basic logging configuration if none exists.
-    Should be called early in application startup.
+    Installs a fallback StreamHandler only when neither the ``django_ray``
+    logger nor the root logger already has handlers configured. Never disables
+    ``propagate`` unless ``propagate=False`` is explicitly requested.
 
     Args:
         level: The logging level (default: INFO).
+        propagate: Optional explicit value for ``logger.propagate``.
     """
-    # Check if django_ray logger already has handlers
     logger = logging.getLogger("django_ray")
-    if not logger.handlers:
+    root_logger = logging.getLogger()
+    if not logger.handlers and not root_logger.handlers:
         handler = logging.StreamHandler()
         formatter = logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -214,4 +301,7 @@ def configure_default_logging(level: int = logging.INFO) -> None:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(level)
-        logger.propagate = False
+    elif logger.level == logging.NOTSET:
+        logger.setLevel(level)
+    if propagate is not None:
+        logger.propagate = propagate

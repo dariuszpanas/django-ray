@@ -19,6 +19,7 @@ from django.apps import AppConfig
 from django_ray.doctor.contracts import (
     CONNECT_SECONDS,
     DATABASE_SECTIONS,
+    DETAIL_CODES,
     LOCK_MILLISECONDS,
     RETURNED_ROWS,
     SQL_STATEMENTS,
@@ -30,12 +31,19 @@ from django_ray.doctor.contracts import (
     settings_module_valid,
 )
 
+_CLOCK_SKEW_TOLERANCE = timedelta(seconds=5)
+_MAX_EXPECTED_MIGRATIONS = 256
+
 
 class ProbeUnavailableError(Exception):
     """A fixed, public code rather than application exception text."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, detail: str | None = None):
+        if detail is not None and detail not in DETAIL_CODES:
+            raise ValueError("Unsupported doctor detail code")
         self.code = code
+        self.detail = detail
+        super().__init__(code)
 
 
 class DoctorAppConfig(AppConfig):
@@ -50,7 +58,7 @@ def bounded_config(settings: object) -> dict:
 
     raw = getattr(settings, "DJANGO_RAY", {})
     if type(raw) is not dict or len(raw) > 256:
-        raise ProbeUnavailableError("configuration_invalid")
+        raise ProbeUnavailableError("configuration_invalid", detail="invalid_django_ray_mapping")
     return {**DEFAULTS, **raw}
 
 
@@ -64,17 +72,35 @@ def configuration(settings: object) -> dict:
 
     config = bounded_config(settings)
     values = {}
-    for key, name, choices in (
-        ("RUNNER", "runner", {"ray_core", "ray_job"}),
-        ("RUNTIME_ENV_STORAGE_MODE", "storage_mode", {"plaintext", "encrypted", "required"}),
-        ("INPUT_STORAGE_BACKEND", "input_backend", {None, "filesystem", "s3", "gcs"}),
-        ("RESULT_STORAGE_BACKEND", "result_backend", {"digest", "filesystem", "s3", "gcs"}),
+    for key, name, choices, detail in (
+        ("RUNNER", "runner", {"ray_core", "ray_job"}, "invalid_runner"),
+        (
+            "RUNTIME_ENV_STORAGE_MODE",
+            "storage_mode",
+            {"plaintext", "encrypted", "required"},
+            "invalid_runtime_env_storage_mode",
+        ),
+        (
+            "INPUT_STORAGE_BACKEND",
+            "input_backend",
+            {None, "filesystem", "s3", "gcs"},
+            "invalid_input_storage_backend",
+        ),
+        (
+            "RESULT_STORAGE_BACKEND",
+            "result_backend",
+            {"digest", "filesystem", "s3", "gcs"},
+            "invalid_result_storage_backend",
+        ),
     ):
         value = config.get(key)
         if type(value) not in {str, type(None)} or value not in choices:
-            raise ProbeUnavailableError("configuration_invalid")
+            raise ProbeUnavailableError("configuration_invalid", detail=detail)
         values[name] = "none" if value is None else value
-    for prefix in ("INPUT", "RESULT"):
+    for prefix, detail in (
+        ("INPUT", "missing_input_storage_location"),
+        ("RESULT", "missing_result_storage_location"),
+    ):
         backend = config.get(f"{prefix}_STORAGE_BACKEND")
         suffix = {"filesystem": "FILESYSTEM_PATH", "s3": "S3_BUCKET", "gcs": "GCS_BUCKET"}.get(
             backend
@@ -82,10 +108,10 @@ def configuration(settings: object) -> dict:
         if suffix:
             location = config.get(f"{prefix}_STORAGE_{suffix}")
             if type(location) is not str or not 1 <= len(location) <= 4096:
-                raise ProbeUnavailableError("configuration_invalid")
+                raise ProbeUnavailableError("configuration_invalid", detail=detail)
     keys = config["RUNTIME_ENV_ENCRYPTION_KEYS"]
     if type(keys) is not dict or len(keys) > 32:
-        raise ProbeUnavailableError("configuration_invalid")
+        raise ProbeUnavailableError("configuration_invalid", detail="invalid_encryption_keys")
     for key, material in keys.items():
         if (
             type(key) is not str
@@ -93,26 +119,28 @@ def configuration(settings: object) -> dict:
             or type(material) is not str
             or len(material) != 43
         ):
-            raise ProbeUnavailableError("configuration_invalid")
+            raise ProbeUnavailableError("configuration_invalid", detail="invalid_encryption_keys")
     active = config["RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY"]
     if active is not None and (type(active) is not str or len(active) > 64):
-        raise ProbeUnavailableError("configuration_invalid")
+        raise ProbeUnavailableError("configuration_invalid", detail="invalid_encryption_active_key")
     fallback = config["RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK"]
     if type(fallback) is not bool:
-        raise ProbeUnavailableError("configuration_invalid")
+        raise ProbeUnavailableError("configuration_invalid", detail="invalid_secret_fallback")
     secret = getattr(settings, "SECRET_KEY", "") if fallback else "unused"
     fallbacks = getattr(settings, "SECRET_KEY_FALLBACKS", ()) if fallback else ()
     if type(fallbacks) not in {tuple, list} or len(fallbacks) > 8:
-        raise ProbeUnavailableError("configuration_invalid")
+        raise ProbeUnavailableError("configuration_invalid", detail="invalid_secret_key")
     for item in (secret, *fallbacks):
         if type(item) not in {str, bytes} or not 1 <= len(item) <= 4096:
-            raise ProbeUnavailableError("configuration_invalid")
+            raise ProbeUnavailableError("configuration_invalid", detail="invalid_secret_key")
     try:
         validate_runtime_env_encryption_settings(
             config, django_secret_key=secret, django_secret_key_fallbacks=fallbacks
         )
     except RuntimeEnvEncryptionError:
-        raise ProbeUnavailableError("configuration_invalid") from None
+        raise ProbeUnavailableError(
+            "configuration_invalid", detail="invalid_encryption_settings"
+        ) from None
     return observation(
         "observed",
         "observed",
@@ -129,32 +157,32 @@ def readonly_database(settings: object, using: str, deadline: float) -> dict:
     """Copy supported plain settings; never alter an existing wrapper/config."""
     databases = getattr(settings, "DATABASES", None)
     if type(databases) is not dict or using not in databases or type(databases[using]) is not dict:
-        raise ProbeUnavailableError("database_unsupported")
+        raise ProbeUnavailableError("database_unsupported", detail="missing_database_alias")
     source = databases[using]
     if getattr(settings, "USE_TZ", True) is not True or source.get("TIME_ZONE") not in (
         None,
         "UTC",
     ):
-        raise ProbeUnavailableError("database_unsupported")
+        raise ProbeUnavailableError("database_unsupported", detail="unsupported_timezone")
     engine = source.get("ENGINE")
     if type(engine) is not str or engine not in {
         "django.db.backends.sqlite3",
         "django.db.backends.postgresql",
     }:
-        raise ProbeUnavailableError("database_unsupported")
+        raise ProbeUnavailableError("database_unsupported", detail="unsupported_engine")
     options = source.get("OPTIONS", {})
     if type(options) is not dict or len(options) > 32:
-        raise ProbeUnavailableError("database_unsupported")
+        raise ProbeUnavailableError("database_unsupported", detail="invalid_database_options")
     clone = {"ENGINE": engine, "CONN_MAX_AGE": 0, "CONN_HEALTH_CHECKS": False}
     if engine.endswith("sqlite3"):
         name = source.get("NAME")
         if type(name) not in {str, type(Path())}:
-            raise ProbeUnavailableError("database_unsupported")
+            raise ProbeUnavailableError("database_unsupported", detail="invalid_sqlite_path")
         name = str(name)
         if not name or len(name) > 4096 or name == ":memory:" or name.startswith("file:"):
             raise ProbeUnavailableError("memory_database_unsupported")
         if set(options) - {"timeout"}:
-            raise ProbeUnavailableError("database_unsupported")
+            raise ProbeUnavailableError("database_unsupported", detail="unsupported_sqlite_options")
         try:
             path = Path(name).resolve(strict=True)
             if not path.is_file():
@@ -165,8 +193,12 @@ def readonly_database(settings: object, using: str, deadline: float) -> dict:
         return clone
     for field in ("NAME", "USER", "PASSWORD", "HOST", "PORT"):
         value = source.get(field, "")
+        if value is None and field != "NAME":
+            value = ""
         if type(value) not in {str, int} or len(str(value)) > 4096:
-            raise ProbeUnavailableError("database_unsupported")
+            raise ProbeUnavailableError(
+                "database_unsupported", detail="invalid_postgresql_settings"
+            )
         clone[field] = value
     allowed = {
         "sslmode",
@@ -179,16 +211,18 @@ def readonly_database(settings: object, using: str, deadline: float) -> dict:
         "connect_timeout",
     }
     if set(options) - allowed:
-        raise ProbeUnavailableError("database_unsupported")
+        raise ProbeUnavailableError("database_unsupported", detail="unsupported_postgresql_options")
     for value in options.values():
         if type(value) not in {str, int} or len(str(value)) > 4096:
-            raise ProbeUnavailableError("database_unsupported")
+            raise ProbeUnavailableError(
+                "database_unsupported", detail="unsupported_postgresql_options"
+            )
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise ProbeUnavailableError("probe_timeout")
     existing = options.get("options", "")
     if type(existing) is not str:
-        raise ProbeUnavailableError("database_unsupported")
+        raise ProbeUnavailableError("database_unsupported", detail="unsupported_postgresql_options")
     clone["OPTIONS"] = {
         **options,
         "connect_timeout": max(1, min(CONNECT_SECONDS, math.ceil(remaining))),
@@ -245,9 +279,12 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
 
     from django_ray.execution_protocol import (
         EXECUTION_METADATA_SCHEMA_VERSION,
+        LEGACY_EXECUTION_METADATA_SCHEMA_VERSION,
+        LEGACY_EXECUTION_PROTOCOL_VERSION,
         MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
         MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
     )
+    from django_ray.lease_policy import LeasePolicyError, db_clock_now, read_lease_policy
     from django_ray.models import RayTaskExecution, TaskInputPayload, TaskState, TaskWorkerLease
     from django_ray.protocol_status import _valid_protocol_policy, _valid_worker_lease_shape
 
@@ -274,7 +311,7 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                 for path in directory.iterdir():
                     if path.suffix == ".py" and path.name[:1].isdigit():
                         expected.append(path.stem)
-                        if len(expected) > 64:
+                        if len(expected) > _MAX_EXPECTED_MIGRATIONS:
                             raise ProbeUnavailableError("row_budget_exhausted")
                 migrations = MigrationRecorder.Migration.objects.using(using).filter(
                     app="django_ray"
@@ -328,9 +365,17 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                 )
                 lease_seconds = config.get("WORKER_LEASE_SECONDS")
                 if type(lease_seconds) is not int or not 1 <= lease_seconds <= 86400:
-                    raise ProbeUnavailableError("configuration_invalid")
-                from django_ray.lease_policy import LeasePolicyError, read_lease_policy
-
+                    raise ProbeUnavailableError(
+                        "configuration_invalid", detail="invalid_worker_lease_seconds"
+                    )
+                stuck_timeout_seconds = config.get("STUCK_TASK_TIMEOUT_SECONDS", 300)
+                if (
+                    type(stuck_timeout_seconds) is not int
+                    or not 1 <= stuck_timeout_seconds <= 86400
+                ):
+                    raise ProbeUnavailableError(
+                        "configuration_invalid", detail="invalid_stuck_task_timeout_seconds"
+                    )
                 try:
                     lease_policy = read_lease_policy(using=using, matching=False)
                 except LeasePolicyError as error:
@@ -339,13 +384,20 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                 if lease_policy.seconds != lease_seconds:
                     raise ProbeUnavailableError("lease_policy_mismatch")
                 observed = datetime.now(UTC)
-                cutoff = observed - timedelta(seconds=lease_seconds)
-                fresh = Q(
-                    is_active=True,
-                    stopped_at__isnull=True,
-                    last_heartbeat_at__gte=cutoff,
-                    last_heartbeat_at__lte=observed,
-                    started_at__lte=observed,
+                observed_upper = observed + _CLOCK_SKEW_TOLERANCE
+                lease_cutoff = observed - timedelta(seconds=lease_seconds)
+                task_heartbeat_cutoff = observed - timedelta(seconds=stuck_timeout_seconds)
+                db_now = db_clock_now()
+                # Prefer DB-clock lease_expires_at > Now() (zero host-clock skew/commit race),
+                # falling back to heartbeat window with bounded skew tolerance for legacy rows.
+                fresh = Q(is_active=True, stopped_at__isnull=True) & (
+                    Q(lease_expires_at__isnull=False, lease_expires_at__gt=db_now)
+                    | Q(
+                        lease_expires_at__isnull=True,
+                        last_heartbeat_at__gte=lease_cutoff,
+                        last_heartbeat_at__lte=observed_upper,
+                        started_at__lte=observed_upper,
+                    )
                 )
                 shape = _valid_worker_lease_shape()
                 leases = TaskWorkerLease.objects.using(using)
@@ -392,7 +444,7 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                 )
                 capacity = (
                     leases.filter(fresh & shape)
-                    .alias(_legacy_version=Value(0))
+                    .alias(_legacy_version=Value(LEGACY_EXECUTION_PROTOCOL_VERSION))
                     .filter(
                         Q(
                             capability_schema_version=1,
@@ -422,7 +474,10 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                 unsupported = ~Q(
                     execution_protocol_version__gte=MIN_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
                     execution_protocol_version__lte=MAX_SUPPORTED_EXECUTION_PROTOCOL_VERSION,
-                    metadata_schema_version=EXECUTION_METADATA_SCHEMA_VERSION,
+                    metadata_schema_version__in=(
+                        LEGACY_EXECUTION_METADATA_SCHEMA_VERSION,
+                        EXECUTION_METADATA_SCHEMA_VERSION,
+                    ),
                 )
                 executions = RayTaskExecution.objects.using(using).alias(_capacity=Exists(capacity))
                 work = budget.returned(
@@ -452,8 +507,8 @@ def collect_database(*, using: str, budget: QueryBudget, config: dict, emit: Cal
                             filter=Q(state__in=(TaskState.RUNNING, TaskState.CANCELLING))
                             & (
                                 Q(last_heartbeat_at__isnull=True)
-                                | Q(last_heartbeat_at__lt=cutoff)
-                                | Q(last_heartbeat_at__gt=observed)
+                                | Q(last_heartbeat_at__lt=task_heartbeat_cutoff)
+                                | Q(last_heartbeat_at__gt=observed_upper)
                             ),
                         ),
                         queue_expired=Count(
@@ -551,6 +606,7 @@ def run(*, probe: str, settings_module: str, using: str, deadline: float, emit: 
         return 0
     except Exception as error:
         code = error.code if isinstance(error, ProbeUnavailableError) else failure_code
+        detail = error.detail if isinstance(error, ProbeUnavailableError) else None
         if code == "configuration_invalid":
             outcome = "blocker"
         elif code in {"probe_timeout", "query_budget_exhausted", "row_budget_exhausted"}:
@@ -559,10 +615,11 @@ def run(*, probe: str, settings_module: str, using: str, deadline: float, emit: 
             outcome = "unsupported"
         else:
             outcome = "unavailable"
+        extra = {"detail": detail} if detail is not None else {}
         all_emitted = len(seen) == len(expected)
         for name in expected:
             if name not in seen:
-                publish(name, observation(outcome, code))
+                publish(name, observation(outcome, code, **extra))
         # All frames can have been emitted before connection-close failed. The
         # supervisor must expose that late failure as well.
         return 2 if all_emitted else 0

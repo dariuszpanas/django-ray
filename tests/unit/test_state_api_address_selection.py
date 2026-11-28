@@ -48,6 +48,11 @@ def test_selected_dashboard_wins_over_sdk_ambient_address(
     settings.DJANGO_RAY = {
         "RAY_STATE_API_ADDRESS": "http://configured:8265" if explicit else "http://selected:8265",
         "RAY_STATE_API_TIMEOUT_SECONDS": 5,
+        **(
+            {"ALLOWED_RAY_ADDRESSES": ["http://configured:8265", "http://selected:8265"]}
+            if explicit
+            else {}
+        ),
     }
     # Keep the SDK's resolver body intact, using only synthetic ambient values.
     monkeypatch.setattr(utils, "os", SimpleNamespace(environ=ambient.copy()))
@@ -83,10 +88,11 @@ def test_selected_dashboard_wins_over_sdk_ambient_address(
 
 
 @pytest.mark.parametrize("scheme", ["http", "https"])
-def test_selected_client_preserves_sdk_base_initialization(monkeypatch, scheme) -> None:
+def test_selected_client_preserves_sdk_base_initialization(monkeypatch, settings, scheme) -> None:
     from ray.dashboard.modules import dashboard_sdk
     from ray.util.state import StateApiClient
 
+    settings.DJANGO_RAY = {"ALLOWED_RAY_ADDRESSES": [f"{scheme}://selected:8265"]}
     monkeypatch.setattr(
         dashboard_sdk,
         "get_auth_headers_if_auth_enabled",
@@ -172,11 +178,14 @@ def test_selected_query_uses_initialized_sdk_get_and_filters(monkeypatch, settin
 
 
 @pytest.mark.parametrize("selected", ["ray://selected:10001", "selected:6379", "auto"])
-def test_non_http_selection_uses_existing_independent_resolver(monkeypatch, selected) -> None:
+def test_non_http_selection_uses_existing_independent_resolver(
+    monkeypatch, settings, selected
+) -> None:
     from ray.dashboard.modules.dashboard_sdk import SubmissionClient
 
     from django_ray.runner import ray_job
 
+    settings.DJANGO_RAY = {"ALLOWED_RAY_ADDRESSES": [selected]}
     resolved = []
     initialized = []
 

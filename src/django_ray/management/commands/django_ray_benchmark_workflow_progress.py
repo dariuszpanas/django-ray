@@ -635,19 +635,65 @@ class Command(BaseCommand):
     help = "Benchmark workflow-progress storage shapes without importing Ray"
 
     def add_arguments(self, parser: CommandParser) -> None:
-        parser.add_argument("--nodes", nargs="+", type=int, default=list(DEFAULT_NODES))
+        parser.add_argument(
+            "--nodes",
+            nargs="+",
+            type=int,
+            default=list(DEFAULT_NODES),
+            help="Unique positive workflow node counts to model (default: 1000 10000 50000 100000).",
+        )
         parser.add_argument(
             "--change-rates",
             nargs="+",
             type=float,
             default=list(DEFAULT_CHANGE_RATES),
+            help="Unique change-rate fractions in (0, 1] to model (default: 0.01 0.1 1.0).",
         )
-        parser.add_argument("--repetitions", type=int, default=5)
-        parser.add_argument("--warmups", type=int, default=1)
-        parser.add_argument("--seed", type=int, default=20260720)
-        parser.add_argument("--database-deployment", default="unspecified")
-        parser.add_argument("--output-json", type=Path)
-        parser.add_argument("--output-markdown", type=Path)
+        parser.add_argument(
+            "--repetitions",
+            type=int,
+            default=5,
+            help="Number of measured warm repetitions per benchmark case (default: 5).",
+        )
+        parser.add_argument(
+            "--warmups",
+            type=int,
+            default=1,
+            help="Number of unmeasured warmup repetitions per case (default: 1).",
+        )
+        parser.add_argument(
+            "--seed",
+            type=int,
+            default=20260720,
+            help="Deterministic PRNG seed for synthetic profiles (default: 20260720).",
+        )
+        parser.add_argument(
+            "--database-deployment",
+            default="unspecified",
+            help="Non-secret label describing the database deployment (default: unspecified).",
+        )
+        parser.add_argument(
+            "--output-json",
+            type=Path,
+            help="Optional path to atomically write full benchmark evidence as JSON.",
+        )
+        parser.add_argument(
+            "--output-markdown",
+            type=Path,
+            help="Optional path to atomically write the benchmark summary as Markdown.",
+        )
+        parser.add_argument(
+            "--format",
+            choices=("text", "json"),
+            default="text",
+            help="Stdout format: text (Markdown/summary) or json (default: text).",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            dest="as_json",
+            help="Emit JSON output to stdout (alias for --format json).",
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         del args
@@ -777,16 +823,29 @@ class Command(BaseCommand):
         }
         json_text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         markdown_text = _markdown(payload)
+        use_json = bool(options.get("as_json")) or options.get("format", "text") == "json"
         if output_json is not None:
             _write_atomic(output_json, json_text)
         if output_markdown is not None:
             _write_atomic(output_markdown, markdown_text)
         if output_json is None and output_markdown is None:
-            self.stdout.write(markdown_text)
-        else:
+            self.stdout.write(json_text.rstrip("\n") if use_json else markdown_text)
+        elif use_json:
+            db_evidence = cast(dict[str, Any], payload["database_evidence"])
             self.stdout.write(
-                f"Recorded {len(cases)} cases; database evidence "
-                f"{payload['database_evidence']['status']}."
+                json.dumps(
+                    {
+                        "cases": len(cases),
+                        "database_evidence_status": db_evidence["status"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        else:
+            db_evidence = cast(dict[str, Any], payload["database_evidence"])
+            self.stdout.write(
+                f"Recorded {len(cases)} cases; database evidence {db_evidence['status']}."
             )
 
     @staticmethod
