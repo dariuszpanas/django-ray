@@ -172,6 +172,8 @@
           "tests/unit/test_workflow_progress_protocol.py",
           "tests/unit/test_workflow_progress_publication.py",
           "tests/unit/test_workflow_progress_preparation.py",
+          "tests/unit/test_workflow_progress_preparation_benchmark.py",
+          "tests/unit/test_workflow_progress_preparation_cleanup.py",
           "tests/unit/test_workflow_progress_reads.py",
           "tests/unit/test_workflow_progress_storage_audit.py",
           "tests/unit/test_workflow_progress_storage_boundaries.py",
