@@ -262,6 +262,8 @@
           "tests/unit/test_ray_job_request_storage.py",
           "tests/unit/test_ray_target_probe.py",
           "tests/unit/test_remote.py",
+          "tests/unit/test_remote_progress_actor.py",
+          "tests/unit/test_remote_real_ray.py",
           "tests/unit/test_target_attestation.py",
           "tests/unit/test_target_execution_codec.py",
           "tests/unit/test_target_execution_transport.py",
@@ -629,8 +631,8 @@
         "tests/unit/test_kuberay_resource_profiles.py",
         "tests/unit/test_local_kuberay_gate.py"
       ],
-      "reason": "The gate source-binding test and the local capacity-profile contract render the direct Kustomize overlay independently; the profile contract also renders the heavier Kong overlay.",
-      "review": "Share one raw direct-overlay render only if it preserves the gate's temporary source-tag rewrite and the profile test's distinct direct-versus-Kong assertions."
+      "reason": "The gate source-binding test caches one render of a temporary source-tag-rewritten direct overlay, while the local capacity-profile contract caches one render of the unmodified co-resident, direct, and Kong overlays.",
+      "review": "Keep both cached renders separate because the gate exercises temporary source-tag rewriting while the profile contract verifies unmodified overlay diffs."
     }
   ]
 }
