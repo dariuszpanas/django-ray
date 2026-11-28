@@ -263,11 +263,20 @@ def real_ray_stress_command(
 def real_ray_stress_environment(
     ray_tmpdir: Path,
     *,
+    python_executable: str = sys.executable,
     shared_local_ray: bool = True,
 ) -> dict[str, str]:
     """Mirror CI's real_ray environment with an owned short Ray temporary root."""
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
+    # Keep the venv bin directory first on PATH (without resolving the interpreter
+    # symlink) so Ray Job CLI entrypoints resolve `python` to the synced venv.
+    venv_bin_path = Path(os.path.abspath(python_executable)).parent
+    venv_bin = str(venv_bin_path)
+    current_path = environment.get("PATH", "")
+    environment["PATH"] = f"{venv_bin}{os.pathsep}{current_path}" if current_path else venv_bin
+    if venv_bin_path.name in {"bin", "Scripts"}:
+        environment["VIRTUAL_ENV"] = str(venv_bin_path.parent)
     environment["RAY_TMPDIR"] = str(ray_tmpdir)
     environment["PYTHONFAULTHANDLER"] = "1"
     environment["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
@@ -684,7 +693,11 @@ def stress_real_ray(
             process = subprocess.Popen(
                 command,
                 cwd=source,
-                env=real_ray_stress_environment(ray_tmpdir, shared_local_ray=shared_local_ray),
+                env=real_ray_stress_environment(
+                    ray_tmpdir,
+                    python_executable=sys.executable,
+                    shared_local_ray=shared_local_ray,
+                ),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
