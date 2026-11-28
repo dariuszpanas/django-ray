@@ -20,6 +20,20 @@ from . import settings as _base
 # Retain production validation, middleware, installed apps, API and static rules.
 globals().update({name: value for name, value in vars(_base).items() if name.isupper()})
 
+# Disposable in-cluster HTTP qualification transport (no external TLS termination).
+DJANGO_ALLOW_INSECURE_HTTP = True
+DJANGO_ALLOW_UNAUTHENTICATED_SAMPLE_SURFACES = True
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
+SECURE_SSL_REDIRECT = False
+SECURE_HSTS_SECONDS = 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
+DATABASES = copy.deepcopy(_base.DATABASES)
+_default_db_options = DATABASES["default"].get("OPTIONS")
+if not os.environ.get("DATABASE_SSLMODE", "").strip() and isinstance(_default_db_options, dict):
+    _default_db_options.pop("sslmode", None)
+
 if _base.DEPLOYMENT_MODE != "production":
     raise ImproperlyConfigured("Application qualification requires production deployment mode.")
 if _base.DATABASE_ENGINE != "django.db.backends.postgresql":

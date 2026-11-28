@@ -114,6 +114,7 @@ execution = RayTaskExecution.objects.create(
     task_id="unfold-admin-execution",
     callable_path="testproject.tasks.add_numbers",
     state=TaskState.QUEUED,
+    workflow_run_id="00000000-0000-0000-0000-000000990002",
     runtime_env_profile="unfold-runtime-profile",
     runtime_env_hash="c" * 64,
     runtime_env_json=json.dumps(

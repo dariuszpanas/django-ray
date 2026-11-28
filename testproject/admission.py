@@ -23,6 +23,16 @@ MAX_OUTSTANDING_EXECUTIONS = 32
 class SampleInputError(ValueError):
     """A rejected input never reaches durable enqueue."""
 
+    def __init__(
+        self,
+        message: str = "Sample input exceeds its supported bounds.",
+        *,
+        code: str = "INVALID_INPUT",
+    ) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
 
 class SampleAdmissionError(Exception):
     def __init__(self, *, rate_limited: bool = False) -> None:
@@ -42,11 +52,17 @@ def enqueue_sample(task: Any, *args: Any, **kwargs: Any) -> Any:
     """
     try:
         validate_call(task.func, args, kwargs)
-        queues = settings.TASKS[task.backend].get("QUEUES", ())
+        queues = sorted(settings.TASKS[task.backend].get("QUEUES", ()))
         if task.queue_name not in queues:
-            raise ValueError("Unsupported sample queue")
+            valid_queues = ", ".join(queues)
+            raise SampleInputError(
+                f"Unknown queue for backend '{task.backend}'. Valid queues: {valid_queues}.",
+                code="INVALID_QUEUE",
+            )
+    except SampleInputError:
+        raise
     except (TypeError, ValueError, KeyError) as error:
-        raise SampleInputError("Sample input exceeds its supported bounds") from error
+        raise SampleInputError("Sample input exceeds its supported bounds.") from error
     return admit_sample(task.enqueue, *args, **kwargs)
 
 

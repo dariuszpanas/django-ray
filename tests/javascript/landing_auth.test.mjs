@@ -972,3 +972,40 @@ for (const pendingPhase of ["headers", "body"]) {
     );
   });
 }
+
+test("smoke task completing under 400ms still polls /api/tasks/{id} and renders terminal state", async () => {
+  const dashboard = loadDashboard();
+  dashboard.elements.get("api-token").value = "fast-smoke-token";
+  dashboard.fetchResponses.push(response(200, stats));
+  await dashboard.click("use-token");
+
+  dashboard.fetchResponses.push(response(200, { task_id: "fast-task-1", status: "READY" }));
+  await dashboard.click("trigger");
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "Task fast-task-1 enqueued with status READY.",
+  );
+
+  // Task finished in < 400ms before the initial stats refresh ran: queued=0, running=0.
+  const finishedStats = { total: 10, queued: 0, running: 0, succeeded: 8, failed: 1, expired: 1 };
+  dashboard.fetchResponses.push(response(200, finishedStats));
+  await dashboard.scheduled.shift()();
+  assert.equal(dashboard.fetchCalls.at(-1).url, "/api/executions/stats");
+  assert.equal(
+    dashboard.scheduled.length,
+    1,
+    "fast-completing smoke task must still schedule a terminal status poll",
+  );
+
+  dashboard.fetchResponses.push(
+    response(200, { task_id: "fast-task-1", status: "SUCCESSFUL", state: "SUCCEEDED" }),
+  );
+  dashboard.fetchResponses.push(response(200, finishedStats));
+  await dashboard.scheduled.shift()();
+  assert.equal(dashboard.fetchCalls[3].url, "/api/tasks/fast-task-1");
+  assert.equal(
+    dashboard.elements.get("output").textContent,
+    "Task fast-task-1 finished with state SUCCEEDED.",
+  );
+  assert.equal(dashboard.scheduled.length, 0);
+});

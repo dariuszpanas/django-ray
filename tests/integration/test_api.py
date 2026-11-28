@@ -177,8 +177,9 @@ def test_browser_auth_javascript_executes_credentialed_actions() -> None:
 class TestLandingPage:
     """Test the sample project landing page."""
 
-    def test_landing_page(self):
-        """Test the root page renders links and task stats."""
+    def test_landing_page(self, settings):
+        """Test the root page renders links and task stats in debug mode."""
+        settings.DEBUG = True
         RayTaskExecution.objects.create(
             task_id="landing-test-1",
             callable_path="test.task",
@@ -218,6 +219,7 @@ class TestLandingPage:
 
     def test_browser_auth_contract_does_not_embed_or_leak_token(self, settings):
         """The loaded page retains its credential without persistence or leakage."""
+        settings.DEBUG = True
         configured_token = "configured-browser-token-must-not-leak-issue-162"
         settings.DJANGO_API_TOKEN = configured_token
 
@@ -337,7 +339,7 @@ class TestHealthAPI:
     def test_readiness_check_returns_503_when_database_fails(
         self, unauthenticated_client, monkeypatch
     ):
-        """Readiness probe returns HTTP 503 when database check fails while health stays 200."""
+        """Readiness and health probes return HTTP 503 when database check fails."""
         from django.db import connection
 
         def broken_cursor():
@@ -354,8 +356,12 @@ class TestHealthAPI:
         }
 
         health_response = unauthenticated_client.get("/api/health")
-        assert health_response.status_code == 200
-        assert health_response.json()["status"] == "degraded"
+        assert health_response.status_code == 503
+        assert health_response.json() == {
+            "status": "degraded",
+            "database": "error",
+            "version": django_ray_version,
+        }
 
         live_response = unauthenticated_client.get("/api/livez")
         assert live_response.status_code == 200
@@ -851,10 +857,11 @@ class TestEnqueueAPI:
 
         assert response.status_code == 503
         assert response.json() == {
-            "detail": (
+            "code": "RECOVERY_SHOWCASE_UNAVAILABLE",
+            "message": (
                 "Workflow recovery showcase requires a valid 'recovery-showcase' task "
                 "backend and RuntimeEnv profile."
-            )
+            ),
         }
         assert RayTaskExecution.objects.count() == 0
 
@@ -885,10 +892,11 @@ class TestEnqueueAPI:
 
         assert response.status_code == 503
         assert response.json() == {
-            "detail": (
+            "code": "RECOVERY_SHOWCASE_UNAVAILABLE",
+            "message": (
                 "Workflow recovery showcase requires a valid 'recovery-showcase' task "
                 "backend and RuntimeEnv profile."
-            )
+            ),
         }
         assert RayTaskExecution.objects.count() == 0
 
@@ -913,10 +921,11 @@ class TestEnqueueAPI:
 
         assert response.status_code == 503
         assert response.json() == {
-            "detail": (
+            "code": "RECOVERY_SHOWCASE_UNAVAILABLE",
+            "message": (
                 "Workflow recovery showcase requires a valid 'recovery-showcase' task "
                 "backend and RuntimeEnv profile."
-            )
+            ),
         }
         assert RayTaskExecution.objects.count() == 0
 
