@@ -13,7 +13,10 @@ from django_ray.models import RayTaskExecution
 
 MIGRATE_FROM = [("django_ray", "0014_raytaskexecution_ray_target_address")]
 MIGRATE_TO = [("django_ray", "0015_raytaskexecution_task_id_unique")]
-LATEST = [("django_ray", "0028_worker_lease_policy")]
+
+
+def _latest_migrations() -> list[tuple[str, str]]:
+    return MigrationExecutor(connection).loader.graph.leaf_nodes("django_ray")
 
 
 def _assert_task_id_uniqueness_migration_round_trip() -> None:
@@ -77,7 +80,7 @@ def _assert_task_id_uniqueness_migration_round_trip() -> None:
         assert reverted_execution.objects.filter(task_id=duplicate_id).count() == 2
         reverted_execution.objects.filter(task_id=duplicate_id).exclude(pk=first.pk).delete()
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
 
 
 @pytest.mark.django_db(transaction=True)

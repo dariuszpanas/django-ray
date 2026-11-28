@@ -991,6 +991,20 @@ def _compile_cached(
     )
 
 
+@lru_cache(maxsize=128)
+def _compile_validated_cached(
+    builtin_patterns: tuple[str, ...],
+    configured_patterns: tuple[str, ...],
+    limits: RedactionPatternLimits,
+) -> RedactionPatternProgram:
+    builtin_sources, configured_sources = _validate_sources(
+        builtin_patterns,
+        configured_patterns,
+        limits,
+    )
+    return _compile_cached(builtin_sources, configured_sources, limits)
+
+
 def compile_redaction_patterns(
     configured_patterns: Sequence[str] | str = (),
     *,
@@ -1000,6 +1014,26 @@ def compile_redaction_patterns(
     """Validate and cache one bounded NFA program for redaction patterns."""
     if not isinstance(limits, RedactionPatternLimits):
         raise TypeError("limits must be a RedactionPatternLimits instance")
+    if (
+        type(builtin_patterns) is tuple
+        and type(configured_patterns) in (tuple, list)
+        and len(configured_patterns) <= limits.max_configured_patterns
+        and len(builtin_patterns) + len(configured_patterns) <= limits.max_program_patterns
+        and all(type(item) is str for item in builtin_patterns)
+        and all(type(item) is str for item in configured_patterns)
+    ):
+        configured_chars = sum(len(item) for item in configured_patterns)
+        builtin_chars = sum(len(item) for item in builtin_patterns)
+        if (
+            configured_chars <= limits.max_configured_source_bytes
+            and builtin_chars + configured_chars <= limits.max_program_source_bytes
+        ):
+            configured_tuple = (
+                configured_patterns
+                if type(configured_patterns) is tuple
+                else tuple(configured_patterns)
+            )
+            return _compile_validated_cached(builtin_patterns, configured_tuple, limits)
     builtin_sources, configured_sources = _validate_sources(
         builtin_patterns,
         configured_patterns,

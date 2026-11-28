@@ -7,13 +7,38 @@ import hashlib
 import importlib
 import os
 import re
-import secrets
 import stat
-import time
+import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, unquote, urlsplit
+
+from django_ray._blob_storage import (
+    _ALLOWED_FILESYSTEM_FILE_MODES,
+    _DEFAULT_FILESYSTEM_FILE_MODE,
+    _FILESYSTEM_DIR_MODE_BY_FILE_MODE,
+    BlobDeleteOutcome,
+    ResultStorageError,
+    ResultStorageIntegrityError,
+    clear_blob_client_caches,
+    configured_filesystem_file_mode,
+    delete_blob_verified,
+    filesystem_namespaces_overlap,
+    get_or_create_gcs_client,
+    get_or_create_s3_client,
+    hard_link_is_unsupported,
+    install_temporary_payload_atomic,
+    is_provider_not_found,
+    is_s3_conditional_delete_unsupported,
+    object_prefixes_overlap,
+    provider_error_markers,
+    provider_error_matches,
+    register_blob_backend_resolver,
+    write_temporary_payload_stream_hashed,
+)
 
 _REFERENCE_MAX_LENGTH = 500
 _MAX_REFERENCE_BYTE_COUNT = 9_223_372_036_854_775_807
@@ -28,6 +53,63 @@ _DEFAULT_RESULT_S3_PREFIX = "django-ray/results"
 _DEFAULT_RESULT_GCS_PREFIX = "django-ray/results"
 _DEFAULT_INPUT_S3_PREFIX = "django-ray/inputs"
 _DEFAULT_INPUT_GCS_PREFIX = "django-ray/inputs"
+_DIGEST_RESULT_PREFIX = "oversize://"
+
+
+@dataclass
+class _RefCountedResultLock:
+    """In-process re-entrant lock and active-waiter count for one result reference."""
+
+    lock: Any
+    waiters: int = 0
+
+
+_RESULT_REFERENCE_LOCKS_GUARD = threading.Lock()
+_RESULT_REFERENCE_LOCKS: dict[tuple[int, int], _RefCountedResultLock] = {}
+
+
+def is_external_result_reference(reference: str | None) -> bool:
+    """Return whether ``reference`` points to an external result blob."""
+    return bool(
+        isinstance(reference, str) and reference and not reference.startswith(_DIGEST_RESULT_PREFIX)
+    )
+
+
+def _result_reference_fence_key(reference: str) -> tuple[int, int]:
+    """Derive a stable 64-bit advisory lock key pair for one result reference."""
+    normalized = reference
+    try:
+        normalized = canonicalize_result_reference(reference)
+    except Exception:
+        normalized = reference
+    digest = hashlib.sha256(f"django-ray:result-ref-fence:v1:{normalized}".encode()).digest()
+    key1 = int.from_bytes(digest[:4], byteorder="big", signed=True)
+    key2 = int.from_bytes(digest[4:8], byteorder="big", signed=True)
+    return key1, key2
+
+
+@contextmanager
+def _in_process_result_reference_lock(reference: str) -> Generator[tuple[int, int], None, None]:
+    """Serialize in-process store/publish/delete operations on the same result blob."""
+    key = _result_reference_fence_key(reference)
+    with _RESULT_REFERENCE_LOCKS_GUARD:
+        entry = _RESULT_REFERENCE_LOCKS.get(key)
+        if entry is None:
+            entry = _RefCountedResultLock(lock=threading.RLock())
+            _RESULT_REFERENCE_LOCKS[key] = entry
+        entry.waiters += 1
+        lock = entry.lock
+    lock.acquire()
+    try:
+        yield key
+    finally:
+        lock.release()
+        with _RESULT_REFERENCE_LOCKS_GUARD:
+            current = _RESULT_REFERENCE_LOCKS.get(key)
+            if current is entry:
+                current.waiters -= 1
+                if current.waiters <= 0:
+                    _RESULT_REFERENCE_LOCKS.pop(key, None)
 
 
 def get_settings() -> dict[str, Any]:
@@ -35,14 +117,6 @@ def get_settings() -> dict[str, Any]:
     from django_ray.conf.settings import get_settings as load_settings
 
     return load_settings()
-
-
-class ResultStorageError(RuntimeError):
-    """Raised when result storage operations fail."""
-
-
-class ResultStorageIntegrityError(ResultStorageError):
-    """Raised when stored bytes do not match their content-addressed reference."""
 
 
 @dataclass(frozen=True)
@@ -116,57 +190,11 @@ def _configured_prefix(config: dict[str, Any], name: str, default: str) -> str:
 
 def _provider_error_markers(error: Exception) -> set[str | int]:
     """Extract only bounded status markers from an SDK exception."""
-    markers: set[str | int] = set()
-
-    def add_marker(value: object) -> None:
-        normalized: str | int | None = None
-        try:
-            if isinstance(value, int):
-                normalized = int(value)
-            elif isinstance(value, str) and len(value) <= 128:
-                normalized = str(value)
-        except Exception:
-            pass
-        if normalized is not None:
-            markers.add(normalized)
-
-    response: object | None = None
-    try:
-        response = getattr(error, "response", None)
-    except Exception:
-        pass
-    if isinstance(response, dict):
-        error_data: object | None = None
-        response_metadata: object | None = None
-        try:
-            error_data = response.get("Error")
-            response_metadata = response.get("ResponseMetadata")
-        except Exception:
-            pass
-        if isinstance(error_data, dict):
-            try:
-                add_marker(error_data.get("Code"))
-            except Exception:
-                pass
-        if isinstance(response_metadata, dict):
-            try:
-                add_marker(response_metadata.get("HTTPStatusCode"))
-            except Exception:
-                pass
-    for name in ("code", "status_code"):
-        value: object | None = None
-        try:
-            value = getattr(error, name, None)
-        except Exception:
-            pass
-        add_marker(value)
-    return markers
+    return provider_error_markers(error)
 
 
 def _provider_error_matches(error: Exception, *expected: str | int) -> bool:
-    markers = _provider_error_markers(error)
-    normalized = {str(marker).casefold() for marker in markers}
-    return any(str(marker).casefold() in normalized for marker in expected)
+    return provider_error_matches(error, *expected)
 
 
 def _validated_s3_etag(value: object) -> str | None:
@@ -384,38 +412,29 @@ def _verified_payload(payload: object, metadata: _ResultReference) -> str:
     return decoded
 
 
-def _write_temporary_payload(directory: Path, payload: bytes) -> Path:
-    """Write a same-directory temporary file without adopting a name collision."""
-    for _attempt in range(_FILESYSTEM_TEMP_ATTEMPTS):
-        temporary_path = directory / f".django-ray-result-{secrets.token_hex(16)}.tmp"
-        descriptor: int | None = None
-        try:
-            descriptor = os.open(
-                temporary_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o666,
-            )
-        except FileExistsError:
-            pass
-        if descriptor is None:
-            continue
+_ORIGINAL_PATH_OPEN = Path.open
+_ORIGINAL_PATH_STAT = Path.stat
 
-        write_failed = False
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-        except OSError:
-            write_failed = True
-        if write_failed:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise OSError("temporary result payload write failed")
-        return temporary_path
-    raise ResultStorageError("Failed to persist result payload to filesystem storage")
+
+def _configured_filesystem_file_mode(file_mode: int | None = None) -> int:
+    """Resolve and validate the shared-filesystem payload file mode."""
+    return configured_filesystem_file_mode(file_mode)
+
+
+def _write_temporary_payload(
+    directory: Path,
+    payload: bytes,
+    *,
+    file_mode: int | None = None,
+) -> Path:
+    """Write a same-directory temporary file without adopting a name collision."""
+    temporary_path, _digest = write_temporary_payload_stream_hashed(
+        directory,
+        payload,
+        file_mode=file_mode,
+        os_module=os,
+    )
+    return temporary_path
 
 
 def _read_filesystem_payload(
@@ -424,22 +443,71 @@ def _read_filesystem_payload(
     *,
     unavailable_message: str,
 ) -> str:
-    size: int | None = None
-    try:
-        size = path.stat().st_size
-    except (OSError, OverflowError, RuntimeError, ValueError):
-        pass
-    if size is None:
-        raise ResultStorageError(unavailable_message)
-    if type(size) is not int or size != metadata.size_bytes:
-        raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
+    if Path.open is not _ORIGINAL_PATH_OPEN or Path.stat is not _ORIGINAL_PATH_STAT:
+        # Preserve test seams that explicitly patch pathlib.Path.stat / Path.open.
+        size: int | None = None
+        try:
+            size = path.stat().st_size
+        except (OSError, OverflowError, RuntimeError, ValueError):
+            pass
+        if size is None:
+            raise ResultStorageError(unavailable_message)
+        if type(size) is not int or size != metadata.size_bytes:
+            raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
+        legacy_payload: bytes | None = None
+        try:
+            with path.open("rb") as legacy_handle:
+                legacy_payload = legacy_handle.read(metadata.size_bytes + 1)
+        except (OSError, OverflowError, RuntimeError, ValueError):
+            pass
+        if legacy_payload is None:
+            raise ResultStorageError(unavailable_message)
+        return _verified_payload(legacy_payload, metadata)
+
+    flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if not hasattr(os, "O_NOFOLLOW"):
+        try:
+            if path.is_symlink():
+                raise ResultStorageIntegrityError(
+                    "Stored result payload failed integrity verification"
+                )
+        except ResultStorageIntegrityError:
+            raise
+        except (OSError, OverflowError, RuntimeError, ValueError):
+            pass
 
     payload: bytes | None = None
+    integrity_failed = False
     try:
-        with path.open("rb") as handle:
-            payload = handle.read(metadata.size_bytes + 1)
-    except (OSError, OverflowError, RuntimeError, ValueError):
+        with open(
+            path,
+            "rb",
+            buffering=0,
+            opener=lambda name, mode: os.open(name, mode | flags),
+        ) as handle:
+            file_stat = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(file_stat.st_mode)
+                or type(file_stat.st_size) is not int
+                or file_stat.st_size != metadata.size_bytes
+            ):
+                integrity_failed = True
+            else:
+                chunks = bytearray()
+                limit = metadata.size_bytes + 1
+                while len(chunks) < limit:
+                    chunk = handle.read(min(64 * 1024, limit - len(chunks)))
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                payload = bytes(chunks)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            integrity_failed = True
+    except (OverflowError, RuntimeError, ValueError):
         pass
+    if integrity_failed:
+        raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
     if payload is None:
         raise ResultStorageError(unavailable_message)
     return _verified_payload(payload, metadata)
@@ -505,56 +573,12 @@ def _verify_filesystem_delete(path: Path, metadata: _ResultReference) -> bool:
 
 
 def _hard_link_is_unsupported(error: OSError) -> bool:
-    unsupported_errnos = {
-        errno.EACCES,
-        errno.EPERM,
-        errno.EXDEV,
-        errno.ENOSYS,
-        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-        errno.EOPNOTSUPP,
-    }
-    return error.errno in unsupported_errnos or getattr(error, "winerror", None) in {1, 50}
+    return hard_link_is_unsupported(error)
 
 
-def _install_temporary_payload(temporary_path: Path, full_path: Path) -> None:
+def _install_temporary_payload(temporary_path: Path, full_path: Path) -> bool:
     """Install without replacing an object created by another django-ray writer."""
-    lock_path = full_path.with_name(f".{full_path.name}.install-lock")
-    acquired = False
-    for _attempt in range(_FILESYSTEM_LOCK_ATTEMPTS):
-        if full_path.exists():
-            return
-        try:
-            lock_path.mkdir()
-            acquired = True
-        except FileExistsError:
-            time.sleep(_FILESYSTEM_LOCK_WAIT_SECONDS)
-        if acquired:
-            break
-    if not acquired:
-        raise OSError("filesystem result installation lock is unavailable")
-    try:
-        if full_path.exists():
-            return
-        link_error: OSError | None = None
-        try:
-            os.link(temporary_path, full_path)
-        except FileExistsError:
-            return
-        except OSError as error:
-            link_error = error
-        if link_error is None:
-            return
-        if not _hard_link_is_unsupported(link_error):
-            raise OSError("filesystem result installation failed")
-        # Every django-ray installer holds the same digest-specific lock here,
-        # so replace cannot overwrite an object from a cooperating writer.
-        if not full_path.exists():
-            os.replace(temporary_path, full_path)
-    finally:
-        try:
-            lock_path.rmdir()
-        except OSError:
-            pass
+    return install_temporary_payload_atomic(temporary_path, full_path, os_module=os)
 
 
 class DigestResultStorage:
@@ -573,16 +597,30 @@ class DigestResultStorage:
             raise _invalid_reference()
         return None
 
-    def delete(self, *, reference: str) -> None:
+    def delete_verified(
+        self,
+        *,
+        reference: str,
+        ignore_missing: bool = True,  # noqa: ARG002
+    ) -> BlobDeleteOutcome:
         metadata = _parse_result_reference(reference)
         if metadata.scheme != "oversize":
             raise _invalid_reference()
+        return BlobDeleteOutcome(
+            deleted=False,
+            already_missing=False,
+            reference=reference,
+            backend="digest",
+        )
+
+    def delete(self, *, reference: str, ignore_missing: bool = True) -> None:
+        self.delete_verified(reference=reference, ignore_missing=ignore_missing)
 
 
 class FilesystemResultStorage:
     """Filesystem-backed result storage for oversized payloads."""
 
-    def __init__(self, root_path: str | Path) -> None:
+    def __init__(self, root_path: str | Path, *, file_mode: int | None = None) -> None:
         resolved_root: Path | None = None
         try:
             resolved_root = Path(root_path).resolve(strict=False)
@@ -594,6 +632,8 @@ class FilesystemResultStorage:
         # Every reference path is resolved again below and checked against this
         # stable root before filesystem I/O.
         self.root_path = resolved_root
+        self.file_mode = _configured_filesystem_file_mode(file_mode)
+        self.dir_mode = _FILESYSTEM_DIR_MODE_BY_FILE_MODE[self.file_mode]
 
     def store(self, *, serialized_result: str) -> str:
         return self.store_payload(serialized_payload=serialized_result)
@@ -607,52 +647,97 @@ class FilesystemResultStorage:
 
         setup_failed = False
         try:
-            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.parent.mkdir(mode=self.dir_mode, parents=True, exist_ok=True)
         except (OSError, OverflowError, RuntimeError, ValueError):
             setup_failed = True
         if setup_failed:
             raise ResultStorageError("Failed to persist result payload to filesystem storage")
 
-        exists = False
-        stat_failed = False
-        try:
-            full_path.stat()
-            exists = True
-        except FileNotFoundError:
-            pass
-        except (OSError, OverflowError, RuntimeError, ValueError):
-            stat_failed = True
-        if stat_failed:
-            raise ResultStorageError("Failed to persist result payload to filesystem storage")
-        if exists:
-            _read_filesystem_payload(
-                full_path,
-                metadata,
-                unavailable_message="Failed to persist result payload to filesystem storage",
-            )
-            return reference
-
-        temporary_path: Path | None = None
-        install_failed = False
-        try:
-            temporary_path = _write_temporary_payload(full_path.parent, payload)
-            _install_temporary_payload(temporary_path, full_path)
-        except (OSError, OverflowError, RuntimeError, ValueError):
-            install_failed = True
-        finally:
-            if temporary_path is not None:
+        with _in_process_result_reference_lock(reference):
+            exists = False
+            stat_failed = False
+            try:
+                full_path.stat()
+                exists = True
+            except FileNotFoundError:
+                pass
+            except (OSError, OverflowError, RuntimeError, ValueError):
+                stat_failed = True
+            if stat_failed:
+                raise ResultStorageError("Failed to persist result payload to filesystem storage")
+            if exists:
+                reused = False
                 try:
-                    temporary_path.unlink(missing_ok=True)
+                    _read_filesystem_payload(
+                        full_path,
+                        metadata,
+                        unavailable_message="Failed to persist result payload to filesystem storage",
+                    )
+                    # Advance mtime on content-addressed dedup reuse so concurrent
+                    # retention purges observe a live modification timestamp.
+                    os.utime(full_path, None)
+                    reused = True
+                except FileNotFoundError:
+                    reused = False
+                except ResultStorageError:
+                    if full_path.exists():
+                        raise
+                    reused = False
                 except (OSError, OverflowError, RuntimeError, ValueError):
-                    pass
-        if install_failed:
+                    raise ResultStorageError(
+                        "Failed to persist result payload to filesystem storage"
+                    ) from None
+                if reused:
+                    return reference
+
+            for _attempt in range(2):
+                temporary_path: Path | None = None
+                install_failed = False
+                installed_by_us = False
+                try:
+                    temporary_path, _written_digest = write_temporary_payload_stream_hashed(
+                        full_path.parent,
+                        payload,
+                        expected_digest=digest,
+                        file_mode=self.file_mode,
+                        os_module=os,
+                    )
+                    installed_by_us = _install_temporary_payload(temporary_path, full_path)
+                except (OSError, OverflowError, RuntimeError, ValueError):
+                    install_failed = True
+                finally:
+                    if temporary_path is not None:
+                        try:
+                            temporary_path.unlink(missing_ok=True)
+                        except (OSError, OverflowError, RuntimeError, ValueError):
+                            pass
+                if install_failed:
+                    raise ResultStorageError(
+                        "Failed to persist result payload to filesystem storage"
+                    )
+                # Stream-hashed writes are verified during fsync before atomic install.
+                # Only re-read and refresh mtime when a concurrent writer won installation first.
+                if installed_by_us:
+                    return reference
+                try:
+                    _read_filesystem_payload(
+                        full_path,
+                        metadata,
+                        unavailable_message="Failed to persist result payload to filesystem storage",
+                    )
+                    os.utime(full_path, None)
+                    return reference
+                except FileNotFoundError:
+                    continue
+                except ResultStorageError:
+                    if full_path.exists():
+                        raise
+                    continue
+                except (OSError, OverflowError, RuntimeError, ValueError):
+                    raise ResultStorageError(
+                        "Failed to persist result payload to filesystem storage"
+                    ) from None
             raise ResultStorageError("Failed to persist result payload to filesystem storage")
-        _read_filesystem_payload(
-            full_path,
-            metadata,
-            unavailable_message="Failed to persist result payload to filesystem storage",
-        )
-        return reference
 
     def load(self, *, reference: str) -> str | None:
         metadata = self._filesystem_reference(reference)
@@ -663,18 +748,49 @@ class FilesystemResultStorage:
             unavailable_message="Result payload is unavailable from filesystem storage",
         )
 
-    def delete(self, *, reference: str) -> None:
+    def delete_verified(
+        self,
+        *,
+        reference: str,
+        ignore_missing: bool = True,
+    ) -> BlobDeleteOutcome:
         metadata = self._filesystem_reference(reference)
         full_path = self._path_for_reference(metadata)
-        if not _verify_filesystem_delete(full_path, metadata):
-            return
-        delete_failed = False
-        try:
-            full_path.unlink(missing_ok=True)
-        except (OSError, OverflowError, RuntimeError, ValueError):
-            delete_failed = True
-        if delete_failed:
-            raise ResultStorageError("Failed to delete result payload from filesystem storage")
+        with _in_process_result_reference_lock(reference):
+            if not _verify_filesystem_delete(full_path, metadata):
+                if not ignore_missing:
+                    raise ResultStorageError(
+                        "Result payload is unavailable from filesystem storage"
+                    )
+                return BlobDeleteOutcome(
+                    deleted=False,
+                    already_missing=True,
+                    reference=reference,
+                    backend="filesystem",
+                )
+            delete_failed = False
+            already_missing = False
+            try:
+                full_path.unlink(missing_ok=False)
+            except FileNotFoundError:
+                if not ignore_missing:
+                    raise ResultStorageError(
+                        "Result payload is unavailable from filesystem storage"
+                    ) from None
+                already_missing = True
+            except (OSError, OverflowError, RuntimeError, ValueError):
+                delete_failed = True
+            if delete_failed:
+                raise ResultStorageError("Failed to delete result payload from filesystem storage")
+            return BlobDeleteOutcome(
+                deleted=not already_missing,
+                already_missing=already_missing,
+                reference=reference,
+                backend="filesystem",
+            )
+
+    def delete(self, *, reference: str, ignore_missing: bool = True) -> None:
+        self.delete_verified(reference=reference, ignore_missing=ignore_missing)
 
     @staticmethod
     def _filesystem_reference(reference: str) -> _ResultReference:
@@ -804,38 +920,21 @@ class S3ResultStorage:
         endpoint_url: str | None = None,
         region_name: str | None = None,
         client: Any | None = None,
+        conditional_delete: bool | None = None,
     ) -> None:
         self.bucket = _canonical_authority(bucket)
         self.prefix = _canonical_object_prefix(prefix)
+        self.endpoint_url = endpoint_url
+        self.region_name = region_name
+        self.conditional_delete = conditional_delete
         if client is not None:
             self.client = client
             return
-        boto3_module: Any | None = None
-        import_failed = False
-        try:
-            boto3_module = importlib.import_module("boto3")
-        except ImportError:
-            pass
-        except Exception:
-            import_failed = True
-        if import_failed:
-            raise ResultStorageError("Failed to initialize S3 result storage")
-        if boto3_module is None:
-            raise ResultStorageError(
-                "S3 result storage requires boto3. Install with: pip install boto3"
-            )
-        initialized_client: Any | None = None
-        try:
-            initialized_client = boto3_module.client(
-                "s3",
-                endpoint_url=endpoint_url,
-                region_name=region_name,
-            )
-        except Exception:
-            pass
-        if initialized_client is None:
-            raise ResultStorageError("Failed to initialize S3 result storage") from None
-        self.client = initialized_client
+        self.client = get_or_create_s3_client(
+            endpoint_url=endpoint_url,
+            region_name=region_name,
+            import_module_fn=importlib.import_module,
+        )
 
     def store(self, *, serialized_result: str) -> str:
         return self.store_payload(serialized_payload=serialized_result)
@@ -896,13 +995,20 @@ class S3ResultStorage:
         metadata: _ResultReference,
         bucket: str,
         key: str,
-    ) -> tuple[str, str | None]:
+        allow_missing: bool = False,
+    ) -> tuple[str | None, str | None]:
         response: Any | None = None
+        missing = False
         failed = False
         try:
             response = self.client.get_object(Bucket=bucket, Key=key)
-        except Exception:
-            failed = True
+        except Exception as error:
+            if allow_missing and is_provider_not_found(error):
+                missing = True
+            else:
+                failed = True
+        if missing:
+            return None, None
         if failed or not isinstance(response, dict):
             raise ResultStorageError("Result payload is unavailable from S3 storage") from None
         content_length: object | None = None
@@ -934,7 +1040,48 @@ class S3ResultStorage:
             raise ResultStorageError("Result payload is unavailable from S3 storage") from None
         return _verified_payload(payload, metadata), _validated_s3_etag(response_etag)
 
-    def delete(self, *, reference: str) -> None:
+    def _head_verified_metadata(
+        self,
+        *,
+        metadata: _ResultReference,
+        bucket: str,
+        key: str,
+    ) -> tuple[bool, str | None]:
+        """Verify S3 object size and ETag via HEAD without downloading payload bytes."""
+        response: Any | None = None
+        missing = False
+        failed = False
+        try:
+            response = self.client.head_object(Bucket=bucket, Key=key)
+        except Exception as error:
+            if is_provider_not_found(error):
+                missing = True
+            else:
+                failed = True
+        if missing:
+            return False, None
+        if failed or not isinstance(response, dict):
+            raise ResultStorageError("Result payload is unavailable from S3 storage") from None
+        content_length: object | None = None
+        response_etag: object | None = None
+        response_failed = False
+        try:
+            content_length = response.get("ContentLength")
+            response_etag = response.get("ETag")
+        except Exception:
+            response_failed = True
+        if response_failed:
+            raise ResultStorageError("Result payload is unavailable from S3 storage") from None
+        if type(content_length) is not int or content_length != metadata.size_bytes:
+            raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
+        return True, _validated_s3_etag(response_etag)
+
+    def delete_verified(
+        self,
+        *,
+        reference: str,
+        ignore_missing: bool = True,
+    ) -> BlobDeleteOutcome:
         metadata = _parse_result_reference(reference, allow_encoding_legacy=True)
         bucket, key = _validate_object_reference(
             metadata,
@@ -942,20 +1089,114 @@ class S3ResultStorage:
             bucket=self.bucket,
             prefix=self.prefix,
         )
-        _payload, etag = self._load_verified_payload(
-            metadata=metadata,
-            bucket=bucket,
-            key=key,
-        )
+        head_object = getattr(self.client, "head_object", None)
+        etag: str | None = None
+        if callable(head_object):
+            exists, etag = self._head_verified_metadata(
+                metadata=metadata,
+                bucket=bucket,
+                key=key,
+            )
+            if not exists:
+                if not ignore_missing:
+                    raise ResultStorageError("Result payload is unavailable from S3 storage")
+                return BlobDeleteOutcome(
+                    deleted=False,
+                    already_missing=True,
+                    reference=reference,
+                    backend="s3",
+                )
+        else:
+            loaded_payload, etag = self._load_verified_payload(
+                metadata=metadata,
+                bucket=bucket,
+                key=key,
+                allow_missing=ignore_missing,
+            )
+            if loaded_payload is None:
+                return BlobDeleteOutcome(
+                    deleted=False,
+                    already_missing=True,
+                    reference=reference,
+                    backend="s3",
+                )
+
+        if self.conditional_delete is False:
+            missing = False
+            failed = False
+            try:
+                self.client.delete_object(Bucket=bucket, Key=key)
+            except Exception as error:
+                if ignore_missing and is_provider_not_found(error):
+                    missing = True
+                else:
+                    failed = True
+            if missing:
+                return BlobDeleteOutcome(
+                    deleted=False,
+                    already_missing=True,
+                    reference=reference,
+                    backend="s3",
+                )
+            if failed:
+                raise ResultStorageError("Failed to delete result payload from S3 storage")
+            return BlobDeleteOutcome(
+                deleted=True,
+                already_missing=False,
+                reference=reference,
+                backend="s3",
+            )
+
         if etag is None:
             raise ResultStorageError("Failed to delete result payload from S3 storage")
+
+        missing = False
+        need_unconditional_fallback = False
         failed = False
         try:
             self.client.delete_object(Bucket=bucket, Key=key, IfMatch=etag)
-        except Exception:
-            failed = True
+        except Exception as error:
+            if ignore_missing and is_provider_not_found(error):
+                missing = True
+            elif is_s3_conditional_delete_unsupported(error) and (
+                self.endpoint_url is not None or self.conditional_delete is None
+            ):
+                need_unconditional_fallback = True
+            else:
+                failed = True
+        if missing:
+            return BlobDeleteOutcome(
+                deleted=False,
+                already_missing=True,
+                reference=reference,
+                backend="s3",
+            )
+        if need_unconditional_fallback:
+            try:
+                self.client.delete_object(Bucket=bucket, Key=key)
+            except Exception as fallback_error:
+                if ignore_missing and is_provider_not_found(fallback_error):
+                    missing = True
+                else:
+                    failed = True
+            if missing:
+                return BlobDeleteOutcome(
+                    deleted=False,
+                    already_missing=True,
+                    reference=reference,
+                    backend="s3",
+                )
         if failed:
-            raise ResultStorageError("Failed to delete result payload from S3 storage") from None
+            raise ResultStorageError("Failed to delete result payload from S3 storage")
+        return BlobDeleteOutcome(
+            deleted=True,
+            already_missing=False,
+            reference=reference,
+            backend="s3",
+        )
+
+    def delete(self, *, reference: str, ignore_missing: bool = True) -> None:
+        self.delete_verified(reference=reference, ignore_missing=ignore_missing)
 
 
 def _close_response_body(body: object) -> None:
@@ -987,29 +1228,7 @@ class GCSResultStorage:
         if client is not None:
             self.client = client
             return
-        storage_module: Any | None = None
-        import_failed = False
-        try:
-            storage_module = importlib.import_module("google.cloud.storage")
-        except ImportError:
-            pass
-        except Exception:
-            import_failed = True
-        if import_failed:
-            raise ResultStorageError("Failed to initialize GCS result storage")
-        if storage_module is None:
-            raise ResultStorageError(
-                "GCS result storage requires google-cloud-storage. "
-                "Install with: pip install google-cloud-storage"
-            )
-        initialized_client: Any | None = None
-        try:
-            initialized_client = storage_module.Client()
-        except Exception:
-            pass
-        if initialized_client is None:
-            raise ResultStorageError("Failed to initialize GCS result storage") from None
-        self.client = initialized_client
+        self.client = get_or_create_gcs_client(import_module_fn=importlib.import_module)
 
     def store(self, *, serialized_result: str) -> str:
         return self.store_payload(serialized_payload=serialized_result)
@@ -1106,7 +1325,57 @@ class GCSResultStorage:
             raise ResultStorageError("Result payload is unavailable from GCS storage") from None
         return _verified_payload(payload, metadata), blob, generation
 
-    def delete(self, *, reference: str) -> None:
+    def _reload_verified_blob_metadata(
+        self,
+        *,
+        metadata: _ResultReference,
+        bucket: str,
+        key: str,
+    ) -> tuple[Any | None, int | None]:
+        """Fetch GCS blob metadata via reload() without downloading payload bytes."""
+        blob: Any | None = None
+        missing = False
+        failed = False
+        try:
+            blob = self.client.bucket(bucket).blob(key)
+            blob.reload()
+        except Exception as error:
+            if is_provider_not_found(error):
+                missing = True
+            else:
+                failed = True
+        if missing:
+            return None, None
+        if failed or blob is None:
+            raise ResultStorageError("Result payload is unavailable from GCS storage") from None
+        blob_size: object | None = None
+        size_failed = False
+        try:
+            blob_size = blob.size
+        except Exception:
+            size_failed = True
+        if size_failed:
+            raise ResultStorageError("Result payload is unavailable from GCS storage") from None
+        if type(blob_size) is not int or blob_size != metadata.size_bytes:
+            raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
+        generation: object | None = None
+        generation_failed = False
+        try:
+            generation = blob.generation
+        except Exception:
+            generation_failed = True
+        if generation_failed:
+            raise ResultStorageError("Result payload is unavailable from GCS storage") from None
+        if type(generation) is not int or generation <= 0:
+            raise ResultStorageIntegrityError("Stored result payload failed integrity verification")
+        return blob, generation
+
+    def delete_verified(
+        self,
+        *,
+        reference: str,
+        ignore_missing: bool = True,
+    ) -> BlobDeleteOutcome:
         metadata = _parse_result_reference(reference, allow_encoding_legacy=True)
         bucket, key = _validate_object_reference(
             metadata,
@@ -1114,18 +1383,47 @@ class GCSResultStorage:
             bucket=self.bucket,
             prefix=self.prefix,
         )
-        _payload, blob, generation = self._load_verified_payload(
+        blob, generation = self._reload_verified_blob_metadata(
             metadata=metadata,
             bucket=bucket,
             key=key,
         )
+        if blob is None or generation is None:
+            if not ignore_missing:
+                raise ResultStorageError("Result payload is unavailable from GCS storage")
+            return BlobDeleteOutcome(
+                deleted=False,
+                already_missing=True,
+                reference=reference,
+                backend="gcs",
+            )
+        missing = False
         failed = False
         try:
             blob.delete(if_generation_match=generation)
-        except Exception:
-            failed = True
+        except Exception as error:
+            if ignore_missing and is_provider_not_found(error):
+                missing = True
+            else:
+                failed = True
+        if missing:
+            return BlobDeleteOutcome(
+                deleted=False,
+                already_missing=True,
+                reference=reference,
+                backend="gcs",
+            )
         if failed:
-            raise ResultStorageError("Failed to delete result payload from GCS storage") from None
+            raise ResultStorageError("Failed to delete result payload from GCS storage")
+        return BlobDeleteOutcome(
+            deleted=True,
+            already_missing=False,
+            reference=reference,
+            backend="gcs",
+        )
+
+    def delete(self, *, reference: str, ignore_missing: bool = True) -> None:
+        self.delete_verified(reference=reference, ignore_missing=ignore_missing)
 
 
 def _configuration_error(name: str, detail: str) -> ResultStorageError:
@@ -1184,7 +1482,7 @@ def _validate_object_settings(
 
 def _normalized_filesystem_namespace(value: str, name: str) -> str:
     try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(value)))
+        return os.path.normcase(os.path.abspath(os.path.realpath(os.path.normpath(value))))
     except (OSError, OverflowError, RuntimeError, ValueError):
         raise _configuration_error(name, "must identify a usable filesystem namespace") from None
 
@@ -1280,24 +1578,38 @@ def validate_storage_configuration(config: dict[str, Any]) -> None:
             input_filesystem_path,
             "INPUT_STORAGE_FILESYSTEM_PATH",
         )
-        if result_filesystem_namespace == input_filesystem_namespace:
+        if result_filesystem_namespace == input_filesystem_namespace or (
+            filesystem_namespaces_overlap(
+                result_filesystem_namespace,
+                input_filesystem_namespace,
+                normpath_fn=os.path.realpath,
+            )
+        ):
             raise _configuration_error(
                 "INPUT_STORAGE_FILESYSTEM_PATH",
                 "must not reuse the result storage namespace",
             )
 
     if result_s3_configured and input_s3_configured:
-        result_s3_namespace = (
-            _normalized_s3_endpoint_namespace(config.get("RESULT_STORAGE_S3_ENDPOINT_URL")),
-            config.get("RESULT_STORAGE_S3_BUCKET"),
-            _DEFAULT_RESULT_S3_PREFIX if result_s3_prefix is None else result_s3_prefix,
+        result_s3_endpoint = _normalized_s3_endpoint_namespace(
+            config.get("RESULT_STORAGE_S3_ENDPOINT_URL")
         )
-        input_s3_namespace = (
-            _normalized_s3_endpoint_namespace(config.get("INPUT_STORAGE_S3_ENDPOINT_URL")),
-            config.get("INPUT_STORAGE_S3_BUCKET"),
-            _DEFAULT_INPUT_S3_PREFIX if input_s3_prefix is None else input_s3_prefix,
+        input_s3_endpoint = _normalized_s3_endpoint_namespace(
+            config.get("INPUT_STORAGE_S3_ENDPOINT_URL")
         )
-        if result_s3_namespace == input_s3_namespace:
+        result_s3_bucket = config.get("RESULT_STORAGE_S3_BUCKET")
+        input_s3_bucket = config.get("INPUT_STORAGE_S3_BUCKET")
+        result_s3_effective_prefix = (
+            _DEFAULT_RESULT_S3_PREFIX if result_s3_prefix is None else str(result_s3_prefix)
+        )
+        input_s3_effective_prefix = (
+            _DEFAULT_INPUT_S3_PREFIX if input_s3_prefix is None else str(input_s3_prefix)
+        )
+        if (
+            result_s3_endpoint == input_s3_endpoint
+            and result_s3_bucket == input_s3_bucket
+            and object_prefixes_overlap(result_s3_effective_prefix, input_s3_effective_prefix)
+        ):
             raise _configuration_error(
                 "INPUT_STORAGE_S3_PREFIX",
                 "must not reuse the result storage namespace",
@@ -1306,15 +1618,17 @@ def validate_storage_configuration(config: dict[str, Any]) -> None:
     result_gcs_configured = result_backend == "gcs" or result_gcs_retained
     input_gcs_configured = input_backend == "gcs" or input_gcs_retained
     if result_gcs_configured and input_gcs_configured:
-        result_gcs_namespace = (
-            config.get("RESULT_STORAGE_GCS_BUCKET"),
-            _DEFAULT_RESULT_GCS_PREFIX if result_gcs_prefix is None else result_gcs_prefix,
+        result_gcs_bucket = config.get("RESULT_STORAGE_GCS_BUCKET")
+        input_gcs_bucket = config.get("INPUT_STORAGE_GCS_BUCKET")
+        result_gcs_effective_prefix = (
+            _DEFAULT_RESULT_GCS_PREFIX if result_gcs_prefix is None else str(result_gcs_prefix)
         )
-        input_gcs_namespace = (
-            config.get("INPUT_STORAGE_GCS_BUCKET"),
-            _DEFAULT_INPUT_GCS_PREFIX if input_gcs_prefix is None else input_gcs_prefix,
+        input_gcs_effective_prefix = (
+            _DEFAULT_INPUT_GCS_PREFIX if input_gcs_prefix is None else str(input_gcs_prefix)
         )
-        if result_gcs_namespace == input_gcs_namespace:
+        if result_gcs_bucket == input_gcs_bucket and object_prefixes_overlap(
+            result_gcs_effective_prefix, input_gcs_effective_prefix
+        ):
             raise _configuration_error(
                 "INPUT_STORAGE_GCS_PREFIX",
                 "must not reuse the result storage namespace",
@@ -1406,6 +1720,25 @@ def load_result_reference(
     return backend.load(reference=reference)
 
 
+def delete_result_reference(
+    reference: str,
+    config: dict[str, Any] | None = None,
+    *,
+    ignore_missing: bool = True,
+) -> bool:
+    """Delete one validated external result payload with 404 idempotency.
+
+    Returns ``True`` if an external object was deleted, or ``False`` if the
+    reference is digest-only or already missing (when ``ignore_missing=True``).
+    """
+    outcome = delete_blob_verified(
+        config,
+        reference,
+        ignore_missing=ignore_missing,
+    )
+    return outcome.deleted
+
+
 def get_result_storage_backend(config: dict[str, Any] | None = None) -> ResultStorageBackend:
     """Resolve the configured result storage backend."""
     if config is None:
@@ -1461,3 +1794,39 @@ def get_result_storage_backend(config: dict[str, Any] | None = None) -> ResultSt
         )
 
     raise ResultStorageError(f"Unsupported RESULT_STORAGE_BACKEND: {backend}")
+
+
+def _resolve_blob_backend_for_reference(
+    reference: str,
+    config: dict[str, Any] | None = None,
+) -> ResultStorageBackend:
+    return get_result_storage_backend_for_reference(reference, config)
+
+
+register_blob_backend_resolver(_resolve_blob_backend_for_reference)
+
+
+__all__ = [
+    "BlobDeleteOutcome",
+    "DigestResultStorage",
+    "FilesystemResultStorage",
+    "GCSResultStorage",
+    "PayloadStorageBackend",
+    "ResultStorageBackend",
+    "ResultStorageError",
+    "ResultStorageIntegrityError",
+    "S3ResultStorage",
+    "_ALLOWED_FILESYSTEM_FILE_MODES",
+    "_DEFAULT_FILESYSTEM_FILE_MODE",
+    "_FILESYSTEM_DIR_MODE_BY_FILE_MODE",
+    "canonicalize_result_reference",
+    "clear_blob_client_caches",
+    "delete_blob_verified",
+    "delete_result_reference",
+    "get_result_storage_backend",
+    "get_result_storage_backend_for_reference",
+    "is_external_result_reference",
+    "is_valid_result_reference",
+    "load_result_reference",
+    "validate_storage_configuration",
+]

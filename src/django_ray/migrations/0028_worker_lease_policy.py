@@ -5,14 +5,36 @@ from django.db import migrations, models
 
 
 def seed_policy(apps, schema_editor):
+    using = schema_editor.connection.alias
     policy = apps.get_model("django_ray", "TaskWorkerLeasePolicy")
-    policy.objects.using(schema_editor.connection.alias).create(
-        singleton_key=1, schema_version=1, lease_seconds=60, revision=1
+    leases = apps.get_model("django_ray", "TaskWorkerLease")
+    lease_seconds = 60
+    if not leases.objects.using(using).exists():
+        from django_ray.conf.settings import get_settings
+
+        configured = get_settings().get("WORKER_LEASE_SECONDS", 60)
+        if type(configured) is int and 1 <= configured <= 86400:
+            lease_seconds = configured
+    policy.objects.using(using).create(
+        singleton_key=1, schema_version=1, lease_seconds=lease_seconds, revision=1
     )
 
 
 def require_quiescent_reverse(apps, schema_editor):
-    using = schema_editor.connection.alias
+    connection = schema_editor.connection
+    using = connection.alias
+    policy = apps.get_model("django_ray", "TaskWorkerLeasePolicy")
+    table = connection.ops.quote_name(policy._meta.db_table)
+    if connection.vendor == "postgresql":
+        schema_editor.execute(
+            f"SELECT singleton_key FROM {table} WHERE singleton_key = %s FOR UPDATE NOWAIT",
+            [1],
+        )
+    elif connection.vendor == "sqlite":
+        schema_editor.execute(
+            f"UPDATE {table} SET revision = revision WHERE singleton_key = %s",
+            [1],
+        )
     leases = apps.get_model("django_ray", "TaskWorkerLease")
     tasks = apps.get_model("django_ray", "RayTaskExecution")
     if (

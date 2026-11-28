@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from threading import RLock
 from typing import Any, NoReturn
-from weakref import WeakValueDictionary
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from django.tasks.base import Task
 
@@ -20,6 +20,7 @@ _READ_ONLY_MESSAGE = (
 # support weak references. Historical reads never add entries. The latest
 # successful declaration wins for an alias/path, including deliberate reloads.
 _trusted_functions: WeakValueDictionary[tuple[str, str], Callable[..., Any]] = WeakValueDictionary()
+_trusted_takes_context: WeakKeyDictionary[Callable[..., Any], bool] = WeakKeyDictionary()
 _registry_lock = RLock()
 
 
@@ -27,6 +28,7 @@ def _register_validated_task(alias: str, task: Task) -> None:
     """Remember a trusted declaration only after backend validation succeeds."""
     with _registry_lock:
         _trusted_functions[alias, task.module_path] = task.func
+        _trusted_takes_context[task.func] = bool(task.takes_context)
 
 
 def _refuse_execution() -> NoReturn:
@@ -103,11 +105,13 @@ def _project_result_task(
 ) -> Task:
     with _registry_lock:
         func = _trusted_functions.get((alias, callable_path))
+        takes_context = bool(_trusted_takes_context.get(func, False)) if func is not None else False
     return _ReadOnlyResultTask(
         func=func if func is not None else _UnknownResultFunction(alias, callable_path),
         backend=alias,
         priority=priority,
         queue_name=queue_name,
         run_after=run_after,
+        takes_context=takes_context,
         _stored_callable_path=callable_path,
     )

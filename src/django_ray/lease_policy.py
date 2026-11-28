@@ -14,9 +14,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 
-from django.db import DatabaseError, connections, transaction
-from django.db.models import BooleanField, F
+from django.db import DatabaseError, InterfaceError, OperationalError, connections, transaction
+from django.db.models import BooleanField, DateTimeField, ExpressionWrapper, F, OuterRef, Value
 from django.db.models.expressions import RawSQL
+from django.db.models.functions import Now
 from django.utils import timezone
 
 from django_ray.conf.settings import get_settings
@@ -65,7 +66,12 @@ def configured_lease_seconds() -> int:
     return value
 
 
-def policy_rows(*, using: str = "default", matching: bool = True, revision: int | None = None):
+def policy_rows(
+    *,
+    using: str = "default",
+    matching: bool = True,
+    revision: int | OuterRef | None = None,
+):
     """Build a lazy, SQL-validated authority predicate on the selected database."""
     from django_ray.models import TaskWorkerLeasePolicy
 
@@ -125,6 +131,64 @@ def lease_policy_observation(*, using: str = "default") -> Generator[LeasePolicy
         raise LeasePolicyError("lease_policy_changed")
 
 
+def db_clock_now() -> ExpressionWrapper:
+    """Return a database-clock UTC timestamp expression for SQLite and PostgreSQL."""
+    return ExpressionWrapper(Now() + Value(timedelta(0)), output_field=DateTimeField())
+
+
+def db_clock_plus(duration: timedelta) -> ExpressionWrapper:
+    """Return a database-clock UTC timestamp shifted forward by ``duration``."""
+    return ExpressionWrapper(Now() + Value(duration), output_field=DateTimeField())
+
+
+def db_clock_minus(duration: timedelta) -> ExpressionWrapper:
+    """Return a database-clock UTC timestamp shifted backward by ``duration``."""
+    return ExpressionWrapper(Now() - Value(duration), output_field=DateTimeField())
+
+
+_POSTGRESQL_LOCK_CONTENTION_SQLSTATES = frozenset({"55P03", "57014", "40P01"})
+_SQLITE_LOCK_CONTENTION_BASE_CODES = frozenset({5, 6})
+_CONNECTION_FAILURE_MARKERS = (
+    "connection already closed",
+    "connection closed",
+    "server closed the connection",
+    "could not connect",
+    "terminating connection",
+    "broken pipe",
+    "connection reset",
+    "ssl connection has been closed",
+    "network is unreachable",
+    "no route to host",
+    "database is closed",
+)
+
+
+def _is_lock_contention_error(error: DatabaseError | InterfaceError, *, vendor: str) -> bool:
+    """Distinguish lock contention from connection or structural DB failures."""
+    if isinstance(error, InterfaceError) or not isinstance(error, OperationalError):
+        return False
+    cause = error.__cause__
+    if vendor == "postgresql":
+        sqlstate = (
+            getattr(cause, "sqlstate", None)
+            or getattr(cause, "pgcode", None)
+            or getattr(error, "sqlstate", None)
+            or getattr(error, "pgcode", None)
+        )
+        if sqlstate is not None:
+            return str(sqlstate) in _POSTGRESQL_LOCK_CONTENTION_SQLSTATES
+    elif vendor == "sqlite":
+        code = getattr(cause, "sqlite_errorcode", None)
+        if code is None:
+            code = getattr(error, "sqlite_errorcode", None)
+        if isinstance(code, int):
+            return (code & 0xFF) in _SQLITE_LOCK_CONTENTION_BASE_CODES
+    detail = f"{error} {cause or ''}".lower()
+    if any(marker in detail for marker in _CONNECTION_FAILURE_MARKERS):
+        return False
+    return True
+
+
 def lock_lease_policy(*, using: str = "default", exclusive: bool = False) -> LeasePolicy:
     """Acquire authority before any lease/task locks inside an existing transaction."""
     from django_ray.models import TaskWorkerLeasePolicy
@@ -155,9 +219,11 @@ def lock_lease_policy(*, using: str = "default", exclusive: bool = False) -> Lea
                 raise LeasePolicyError("lease_policy_invalid")
         else:
             raise LeasePolicyError()
-        return read_lease_policy(using=using, matching=not exclusive)
-    except DatabaseError:
-        raise LeasePolicyError("lease_policy_busy") from None
+    except (DatabaseError, InterfaceError) as error:
+        if _is_lock_contention_error(error, vendor=connection.vendor):
+            raise LeasePolicyError("lease_policy_busy") from None
+        raise LeasePolicyError("lease_policy_unavailable") from None
+    return read_lease_policy(using=using, matching=not exclusive)
 
 
 @contextmanager
@@ -207,12 +273,13 @@ def set_lease_policy(
     # A transition owns its connection's short lock budget, restoring SQLite's
     # prior setting on every path. PostgreSQL row locking above uses NOWAIT.
     prior_busy = None
-    if connection.vendor == "sqlite":
-        with connection.cursor() as cursor:
-            cursor.execute("PRAGMA busy_timeout")
-            prior_busy = cursor.fetchone()[0]
-            cursor.execute("PRAGMA busy_timeout = 250")
     try:
+        if connection.vendor == "sqlite":
+            with connection.cursor() as cursor:
+                cursor.execute("PRAGMA busy_timeout")
+                row = cursor.fetchone()
+                prior_busy = row[0] if row is not None else 0
+                cursor.execute("PRAGMA busy_timeout = 250")
         with transaction.atomic(using=using, durable=True):
             if connection.vendor == "postgresql":
                 with connection.cursor() as cursor:
@@ -247,5 +314,8 @@ def set_lease_policy(
         raise LeasePolicyError("lease_policy_unavailable") from None
     finally:
         if prior_busy is not None:
-            with connection.cursor() as cursor:
-                cursor.execute(f"PRAGMA busy_timeout = {int(prior_busy)}")
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(f"PRAGMA busy_timeout = {int(prior_busy)}")
+            except Exception:
+                pass

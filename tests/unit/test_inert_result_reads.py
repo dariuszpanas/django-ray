@@ -24,7 +24,7 @@ from django.tasks.exceptions import InvalidTask, TaskResultMismatch
 from django.utils.inspect import _get_func_parameters
 
 from django_ray import _result_tasks
-from django_ray.backends import RayTaskBackend
+from django_ray.backends import RayTaskBackend, ResultUnavailableError
 from django_ray.models import RayTaskExecution, TaskState
 from django_ray.result_storage import FilesystemResultStorage
 
@@ -288,9 +288,11 @@ def test_unregistered_result_contains_malformed_references_and_redacts_diagnosti
     with caplog.at_level(logging.WARNING):
         result = task_backends["default"].get_result("invalid-historical")
     assert result.status == TaskResultStatus.SUCCESSFUL
-    assert result.args == []
-    assert result.kwargs == {}
-    assert result.return_value is None
+    for attr in ("args", "kwargs", "return_value"):
+        with pytest.raises(ResultUnavailableError) as exc_info:
+            getattr(result, attr)
+        assert "private-credential" not in str(exc_info.value)
+        assert reference not in str(exc_info.value)
     assert "Failed to load durable task input" in caplog.text
     assert "Failed to load external task result" in caplog.text
     for record in caplog.records:

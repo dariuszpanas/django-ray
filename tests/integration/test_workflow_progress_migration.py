@@ -9,12 +9,18 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.postgresql,
+    pytest.mark.sqlite_compatible,
+]
 
-@pytest.mark.django_db(transaction=True)
+
 def test_existing_progress_gains_nullable_run_identity_and_reverses() -> None:
     migrate_from = [("django_ray", "0009_taskinputpayload_and_input_reference")]
     migrate_to = [("django_ray", "0010_raytaskexecution_workflow_run_id")]
     executor = MigrationExecutor(connection)
+    latest = executor.loader.graph.leaf_nodes("django_ray")
     executor.migrate(migrate_from)
     try:
         old_apps = executor.loader.project_state(migrate_from).apps
@@ -53,4 +59,4 @@ def test_existing_progress_gains_nullable_run_identity_and_reverses() -> None:
         reverted = reverted_execution.objects.get(task_id="workflow-progress-migration")
         assert reverted.progress_data == legacy_progress
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0028_worker_lease_policy")])
+        MigrationExecutor(connection).migrate(latest)

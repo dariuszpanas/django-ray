@@ -10,6 +10,7 @@ with fabricated empty arguments.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from dataclasses import dataclass
@@ -80,7 +81,22 @@ class InputReferenceMetadata:
 
 def _serialize_json(value: Any, *, description: str) -> str:
     try:
-        return json.dumps(value)
+        return json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise InputPayloadValidationError(
+            f"Task {description} must be JSON-serializable"
+        ) from error
+
+
+def _serialize_canonical_json(value: Any, *, description: str) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as error:
         raise InputPayloadValidationError(
             f"Task {description} must be JSON-serializable"
@@ -100,6 +116,7 @@ def _serialize_envelope(args: list[Any], kwargs: dict[str, Any]) -> str:
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
+            allow_nan=False,
         )
     except (TypeError, ValueError) as error:
         raise InputPayloadValidationError("Task inputs must be JSON-serializable") from error
@@ -310,16 +327,14 @@ def prepare_task_input(
         kwargs_json = _serialize_json(kwargs, description="kwargs")
         return PreparedTaskInput(args_json=args_json, kwargs_json=kwargs_json)
 
-    try:
-        serialized_payload = _serialize_envelope(args_list, kwargs)
-    except InputPayloadValidationError:
-        _serialize_json(args_list, description="args")
-        _serialize_json(kwargs, description="kwargs")
-        raise
+    args_json = _serialize_canonical_json(args_list, description="args")
+    kwargs_json = _serialize_canonical_json(kwargs, description="kwargs")
+    serialized_payload = (
+        f'{{"args":{args_json},"kwargs":{kwargs_json},'
+        f'"schema":"{INPUT_ENVELOPE_SCHEMA}","version":{INPUT_ENVELOPE_VERSION}}}'
+    )
     payload_bytes = serialized_payload.encode("utf-8")
     if len(payload_bytes) <= threshold:
-        args_json = _serialize_json(args_list, description="args")
-        kwargs_json = _serialize_json(kwargs, description="kwargs")
         return PreparedTaskInput(args_json=args_json, kwargs_json=kwargs_json)
 
     backend_name, storage = _storage_backend(resolved_config)
@@ -346,16 +361,69 @@ def prepare_task_input(
     )
 
 
+def _verify_or_restore_input_payload(
+    prepared: PreparedTaskInput,
+    metadata: InputReferenceMetadata,
+    resolved_config: dict[str, Any],
+) -> None:
+    """Verify existing immutable input bytes or re-store them without holding DB locks."""
+    assert prepared.input_reference is not None
+    assert prepared.serialized_payload is not None
+    storage = _storage_backend_for_reference(metadata, resolved_config)
+    try:
+        stored_payload = storage.load(reference=prepared.input_reference)
+    except ResultStorageIntegrityError as error:
+        raise InputPayloadStorageError("Failed to reactivate durable task input") from error
+    except (ResultStorageError, OSError, UnicodeError):
+        stored_payload = None
+    if stored_payload is not None:
+        if stored_payload != prepared.serialized_payload:
+            raise InputPayloadValidationError("Storage backend changed immutable task input bytes")
+        restored_reference = prepared.input_reference
+    else:
+        try:
+            restored_reference = storage.store_payload(
+                serialized_payload=prepared.serialized_payload
+            )
+        except (ResultStorageError, OSError, UnicodeError) as error:
+            raise InputPayloadStorageError("Failed to reactivate durable task input") from error
+    if restored_reference != prepared.input_reference:
+        try:
+            restored_metadata = _validated_reference(restored_reference, resolved_config)
+        except InputPayloadValidationError:
+            restored_metadata = None
+        if restored_metadata != metadata:
+            raise InputPayloadValidationError(
+                "Storage backend changed an immutable task input reference"
+            )
+
+
+def verify_or_restore_prepared_input(
+    prepared: PreparedTaskInput,
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Verify or restore prepared external input bytes strictly outside DB locks."""
+    if not prepared.is_external or prepared.input_reference is None:
+        return
+    if prepared.serialized_payload is None:
+        raise InputPayloadValidationError("Prepared external task input is incomplete")
+    resolved_config = config if config is not None else get_settings()
+    metadata = _validated_reference(prepared.input_reference, resolved_config)
+    _verify_or_restore_input_payload(prepared, metadata, resolved_config)
+
+
 def register_task_input(
     prepared: PreparedTaskInput,
     config: dict[str, Any] | None = None,
     *,
     using: str | None = None,
+    verify_storage: bool = True,
 ) -> TaskInputPayload | None:
     """Register input in the caller's transaction, optionally binding its database.
 
-    Explicit ``using`` pins the lock, insertion and reactivation update to that
-    connection. Omitting it preserves the helper's existing router behavior.
+    When called outside an outer ``transaction.atomic()`` block, remote storage
+    revalidation/reactivation runs strictly outside database row locks between
+    two short transactions so S3/GCS I/O never holds ``SELECT ... FOR UPDATE``.
     """
     if not prepared.is_external:
         return None
@@ -369,11 +437,13 @@ def register_task_input(
     ):
         raise InputPayloadValidationError("Prepared external task input is incomplete")
 
-    from django_ray.models import InputPayloadKind, InputPayloadState, TaskInputPayload
-    from django_ray.payload_registry import (
+    from django.db import models, transaction
+
+    from django_ray._storage_types import (
         _has_other_payload_registry_reference,
         _payload_registry_references,
     )
+    from django_ray.models import InputPayloadKind, InputPayloadState, TaskInputPayload
 
     resolved_config = config if config is not None else get_settings()
     metadata = _validated_reference(prepared.input_reference, resolved_config)
@@ -402,105 +472,92 @@ def register_task_input(
         raise InputPayloadValidationError("Prepared task input metadata is inconsistent")
 
     references = _payload_registry_references(prepared.input_reference, resolved_config)
-    if _has_other_payload_registry_reference(
-        prepared.input_reference, references, using=using, lock=True
-    ):
-        raise InputPayloadValidationError("Task input has another physical registry reference")
-    # Current preparation emits canonical references. Keep existing legacy
-    # identities usable, but never introduce a new alias after another writer
-    # has checked for it. Old producers must remain stopped across upgrades.
-    if prepared.input_reference != references.canonical and not (
-        TaskInputPayload.objects.using(using)
-        .select_for_update()
-        .filter(reference=prepared.input_reference)
-        .exists()
-    ):
-        raise InputPayloadValidationError("New task inputs require a canonical registry reference")
-
-    now = timezone.now()
-    payload, created = (
-        TaskInputPayload.objects.using(using)
-        .select_for_update()
-        .get_or_create(
-            reference=prepared.input_reference,
-            defaults={
-                "payload_kind": InputPayloadKind.TASK_INPUT,
-                "backend": prepared.backend,
-                "digest": prepared.digest,
-                "size_bytes": prepared.size_bytes,
-                "envelope_version": prepared.envelope_version,
-                "state": InputPayloadState.ACTIVE,
-                "last_used_at": now,
-            },
-        )
+    supplied_metadata = (
+        InputPayloadKind.TASK_INPUT,
+        prepared.backend,
+        prepared.digest,
+        prepared.size_bytes,
+        prepared.envelope_version,
     )
-    if not created:
-        persisted_metadata = (
-            payload.payload_kind,
-            payload.backend,
-            payload.digest,
-            payload.size_bytes,
-            payload.envelope_version,
-        )
-        supplied_metadata = (
-            InputPayloadKind.TASK_INPUT,
-            prepared.backend,
-            prepared.digest,
-            prepared.size_bytes,
-            prepared.envelope_version,
-        )
-        if persisted_metadata != supplied_metadata:
+
+    def _acquire_or_create_registry_row() -> tuple[TaskInputPayload, bool]:
+        if _has_other_payload_registry_reference(
+            prepared.input_reference or "", references, using=using, lock=True
+        ):
+            raise InputPayloadValidationError("Task input has another physical registry reference")
+        # Current preparation emits canonical references. Keep existing legacy
+        # identities usable, but never introduce a new alias after another writer
+        # has checked for it. Old producers must remain stopped across upgrades.
+        if prepared.input_reference != references.canonical and not (
+            TaskInputPayload.objects.using(using)
+            .select_for_update()
+            .filter(reference=prepared.input_reference)
+            .exists()
+        ):
             raise InputPayloadValidationError(
-                "Existing task input registry metadata is inconsistent"
+                "New task inputs require a canonical registry reference"
             )
 
-        # Preparation happens before this registry lock. A concurrent purge may
-        # have deleted its object and then rolled back the tombstone, or lost
-        # the provider's acknowledgement. ACTIVE therefore does not prove that
-        # the prepared bytes still exist. Re-establish them before attachment.
-        storage = _storage_backend_for_reference(metadata, resolved_config)
-        try:
-            stored_payload = storage.load(reference=prepared.input_reference)
-        except ResultStorageIntegrityError as error:
-            raise InputPayloadStorageError("Failed to reactivate durable task input") from error
-        except (ResultStorageError, OSError, UnicodeError):
-            stored_payload = None
-        if stored_payload is not None:
-            if stored_payload != prepared.serialized_payload:
+        now = timezone.now()
+        row, was_created = (
+            TaskInputPayload.objects.using(using)
+            .select_for_update()
+            .get_or_create(
+                reference=prepared.input_reference,
+                defaults={
+                    "payload_kind": InputPayloadKind.TASK_INPUT,
+                    "backend": prepared.backend,
+                    "digest": prepared.digest,
+                    "size_bytes": prepared.size_bytes,
+                    "envelope_version": prepared.envelope_version,
+                    "state": InputPayloadState.ACTIVE,
+                    "last_used_at": now,
+                },
+            )
+        )
+        if not was_created:
+            persisted_metadata = (
+                row.payload_kind,
+                row.backend,
+                row.digest,
+                row.size_bytes,
+                row.envelope_version,
+            )
+            if persisted_metadata != supplied_metadata:
                 raise InputPayloadValidationError(
-                    "Storage backend changed immutable task input bytes"
+                    "Existing task input registry metadata is inconsistent"
                 )
-            # A readable legacy URI need not fit the current writer's encoded
-            # URI limit. Verify its exact bytes without requiring a new URI.
-            restored_reference = prepared.input_reference
-        else:
-            try:
-                restored_reference = storage.store_payload(
-                    serialized_payload=prepared.serialized_payload
-                )
-            except (ResultStorageError, OSError, UnicodeError) as error:
-                raise InputPayloadStorageError("Failed to reactivate durable task input") from error
-        if restored_reference != prepared.input_reference:
-            try:
-                restored_metadata = _validated_reference(restored_reference, resolved_config)
-            except InputPayloadValidationError:
-                restored_metadata = None
-            # Retain an encoding-legacy spelling when the canonical writer
-            # returns the same object in its exact authorized input namespace.
-            if restored_metadata != metadata:
-                raise InputPayloadValidationError(
-                    "Storage backend changed an immutable task input reference"
-                )
+        return row, was_created
 
+    def _reactivate_locked_row(row: TaskInputPayload) -> TaskInputPayload:
+        row_obj: Any = row
         update_fields = ["last_used_at"]
-        payload.last_used_at = timezone.now()
-        if payload.state == InputPayloadState.PURGED:
-            payload.state = InputPayloadState.ACTIVE
-            payload.purged_at = None
-            payload.cleanup_error = ""
+        row_obj.last_used_at = timezone.now()
+        if row_obj.state == InputPayloadState.PURGED:
+            row_obj.state = InputPayloadState.ACTIVE
+            row_obj.purged_at = None
+            row_obj.cleanup_error = ""
             update_fields.extend(["state", "purged_at", "cleanup_error"])
-        payload.save(using=using, update_fields=update_fields)
-    return payload
+        row.save(using=using, update_fields=update_fields)
+        return row
+
+    atomic_ctx: Any = (
+        transaction.atomic(using=using)
+        if isinstance(TaskInputPayload.objects, models.Manager)
+        else contextlib.nullcontext()
+    )
+    with atomic_ctx:
+        payload, created = _acquire_or_create_registry_row()
+        if not created:
+            # Preparation happens before this registry lock. A concurrent purge may
+            # have deleted its object and then rolled back the tombstone, or lost
+            # the provider's acknowledgement. ACTIVE therefore does not prove that
+            # the prepared bytes still exist, and a PURGED tombstone MUST always
+            # restore external bytes before flipping state back to ACTIVE.
+            if verify_storage or payload.state == InputPayloadState.PURGED:
+                _verify_or_restore_input_payload(prepared, metadata, resolved_config)
+            return _reactivate_locked_row(payload)
+        return payload
 
 
 def load_task_input(
@@ -564,4 +621,5 @@ __all__ = [
     "load_task_input",
     "prepare_task_input",
     "register_task_input",
+    "verify_or_restore_prepared_input",
 ]

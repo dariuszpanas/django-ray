@@ -8,12 +8,18 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.postgresql,
+    pytest.mark.sqlite_compatible,
+]
 
-@pytest.mark.django_db(transaction=True)
+
 def test_existing_and_rolling_writer_rows_gain_nullable_plan_fields() -> None:
     migrate_from = [("django_ray", "0010_raytaskexecution_workflow_run_id")]
     migrate_to = [("django_ray", "0011_raytaskexecution_workflow_plan")]
     executor = MigrationExecutor(connection)
+    latest = executor.loader.graph.leaf_nodes("django_ray")
     executor.migrate(migrate_from)
     try:
         old_apps = executor.loader.project_state(migrate_from).apps
@@ -58,4 +64,4 @@ def test_existing_and_rolling_writer_rows_gain_nullable_plan_fields() -> None:
             field.name for field in reverted_execution._meta.get_fields()
         }
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0028_worker_lease_policy")])
+        MigrationExecutor(connection).migrate(latest)

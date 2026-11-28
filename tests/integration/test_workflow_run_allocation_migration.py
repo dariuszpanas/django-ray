@@ -19,7 +19,10 @@ from django_ray.workflow.progress.runs import (
 
 MIGRATE_FROM = [("django_ray", "0017_raytaskexecution_sensitive_data_permission")]
 MIGRATE_TO = [("django_ray", "0018_workflow_run_allocation")]
-LATEST = [("django_ray", "0028_worker_lease_policy")]
+
+
+def _latest_migrations() -> list[tuple[str, str]]:
+    return MigrationExecutor(connection).loader.graph.leaf_nodes("django_ray")
 
 
 def _assert_workflow_run_allocation_migration_round_trip() -> None:
@@ -74,7 +77,7 @@ def _assert_workflow_run_allocation_migration_round_trip() -> None:
 
         # Restore the current schema before using the imported current model.
         # The historical assertions above deliberately run at the 0018 boundary.
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         current = RayTaskExecution.objects.get(pk=legacy.pk)
         legacy_identity = WorkflowRunIdentity(
             task_execution_pk=current.pk,
@@ -116,7 +119,7 @@ def _assert_workflow_run_allocation_migration_round_trip() -> None:
         with pytest.raises(FieldDoesNotExist):
             reverted_execution._meta.get_field("workflow_run_sequence")
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
 
 
 @pytest.mark.django_db(transaction=True)

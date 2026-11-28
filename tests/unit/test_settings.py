@@ -31,9 +31,10 @@ class TestValidateSettings:
             )
 
     def test_validate_missing_ray_address(self) -> None:
-        """Test that missing RAY_ADDRESS raises error."""
+        """Explicit None is allowed lazily unless require_ray_address=True."""
+        validate_settings({"RAY_ADDRESS": None})
         with pytest.raises(ImproperlyConfigured, match="RAY_ADDRESS"):
-            validate_settings({"RAY_ADDRESS": None})
+            validate_settings({"RAY_ADDRESS": None}, require_ray_address=True)
 
     def test_validate_valid_settings(self) -> None:
         """Test that valid settings pass validation."""
@@ -227,7 +228,7 @@ class TestValidateSettings:
         with pytest.raises(ImproperlyConfigured, match=setting):
             validate_settings({"RAY_ADDRESS": "ray://localhost:10001", setting: True})
 
-    @pytest.mark.parametrize("ray_address", [None, "", "   ", 123, True])
+    @pytest.mark.parametrize("ray_address", ["", "   ", 123, True])
     def test_validate_ray_address_requires_non_empty_string(self, ray_address) -> None:
         with pytest.raises(ImproperlyConfigured, match="RAY_ADDRESS"):
             validate_settings({"RAY_ADDRESS": ray_address})

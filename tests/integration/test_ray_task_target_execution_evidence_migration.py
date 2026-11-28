@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Event
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from django.db import (
@@ -45,7 +45,11 @@ from django_ray.target.execution_evidence import (
 
 MIGRATE_FROM = [("django_ray", "0025_ray_worker_target_capabilities")]
 MIGRATE_TO = [("django_ray", "0026_ray_task_target_execution_evidence")]
-LATEST = [("django_ray", "0028_worker_lease_policy")]
+
+
+def _latest_migrations() -> list[tuple[str, str]]:
+    return MigrationExecutor(connection).loader.graph.leaf_nodes("django_ray")
+
 
 _DIGEST_A = f"sha256:{'a' * 64}"
 _DIGEST_B = f"sha256:{'b' * 64}"
@@ -64,7 +68,7 @@ class _Lineage:
     route_revision: RayTargetRouteRevision
     binding: RayTaskTargetBinding
     selection: RayTaskTargetRouteSelection
-    lease: TaskWorkerLease
+    lease: Any
     capability: RayWorkerTargetCapability
     claimed_at: datetime
 
@@ -75,6 +79,7 @@ def _create_lineage(
     execution_protocol_version: int = 2,
     capability_precedes_lease: bool = False,
     identity_text: str | None = None,
+    lease_model: Any = TaskWorkerLease,
 ) -> _Lineage:
     now = timezone.now().astimezone(UTC).replace(microsecond=123456)
     observed_at = now - timedelta(seconds=20)
@@ -90,7 +95,7 @@ def _create_lineage(
             expected_revision=protocol_policy.revision,
             legacy_producers_retired=True,
         )
-    lease = TaskWorkerLease.objects.create(
+    lease = lease_model.objects.create(
         worker_id=identity_text or f"evidence-worker-{suffix}",
         hostname=identity_text or "worker.example",
         pid=1234,
@@ -169,7 +174,7 @@ def _create_lineage(
         created_at=observed_at,
     )
     capability = RayWorkerTargetCapability.objects.create(
-        lease=lease,
+        lease_id=lease.pk,
         lease_hostname=lease.hostname,
         lease_pid=lease.pid,
         lease_started_at=lease.started_at,
@@ -797,7 +802,10 @@ def test_migration_is_additive_and_reverse_refuses_retained_evidence() -> None:
         ).objects.exists()
         assert old_execution.objects.filter(pk=legacy.pk).exists()
 
-        lineage = _create_lineage(suffix="reverse")
+        lineage = _create_lineage(
+            suffix="reverse",
+            lease_model=new_apps.get_model("django_ray", "TaskWorkerLease"),
+        )
         evidence = _create_evidence(lineage)
         with pytest.raises(RuntimeError, match="both tables to be empty"):
             MigrationExecutor(connection).migrate(MIGRATE_FROM)
@@ -811,7 +819,7 @@ def test_migration_is_additive_and_reverse_refuses_retained_evidence() -> None:
                 "django_ray", "RayTaskTargetExecutionEvidence"
             )
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
 
 
 def _hold_evidence_writer(
@@ -851,7 +859,7 @@ def _attempt_sqlite_reverse(reverse_started: Event) -> str:
         _close_owned_thread_connection()
 
 
-def _prepare_writer_race_boundary() -> None:
+def _prepare_writer_race_boundary() -> Any:
     # Close admission while the current command's policy authority exists,
     # then isolate 0026 before active fixture rows could trigger 0028's guard.
     policy = TaskExecutionProtocolPolicy.objects.get(singleton_key=1)
@@ -859,7 +867,9 @@ def _prepare_writer_race_boundary() -> None:
         close_legacy_worker_admission(
             expected_revision=policy.revision, legacy_producers_retired=True
         )
-    MigrationExecutor(connection).migrate(MIGRATE_TO)
+    executor = MigrationExecutor(connection)
+    executor.migrate(MIGRATE_TO)
+    return executor.loader.project_state(MIGRATE_TO).apps.get_model("django_ray", "TaskWorkerLease")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -870,8 +880,11 @@ def test_sqlite_evidence_writer_cannot_race_partial_schema_reverse() -> None:
     release_writer = Event()
     reverse_started = Event()
     try:
-        _prepare_writer_race_boundary()
-        lineage = _create_lineage(suffix="sqlite-writer-fence")
+        historical_lease_model = _prepare_writer_race_boundary()
+        lineage = _create_lineage(
+            suffix="sqlite-writer-fence",
+            lease_model=historical_lease_model,
+        )
         values = {**_raw_evidence_values(lineage), "target_execution_evidence_id": 2001}
         with ThreadPoolExecutor(max_workers=2) as pool:
             writer = pool.submit(
@@ -890,7 +903,7 @@ def test_sqlite_evidence_writer_cannot_race_partial_schema_reverse() -> None:
         assert RayTaskTargetExecutionEvidence.objects.filter(pk=2001).exists()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         RayTaskTargetExecutionOutcome.objects.all().delete()
         RayTaskTargetExecutionEvidence.objects.filter(pk=2001).delete()
 
@@ -946,8 +959,11 @@ def test_postgresql_evidence_writer_serializes_before_reverse_guard() -> None:
     reverse_started = Event()
     backend_pid: list[int] = []
     try:
-        _prepare_writer_race_boundary()
-        lineage = _create_lineage(suffix="postgres-writer-fence")
+        historical_lease_model = _prepare_writer_race_boundary()
+        lineage = _create_lineage(
+            suffix="postgres-writer-fence",
+            lease_model=historical_lease_model,
+        )
         values = {**_raw_evidence_values(lineage), "target_execution_evidence_id": 2001}
         with ThreadPoolExecutor(max_workers=2) as pool:
             writer = pool.submit(
@@ -972,6 +988,6 @@ def test_postgresql_evidence_writer_serializes_before_reverse_guard() -> None:
         assert RayTaskTargetExecutionEvidence.objects.filter(pk=2001).exists()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         RayTaskTargetExecutionOutcome.objects.all().delete()
         RayTaskTargetExecutionEvidence.objects.filter(pk=2001).delete()

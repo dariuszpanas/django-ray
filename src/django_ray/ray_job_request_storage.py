@@ -12,14 +12,34 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Never
 from urllib.parse import urlsplit
 
+from django_ray._storage_types import (
+    RAY_JOB_REQUEST_LOCATOR_MAX_BYTES,
+    RAY_JOB_REQUEST_LOCATOR_MAX_CHARS,
+    RAY_JOB_REQUEST_LOCATOR_SCHEMA,
+    RAY_JOB_REQUEST_LOCATOR_VERSION,
+    RAY_JOB_REQUEST_REFERENCE_MAX_BYTES,
+    RAY_JOB_REQUEST_REFERENCE_MAX_CHARS,
+    RAY_JOB_REQUEST_REFERENCE_PREFIX,
+    RayJobRequestLoadError,
+    RayJobRequestStorageError,
+    RayJobRequestStorageRejection,
+    _has_other_payload_registry_reference,
+    _native_request_reference,
+    _payload_registry_references,
+    _reject_request_storage,
+    _wrap_request_reference,
+)
+from django_ray._storage_types import (
+    _request_reference_alias as _request_reference_alias,
+)
 from django_ray.execution_codec import (
     EXECUTION_REQUEST_MAX_BYTES,
     EXECUTION_REQUEST_SCHEMA_VERSION,
@@ -49,14 +69,6 @@ if TYPE_CHECKING:
     from django_ray.runner.base import SubmissionHandle
 
 
-RAY_JOB_REQUEST_LOCATOR_SCHEMA = "django-ray.ray-job-request-locator"
-RAY_JOB_REQUEST_LOCATOR_VERSION = 1
-RAY_JOB_REQUEST_LOCATOR_MAX_BYTES = 4096
-RAY_JOB_REQUEST_LOCATOR_MAX_CHARS = (RAY_JOB_REQUEST_LOCATOR_MAX_BYTES * 4 + 2) // 3
-RAY_JOB_REQUEST_REFERENCE_MAX_BYTES = 500
-RAY_JOB_REQUEST_REFERENCE_MAX_CHARS = RAY_JOB_REQUEST_REFERENCE_MAX_BYTES
-RAY_JOB_REQUEST_REFERENCE_PREFIX = "rq2ref:v1:"
-
 _DEFAULT_INPUT_S3_PREFIX = "django-ray/inputs"
 _DEFAULT_INPUT_GCS_PREFIX = "django-ray/inputs"
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -84,31 +96,6 @@ _S3_LOCATOR_KEYS = _COMMON_LOCATOR_KEYS | {
     "s3_region",
 }
 _GCS_LOCATOR_KEYS = _COMMON_LOCATOR_KEYS | {"gcs_bucket", "gcs_prefix"}
-
-
-class RayJobRequestStorageRejection(StrEnum):
-    """Fixed, redaction-safe request storage failure classifications."""
-
-    INVALID_LOCATOR = "invalid_locator"
-    RESOURCE_LIMIT = "resource_limit"
-    CONFIGURATION = "configuration"
-    STORAGE_UNAVAILABLE = "storage_unavailable"
-    INTEGRITY_MISMATCH = "integrity_mismatch"
-    INVALID_REQUEST = "invalid_request"
-    REGISTRY_MISMATCH = "registry_mismatch"
-    BINDING_MISMATCH = "binding_mismatch"
-
-
-class RayJobRequestStorageError(RuntimeError):
-    """Reject request storage without retaining configuration or payload data."""
-
-    def __init__(self, classification: RayJobRequestStorageRejection) -> None:
-        self.classification = classification
-        super().__init__(f"Ray Job request storage rejected: {classification.value}")
-
-
-class RayJobRequestLoadError(RayJobRequestStorageError):
-    """Reject one pre-Django request locator or payload load."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,13 +147,7 @@ class _DuplicateLocatorKeyError(ValueError):
     pass
 
 
-def _reject(
-    classification: RayJobRequestStorageRejection,
-    *,
-    load: bool = False,
-) -> Never:
-    error_type = RayJobRequestLoadError if load else RayJobRequestStorageError
-    raise error_type(classification) from None
+_reject = _reject_request_storage
 
 
 def _duplicate_safe_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -339,54 +320,6 @@ def _configured_storage(
         raise
     except ResultStorageError:
         _reject(RayJobRequestStorageRejection.CONFIGURATION)
-
-
-def _native_request_reference(reference: object, *, load: bool = False) -> str:
-    """Validate one wrapped or historical native rq2 reference without I/O.
-
-    The discriminator belongs only to request storage. Generic input/result
-    parsers must continue rejecting it before selecting a storage backend.
-    """
-    if (
-        type(reference) is not str
-        or not reference
-        or len(reference) > RAY_JOB_REQUEST_REFERENCE_MAX_CHARS
-        or not reference.isascii()
-    ):
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=load)
-    native = reference.removeprefix(RAY_JOB_REQUEST_REFERENCE_PREFIX)
-    try:
-        metadata = _parse_result_reference(native)
-    except ResultStorageError:
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=load)
-    if (
-        metadata.scheme not in {"resultfs", "s3", "gs"}
-        or not 0 < metadata.size_bytes <= EXECUTION_REQUEST_MAX_BYTES
-    ):
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=load)
-    return native
-
-
-def _wrap_request_reference(reference: object) -> str:
-    """Create the sole current discriminator without allocating oversized text."""
-    if (
-        type(reference) is not str
-        or len(reference)
-        > RAY_JOB_REQUEST_REFERENCE_MAX_CHARS - len(RAY_JOB_REQUEST_REFERENCE_PREFIX)
-        or reference.startswith(RAY_JOB_REQUEST_REFERENCE_PREFIX)
-    ):
-        _reject(RayJobRequestStorageRejection.INVALID_LOCATOR)
-    return RAY_JOB_REQUEST_REFERENCE_PREFIX + _native_request_reference(reference)
-
-
-def _request_reference_alias(reference: object) -> str | None:
-    """Return the other possible registry spelling, solely for refusal checks."""
-    native = _native_request_reference(reference)
-    if native != reference:
-        return native
-    if len(native) + len(RAY_JOB_REQUEST_REFERENCE_PREFIX) <= RAY_JOB_REQUEST_REFERENCE_MAX_CHARS:
-        return RAY_JOB_REQUEST_REFERENCE_PREFIX + native
-    return None
 
 
 def delete_ray_job_request_reference(
@@ -577,12 +510,14 @@ def _decoded_location(value: dict[str, Any], *, backend: str) -> dict[str, str |
         if not _bounded_printable_text(path, allow_empty=False):
             _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=True)
         assert isinstance(path, str)
+        if not os.path.isabs(path) or os.path.normpath(path) != path or ".." in Path(path).parts:
+            _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=True)
         resolved_path: Path | None = None
         try:
             resolved_path = Path(path).resolve(strict=False)
         except (OSError, OverflowError, RuntimeError, ValueError):
             pass
-        if resolved_path is None or str(resolved_path) != path:
+        if resolved_path is None:
             _reject(RayJobRequestStorageRejection.INVALID_LOCATOR, load=True)
         return {"filesystem_path": path}
     if backend == "s3":
@@ -1018,12 +953,45 @@ def _validate_prepared_request(
     return prepared
 
 
+def _has_live_worker_lease(
+    worker_id: str,
+    *,
+    using: str,
+    require_lease_row: bool = False,
+) -> bool:
+    """Verify ``worker_id`` currently holds a live DB-clock ``TaskWorkerLease``."""
+    from django.db import models
+
+    from django_ray.lease_policy import lease_policy_observation
+    from django_ray.models import RayTaskExecution, TaskWorkerLease
+    from django_ray.runner.leasing import live_lease_freshness_q
+
+    if not isinstance(TaskWorkerLease.objects, models.Manager) or not isinstance(
+        RayTaskExecution.objects, models.Manager
+    ):
+        return True
+    if not require_lease_row and not TaskWorkerLease.objects.using(using).exists():
+        return True
+    with lease_policy_observation(using=using) as policy:
+        return (
+            TaskWorkerLease.objects.using(using)
+            .filter(
+                live_lease_freshness_q(policy.duration),
+                worker_id=worker_id,
+                is_active=True,
+                stopped_at__isnull=True,
+            )
+            .exists()
+        )
+
+
 def register_and_attach_ray_job_request(
     prepared: PreparedRayJobRequest,
     *,
     task_execution: RayTaskExecution,
     submission_handle: SubmissionHandle,
     using: str | None = None,
+    require_live_lease: bool = False,
 ) -> str:
     """Register then attach one request under the purge-safe global lock order."""
     prepared = _validate_prepared_request(prepared)
@@ -1076,11 +1044,6 @@ def register_and_attach_ray_job_request(
     ):
         _reject(RayJobRequestStorageRejection.BINDING_MISMATCH)
 
-    from django_ray.payload_registry import (
-        _has_other_payload_registry_reference,
-        _payload_registry_references,
-    )
-
     references = _payload_registry_references(
         prepared.reference,
         {
@@ -1090,68 +1053,15 @@ def register_and_attach_ray_job_request(
             "INPUT_STORAGE_GCS_PREFIX": prepared.locator.gcs_prefix,
         },
     )
-    now = timezone.now()
-    with transaction.atomic(using=database):
-        # Raw/encoded keys and native/wrapped requests can share one object.
-        # Lock one existing alias before our own row and refuse, including
-        # tombstones. Old writers must be stopped during coordinated upgrades.
-        if _has_other_payload_registry_reference(
-            prepared.reference, references, using=database, lock=True
-        ):
-            _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
-        if prepared.reference != references.canonical and not (
-            TaskInputPayload.objects.using(database)
-            .select_for_update()
-            .filter(reference=prepared.reference)
-            .exists()
-        ):
-            _reject(RayJobRequestStorageRejection.INVALID_REQUEST)
-        payload, created = (
-            TaskInputPayload.objects.using(database)
-            .select_for_update()
-            .get_or_create(
-                reference=prepared.reference,
-                defaults={
-                    "payload_kind": InputPayloadKind.RAY_JOB_REQUEST,
-                    "backend": prepared.backend,
-                    "digest": prepared.digest,
-                    "size_bytes": prepared.size_bytes,
-                    "envelope_version": prepared.envelope_version,
-                    "state": InputPayloadState.ACTIVE,
-                    "last_used_at": now,
-                },
-            )
-        )
-        if not created:
-            persisted_metadata = (
-                payload.payload_kind,
-                payload.backend,
-                payload.digest,
-                payload.size_bytes,
-                payload.envelope_version,
-            )
-            expected_metadata = (
-                InputPayloadKind.RAY_JOB_REQUEST,
-                prepared.backend,
-                prepared.digest,
-                prepared.size_bytes,
-                prepared.envelope_version,
-            )
-            if persisted_metadata != expected_metadata:
-                _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
-            # An external delete can succeed even if its acknowledgement or
-            # database tombstone fails. Preparation preceded this registry
-            # lock, so re-establish ACTIVE objects as well as PURGED ones.
-            _restore_request_payload(prepared)
-            update_fields = ["last_used_at"]
-            payload.last_used_at = timezone.now()
-            if payload.state == InputPayloadState.PURGED:
-                payload.state = InputPayloadState.ACTIVE
-                payload.purged_at = None
-                payload.cleanup_error = ""
-                update_fields.extend(["state", "purged_at", "cleanup_error"])
-            payload.save(update_fields=update_fields, using=database)
+    expected_metadata = (
+        InputPayloadKind.RAY_JOB_REQUEST,
+        prepared.backend,
+        prepared.digest,
+        prepared.size_bytes,
+        prepared.envelope_version,
+    )
 
+    def _attach_execution_locked() -> None:
         current = (
             RayTaskExecution.objects.using(database)
             .select_for_update()
@@ -1195,11 +1105,72 @@ def register_and_attach_ray_job_request(
             and current.runtime_env_hash == prepared.request.runtime_env_hash
             and current.ray_job_request_reference in {None, prepared.reference}
         )
-        if not exact_binding:
+        if not exact_binding or not _has_live_worker_lease(
+            expected_worker,
+            using=database,
+            require_lease_row=require_live_lease,
+        ):
             _reject(RayJobRequestStorageRejection.BINDING_MISMATCH)
         if current.ray_job_request_reference is None:
             current.ray_job_request_reference = prepared.reference
             current.save(update_fields=["ray_job_request_reference"], using=database)
+
+    now = timezone.now()
+    with transaction.atomic(using=database):
+        # Raw/encoded keys and native/wrapped requests can share one object.
+        # Lock one existing alias before our own row and refuse, including
+        # tombstones. Old writers must be stopped during coordinated upgrades.
+        if _has_other_payload_registry_reference(
+            prepared.reference, references, using=database, lock=True
+        ):
+            _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
+        if prepared.reference != references.canonical and not (
+            TaskInputPayload.objects.using(database)
+            .select_for_update()
+            .filter(reference=prepared.reference)
+            .exists()
+        ):
+            _reject(RayJobRequestStorageRejection.INVALID_REQUEST)
+        payload, created = (
+            TaskInputPayload.objects.using(database)
+            .select_for_update()
+            .get_or_create(
+                reference=prepared.reference,
+                defaults={
+                    "payload_kind": InputPayloadKind.RAY_JOB_REQUEST,
+                    "backend": prepared.backend,
+                    "digest": prepared.digest,
+                    "size_bytes": prepared.size_bytes,
+                    "envelope_version": prepared.envelope_version,
+                    "state": InputPayloadState.ACTIVE,
+                    "last_used_at": now,
+                },
+            )
+        )
+        if not created:
+            persisted_metadata = (
+                payload.payload_kind,
+                payload.backend,
+                payload.digest,
+                payload.size_bytes,
+                payload.envelope_version,
+            )
+            if persisted_metadata != expected_metadata:
+                _reject(RayJobRequestStorageRejection.REGISTRY_MISMATCH)
+            # An external delete can succeed even if its acknowledgement or
+            # database tombstone fails. Preparation preceded this registry
+            # lock, so re-establish ACTIVE objects as well as PURGED ones.
+            _restore_request_payload(prepared)
+            update_fields = ["last_used_at"]
+            payload.last_used_at = timezone.now()
+            if payload.state == InputPayloadState.PURGED:
+                payload.state = InputPayloadState.ACTIVE
+                payload.purged_at = None
+                payload.cleanup_error = ""
+                update_fields.extend(["state", "purged_at", "cleanup_error"])
+            payload.save(update_fields=update_fields, using=database)
+
+        _attach_execution_locked()
 
     task_execution.ray_job_request_reference = prepared.reference
     return prepared.reference
@@ -1211,6 +1182,7 @@ def release_ray_job_request_reservation(
     *,
     expected_reference: str | None,
     using: str | None = None,
+    require_live_lease: bool = False,
 ) -> bool:
     """Clear one definitely unsubmitted rq2 tuple under the registry lock order."""
     from django.db import transaction
@@ -1293,16 +1265,24 @@ def release_ray_job_request_reservation(
             .filter(pk=expected_pk)
             .first()
         )
-        if current is None or not (
-            current.state == TaskState.RUNNING
-            and current.task_id == expected_task_id
-            and current.attempt_number == expected_attempt
-            and current.execution_generation == expected_generation
-            and current.execution_protocol_version == expected_protocol
-            and current.claimed_by_worker == expected_worker
-            and current.ray_job_id == expected_job_id
-            and current.ray_address == expected_address
-            and current.ray_job_request_reference == expected_reference
+        if (
+            current is None
+            or not (
+                current.state == TaskState.RUNNING
+                and current.task_id == expected_task_id
+                and current.attempt_number == expected_attempt
+                and current.execution_generation == expected_generation
+                and current.execution_protocol_version == expected_protocol
+                and current.claimed_by_worker == expected_worker
+                and current.ray_job_id == expected_job_id
+                and current.ray_address == expected_address
+                and current.ray_job_request_reference == expected_reference
+            )
+            or not _has_live_worker_lease(
+                expected_worker,
+                using=database,
+                require_lease_row=require_live_lease,
+            )
         ):
             return False
         current.ray_job_id = None

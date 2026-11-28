@@ -12,7 +12,10 @@ QUEUE_TIMEOUT_SECONDS_MAX = 2_147_483_647
 
 DEFAULTS: dict[str, Any] = {
     # Ray connection
-    "RAY_ADDRESS": None,  # Required - e.g., "ray://localhost:10001"
+    # "auto" attaches to a running Ray cluster or starts local Ray in Ray Core
+    # mode. Set an explicit Ray Jobs HTTP(S) URL (e.g., "http://ray-head:8265")
+    # or Ray Client URL for remote clusters.
+    "RAY_ADDRESS": "auto",
     "RAY_RUNTIME_ENV": {},
     "RAY_STATE_API_ADDRESS": None,
     "RAY_STATE_API_TIMEOUT_SECONDS": 5,
@@ -30,7 +33,7 @@ DEFAULTS: dict[str, Any] = {
     "WORKFLOW_PLAN_CODE_REVISION": None,
     "WORKFLOW_PLAN_TRUST_IDENTITY": {},
     # Runner configuration
-    "RUNNER": "ray_job",  # "ray_job" or "ray_core"
+    "RUNNER": "ray_core",  # "ray_core" or "ray_job"
     # Concurrency
     "DEFAULT_CONCURRENCY": 10,
     # Queued work expires 24 hours after it first becomes eligible. ``None``
@@ -38,10 +41,21 @@ DEFAULTS: dict[str, Any] = {
     "QUEUE_TIMEOUT_SECONDS": 24 * 60 * 60,
     # Worker polling
     "WORKER_POLL_INTERVAL_SECONDS": 0.1,
-    "WORKER_POLL_MAX_INTERVAL_SECONDS": 0.1,
+    "WORKER_POLL_MAX_INTERVAL_SECONDS": 1.0,
+    "WORKER_CANCELLATION_INTERVAL_SECONDS": 5.0,
+    # Security allowlists (None uses safe runtime defaults / explicit backend targets)
+    "ALLOWED_CALLABLE_MODULES": None,
+    "ALLOWED_RAY_ADDRESSES": None,
+    "REQUIRE_STRICT_NESTED_REQUEST": False,
+    # Observability & tracing
+    "METRICS_CACHE_TTL_SECONDS": 5.0,
+    "TRACING_ENABLED": False,
+    "TRACING_SAMPLE_RATE": 1.0,
+    "TRACING_MAX_WORKFLOW_NODE_SPANS": 100,
     # Retry configuration
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 60,
+    "RETRY_BACKOFF_JITTER_RATIO": 0.1,
     "RETRY_EXCEPTION_DENYLIST": [],
     # Reliability
     "STUCK_TASK_TIMEOUT_SECONDS": 300,

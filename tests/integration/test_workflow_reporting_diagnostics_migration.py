@@ -4,12 +4,18 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.postgresql,
+    pytest.mark.sqlite_compatible,
+]
 
-@pytest.mark.django_db(transaction=True)
+
 def test_reporting_diagnostics_migration_preserves_history_and_old_inserts():
     old = [("django_ray", "0026_ray_task_target_execution_evidence")]
     new = [("django_ray", "0027_workflow_reporting_diagnostics")]
     executor = MigrationExecutor(connection)
+    latest = executor.loader.graph.leaf_nodes("django_ray")
     executor.migrate(old)
     try:
         apps = executor.loader.project_state(old).apps
@@ -49,4 +55,4 @@ def test_reporting_diagnostics_migration_preserves_history_and_old_inserts():
         execution.refresh_from_db()
         assert execution.progress_data == '{"schema_version":2}'
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0028_worker_lease_policy")])
+        MigrationExecutor(connection).migrate(latest)

@@ -9,7 +9,10 @@ from django.utils import timezone
 
 MIGRATE_FROM = [("django_ray", "0020_legacy_open_rollback_fence")]
 MIGRATE_TO = [("django_ray", "0021_ray_job_request_reference")]
-LATEST = [("django_ray", "0028_worker_lease_policy")]
+
+
+def _latest_migrations() -> list[tuple[str, str]]:
+    return MigrationExecutor(connection).loader.graph.leaf_nodes("django_ray")
 
 
 def _insert_legacy_payload_row(payload_model, *, reference: str) -> None:
@@ -144,7 +147,7 @@ def _assert_request_reference_schema_migration_round_trip() -> None:
         assert "payload_kind" not in {field.name for field in reverted_payload._meta.get_fields()}
         assert reverted_payload.objects.filter(pk=raw_reference).exists()
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
 
 
 @pytest.mark.django_db(transaction=True)

@@ -162,7 +162,8 @@ def _assert_priority_migration_round_trip() -> None:
             .values_list("task_id", flat=True)
         ) == ["priority-migration-older", "priority-migration-newer"]
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0028_worker_lease_policy")])
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes("django_ray"))
 
 
 @pytest.mark.django_db(transaction=True)

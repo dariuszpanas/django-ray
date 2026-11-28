@@ -932,7 +932,11 @@ def test_s3_and_gcs_unregistered_inventory_pagination_and_prefix_guard():
             "IsTruncated": False,
         },
     ]
-    s3_client.head_object.return_value = {"LastModified": old_time}
+    s3_client.head_object.return_value = {
+        "LastModified": old_time,
+        "ContentLength": len(payload_bytes),
+        "ETag": '"etag-1"',
+    }
     s3_client.get_object.return_value = {
         "ContentLength": len(payload_bytes),
         "Body": SimpleNamespace(read=lambda _n: payload_bytes, close=lambda: None),

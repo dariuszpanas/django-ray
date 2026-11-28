@@ -16,7 +16,12 @@ from django.db import IntegrityError, transaction
 from django.tasks.exceptions import InvalidTask, TaskResultDoesNotExist
 
 from django_ray import __version__ as django_ray_version
-from django_ray.backends import RayTaskBackend, TaskResultIdAllocationError
+from django_ray.backends import (
+    RayTaskBackend,
+    RayTaskResult,
+    ResultUnavailableError,
+    TaskResultIdAllocationError,
+)
 from django_ray.execution_protocol import (
     EXECUTION_METADATA_SCHEMA_VERSION,
     EXECUTION_PROTOCOL_VERSION,
@@ -132,8 +137,16 @@ class TestRayTaskBackend:
                 },
             )
 
-    def test_backend_keeps_legacy_address_attribute(self) -> None:
-        assert RayTaskBackend("default", {"QUEUES": ["default"]}).ray_address == "auto"
+    def test_backend_keeps_legacy_address_attribute(self, settings) -> None:
+        from django_ray.conf.settings import get_settings
+
+        backend = RayTaskBackend("default", {"QUEUES": ["default"]})
+        assert backend.ray_address == backend.ray_target_address == get_settings()["RAY_ADDRESS"]
+
+        settings.DJANGO_RAY = {**getattr(settings, "DJANGO_RAY", {}), "RAY_ADDRESS": None}
+        none_backend = RayTaskBackend("default", {"QUEUES": ["default"]})
+        assert none_backend.ray_address is None
+        assert none_backend.ray_target_address is None
 
     def test_backend_advertises_and_accepts_coroutine_tasks(self) -> None:
         from django.tasks.base import Task
@@ -356,8 +369,10 @@ class TestRayTaskBackend:
             run_after=None,
         )
 
+        backend = _make_backend()
+        monkeypatch.setattr(backend, "validate_task", lambda _task: None)
         with pytest.raises(IntegrityError):
-            _make_backend().enqueue(invalid_task, args=(2, 3), kwargs={})
+            backend.enqueue(invalid_task, args=(2, 3), kwargs={})
 
         assert candidate_calls == 1
         assert not RayTaskExecution.objects.exists()
@@ -386,8 +401,10 @@ class TestRayTaskBackend:
             run_after=None,
         )
 
+        backend = _make_backend()
+        monkeypatch.setattr(backend, "validate_task", lambda _task: None)
         with pytest.raises(IntegrityError, match="ray_task_priority_valid_range"):
-            _make_backend().enqueue(invalid_task, args=(2, 3), kwargs={})
+            backend.enqueue(invalid_task, args=(2, 3), kwargs={})
 
         assert candidate_calls == 1
         assert RayTaskExecution.objects.filter(task_id=candidate_id).count() == 1
@@ -703,8 +720,11 @@ class TestRayTaskBackend:
 
         result = _make_backend().get_result(execution.task_id)
 
-        assert result.args == []
-        assert result.kwargs == {}
+        assert isinstance(result, RayTaskResult)
+        with pytest.raises(ResultUnavailableError):
+            _ = result.args
+        with pytest.raises(ResultUnavailableError):
+            _ = result.kwargs
         assert result.worker_ids == ["worker-a"]
         assert result.errors[0].exception_class_path == "builtins.ValueError"
         assert result.errors[0].traceback == "Traceback...\nValueError: boom"
@@ -833,7 +853,8 @@ class TestRayTaskBackend:
         result = _make_backend().get_result(execution.task_id)
 
         assert result.status.name == "SUCCESSFUL"
-        assert result.return_value is None
+        with pytest.raises(ResultUnavailableError):
+            _ = result.return_value
 
     def test_get_result_warns_when_stored_reference_payload_is_invalid(
         self, monkeypatch, caplog
@@ -855,7 +876,8 @@ class TestRayTaskBackend:
 
         result = _make_backend().get_result(execution.task_id)
 
-        assert result.return_value is None
+        with pytest.raises(ResultUnavailableError):
+            _ = result.return_value
         assert any(
             "Failed to decode stored task result payload" in record.getMessage()
             for record in caplog.records
@@ -887,7 +909,9 @@ class TestRayTaskBackend:
             result = _make_backend().get_result(execution.task_id)
 
         assert result.status.name == "SUCCESSFUL"
-        assert result.return_value is None
+        with pytest.raises(ResultUnavailableError) as exc_info:
+            _ = result.return_value
+        assert reference not in str(exc_info.value)
         assert "Failed to load external task result" in caplog.text
         assert reference not in caplog.text
 
@@ -906,7 +930,10 @@ class TestRayTaskBackend:
         with caplog.at_level(logging.WARNING):
             result = _make_backend().get_result(execution.task_id)
 
-        assert result.return_value is None
+        with pytest.raises(ResultUnavailableError) as exc_info:
+            _ = result.return_value
+        assert "private-credential" not in str(exc_info.value)
+        assert reference not in str(exc_info.value)
         assert "Failed to load external task result" in caplog.text
         assert "private-credential" not in caplog.text
         assert reference not in caplog.text
@@ -937,3 +964,40 @@ class TestRayTaskBackend:
         monkeypatch.setitem(sys.modules, "ray", type("Ray", (), {"is_initialized": lambda: False}))
 
         assert backend.check() == []
+
+    def test_slotted_ray_task_result_super_calls_on_non_successful_and_inline_results(
+        self,
+    ) -> None:
+        from django.tasks.base import Task, TaskResultStatus
+
+        task = Task(
+            priority=0,
+            func=_async_backend_task,
+            backend="default",
+            queue_name="default",
+            run_after=None,
+        )
+        for status in (
+            TaskResultStatus.READY,
+            TaskResultStatus.RUNNING,
+            TaskResultStatus.FAILED,
+        ):
+            result = RayTaskResult(
+                task=task,
+                id=f"slotted-{status.value.lower()}",
+                status=status,
+                enqueued_at=None,
+                started_at=None,
+                finished_at=None,
+                last_attempted_at=None,
+                args=[1],
+                kwargs={},
+                backend="default",
+                errors=[],
+                worker_ids=[],
+            )
+            rendered = repr(result)
+            assert "RayTaskResult(" in rendered
+            assert "args=[1]" in rendered
+            with pytest.raises(ValueError):
+                _ = result.return_value

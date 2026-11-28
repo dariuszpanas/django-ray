@@ -23,22 +23,29 @@ class Command(BaseCommand):
         parser.add_argument(
             "--database",
             default="default",
-            help="Django database alias to inspect (default: default)",
+            help="Django database alias to inspect (default: default).",
+        )
+        parser.add_argument(
+            "--format",
+            choices=("text", "json"),
+            default="text",
+            help="Output format: text or json (default: text).",
         )
         parser.add_argument(
             "--json",
             action="store_true",
             dest="as_json",
-            help="Emit canonical versioned JSON",
+            help="Emit canonical versioned JSON (alias for --format json).",
         )
 
     def handle(self, *args: Any, **options: Any) -> None:
         del args
+        use_json = bool(options.get("as_json")) or options.get("format", "text") == "json"
         try:
             report = build_protocol_status(using=str(options["database"]))
             rendered = (
                 render_protocol_status_json(report)
-                if bool(options["as_json"])
+                if use_json
                 else render_protocol_status_text(report)
             )
         except ProtocolStatusError as error:
