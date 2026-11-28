@@ -231,7 +231,8 @@ def verify_refusals(request, *, token: str, manager_prefix: str, evidence: dict)
             response_limit=64 * 1024,
         )
         if status != 409 or json.loads(body) != {
-            "detail": "Persisted RuntimeEnv snapshot failed validation"
+            "code": "RUNTIME_ENV_INVALID",
+            "message": "Persisted RuntimeEnv snapshot failed validation.",
         }:
             raise ValueError("RuntimeEnv refusal retry did not return its fixed conflict")
         facts["retry_conflict"] = True

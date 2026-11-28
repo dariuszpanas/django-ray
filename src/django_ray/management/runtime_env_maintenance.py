@@ -116,18 +116,27 @@ class MaintenanceLimits:
     details: int = 20
 
     def __post_init__(self) -> None:
-        for value, low, high in (
-            (self.rows, 1, 1000),
-            (self.snapshot_bytes, 1, 1048576),
-            (self.total_bytes, 1, 8388608),
-            (self.details, 0, 100),
+        for flag, value, low, high in (
+            ("--max-rows", self.rows, 1, 1000),
+            ("--max-bytes", self.snapshot_bytes, 1, 1048576),
+            ("--max-total-bytes", self.total_bytes, 1, 8388608),
+            ("--max-details", self.details, 0, 100),
         ):
             if type(value) is not int or not low <= value <= high:
-                raise MaintenanceError("Invalid RuntimeEnv maintenance budget.")
+                raise MaintenanceError(
+                    f"Invalid RuntimeEnv maintenance budget for {flag}: "
+                    f"expected integer between {low} and {high}."
+                )
         if type(self.seconds) not in {int, float} or not math.isfinite(self.seconds):
-            raise MaintenanceError("Invalid RuntimeEnv maintenance budget.")
+            raise MaintenanceError(
+                "Invalid RuntimeEnv maintenance budget for --max-seconds: "
+                "expected finite number between 0.1 and 60."
+            )
         if not 0.1 <= self.seconds <= 60:
-            raise MaintenanceError("Invalid RuntimeEnv maintenance budget.")
+            raise MaintenanceError(
+                "Invalid RuntimeEnv maintenance budget for --max-seconds: "
+                "expected finite number between 0.1 and 60."
+            )
 
 
 @dataclass(frozen=True, repr=False)
@@ -141,43 +150,84 @@ class _Snapshot:
 def _configuration(config: dict[str, Any], mode: str) -> tuple[dict, RuntimeEnvEncryptionConfig]:
     keys = config.get("RUNTIME_ENV_ENCRYPTION_KEYS", {})
     fallbacks = getattr(settings, "SECRET_KEY_FALLBACKS", ())
-    if type(keys) is not dict or len(keys) > 32 or type(fallbacks) not in {tuple, list}:
-        raise MaintenanceError("Invalid RuntimeEnv maintenance encryption configuration.")
-    if len(fallbacks) > 8 or any(type(item) is not str or len(item) > 4096 for item in fallbacks):
-        raise MaintenanceError("Invalid RuntimeEnv maintenance encryption configuration.")
+    if type(keys) is not dict or len(keys) > 32:
+        raise MaintenanceError(
+            "Invalid RuntimeEnv maintenance encryption configuration: "
+            "DJANGO_RAY['RUNTIME_ENV_ENCRYPTION_KEYS'] must be a dict with at most 32 entries."
+        )
+    if type(fallbacks) not in {tuple, list} or len(fallbacks) > 8:
+        raise MaintenanceError(
+            "Invalid RuntimeEnv maintenance encryption configuration: "
+            "settings.SECRET_KEY_FALLBACKS must be a tuple or list of at most 8 entries."
+        )
+    if any(type(item) not in {str, bytes} or len(item) > 4096 for item in fallbacks):
+        raise MaintenanceError(
+            "Invalid RuntimeEnv maintenance encryption configuration: "
+            "settings.SECRET_KEY_FALLBACKS entries must be strings or bytes up to 4096 chars."
+        )
     if any(
         type(key) is not str or len(key) > 64 or type(value) is not str or len(value) != 43
         for key, value in keys.items()
     ):
-        raise MaintenanceError("Invalid RuntimeEnv maintenance encryption configuration.")
+        raise MaintenanceError(
+            "Invalid RuntimeEnv maintenance encryption configuration: "
+            "DJANGO_RAY['RUNTIME_ENV_ENCRYPTION_KEYS'] entries must map <=64-char key IDs "
+            "to 43-char base64url keys."
+        )
     try:
         original = validate_runtime_env_encryption_settings(config)
         if mode == "rewrite" and original.mode not in {"encrypted", "required"}:
-            raise MaintenanceError("Rewrite requires encrypted or required storage mode.")
+            raise MaintenanceError(
+                "Rewrite requires encrypted or required storage mode "
+                "(set DJANGO_RAY['RUNTIME_ENV_STORAGE_MODE'] to 'encrypted' or 'required')."
+            )
+        if mode in {"dry-run", "check"} and original.mode == "plaintext":
+            return dict(config), original
         # Maintenance validates plaintext for conversion, never for application execution.
         readable = {**config, "RUNTIME_ENV_STORAGE_MODE": "encrypted"}
         return readable, validate_runtime_env_encryption_settings(readable)
     except RuntimeEnvEncryptionError:
-        raise MaintenanceError("Invalid RuntimeEnv maintenance encryption configuration.") from None
+        raise MaintenanceError(
+            "Invalid RuntimeEnv maintenance encryption configuration: "
+            "check DJANGO_RAY['RUNTIME_ENV_STORAGE_MODE'], "
+            "RUNTIME_ENV_ENCRYPTION_ACTIVE_KEY, and RUNTIME_ENV_ENCRYPTION_KEYS."
+        ) from None
 
 
 def _database_settings(using: str) -> dict[str, Any]:
     databases = settings.DATABASES
     if type(using) is not str or not 1 <= len(using) <= 100:
-        raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
+        raise MaintenanceError(
+            "Unsupported RuntimeEnv maintenance database: --database must be a 1-100 char alias."
+        )
     if type(databases) is not dict or type(databases.get(using)) is not dict:
-        raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
+        raise MaintenanceError(
+            "Unsupported RuntimeEnv maintenance database: selected --database alias is not configured."
+        )
     source = databases[using]
     engine = source.get("ENGINE")
     options = source.get("OPTIONS", {})
     if type(options) is not dict or len(options) > 16:
-        raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
+        raise MaintenanceError(
+            "Unsupported RuntimeEnv maintenance database: DATABASES[alias]['OPTIONS'] must be a dict "
+            "with at most 16 entries."
+        )
     if engine == "django.db.backends.sqlite3":
         name = source.get("NAME")
         if type(name) not in {str, type(Path())} or len(str(name)) > 4096:
-            raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
-        if str(name) == ":memory:" or str(name).startswith("file:") or set(options) - {"timeout"}:
-            raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
+            raise MaintenanceError(
+                "Unsupported RuntimeEnv maintenance database: SQLite DATABASES[alias]['NAME'] "
+                "must be a valid file path."
+            )
+        if str(name) == ":memory:" or str(name).startswith("file:"):
+            raise MaintenanceError(
+                "Unsupported RuntimeEnv maintenance database: SQLite :memory: and URI databases "
+                "are not supported; use a persistent file path."
+            )
+        if set(options) - {"timeout"}:
+            raise MaintenanceError(
+                "Unsupported RuntimeEnv maintenance database: SQLite OPTIONS only supports 'timeout'."
+            )
         try:
             path = Path(name).resolve(strict=True)
             if not path.is_file():
@@ -186,7 +236,9 @@ def _database_settings(using: str) -> dict[str, Any]:
             raise MaintenanceError("RuntimeEnv maintenance database is unavailable.") from None
         return {"engine": "sqlite", "name": str(path), "using": using}
     if engine != "django.db.backends.postgresql":
-        raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
+        raise MaintenanceError(
+            "Unsupported RuntimeEnv maintenance database: ENGINE must be PostgreSQL or SQLite."
+        )
     allowed = {
         "sslmode",
         "sslcert",
@@ -196,19 +248,42 @@ def _database_settings(using: str) -> dict[str, Any]:
         "application_name",
         "options",
         "connect_timeout",
+        "pool",
     }
     if set(options) - allowed:
-        raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
-    result: dict[str, Any] = {"engine": "postgresql", "using": using, "options": dict(options)}
+        raise MaintenanceError(
+            "Unsupported RuntimeEnv maintenance database: unsupported key in PostgreSQL OPTIONS."
+        )
+    if "pool" in options:
+        pool_value = options["pool"]
+        if type(pool_value) is not bool and (type(pool_value) is not dict or len(pool_value) > 16):
+            raise MaintenanceError(
+                "Unsupported RuntimeEnv maintenance database: PostgreSQL OPTIONS['pool'] must be "
+                "a bool or bounded dict."
+            )
+    driver_options = {key: value for key, value in options.items() if key != "pool"}
+    if any(
+        type(value) not in {str, int} or len(str(value)) > 4096 for value in driver_options.values()
+    ):
+        raise MaintenanceError(
+            "Unsupported RuntimeEnv maintenance database: PostgreSQL OPTIONS values must be "
+            "bounded strings or integers."
+        )
+    if type(driver_options.get("options", "")) is not str:
+        raise MaintenanceError(
+            "Unsupported RuntimeEnv maintenance database: PostgreSQL OPTIONS['options'] must be a string."
+        )
+    result: dict[str, Any] = {"engine": "postgresql", "using": using, "options": driver_options}
     for field in ("NAME", "USER", "PASSWORD", "HOST", "PORT"):
         value = source.get(field, "")
+        if value is None and field != "NAME":
+            value = ""
         if type(value) not in {str, int} or len(str(value)) > 4096:
-            raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
+            raise MaintenanceError(
+                f"Unsupported RuntimeEnv maintenance database: PostgreSQL {field} must be a "
+                "bounded string or integer."
+            )
         result[field.lower()] = str(value)
-    if any(type(value) not in {str, int} or len(str(value)) > 4096 for value in options.values()):
-        raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
-    if type(options.get("options", "")) is not str:
-        raise MaintenanceError("Unsupported RuntimeEnv maintenance database.")
     return result
 
 
@@ -261,14 +336,15 @@ class _Database:
             # Use Django's supported driver selection, but only its raw module.
             # Neither psycopg generation goes through CursorDebugWrapper here.
             driver = importlib.import_module("django.db.backends.postgresql.base").Database
-            self.connection = driver.connect(
-                dbname=self.config["name"],
-                user=self.config["user"],
-                password=self.config["password"],
-                host=self.config["host"],
-                port=self.config["port"],
+            connect_kwargs: dict[str, Any] = {
+                "dbname": self.config["name"],
                 **options,
-            )
+            }
+            for param in ("user", "password", "host", "port"):
+                value = self.config.get(param, "")
+                if value != "":
+                    connect_kwargs[param] = value
+            self.connection = driver.connect(**connect_kwargs)
             self.connection.autocommit = True
 
     def query(self, sql: str, parameters: tuple = (), *, fetch: str = "none") -> Any:
@@ -381,6 +457,13 @@ class _Database:
             raise _ByteBudgetExpiredError
         return _Snapshot(pk, values, size, oversized)
 
+    def _exec_tx_sql(self, sql: str) -> None:
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(sql)
+        finally:
+            cursor.close()
+
     def replace(self, snapshot: _Snapshot, envelope: str) -> str:
         marker = self.placeholder
         predicates, parameters = [f"id={marker}"], [envelope, snapshot.pk]
@@ -390,6 +473,7 @@ class _Database:
             else:
                 predicates.append(f"{name}={marker}")
                 parameters.append(value)
+        use_sql_tx = self.config["engine"] == "postgresql"
         self.query("BEGIN")
         committed = False
         try:
@@ -401,7 +485,10 @@ class _Database:
             self.check()
             # A failure after asking for COMMIT is uncertain, even if rollback succeeds.
             try:
-                self.connection.commit()
+                if use_sql_tx:
+                    self._exec_tx_sql("COMMIT")
+                else:
+                    self.connection.commit()
                 committed = True
             except Exception:
                 return "commit_uncertain"
@@ -409,7 +496,10 @@ class _Database:
         finally:
             if not committed:
                 try:
-                    self.connection.rollback()
+                    if use_sql_tx:
+                        self._exec_tx_sql("ROLLBACK")
+                    else:
+                        self.connection.rollback()
                 except Exception:
                     # Preserve an already classified uncertain COMMIT. close()
                     # separately reports cleanup refusal without raw exceptions.
@@ -556,44 +646,62 @@ def maintain_runtime_env(
         more = len(ids) > limits.rows
         for pk in ids[: limits.rows]:
             database.check()
-            snapshot = database.read(pk, limits.total_bytes - consumed)
+            try:
+                snapshot = database.read(pk, limits.total_bytes - consumed)
+            except _ByteBudgetExpiredError:
+                if processed == 0:
+                    # A single row exceeding the entire --max-total-bytes budget can
+                    # never progress across cursor retries with the same limits.
+                    snapshot = _Snapshot(pk, {}, 0, True)
+                else:
+                    raise
             if snapshot is None:
                 code = "missing"
+            elif snapshot.oversized:
+                code = "row_too_large"
             else:
                 if consumed + snapshot.size > limits.total_bytes:
-                    exhausted, more = "total_bytes", True
-                    break
-                consumed += snapshot.size
-                code, plaintext = _inspect(snapshot, readable, encryption)
-                database.check()
-                if mode == "rewrite" and code in {"plaintext", "old_key"}:
-                    assert plaintext is not None
-                    # Reserve a conservative envelope bound before crypto or a write.
-                    estimate = (len(plaintext.encode()) + 16) * 4 // 3 + 512
-                    if consumed + estimate > limits.total_bytes:
+                    if processed == 0:
+                        code = "row_too_large"
+                    else:
                         exhausted, more = "total_bytes", True
                         break
-                    try:
-                        envelope = protect_runtime_env_snapshot(
-                            plaintext,
-                            task_id=snapshot.values["task_id"],
-                            profile=snapshot.values["runtime_env_profile"],
-                            digest=snapshot.values["runtime_env_hash"],
-                            encryption=encryption,
-                        )
-                    except RuntimeEnvEncryptionError:
-                        code = "encryption_failed"
-                    else:
-                        consumed += len(envelope.encode())
-                        if len(envelope.encode()) > limits.snapshot_bytes:
-                            code = "row_too_large"
+                else:
+                    consumed += snapshot.size
+                    code, plaintext = _inspect(snapshot, readable, encryption)
+                    database.check()
+                    if mode == "rewrite" and code in {"plaintext", "old_key"}:
+                        assert plaintext is not None
+                        # Reserve a conservative envelope bound before crypto or a write.
+                        estimate = (len(plaintext.encode()) + 16) * 4 // 3 + 512
+                        if consumed + estimate > limits.total_bytes:
+                            if processed == 0:
+                                code = "row_too_large"
+                            else:
+                                exhausted, more = "total_bytes", True
+                                break
                         else:
-                            result = database.replace(snapshot, envelope)
-                            code = (
-                                ("rewritten" if code == "plaintext" else "rewrapped")
-                                if result == "updated"
-                                else result
-                            )
+                            try:
+                                envelope = protect_runtime_env_snapshot(
+                                    plaintext,
+                                    task_id=snapshot.values["task_id"],
+                                    profile=snapshot.values["runtime_env_profile"],
+                                    digest=snapshot.values["runtime_env_hash"],
+                                    encryption=encryption,
+                                )
+                            except RuntimeEnvEncryptionError:
+                                code = "encryption_failed"
+                            else:
+                                consumed += len(envelope.encode())
+                                if len(envelope.encode()) > limits.snapshot_bytes:
+                                    code = "row_too_large"
+                                else:
+                                    result = database.replace(snapshot, envelope)
+                                    code = (
+                                        ("rewritten" if code == "plaintext" else "rewrapped")
+                                        if result == "updated"
+                                        else result
+                                    )
             counts[code] += 1
             processed += 1
             if len(details) < limits.details:

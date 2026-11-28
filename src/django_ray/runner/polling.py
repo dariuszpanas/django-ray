@@ -25,8 +25,8 @@ class AdaptivePollingPolicy:
     ) -> None:
         self.base_interval_seconds = base_interval_seconds
         self.max_interval_seconds = max_interval_seconds
-        self.backoff_multiplier = backoff_multiplier
-        self.jitter_ratio = jitter_ratio
+        self.backoff_multiplier = max(1.0, float(backoff_multiplier))
+        self.jitter_ratio = min(1.0, max(0.0, float(jitter_ratio)))
         self._random_value = random_value or random.random
         self._idle_interval_seconds = base_interval_seconds
 
@@ -45,7 +45,7 @@ class AdaptivePollingPolicy:
             self.reset()
 
         interval = self._idle_interval_seconds
-        if self.max_interval_seconds == self.base_interval_seconds:
+        if self.max_interval_seconds <= self.base_interval_seconds:
             # Preserve the legacy fixed cadence exactly when idle backoff has
             # not been opted into. Jitter in this mode would increase the idle
             # query rate above the configured compatibility interval.

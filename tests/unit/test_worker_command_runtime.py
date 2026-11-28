@@ -150,7 +150,7 @@ class TestWorkerCommandRuntime:
             },
             raising=False,
         )
-        assert cmd._parse_queues({"all_queues": True}) == [
+        assert cmd._parse_queues({"all_queues": True, "ray_job": True}) == [
             "ray-batch",
             "shared",
             "ray-gpu",
@@ -984,9 +984,11 @@ class TestWorkerCommandRuntime:
         cmd = _make_command()
         cmd.execution_mode = "ray"
         cmd.active_tasks = {1: "raysubmit_pending"}
-        monkeypatch.setattr(cmd, "send_heartbeat", lambda: None)
+        events: list[str] = []
+        monkeypatch.setattr(cmd, "send_heartbeat", lambda: events.append("heartbeat"))
 
-        def poll():
+        def poll() -> int:
+            events.append("poll")
             cmd.shutdown_requested = True
             return 1
 
@@ -996,8 +998,17 @@ class TestWorkerCommandRuntime:
             "claim_and_process_tasks",
             lambda *_args: pytest.fail("shutdown must precede a newly freed claim"),
         )
+        monkeypatch.setattr(
+            cmd,
+            "reconcile_tasks",
+            lambda *_args: pytest.fail("shutdown must exit before maintenance reconciliation"),
+        )
 
         cmd.run_loop(queues=["default"], concurrency=1, heartbeat_interval=10.0)
+
+        assert cmd.shutdown_requested is True
+        assert events == ["heartbeat", "poll"]
+        assert cmd.active_tasks == {1: "raysubmit_pending"}
 
     def test_reconciliation_timeout_and_cleanup_have_independent_deadlines(
         self, monkeypatch
@@ -2080,7 +2091,7 @@ class TestWorkerCommandRuntimeDb:
 
         task.refresh_from_db()
         assert cancel_calls == ["cancel"]
-        assert task.state == TaskState.CANCELLING
+        assert task.state == TaskState.CANCELLED
         assert task.cancellation_status == "REQUESTED"
 
     def test_cleanup_expired_leases_logs_and_handles_errors(self, monkeypatch) -> None:

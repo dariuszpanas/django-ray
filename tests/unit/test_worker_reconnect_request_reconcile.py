@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -955,19 +954,51 @@ class TestWorkerReconnectRequestReconcile(RealCommandLeaseTestCase):
         assert task.error_message is None
         assert not TaskAttempt.objects.filter(execution=task, attempt_number=2).exists()
 
-    def test_reconcile_tasks_returns_early_for_sync_or_empty(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "django_ray.runner.ray_job.RayJobRunner",
-            lambda: SimpleNamespace(),
+    def test_reconcile_tasks_returns_early_for_sync_or_empty(
+        self, monkeypatch, django_assert_num_queries
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="reconcile-early-return-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            ray_job_id="raysubmit_x",
+            claimed_by_worker="worker-coverage",
         )
+        runner_instantiations = 0
+
+        def fail_runner():
+            nonlocal runner_instantiations
+            runner_instantiations += 1
+            pytest.fail("early-return reconciliation must not construct RayJobRunner")
+
+        monkeypatch.setattr("django_ray.runner.ray_job.RayJobRunner", fail_runner)
         cmd = _make_command()
         cmd.sync_mode = True
-        cmd.active_tasks = {1: "raysubmit_x"}
-        cmd.reconcile_tasks()
+        cmd.active_tasks = {task.pk: "raysubmit_x"}
+
+        with django_assert_num_queries(0):
+            assert cmd.reconcile_tasks() == 0
+        assert cmd.active_tasks == {task.pk: "raysubmit_x"}
+        assert runner_instantiations == 0
 
         cmd.sync_mode = False
+        cmd.shutdown_requested = True
+        with django_assert_num_queries(0):
+            assert cmd.reconcile_tasks() == 0
+        assert runner_instantiations == 0
+
+        cmd.shutdown_requested = False
         cmd.active_tasks = {}
-        cmd.reconcile_tasks()
+        assert cmd.reconcile_tasks() == 0
+        assert runner_instantiations == 0
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.finished_at is None
+        assert cmd.active_tasks == {}
 
     def test_reconcile_leaves_cancelling_ray_job_for_remote_stop(
         self,

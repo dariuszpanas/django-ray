@@ -362,7 +362,10 @@ def test_database_required_plaintext_manager_and_real_retry_preserve_history(
         f"/api/executions/{row.pk}/retry", HTTP_AUTHORIZATION=f"Bearer {settings.DJANGO_API_TOKEN}"
     )
     assert response.status_code == 409
-    assert response.json() == {"detail": "Persisted RuntimeEnv snapshot failed validation"}
+    assert response.json() == {
+        "code": "RUNTIME_ENV_INVALID",
+        "message": "Persisted RuntimeEnv snapshot failed validation.",
+    }
     assert refusal.inspect_failure(fixture, manager_prefix="django-manager-") == before
 
 

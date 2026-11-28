@@ -289,7 +289,8 @@ class TestLiveFailureInjection:
         assert task.state == TaskState.QUEUED
         assert task.attempt_number == 2
         assert task.run_after is not None
-        assert "Ray connection lost" in (task.error_message or "")
+        assert task.error_message is None
+        assert "Ray connection lost" in (task.attempts.get(attempt_number=1).error_message or "")
         assert cmd.ray_core_runner is not None
         assert cmd.ray_core_runner._pending_tasks == {}
 

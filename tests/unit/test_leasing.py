@@ -448,3 +448,46 @@ class TestActiveWorkers:
         workers = get_active_workers()
         assert len(workers) == 1
         assert workers[0].worker_id == active_id
+
+
+@pytest.mark.django_db
+class TestLeasingClockAndExpiryBranches:
+    """Cover naive UTC normalization, patched-clock predicates, and lease_expires_at."""
+
+    def test_ensure_utc_and_patched_clock_predicates_and_expiry_timestamp(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from django_ray.runner import leasing as leasing_mod
+
+        naive_dt = datetime(2026, 6, 1, 12, 0, 0)
+        assert leasing_mod._ensure_utc(naive_dt) == datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+
+        # Fresh heartbeat, but explicit lease_expires_at in the past -> expired.
+        now = datetime.now(UTC)
+        lease = TaskWorkerLease.objects.create(
+            worker_id=generate_worker_id(),
+            hostname="expiry-host",
+            pid=999,
+            queue_name="default",
+            last_heartbeat_at=now,
+            lease_expires_at=now - timedelta(seconds=5),
+            is_active=True,
+        )
+        assert is_lease_expired(lease) is True
+
+        # Patched datetime exercises non-builtin predicate branches in live_lease_freshness_q
+        # and expired_lease_q.
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[override]
+                return now if tz is not None else now.replace(tzinfo=None)
+
+        monkeypatch.setattr(leasing_mod, "datetime", _FrozenDatetime)
+        assert TaskWorkerLease.objects.filter(
+            leasing_mod.expired_lease_q(timedelta(seconds=60)),
+            worker_id=lease.worker_id,
+        ).exists()
+        assert not TaskWorkerLease.objects.filter(
+            leasing_mod.live_lease_freshness_q(timedelta(seconds=60)),
+            worker_id=lease.worker_id,
+        ).exists()

@@ -555,6 +555,7 @@ def main() -> int:
                         sys.executable,
                         "testproject/manage.py",
                         "django_ray_worker",
+                        "--ray-job",
                         "--queue",
                         "ray-data",
                         "--concurrency",

@@ -130,6 +130,7 @@ def _explicit_range_worker(
     """Build one command around an exact synthetic capability cohort."""
     worker = Command()
     worker.stdout = StringIO()
+    worker.execution_mode = "ray"
     worker._set_worker_id(worker_id)
     now = timezone.now()
     lease = TaskWorkerLease.objects.create(

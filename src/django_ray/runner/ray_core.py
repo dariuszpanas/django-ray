@@ -7,12 +7,15 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from threading import BoundedSemaphore, Event, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import TYPE_CHECKING, Any
 
+from django_ray.logging import get_logger
 from django_ray.redaction import materialize_exception_message, safe_exception_type_name
 from django_ray.runner.base import BaseRunner, JobInfo, JobStatus, SubmissionHandle
 from django_ray.runtime.ray_cancel import is_ray_ref_ready
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
@@ -53,6 +56,7 @@ class RayCoreCompletion:
     attempt_number: int
     execution_generation: int
     result_json: str
+    handle: RayCoreHandle | None = field(default=None, compare=False, kw_only=True)
 
 
 class RayCoreTargetExecutionTransportState(StrEnum):
@@ -118,9 +122,11 @@ _execute_django_task_remote_cached = None
 
 # Ray Client's terminate-task RPC has no caller-visible timeout in Ray 2.56.
 # Keep the worker's database ownership locks bounded while matching the Ray Job
-# control-request budget used by the other execution backend.
+# control-request budget used by the other execution backend. Use a bounded
+# per-runner concurrency pool so one hung cancel RPC never bricks subsequent
+# cancellations across the process.
 _RAY_CORE_CANCEL_TIMEOUT_SECONDS = 5.0
-_RAY_CORE_CANCEL_SLOT = BoundedSemaphore(value=1)
+_RAY_CORE_CANCEL_MAX_INFLIGHT = 16
 
 
 def _target_execution_utc_time(value: object) -> datetime:
@@ -284,6 +290,20 @@ def _compiled_graph_submission_transport(ray: Any) -> str | None:
     return None
 
 
+def _resolve_ray_task_contract(callable_path: str) -> Any | None:
+    """Resolve an optional ``@ray_task`` contract without failing worker-only paths."""
+    if not callable_path:
+        return None
+    try:
+        from django_ray.decorators import get_ray_task_contract
+        from django_ray.runtime.import_utils import resolve_task_callable
+
+        task_obj = resolve_task_callable(callable_path)
+    except Exception:
+        return None
+    return get_ray_task_contract(task_obj)
+
+
 class RayCoreRunner(BaseRunner):
     """Runner that uses Ray Core remote functions.
 
@@ -295,14 +315,59 @@ class RayCoreRunner(BaseRunner):
     runs tasks in shared worker processes for lower latency.
     """
 
-    # Class-level tracking of pending tasks
-    _pending_tasks: dict[int, RayCoreHandle] = field(default_factory=dict)
-    _ray_initialized: bool = False
+    runner_family: str = "ray_core"
 
-    def __init__(self, *, address: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        address: str | None = None,
+        max_concurrent_cancels: int = _RAY_CORE_CANCEL_MAX_INFLIGHT,
+    ) -> None:
         """Initialize the Ray Core runner."""
+        if max_concurrent_cancels < 1:
+            raise ValueError("max_concurrent_cancels must be at least 1")
+        self._address: str | None = address
         self._pending_tasks: dict[int, RayCoreHandle] = {}
+        self._resolved_completions: dict[
+            tuple[int, int, int], tuple[RayCoreHandle, RayCoreCompletion]
+        ] = {}
+        self._cancel_slots = BoundedSemaphore(value=max_concurrent_cancels)
+        self._cancel_lock = Lock()
+        self._inflight_cancels: set[tuple[int, int, int]] = set()
+        self._hung_cancel_count = 0
         self._ensure_ray_initialized(address=address)
+
+    def _cancel_lock_obj(self) -> Lock:
+        lock = self.__dict__.get("_cancel_lock")
+        if lock is None:
+            lock = Lock()
+            self.__dict__["_cancel_lock"] = lock
+        return lock
+
+    def _cancel_slots_obj(self) -> BoundedSemaphore:
+        slots = self.__dict__.get("_cancel_slots")
+        if slots is None:
+            slots = BoundedSemaphore(value=_RAY_CORE_CANCEL_MAX_INFLIGHT)
+            self.__dict__["_cancel_slots"] = slots
+        return slots
+
+    def _inflight_cancels_set(self) -> set[tuple[int, int, int]]:
+        inflight = self.__dict__.get("_inflight_cancels")
+        if inflight is None:
+            inflight = set()
+            self.__dict__["_inflight_cancels"] = inflight
+        return inflight
+
+    @property
+    def hung_cancel_count(self) -> int:
+        """Number of timed-out Ray Core cancel threads still blocked in Ray."""
+        with self._cancel_lock_obj():
+            return int(self.__dict__.get("_hung_cancel_count", 0))
+
+    def _effective_ray_address(self) -> str:
+        if self._address is not None:
+            return self._address
+        return os.environ.get("RAY_ADDRESS", "auto")
 
     def _ensure_ray_initialized(self, *, address: str | None = None) -> None:
         """Ensure Ray is initialized."""
@@ -314,6 +379,20 @@ class RayCoreRunner(BaseRunner):
             if address is None:
                 address = os.environ.get("RAY_ADDRESS", "auto")
             ray.init(address=address, ignore_reinit_error=True)
+        elif address is not None and address != "auto":
+            active_gcs: str | None = None
+            try:
+                runtime_ctx = ray.get_runtime_context()
+                active_gcs = getattr(runtime_ctx, "gcs_address", None)
+            except Exception:
+                active_gcs = None
+            if isinstance(active_gcs, str) and active_gcs and active_gcs != address:
+                logger.warning(
+                    "Ray is already initialized with GCS %s; explicit RayCoreRunner "
+                    "address %s was not re-initialized",
+                    active_gcs,
+                    address,
+                )
 
     def submit(
         self,
@@ -417,13 +496,22 @@ class RayCoreRunner(BaseRunner):
 
         from django_ray.runtime.runtime_env import (
             prepare_runtime_env_for_ray_core,
+            resolve_runtime_env_profile,
             runtime_env_for_execution,
             snapshot_local_runtime_env,
         )
 
         # Keep the executor importable at module scope so Ray can reuse worker
         # processes without serializing a new nested function for every task.
+        task_contract = _resolve_ray_task_contract(callable_path)
         runtime_env = runtime_env_for_execution(task_execution)
+        if (
+            task_contract is not None
+            and task_contract.runtime_env_profile is not None
+            and not getattr(task_execution, "runtime_env_profile", None)
+            and not runtime_env.spec
+        ):
+            runtime_env = resolve_runtime_env_profile(task_contract.runtime_env_profile)
         from django_ray.conf.settings import get_settings
         from django_ray.workflow.plans import runtime_env_plan_identity
 
@@ -447,19 +535,6 @@ class RayCoreRunner(BaseRunner):
                     "Outer RuntimeEnv immutable snapshot differs from its effective plan"
                 )
             submitted_runtime_env = prepare_runtime_env_for_ray_core(immutable_snapshot)
-        verified_runtime_env_identity = runtime_env_plan_identity(
-            runtime_env,
-            trust_identity=trust_identity,
-        )
-        if (
-            verified_runtime_env_identity.manifest["digest"]
-            != plan_runtime_env_identity.manifest["digest"]
-        ):
-            from django_ray.workflow.plans import WorkflowPlanMismatchError
-
-            raise WorkflowPlanMismatchError(
-                "Outer RuntimeEnv local content changed while it was being packaged"
-            )
         # Ray Client deserializes the remote function on the server before its
         # task-level RuntimeEnv exists. Ship this small bootstrap function by
         # value so a generic Ray head does not need django-ray installed.
@@ -470,6 +545,8 @@ class RayCoreRunner(BaseRunner):
             cloudpickle.register_pickle_by_value(remote_module)
 
         remote_options: dict[str, Any] = {"name": f"django_ray:{task_name}"}
+        if task_contract is not None:
+            remote_options.update(task_contract.to_ray_options())
         if submitted_runtime_env:
             remote_options["runtime_env"] = submitted_runtime_env
 
@@ -659,7 +736,7 @@ class RayCoreRunner(BaseRunner):
         # Return a SubmissionHandle for compatibility with BaseRunner interface
         return _RayCoreSubmissionHandle(
             ray_job_id=composite_id,
-            ray_address=os.environ.get("RAY_ADDRESS", "auto"),
+            ray_address=self._effective_ray_address(),
             submitted_at=submitted_at,
             pending_handle=handle,
         )
@@ -737,12 +814,6 @@ class RayCoreRunner(BaseRunner):
                 )
 
             if handle.ray_job_id.startswith("ray_core:"):
-                if task_pk not in self._pending_tasks:
-                    return JobInfo(
-                        job_id=handle.ray_job_id,
-                        status=JobStatus.UNKNOWN,
-                        message="Legacy handle lacks exact submission identity",
-                    )
                 return JobInfo(
                     job_id=handle.ray_job_id,
                     status=JobStatus.UNKNOWN,
@@ -848,9 +919,11 @@ class RayCoreRunner(BaseRunner):
         """Bound cancellation of one immutable ObjectRef and report uncertainty.
 
         Ray Client can wait indefinitely inside ``ray.cancel``. Run only that
-        exact remote effect in a daemon thread, then retire the matching local
-        handle from the caller thread on every result, including timeout. A
-        late daemon completion cannot mutate tracking or target a replacement.
+        exact remote effect in a bounded per-runner pool of daemon threads so
+        one hung cancel cannot brick subsequent cancellations, then retire the
+        matching local handle from the caller thread once cancellation has been
+        attempted. A late daemon completion cannot mutate tracking or target a
+        replacement.
         """
         import ray
         from ray.exceptions import RayTaskError
@@ -865,15 +938,25 @@ class RayCoreRunner(BaseRunner):
             if timeout_seconds is None
             else max(float(timeout_seconds), 0.0)
         )
-        if not _RAY_CORE_CANCEL_SLOT.acquire(blocking=False):
-            if self._pending_tasks.get(handle.task_pk) is handle:
-                self._pending_tasks.pop(handle.task_pk, None)
-            return CancellationOutcome(
-                CancellationOutcomeStatus.INDETERMINATE,
-                "Ray Core cancellation capacity is occupied; the exact stop was not attempted",
-            )
+        handle_key = (handle.task_pk, handle.attempt_number, handle.execution_generation)
+        cancel_lock = self._cancel_lock_obj()
+        cancel_slots = self._cancel_slots_obj()
+        inflight_cancels = self._inflight_cancels_set()
+        with cancel_lock:
+            if handle_key in inflight_cancels:
+                return CancellationOutcome(
+                    CancellationOutcomeStatus.INDETERMINATE,
+                    "Ray Core cancellation is already in flight for this task attempt",
+                )
+            if not cancel_slots.acquire(blocking=False):
+                return CancellationOutcome(
+                    CancellationOutcomeStatus.INDETERMINATE,
+                    "Ray Core cancellation capacity is occupied; the exact stop was not attempted",
+                )
+            inflight_cancels.add(handle_key)
 
         completed = Event()
+        timed_out_flag = [False]
         result = [
             CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
@@ -905,7 +988,13 @@ class RayCoreRunner(BaseRunner):
                     f"Ray Core cancellation raised {safe_exception_type_name(exc)}",
                 )
             finally:
-                _RAY_CORE_CANCEL_SLOT.release()
+                with cancel_lock:
+                    inflight_cancels.discard(handle_key)
+                    if timed_out_flag[0]:
+                        self.__dict__["_hung_cancel_count"] = max(
+                            0, int(self.__dict__.get("_hung_cancel_count", 0)) - 1
+                        )
+                cancel_slots.release()
                 completed.set()
 
         request_thread = Thread(
@@ -919,17 +1008,24 @@ class RayCoreRunner(BaseRunner):
         try:
             request_thread.start()
         except RuntimeError:
-            _RAY_CORE_CANCEL_SLOT.release()
-            if self._pending_tasks.get(handle.task_pk) is handle:
-                self._pending_tasks.pop(handle.task_pk, None)
+            with cancel_lock:
+                inflight_cancels.discard(handle_key)
+            cancel_slots.release()
+            self.retire_pending_handle(handle)
             return CancellationOutcome(
                 CancellationOutcomeStatus.FAILED,
                 "Ray Core cancellation worker could not start",
             )
 
         finished = completed.wait(timeout=timeout)
-        if self._pending_tasks.get(handle.task_pk) is handle:
-            self._pending_tasks.pop(handle.task_pk, None)
+        if not finished:
+            with cancel_lock:
+                if not completed.is_set():
+                    timed_out_flag[0] = True
+                    self.__dict__["_hung_cancel_count"] = (
+                        int(self.__dict__.get("_hung_cancel_count", 0)) + 1
+                    )
+        self.retire_pending_handle(handle)
         if not finished:
             return CancellationOutcome(
                 CancellationOutcomeStatus.INDETERMINATE,
@@ -965,73 +1061,97 @@ class RayCoreRunner(BaseRunner):
         """
         return None
 
+    def _resolved_completions_map(
+        self,
+    ) -> dict[tuple[int, int, int], tuple[RayCoreHandle, RayCoreCompletion]]:
+        """Lazily initialize completion cache even for ``object.__new__`` instances."""
+        store = self.__dict__.get("_resolved_completions")
+        if store is None:
+            store = {}
+            self.__dict__["_resolved_completions"] = store
+        return store
+
     def retire_pending_handle(self, handle: RayCoreHandle) -> bool:
         """Forget one exact local capability without contacting Ray."""
+        handle_key = (handle.task_pk, handle.attempt_number, handle.execution_generation)
+        resolved = self._resolved_completions_map()
+        cached = resolved.get(handle_key)
+        if cached is not None and cached[0] is handle:
+            resolved.pop(handle_key, None)
         if self._pending_tasks.get(handle.task_pk) is not handle:
             return False
         self._pending_tasks.pop(handle.task_pk, None)
         return True
 
-    def poll_completed(
+    def acknowledge_completed(self, handle: RayCoreHandle) -> bool:
+        """Retire a completed handle only after the caller durably persisted it."""
+        return self.retire_pending_handle(handle)
+
+    def _select_pollable_handles(
         self,
         handles: tuple[RayCoreHandle, ...] | None = None,
-    ) -> list[RayCoreCompletion]:
-        """Poll for completed tasks and return their results.
-
-        This is a convenience method for the worker to efficiently
-        check multiple pending tasks at once. When ``handles`` is provided,
-        only exact capabilities that remain current are allowed to cross the
-        Ray boundary; a replacement or newly submitted handle is not polled.
-
-        Returns:
-            Completion envelopes carrying the exact submitted execution identity.
-        """
-        import ray
-
+    ) -> tuple[RayCoreHandle, ...]:
         if handles is None:
-            selected_handles = tuple(
+            return tuple(
                 handle
                 for handle in self._pending_tasks.values()
                 if handle.target_execution_evidence_id is None
             )
-        else:
-            selected_by_task = {
-                handle.task_pk: handle
-                for handle in handles
-                if self._pending_tasks.get(handle.task_pk) is handle
-                and handle.target_execution_evidence_id is None
-            }
-            selected_handles = tuple(selected_by_task.values())
+        selected_by_task = {
+            handle.task_pk: handle
+            for handle in handles
+            if self._pending_tasks.get(handle.task_pk) is handle
+            and handle.target_execution_evidence_id is None
+        }
+        return tuple(selected_by_task.values())
 
+    def peek_completed(
+        self,
+        handles: tuple[RayCoreHandle, ...] | None = None,
+    ) -> list[RayCoreCompletion]:
+        """Return ready completions WITHOUT retiring handles from ``_pending_tasks``.
+
+        Callers must invoke ``acknowledge_completed(completion.handle)`` after
+        the terminal DB update commits so transient DB errors never drop a
+        completed Ray result.
+        """
+        import ray
+
+        selected_handles = self._select_pollable_handles(handles)
         if not selected_handles:
             return []
 
-        # Get all pending object refs
-        refs = [handle.object_ref for handle in selected_handles]
-        handle_by_ref = {handle.object_ref: handle for handle in selected_handles}
+        resolved = self._resolved_completions_map()
+        completed: list[RayCoreCompletion] = []
+        unresolved_handles: list[RayCoreHandle] = []
+        for handle in selected_handles:
+            handle_key = (handle.task_pk, handle.attempt_number, handle.execution_generation)
+            cached = resolved.get(handle_key)
+            if cached is not None and cached[0] is handle:
+                completed.append(cached[1])
+            else:
+                unresolved_handles.append(handle)
 
-        # Check for completed tasks (non-blocking)
+        if not unresolved_handles:
+            return completed
+
+        refs = [handle.object_ref for handle in unresolved_handles]
+        handle_by_ref = {handle.object_ref: handle for handle in unresolved_handles}
         ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
 
-        completed = []
         for ref in ready:
             handle = handle_by_ref[ref]
             try:
                 result_json = ray.get(ref)
-                completed.append(
-                    RayCoreCompletion(
-                        task_pk=handle.task_pk,
-                        attempt_number=handle.attempt_number,
-                        execution_generation=handle.execution_generation,
-                        result_json=result_json,
-                    )
+                completion = RayCoreCompletion(
+                    task_pk=handle.task_pk,
+                    attempt_number=handle.attempt_number,
+                    execution_generation=handle.execution_generation,
+                    result_json=result_json,
+                    handle=handle,
                 )
             except Exception as e:
                 if handle.strict_request:
-                    # No executor completion was returned, so neither application
-                    # quiescence nor safe replay is proven. Keep the diagnostic
-                    # fixed and suppress automatic retry without claiming remote
-                    # executor provenance.
                     error_result = json.dumps(
                         {
                             "success": False,
@@ -1044,8 +1164,6 @@ class RayCoreRunner(BaseRunner):
                         }
                     )
                 else:
-                    # Retain the released local-handle behavior for capabilities
-                    # created before strict request transport was introduced.
                     error_result = json.dumps(
                         {
                             "success": False,
@@ -1055,18 +1173,55 @@ class RayCoreRunner(BaseRunner):
                             "exception_type": type(e).__module__ + "." + type(e).__name__,
                         }
                     )
-                completed.append(
-                    RayCoreCompletion(
-                        task_pk=handle.task_pk,
-                        attempt_number=handle.attempt_number,
-                        execution_generation=handle.execution_generation,
-                        result_json=error_result,
-                    )
+                completion = RayCoreCompletion(
+                    task_pk=handle.task_pk,
+                    attempt_number=handle.attempt_number,
+                    execution_generation=handle.execution_generation,
+                    result_json=error_result,
+                    handle=handle,
                 )
 
-            # Remove from pending
-            self.retire_pending_handle(handle)
+            handle_key = (handle.task_pk, handle.attempt_number, handle.execution_generation)
+            resolved[handle_key] = (handle, completion)
+            completed.append(completion)
 
+        return completed
+
+    def drain_ready_for_shutdown(
+        self,
+        handles: tuple[RayCoreHandle, ...] | None = None,
+    ) -> tuple[list[RayCoreCompletion], tuple[RayCoreHandle, ...]]:
+        """Partition pending handles into already-ready completions and still-running handles.
+
+        Shutdown handoff calls this before ``cancel_pending_with_status()`` so
+        already-finished Ray tasks are persisted as completed rather than
+        discarded and marked ``CANCELLING``.
+        """
+        selected_handles = self._select_pollable_handles(handles)
+        if not selected_handles:
+            return [], ()
+        ready_completions = self.peek_completed(selected_handles)
+        ready_handles = {id(c.handle) for c in ready_completions if c.handle is not None}
+        remaining = tuple(handle for handle in selected_handles if id(handle) not in ready_handles)
+        return ready_completions, remaining
+
+    def poll_completed(
+        self,
+        handles: tuple[RayCoreHandle, ...] | None = None,
+        *,
+        auto_acknowledge: bool = True,
+    ) -> list[RayCoreCompletion]:
+        """Poll for completed tasks and return their results.
+
+        When ``auto_acknowledge`` is ``False``, handles remain tracked until
+        the caller invokes ``acknowledge_completed(completion.handle)`` after
+        durable DB commit (equivalent to ``peek_completed``).
+        """
+        completed = self.peek_completed(handles)
+        if auto_acknowledge:
+            for completion in completed:
+                if completion.handle is not None:
+                    self.acknowledge_completed(completion.handle)
         return completed
 
     def _poll_target_execution_results(

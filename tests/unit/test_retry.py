@@ -86,13 +86,17 @@ class TestRetryDenylistNormalization:
         assert decision.reason is not None
         assert "builtins.ValueError" in decision.reason
 
-    def test_custom_fully_qualified_denylist_matches_by_class_name(self, monkeypatch) -> None:
+    def test_custom_fully_qualified_denylist_requires_exact_module_match(self, monkeypatch) -> None:
         _patch_settings(monkeypatch, denylist=["myapp.errors.PermanentError"])
         task = SimpleNamespace(attempt_number=1)
 
-        decision = retry_module.should_retry(task, exception_type="other.module.PermanentError")
+        different_module = retry_module.should_retry(
+            task, exception_type="other.module.PermanentError"
+        )
+        exact_module = retry_module.should_retry(task, exception_type="myapp.errors.PermanentError")
 
-        assert decision.should_retry is False
+        assert different_module.should_retry is True
+        assert exact_module.should_retry is False
 
     def test_non_matching_exception_still_retries(self, monkeypatch) -> None:
         _patch_settings(monkeypatch, denylist=["ValueError"])

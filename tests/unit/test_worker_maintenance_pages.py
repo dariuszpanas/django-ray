@@ -312,6 +312,8 @@ def test_corrupt_sqlite_numeric_cell_is_bounded_and_cannot_authorize_a_snapshot(
 def test_actual_loop_runs_heartbeat_and_claim_between_pending_cancellation_pages(monkeypatch):
     rows(40, state=TaskState.CANCELLING)
     command = Command()
+    command.poll_max_interval = command.poll_base_interval
+    command.polling_policy = command._new_polling_policy()
     clock = [0.0]
     events = []
     monkeypatch.setattr(

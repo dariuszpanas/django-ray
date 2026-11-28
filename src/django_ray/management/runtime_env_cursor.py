@@ -41,9 +41,17 @@ class RuntimeEnvCursor:
 def keyed_fingerprint(value: bytes) -> str:
     """Bind an internal policy without returning its key or namespace material."""
     secret = settings.SECRET_KEY
-    if type(secret) is not str or not 1 <= len(secret) <= 4096:
+    if type(secret) is str:
+        if not 1 <= len(secret) <= 4096:
+            raise InvalidRuntimeEnvCursorError
+        secret_bytes = secret.encode("utf-8")
+    elif type(secret) is bytes:
+        if not 1 <= len(secret) <= 4096:
+            raise InvalidRuntimeEnvCursorError
+        secret_bytes = secret
+    else:
         raise InvalidRuntimeEnvCursorError
-    return hmac.new(secret.encode(), _CONTEXT + b"\0" + value, hashlib.sha256).hexdigest()
+    return hmac.new(secret_bytes, _CONTEXT + b"\0" + value, hashlib.sha256).hexdigest()
 
 
 def _cipher() -> AESGCM:
