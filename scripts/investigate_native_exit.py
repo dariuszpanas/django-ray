@@ -39,12 +39,14 @@ CHILD_POLL_SECONDS = 0.1
 RESOURCE_SAMPLE_SECONDS = 1
 MAX_RAY_LOG_BYTES = 32 * 1024
 DEFAULT_DUMP_RAY_LOG_BYTES = 8 * 1024
-MAX_STRESS_ITERATIONS = 30
+MAX_STRESS_ITERATIONS = 120
 DEFAULT_STRESS_ITERATIONS = 25
 MAX_CORE_WORKER_LOGS = 4
 OVERLAYS = ("scripts/observe_pytest_exit.py", "scripts/pytest_exit_gdb.py")
 OMITTED_CONTRACT = "tests/unit/test_observe_pytest_exit.py"
 RAY_LOGS = ("raylet.err", "raylet.out", "gcs_server.err", "gcs_server.out", "runtime_env_agent.log")
+EXTRA_STRESS_RAY_LOGS = ("dashboard_agent.log",)
+STRESS_TARGETS = ("all", "distributed")
 REAL_RAY_PRIORITY_FILES = frozenset(
     {
         "tests/integration/test_task_execution.py",
@@ -234,9 +236,16 @@ def real_ray_stress_command(
     python_executable: str,
     trace: bool,
     phase_file: Path,
+    target: str = "all",
     collect_coverage: bool = False,
 ) -> list[str]:
     """Build the bounded real_ray stress command mirroring CI's observed suite."""
+    if target == "all":
+        test_files = discover_real_ray_files(source)
+    elif target == "distributed":
+        test_files = ["tests/unit/test_distributed.py"]
+    else:
+        raise ValueError(f"Unknown real_ray stress target: {target!r}")
     command = [
         python_executable,
         "scripts/observe_pytest_exit.py",
@@ -249,7 +258,7 @@ def real_ray_stress_command(
     command.extend(
         [
             "--",
-            *discover_real_ray_files(source),
+            *test_files,
             "-m",
             "real_ray and not live_cluster",
         ]
@@ -354,7 +363,8 @@ def retain_ray_logs(
             if include_workers
             else []
         )
-        targets: list[tuple[str, str]] = [(name, name) for name in RAY_LOGS] + [
+        named_logs = (*RAY_LOGS, *EXTRA_STRESS_RAY_LOGS) if include_workers else RAY_LOGS
+        targets: list[tuple[str, str]] = [(name, name) for name in named_logs] + [
             (path.name, "core-driver.log") for path in drivers
         ]
         targets.extend(
@@ -421,7 +431,7 @@ def emit_ray_failure_logs(
             key=lambda path: path.stat().st_mtime_ns,
         )
         targets = (
-            [(name, name) for name in RAY_LOGS]
+            [(name, name) for name in (*RAY_LOGS, *EXTRA_STRESS_RAY_LOGS)]
             + [(path.name, "core-driver.log") for path in drivers]
             + [(path.name, f"core-worker-{idx}.log") for idx, path in enumerate(workers, 1)]
         )
@@ -624,6 +634,7 @@ def stress_real_ray(
     *,
     max_iterations: int = DEFAULT_STRESS_ITERATIONS,
     trace: bool = True,
+    target: str = "all",
     shared_local_ray: bool = True,
     collect_coverage: bool = False,
     timeout: int = MAX_SECONDS,
@@ -633,6 +644,8 @@ def stress_real_ray(
     started = clock()
     deadline = started + timeout
     source, output = source.resolve(), output.resolve()
+    if target not in STRESS_TARGETS:
+        raise ValueError(f"Unknown real_ray stress target: {target!r}")
     if not 1 <= max_iterations <= MAX_STRESS_ITERATIONS:
         raise ValueError(f"max_iterations must be within 1..{MAX_STRESS_ITERATIONS}")
     if not CLEANUP_RESERVE < timeout <= MAX_SECONDS:
@@ -653,7 +666,9 @@ def stress_real_ray(
     )
     source_head, source_tree = rev.stdout.split()
     versions = {package: metadata.version(package) for package in PACKAGES}
-    real_ray_files = discover_real_ray_files(source)
+    real_ray_files = (
+        discover_real_ray_files(source) if target == "all" else ["tests/unit/test_distributed.py"]
+    )
     iterations: list[dict[str, object]] = []
     retained_ray_logs: list[dict[str, object]] = []
     outcome = "complete-no-reproduction"
@@ -685,6 +700,7 @@ def stress_real_ray(
             python_executable=sys.executable,
             trace=trace,
             phase_file=phase_file,
+            target=target,
             collect_coverage=collect_coverage,
         )
         try:
@@ -802,6 +818,7 @@ def stress_real_ray(
     receipt: dict[str, object] = {
         "intent": "diagnostic-only",
         "probe": "real-ray-stress",
+        "target": target,
         "outcome": outcome,
         "exit_code": final_exit_code,
         "planned_iterations": max_iterations,
@@ -832,6 +849,7 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--probe", choices=("distributed", "prefix", "real-ray-stress"))
     parser.add_argument("--hook-mode", choices=("historical", "disabled"))
     parser.add_argument("--trace-native-exit", action="store_true")
+    parser.add_argument("--target", choices=STRESS_TARGETS, default="all")
     parser.add_argument("--max-iterations", type=int, default=DEFAULT_STRESS_ITERATIONS)
     parser.add_argument("--isolated-local-ray", action="store_true")
     parser.add_argument("--collect-coverage", action="store_true")
@@ -857,6 +875,7 @@ def main(arguments: list[str] | None = None) -> int:
                 options.output,
                 max_iterations=options.max_iterations,
                 trace=options.trace_native_exit,
+                target=options.target,
                 shared_local_ray=not options.isolated_local_ray,
                 collect_coverage=options.collect_coverage,
                 timeout=options.timeout_seconds,

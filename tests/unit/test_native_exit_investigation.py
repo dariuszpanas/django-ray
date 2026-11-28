@@ -489,6 +489,26 @@ def test_real_ray_stress_command_and_environment_mirror_ci(tmp_path):
     assert cmd[7:10] == files
     assert cmd[-3:] == ["-m", "real_ray and not live_cluster", "-v"]
 
+    dist_cmd = investigation.real_ray_stress_command(
+        tmp_path,
+        python_executable="/venv/bin/python",
+        trace=False,
+        phase_file=phase,
+        target="distributed",
+    )
+    assert "--trace-native-exit" not in dist_cmd
+    assert dist_cmd[dist_cmd.index("--") + 1 : dist_cmd.index("-m")] == [
+        "tests/unit/test_distributed.py"
+    ]
+    with pytest.raises(ValueError, match="Unknown real_ray stress target"):
+        investigation.real_ray_stress_command(
+            tmp_path,
+            python_executable="/venv/bin/python",
+            trace=False,
+            phase_file=phase,
+            target="custom",
+        )
+
     venv_python = str(tmp_path / ".venv" / "bin" / "python")
     env_shared = investigation.real_ray_stress_environment(
         tmp_path / "ray",
