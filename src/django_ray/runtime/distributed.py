@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 from uuid import uuid4
 
+from django_ray.runtime.ray_cancel import cancel_unready_ray_refs
+
 if TYPE_CHECKING:
     from django_ray.execution_codec import (
         ExecutionIdentity,
@@ -460,9 +462,11 @@ def _collect_remote_results(
 ) -> list[Any]:
     """Preserve order and request owned-child cancellation on exceptional exit.
 
-    Cleanup makes one non-force, recursive cancellation request per outstanding
-    ref, without draining results or replaying work. It does not prove quiescence
-    or impose a timeout on Ray's own cancellation RPC.
+    Cleanup makes one non-force, recursive cancellation request per still-unready
+    outstanding ref, without draining results or replaying work. Already-ready
+    refs are excluded before cancellation so a just-completed or just-failed
+    task does not trigger Ray's concurrent completion/cancellation crash. It
+    does not prove quiescence or impose a timeout on Ray's own cancellation RPC.
     """
     pending: list[tuple[int, Any]] = []
     try:
@@ -481,23 +485,22 @@ def _collect_remote_results(
             ready, _ = ray.wait([ref for _, ref in pending], num_returns=1)
             ready_ref = ready[0]
             ready_index = next(index for index, ref in pending if ref == ready_ref)
-            # Retain ownership until get succeeds, including caller interruption.
-            results[ready_index] = ray.get(ready_ref)
+            # ray.wait() already proved ready_ref is terminal (value or error),
+            # so exclude it from cleanup cancellation before ray.get().
             pending = [(index, ref) for index, ref in pending if index != ready_index]
+            results[ready_index] = ray.get(ready_ref)
             if next_index < len(calls):
                 pending.append((next_index, remote.remote(*calls[next_index])))
                 next_index += 1
 
         return results
     except BaseException:
-        failed_cancellations = 0
-        for _, ref in pending:
-            try:
-                ray.cancel(ref, force=False, recursive=True)
-            except BaseException:
-                # A second interruption or disconnected Ray must not mask the
-                # original error or prevent attempts for the remaining siblings.
-                failed_cancellations += 1
+        failed_cancellations = cancel_unready_ray_refs(
+            ray,
+            [ref for _, ref in pending],
+            force=False,
+            recursive=True,
+        )
         if failed_cancellations:
             with suppress(BaseException):
                 logger.warning(

@@ -1115,16 +1115,26 @@ def test_outer_submission_failure_is_fixed_and_redacted() -> None:
     _assert_probe_failure(error, probe.RayTargetProbeFailure.NODE_PROBE_UNAVAILABLE)
 
 
+@pytest.mark.parametrize(
+    ("ready", "timeout_call", "expect_cancel"),
+    [
+        (False, 2, True),
+        (True, 3, False),
+    ],
+)
 def test_outer_propagates_its_own_deadline_rejection(
     monkeypatch: pytest.MonkeyPatch,
+    ready: bool,
+    timeout_call: int,
+    expect_cancel: bool,
 ) -> None:
-    fake_ray = _FakeOuterRay(ready=True)
+    fake_ray = _FakeOuterRay(ready=ready)
     calls = 0
 
     def remaining(_deadline: float) -> float:
         nonlocal calls
         calls += 1
-        if calls == 3:
+        if calls == timeout_call:
             raise probe.RayTargetProbeError(probe.RayTargetProbeFailure.NODE_PROBE_TIMEOUT)
         return 1.0
 
@@ -1138,7 +1148,8 @@ def test_outer_propagates_its_own_deadline_rejection(
         )
 
     _assert_probe_failure(error, probe.RayTargetProbeFailure.NODE_PROBE_TIMEOUT)
-    assert fake_ray.cancelled == [(fake_ray.ref, True, True)]
+    expected = [(fake_ray.ref, True, True)] if expect_cancel else []
+    assert fake_ray.cancelled == expected
 
 
 @pytest.mark.parametrize("ray_version", UNSUPPORTED_RAY_VERSIONS)

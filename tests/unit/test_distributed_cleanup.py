@@ -14,6 +14,7 @@ class _CollectorRay:
         self.submitted: list[int] = []
         self.cancelled: list[tuple[int, bool, bool]] = []
         self.consumed: list[int] = []
+        self.ready_refs: set[int] = set()
         self.failure: BaseException = ValueError("original application failure")
         self.fail_submit: int | None = None
         self.fail_wait = False
@@ -26,7 +27,20 @@ class _CollectorRay:
         self.submitted.append(value)
         return value
 
-    def wait(self, refs: list[int], *, num_returns: int) -> tuple[list[int], list[int]]:
+    def wait(
+        self,
+        refs: list[int],
+        *,
+        num_returns: int,
+        timeout: float | None = None,
+        fetch_local: bool = True,
+    ) -> tuple[list[int], list[int]]:
+        if timeout == 0:
+            assert num_returns == len(refs)
+            assert fetch_local is False
+            ready = [ref for ref in refs if ref in self.ready_refs]
+            unready = [ref for ref in refs if ref not in self.ready_refs]
+            return ready, unready
         assert num_returns == 1
         if self.fail_wait:
             raise self.failure
@@ -59,9 +73,23 @@ def test_collection_failure_cancels_owned_refs_and_preserves_exception(
     with pytest.raises(failure_type) as caught:
         _collect_remote_results(ray, ray, [(i,) for i in range(4)], window)
     assert caught.value is ray.failure
-    expected = [0, 1] if window == 2 else [0, 1, 2, 3]
-    assert ray.submitted == expected
-    assert ray.cancelled == [(ref, False, True) for ref in expected]
+    expected_submitted = [0, 1] if window == 2 else [0, 1, 2, 3]
+    # In bounded mode ray.wait() already reported ref 1 ready before ray.get(),
+    # so only the still-unready sibling ref 0 should be cancelled.
+    expected_cancelled = [0] if window == 2 else [0, 1, 2, 3]
+    assert ray.submitted == expected_submitted
+    assert ray.cancelled == [(ref, False, True) for ref in expected_cancelled]
+
+
+def test_unbounded_collection_failure_skips_already_ready_refs() -> None:
+    ray = _CollectorRay()
+    ray.fail_get = True
+    ray.ready_refs = {1, 2}
+    with pytest.raises(ValueError) as caught:
+        _collect_remote_results(ray, ray, [(i,) for i in range(4)], None)
+    assert caught.value is ray.failure
+    assert ray.submitted == [0, 1, 2, 3]
+    assert ray.cancelled == [(0, False, True), (3, False, True)]
 
 
 @pytest.mark.parametrize("window", [None, 2, 8])
@@ -104,8 +132,9 @@ def test_failed_cancellation_keeps_cleaning_without_replacing_original_exception
     ray.fail_get = True
     ray.fail_cancel = cleanup_failure
     with pytest.raises(ValueError) as caught:
-        _collect_remote_results(ray, ray, [(i,) for i in range(4)], 2)
+        _collect_remote_results(ray, ray, [(i,) for i in range(4)], 3)
     assert caught.value is ray.failure
+    # Ref 2 was already reported ready by ray.wait(); refs 0 and 1 remain unready.
     assert ray.cancelled == [(0, False, True), (1, False, True)]
     assert caplog.messages == ["Could not request cancellation for 1 distributed children"]
 

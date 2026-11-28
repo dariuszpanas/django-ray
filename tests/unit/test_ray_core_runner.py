@@ -1023,6 +1023,30 @@ class TestRayCoreRunnerRuntime:
         assert fake.cancelled == [(stale.object_ref, False)]
         assert runner._pending_tasks[6] is replacement
 
+    def test_cancel_pending_skips_ray_cancel_when_object_ref_is_already_ready(
+        self, monkeypatch
+    ) -> None:
+        fake = _install_fake_ray(monkeypatch)
+        runner = RayCoreRunner()
+        terminal_ref = _FakeObjectRef("already-terminal")
+        fake.ready_refs.add(terminal_ref)
+        handle = RayCoreHandle(
+            task_pk=61,
+            object_ref=terminal_ref,
+            submitted_at=datetime.now(UTC),
+            task_name="already-terminal",
+            attempt_number=1,
+            execution_generation=2,
+        )
+        runner._pending_tasks[61] = handle
+
+        outcome = runner.cancel_pending_with_status(handle)
+
+        assert outcome.status == CancellationOutcomeStatus.FAILED
+        assert "already terminal" in (outcome.message or "")
+        assert fake.cancelled == []
+        assert 61 not in runner._pending_tasks
+
     def test_cancel_pending_timeout_is_indeterminate_and_late_completion_is_exact(
         self,
         monkeypatch,

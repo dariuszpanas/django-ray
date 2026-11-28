@@ -258,8 +258,13 @@ class _FakeRay:
         *,
         num_returns: int = 1,
         timeout: float | None = None,
+        fetch_local: bool = True,
     ) -> tuple[list[_Ref], list[_Ref]]:
-        del timeout
+        del fetch_local
+        if timeout == 0:
+            # Non-blocking cleanup readiness probes treat still-pending fake
+            # refs as unready unless a test overrides readiness explicitly.
+            return [], list(refs)
         self.wait_sizes.append(len(refs))
         return refs[:num_returns], refs[num_returns:]
 

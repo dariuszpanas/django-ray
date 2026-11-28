@@ -210,11 +210,10 @@ entry for the current operation. Use an explicit window for large fanouts.
 
 If submission, result collection, or the caller is interrupted, the helpers make
 one best-effort `ray.cancel(ref, force=False, recursive=True)` request for each
-submitted result they still own. They retain the original exception, stop
-submitting new items, and do not replay work. Consumed results and unrelated task
-references are excluded. The unbounded path retains all submitted references
-until its batch result is collected; a finished task may receive a harmless
-cancellation request when another task in that batch fails.
+still-unready submitted result they still own. They retain the original
+exception, stop submitting new items, and do not replay work. Consumed results,
+already-ready tasks, and unrelated task references are excluded before
+cancellation so already-finished or already-failed tasks are not cancelled.
 
 Cleanup does not wait for children to drain or force-kill workers. Its number of
 cancellation requests is bounded by the outstanding submission window (all
