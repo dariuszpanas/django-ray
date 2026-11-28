@@ -398,7 +398,9 @@
       "selection": {
         "paths": [
           "tests/integration/test_admin.py",
+          "tests/integration/test_admin_actions_and_detail.py",
           "tests/integration/test_admin_coverage.py",
+          "tests/integration/test_admin_models_and_cancel.py",
           "tests/integration/test_api.py",
           "tests/integration/test_sample_bearer_input.py",
           "tests/integration/test_testproject_admin_theme.py",
