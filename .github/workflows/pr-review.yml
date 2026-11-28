@@ -159,7 +159,7 @@ jobs:
           PR_NUMBER: ${{ needs.resolve.outputs.pull_request_number }}
         run: python3 -I -S scripts/check_pr_review_admission.py
       - name: Publish bounded pull-request triage
-        uses: dariuszpanas/yaga@c4535c0b1db0de91e6ba0e17b802d83c9f803aa5 # PR trust triage
+        uses: dariuszpanas/yaga@51f81c2eecc9c318d35cf159142bad76fff5f51c # v0.6.0
         with:
           check: pr-triage
           policy: .github/pr-triage-policy.toml
@@ -169,7 +169,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Evaluate and submit pull-request review
         if: steps.admission.outputs.allowed == 'true'
-        uses: dariuszpanas/yaga@c4535c0b1db0de91e6ba0e17b802d83c9f803aa5 # PR trust triage
+        uses: dariuszpanas/yaga@51f81c2eecc9c318d35cf159142bad76fff5f51c # v0.6.0
         with:
           check: pr-review
           policy: .yaga/agent-review-policy.toml

@@ -91,7 +91,7 @@ make test
 
 Run `make workflow-check` to check immutable Actions/container references and the
 YAGA `recommended-v3` workflow security profile. This uses the pinned released
-`yaga-cli==0.5.0` through uvx; it does not add a package runtime dependency.
+`yaga-cli==0.6.0` through uvx; it does not add a package runtime dependency.
 `make check` and the Linux `make ci` run these workflow checks too. The required
 CI lint job includes them in `.yaga/checks/repository.toml` alongside the committed
 tree policies described below.
@@ -117,7 +117,7 @@ the ordinary quality checks, retained commit checks, and `make repository-check`
 - Branch names matching the documented prefixes, including `perf/` and `ci/`, or
   the existing `main` and Dependabot namespaces.
 - Changes to YAGA policy files accompanied by contributor-guidance changes, plus
-  strict schema and `required-version = ">=0.5.0"` verification across every tracked
+  strict schema and `required-version = ">=0.6.0"` verification across every tracked
   YAGA policy file (`yaga policy check --strict`). YAGA's path-only coupling does
   not prove test coverage or dependency-lock consistency; tests and locked
   dependency validation remain separate checks.
@@ -131,7 +131,7 @@ HEAD so workflow files and committed checks describe the same candidate. Detache
 checkouts require an explicit branch. CI supplies exact event SHAs and the source
 branch through environment variables, without shell interpolation.
 
-The released YAGA 0.5.0 CLI provides these checks; no development checkout is needed.
+The released YAGA 0.6.0 CLI provides these checks; no development checkout is needed.
 CI also runs `make workflow-lint` through YAGA's digest-pinned actionlint container,
 with bounded resources and verified cleanup. It is not part of the resource-free
 local gate: run it locally only with an explicitly admitted Docker daemon. These
@@ -726,9 +726,8 @@ publisher guard remains.
 
 This workflow does not revoke existing approvals or publish an authoritative current-head merge
 status. Its comment is informational, and GitHub's final-read/publication race still exists.
-Required CI, merge rules, and explicit user authorization remain independently enforced. The
-workflow-only triage policy is validated by its reviewed Action commit; repository-wide quality
-checks retain released YAGA 0.5.0 until a separate dependency update.
+Required CI, merge rules, and explicit user authorization remain independently enforced. Both the
+workflow-only triage policy and repository-wide quality checks use released YAGA 0.6.0.
 
 External contributions remain welcome through normal PR creation and maintainer review. Before
 an agent approves workflow execution, submits an approving review, enables auto-merge or merges
@@ -1173,9 +1172,9 @@ By contributing, you agree that your contributions will be licensed under the BS
 ### YAGA commit policy
 
 The required `Commit Messages` check and local hook/Make commands use released
-YAGA 0.5.0 with the structural policy in `.yaga.toml` and PR description rules in
+YAGA 0.6.0 with the structural policy in `.yaga.toml` and PR description rules in
 `.yaga/description-policy.toml`. Every tracked YAGA policy declares
-`required-version = ">=0.5.0"` and passes `yaga policy check --strict` during
+`required-version = ">=0.6.0"` and passes `yaga policy check --strict` during
 `make repository-check`. Spelling with pinned Typos 1.50.2 is an explicit
 additional check. Node.js and npm are no longer development prerequisites.
 

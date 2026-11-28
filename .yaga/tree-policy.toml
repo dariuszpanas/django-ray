@@ -1,4 +1,4 @@
-required-version = ">=0.5.0"
+required-version = ">=0.6.0"
 tree-policy-version = 1
 required-paths = [
   "AGENTS.md", "CONTRIBUTING.md", "LICENSE", "README.md", "SECURITY.md",
