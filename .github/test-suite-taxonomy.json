@@ -10,8 +10,15 @@
         "reason": "Portable profiles preserve explicit platform or optional-capability skips and report them as outcomes."
       },
       "selection": {
-        "paths": ["tests"],
-        "exclude_markers": ["django_db", "live_cluster", "postgresql", "real_ray"],
+        "paths": [
+          "tests"
+        ],
+        "exclude_markers": [
+          "django_db",
+          "live_cluster",
+          "postgresql",
+          "real_ray"
+        ],
         "exclude_fixtures": [
           "admin_client",
           "admin_user",
@@ -32,8 +39,12 @@
         "reason": "SQLite profiles preserve optional-capability skips unrelated to database availability and report them as outcomes."
       },
       "selection": {
-        "paths": ["tests"],
-        "include_any_markers": ["django_db"],
+        "paths": [
+          "tests"
+        ],
+        "include_any_markers": [
+          "django_db"
+        ],
         "include_any_fixtures": [
           "admin_client",
           "admin_user",
@@ -43,7 +54,11 @@
           "live_server",
           "transactional_db"
         ],
-        "exclude_markers": ["live_cluster", "postgresql", "real_ray"]
+        "exclude_markers": [
+          "live_cluster",
+          "postgresql",
+          "real_ray"
+        ]
       }
     },
     {
@@ -55,9 +70,17 @@
         "reason": "A local-Ray observation is valid only when every selected runtime case executes."
       },
       "selection": {
-        "paths": ["tests"],
-        "include_markers": ["real_ray"],
-        "exclude_markers": ["compiled_graph_opt_in", "live_cluster", "postgresql"]
+        "paths": [
+          "tests"
+        ],
+        "include_markers": [
+          "real_ray"
+        ],
+        "exclude_markers": [
+          "compiled_graph_opt_in",
+          "live_cluster",
+          "postgresql"
+        ]
       }
     },
     {
@@ -69,9 +92,17 @@
         "reason": "The native topology probe remains a deliberate opt-in until its upstream capability gate passes."
       },
       "selection": {
-        "paths": ["tests"],
-        "include_markers": ["compiled_graph_opt_in", "real_ray"],
-        "exclude_markers": ["live_cluster", "postgresql"]
+        "paths": [
+          "tests"
+        ],
+        "include_markers": [
+          "compiled_graph_opt_in",
+          "real_ray"
+        ],
+        "exclude_markers": [
+          "live_cluster",
+          "postgresql"
+        ]
       }
     },
     {
@@ -82,11 +113,20 @@
         "mode": "forbid",
         "reason": "PostgreSQL evidence must prove the configured database rather than skip unavailable resources."
       },
-      "django_settings_modules": ["tests.postgres_settings"],
+      "django_settings_modules": [
+        "tests.postgres_settings"
+      ],
       "selection": {
-        "paths": ["tests"],
-        "include_markers": ["postgresql"],
-        "exclude_markers": ["live_cluster", "real_ray"]
+        "paths": [
+          "tests"
+        ],
+        "include_markers": [
+          "postgresql"
+        ],
+        "exclude_markers": [
+          "live_cluster",
+          "real_ray"
+        ]
       }
     },
     {
@@ -98,8 +138,12 @@
         "reason": "Live-cluster evidence must execute every selected fault and transport case."
       },
       "selection": {
-        "paths": ["tests"],
-        "include_markers": ["live_cluster"]
+        "paths": [
+          "tests"
+        ],
+        "include_markers": [
+          "live_cluster"
+        ]
       }
     }
   ],
@@ -244,6 +288,8 @@
           "tests/integration/test_protocol_status.py",
           "tests/integration/test_worker_readiness.py",
           "tests/integration/test_postgresql_coordination.py",
+          "tests/integration/test_postgresql_coordination_progress_and_input.py",
+          "tests/integration/test_postgresql_coordination_rq2_and_purge.py",
           "tests/integration/test_postgresql_maintenance_scans.py",
           "tests/integration/test_postgresql_maintenance_plans.py",
           "tests/integration/test_doctor_postgresql.py",
@@ -396,8 +442,13 @@
         "reason": "The broad local profile intentionally includes backend and optional-capability cases that self-skip without dedicated resources."
       },
       "selection": {
-        "paths": ["tests"],
-        "exclude_markers": ["live_cluster", "real_ray"]
+        "paths": [
+          "tests"
+        ],
+        "exclude_markers": [
+          "live_cluster",
+          "real_ray"
+        ]
       }
     }
   ],
@@ -412,8 +463,12 @@
         "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
       },
       "selection": {
-        "paths": ["tests"],
-        "exclude_markers": ["live_cluster"]
+        "paths": [
+          "tests"
+        ],
+        "exclude_markers": [
+          "live_cluster"
+        ]
       }
     },
     {
@@ -425,7 +480,9 @@
         "mode": "forbid",
         "reason": "The PostgreSQL service job must execute every selected backend case."
       },
-      "django_settings_modules": ["tests.postgres_settings"],
+      "django_settings_modules": [
+        "tests.postgres_settings"
+      ],
       "selection": {
         "paths": [
           "tests/integration/test_execution_protocol_schema_migration.py",
@@ -433,6 +490,8 @@
           "tests/integration/test_protocol_status.py",
           "tests/integration/test_worker_readiness.py",
           "tests/integration/test_postgresql_coordination.py",
+          "tests/integration/test_postgresql_coordination_progress_and_input.py",
+          "tests/integration/test_postgresql_coordination_rq2_and_purge.py",
           "tests/integration/test_postgresql_maintenance_scans.py",
           "tests/integration/test_postgresql_maintenance_plans.py",
           "tests/integration/test_doctor_postgresql.py",
@@ -459,7 +518,9 @@
           "tests/integration/test_workflow_run_allocation_migration.py",
           "tests/unit/test_application_offline_settings.py"
         ],
-        "include_markers": ["postgresql"]
+        "include_markers": [
+          "postgresql"
+        ]
       }
     },
     {
@@ -472,8 +533,12 @@
         "reason": "The enabled live-cluster job must execute every selected fault case."
       },
       "selection": {
-        "paths": ["tests/integration/test_live_failure_injection.py"],
-        "include_markers": ["live_cluster"]
+        "paths": [
+          "tests/integration/test_live_failure_injection.py"
+        ],
+        "include_markers": [
+          "live_cluster"
+        ]
       }
     },
     {
@@ -498,7 +563,9 @@
           "tests/unit/test_testproject_workflows.py",
           "tests/unit/test_workflow_reporting_benchmark_command.py"
         ],
-        "exclude_markers": ["postgresql"]
+        "exclude_markers": [
+          "postgresql"
+        ]
       }
     },
     {
@@ -511,8 +578,13 @@
         "reason": "Dependency jobs intentionally select backend-specific and optional-capability cases that self-skip without their dedicated resources."
       },
       "selection": {
-        "paths": ["tests"],
-        "exclude_markers": ["live_cluster", "real_ray"]
+        "paths": [
+          "tests"
+        ],
+        "exclude_markers": [
+          "live_cluster",
+          "real_ray"
+        ]
       }
     }
   ],
