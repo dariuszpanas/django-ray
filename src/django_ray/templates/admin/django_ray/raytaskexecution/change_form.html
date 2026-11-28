@@ -48,62 +48,52 @@
   {% endif %}
 {% endblock %}
 
-{% block after_field_sets %}
-  {{ block.super }}
-  {% if django_ray_retry_guidance %}
-    <section
-      class="module aligned django-ray-task-actions"
-      id="django-ray-task-actions"
-      aria-labelledby="django-ray-task-actions-heading"
-    >
-      <h2 id="django-ray-task-actions-heading">Task actions</h2>
-      <div class="django-ray-task-actions__body">
-        <p
-          class="django-ray-task-actions__guidance"
-          id="django-ray-task-actions-guidance"
-          role="status"
-        >
-          {{ django_ray_retry_guidance }}
-        </p>
-        {% if django_ray_retry_available %}
-          <button
-            type="submit"
-            class="button default django-ray-admin-action django-ray-admin-action--retry django-ray-task-actions__retry"
-            form="{{ opts.model_name }}_form"
-            formaction="{{ django_ray_retry_url }}"
-            formmethod="post"
-            formnovalidate
-            aria-describedby="django-ray-task-actions-guidance"
-          >
-            Retry task...
-          </button>
-        {% endif %}
-      </div>
-    </section>
-  {% endif %}
+{% block field_sets %}
   {% if django_ray_observability_url %}
     <section
       class="module aligned django-ray-live"
       id="django-ray-live-observability"
       data-observability-url="{{ django_ray_observability_url }}"
+      data-initial-state="{{ original.state }}"
+      data-has-workflow="{% if django_ray_show_workflow_diagnostics %}true{% else %}false{% endif %}"
       aria-labelledby="django-ray-live-heading"
     >
       <h2 id="django-ray-live-heading">
-        <span class="django-ray-live__indicator" aria-hidden="true"></span>
-        Live task status
+        <span
+          class="django-ray-live__indicator"
+          data-field="indicator"
+          data-polling-state="{% if django_ray_initial_terminal %}terminal{% else %}live{% endif %}"
+          data-state="{{ original.state }}"
+          aria-hidden="true"
+        ></span>
+        {% translate "Live task status" %}
       </h2>
-      <p
-        class="django-ray-live__summary"
-        data-field="status"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        Waiting for the first durable status update.
-      </p>
+      <div class="django-ray-live__summary-bar">
+        <p
+          class="django-ray-live__summary"
+          data-field="status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {% if django_ray_initial_terminal %}
+            {% blocktranslate with state=original.state %}Execution is in terminal state {{ state }}. Live polling is stopped.{% endblocktranslate %}
+          {% else %}
+            {% translate "Waiting for the first durable status update." %}
+          {% endif %}
+        </p>
+        <button
+          type="button"
+          class="django-ray-admin-action django-ray-admin-action--secondary django-ray-live__reload"
+          data-action="reload"
+          hidden
+        >
+          {% translate "Reload page for full details" %}
+        </button>
+      </div>
       <dl class="django-ray-live__grid">
         <div class="django-ray-live__metric">
-          <dt>State</dt>
+          <dt>{% translate "State" %}</dt>
           <dd
             class="django-ray-live__state"
             data-field="state"
@@ -113,21 +103,50 @@
           </dd>
         </div>
         <div class="django-ray-live__metric">
-          <dt>Attempt</dt>
+          <dt>{% translate "Attempt" %}</dt>
           <dd class="django-ray-live__attempt" data-field="attempt">
             {{ original.attempt_number }}
           </dd>
         </div>
         <div class="django-ray-live__metric django-ray-live__metric--workflow">
-          <dt>Workflow</dt>
-          <dd data-field="workflow">No workflow progress available.</dd>
+          <dt>{% translate "Workflow" %}</dt>
+          <dd data-field="workflow">
+            {% if not django_ray_show_workflow_diagnostics %}
+              {% if django_ray_initial_terminal %}
+                {% translate "Not a workflow task." %}
+              {% else %}
+                {% translate "No workflow recorded yet." %}
+              {% endif %}
+            {% elif django_ray_initial_terminal %}
+              {% translate "Open Workflow execution below to inspect bounded progress." %}
+            {% else %}
+              {% translate "No workflow progress available." %}
+            {% endif %}
+          </dd>
         </div>
       </dl>
+      {% if django_ray_replay_command %}
+        <div class="django-ray-live__replay" data-field="replay">
+          <span class="django-ray-live__replay-label">{% translate "Local read-only replay" %}</span>
+          <div class="django-ray-live__replay-bar">
+            <code class="django-ray-live__replay-command" data-field="replay-command">{{ django_ray_replay_command }}</code>
+            <button
+              type="button"
+              class="django-ray-live__replay-copy"
+              data-action="copy-replay"
+              data-replay-command="{{ django_ray_replay_command }}"
+            >
+              {% translate "Copy command" %}
+            </button>
+          </div>
+        </div>
+      {% endif %}
       {% if django_ray_workflow_diagnostics_url %}
         {% with workflow_attempt=original.attempt_number|urlencode %}
           <details
             class="django-ray-workflow"
             id="django-ray-workflow-diagnostics"
+            data-has-workflow="{% if django_ray_show_workflow_diagnostics %}true{% else %}false{% endif %}"
             data-diagnostics-url="{{ django_ray_workflow_diagnostics_url }}?attempt_number={{ workflow_attempt }}"
             data-pinned-attempt-number="{{ workflow_attempt }}"
             data-graph-url="{{ django_ray_workflow_graph_url }}?attempt_number={{ workflow_attempt }}"
@@ -139,9 +158,9 @@
             data-node-detail-url="{{ django_ray_workflow_node_detail_url }}?attempt_number={{ workflow_attempt }}"
           >
             <summary class="django-ray-workflow__summary">
-              <span class="django-ray-workflow__summary-title">Workflow execution</span>
+              <span class="django-ray-workflow__summary-title">{% translate "Workflow execution" %}</span>
               <span class="django-ray-workflow__summary-copy">
-                Plan, strategy, and bounded progress
+                {% translate "Plan, strategy, and bounded progress" %}
               </span>
               <span class="django-ray-workflow__summary-arrow" aria-hidden="true">
                 &#9656;
@@ -155,7 +174,7 @@
                 aria-live="polite"
                 aria-atomic="true"
               >
-                Open this section to load workflow diagnostics.
+                {% translate "Open this section to load workflow diagnostics." %}
               </p>
               <div
                 class="django-ray-workflow__content"
@@ -165,23 +184,24 @@
               </div>
               <section
                 class="django-ray-workflow-attempts"
+                id="workflow-graph"
                 data-workflow-attempt-graphs
                 aria-labelledby="django-ray-workflow-attempts-heading"
                 {% if not django_ray_archived_workflow_attempts %}hidden{% endif %}
               >
                 <div class="django-ray-workflow-attempts__heading">
                   <h3 id="django-ray-workflow-attempts-heading">
-                    Attempt execution graphs
+                    {% translate "Attempt execution graphs" %}
                   </h3>
                   <p>
-                    Attempts are ordered from oldest to newest. Open any attempt
-                    to load its exact bounded graph.
+                    {% translate "Attempts are ordered from oldest to newest. Open any attempt to load its exact bounded graph." %}
                   </p>
                 </div>
                 {% for attempt_number in django_ray_archived_workflow_attempts %}
                   {% with attempt=attempt_number|urlencode current_attempt=original.attempt_number|urlencode %}
                     <details
                       class="django-ray-workflow-graph django-ray-workflow-attempt-graph"
+                      id="workflow-graph-attempt-{{ attempt }}"
                       data-workflow-attempt-graph="{{ attempt }}"
                       data-workflow-graph-attempt="{{ attempt }}"
                       data-hydration-state="idle"
@@ -270,13 +290,64 @@
       {% endif %}
     </section>
   {% endif %}
+  {% if django_ray_retry_guidance or django_ray_cancel_available %}
+    <section
+      class="module aligned django-ray-task-actions"
+      id="django-ray-task-actions"
+      aria-labelledby="django-ray-task-actions-heading"
+    >
+      <h2 id="django-ray-task-actions-heading">{% translate "Task actions" %}</h2>
+      <div class="django-ray-task-actions__body">
+        <p
+          class="django-ray-task-actions__guidance"
+          id="django-ray-task-actions-guidance"
+          role="status"
+        >
+          {{ django_ray_retry_guidance }}
+        </p>
+        <div class="django-ray-task-actions__controls">
+          {% if django_ray_cancel_available %}
+            <button
+              type="submit"
+              class="button django-ray-admin-action django-ray-admin-action--cancel django-ray-task-actions__cancel"
+              form="{{ opts.model_name }}_form"
+              formaction="{{ django_ray_cancel_url }}"
+              formmethod="post"
+              formnovalidate
+              aria-describedby="django-ray-task-actions-guidance"
+            >
+              {% translate "Cancel task" %}
+            </button>
+          {% endif %}
+          {% if django_ray_retry_available %}
+            <button
+              type="submit"
+              class="button default django-ray-admin-action django-ray-admin-action--retry django-ray-task-actions__retry"
+              form="{{ opts.model_name }}_form"
+              formaction="{{ django_ray_retry_url }}"
+              formmethod="post"
+              formnovalidate
+              aria-describedby="django-ray-task-actions-guidance"
+            >
+              Retry task...
+            </button>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}
+
+{% block after_field_sets %}
+  {{ block.super }}
   {% if django_ray_attempt_history_total %}
     <section
       class="module aligned django-ray-attempt-history-scope"
       aria-label="Attempt history scope"
     >
       <p>
-        <strong>Attempt history:</strong>
+        <strong>{% translate "Attempt history:" %}</strong>
         {% if django_ray_attempt_history_omitted %}
           Showing the newest {{ django_ray_attempt_history_shown }} of
           {{ django_ray_attempt_history_total }} attempts; the

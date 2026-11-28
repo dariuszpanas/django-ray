@@ -11,6 +11,10 @@
   const attemptNode = panel.querySelector('[data-field="attempt"]');
   const workflowNode = panel.querySelector('[data-field="workflow"]');
   const statusNode = panel.querySelector('[data-field="status"]');
+  const indicatorNode = panel.querySelector('[data-field="indicator"]');
+  const reloadButton = panel.querySelector('[data-action="reload"]');
+  const copyReplayButton = panel.querySelector('[data-action="copy-replay"]');
+  const replayCommandNode = panel.querySelector('[data-field="replay-command"]');
   const requestDeadlineMs = 15000;
   const terminalStates = new Set([
     "SUCCEEDED",
@@ -19,22 +23,78 @@
     "LOST",
     "EXPIRED",
   ]);
+  const initialState = panel.dataset.initialState ?? "";
+  const hasWorkflow = panel.dataset.hasWorkflow !== "false";
+  const openedState = initialState || (stateNode?.dataset?.state ?? "");
   let timer = null;
+  let copyResetTimer = null;
   let stopped = false;
   let inFlight = false;
   let lastAnnouncementKey = null;
 
+  const setPollingState = (pollingState, taskState) => {
+    if (indicatorNode && indicatorNode.dataset) {
+      indicatorNode.dataset.pollingState = pollingState;
+      if (taskState !== undefined) {
+        indicatorNode.dataset.state = taskState;
+      }
+    }
+  };
+
+  if (reloadButton && typeof reloadButton.addEventListener === "function") {
+    reloadButton.addEventListener("click", () => {
+      window.location?.reload?.();
+    });
+  }
+
+  if (copyReplayButton && typeof copyReplayButton.addEventListener === "function") {
+    copyReplayButton.addEventListener("click", async () => {
+      const command =
+        copyReplayButton.dataset?.replayCommand ||
+        replayCommandNode?.textContent?.trim() ||
+        "";
+      if (!command) {
+        return;
+      }
+      const setCopyLabel = (label) => {
+        copyReplayButton.textContent = label;
+        if (copyResetTimer !== null) {
+          window.clearTimeout(copyResetTimer);
+        }
+        copyResetTimer = window.setTimeout(() => {
+          copyReplayButton.textContent = "Copy command";
+          copyResetTimer = null;
+        }, 2000);
+      };
+      try {
+        const clipboard =
+          window.navigator?.clipboard ?? globalThis.navigator?.clipboard;
+        if (clipboard && typeof clipboard.writeText === "function") {
+          await clipboard.writeText(command);
+          setCopyLabel("Copied");
+          return;
+        }
+      } catch (error) {
+        // Fall through to manual-copy guidance when clipboard access is blocked.
+      }
+      setCopyLabel("Select and copy");
+    });
+  }
+
   const schedule = () => {
-    if (!stopped && !document.hidden) {
+    if (!stopped && !document.hidden && !panel.hidden) {
       timer = window.setTimeout(refresh, 3000);
     }
   };
 
   const renderWorkflow = (workflow, availability) => {
     if (!workflow) {
-      return availability
-        ? `Workflow detail: ${availability}.`
-        : "No workflow progress available.";
+      if (availability) {
+        return `Workflow detail: ${availability}.`;
+      }
+      return hasWorkflow
+        ? "No workflow progress available."
+        : "Not a workflow task.";
     }
     const completed = workflow.completed_nodes ?? 0;
     const total = workflow.total_nodes ?? 0;
@@ -58,7 +118,7 @@
   };
 
   async function refresh() {
-    if (stopped || document.hidden || inFlight) {
+    if (stopped || document.hidden || panel.hidden || inFlight) {
       return;
     }
     let controller;
@@ -66,11 +126,13 @@
       controller = new window.AbortController();
     } catch (error) {
       stopped = true;
+      setPollingState("error");
       statusNode.textContent =
         "Live updates unavailable in this browser; reload the page for current status.";
       return;
     }
     inFlight = true;
+    setPollingState("live");
     let deadlineTimer = null;
     let expired = false;
     try {
@@ -119,6 +181,7 @@
       }
       if (update.stop) {
         stopped = true;
+        setPollingState("error");
         statusNode.textContent = "Live updates stopped; reload after signing in again.";
         return;
       }
@@ -144,9 +207,18 @@
         statusNode.textContent = `Durable status updated: ${state}. ${workflowText}`;
         lastAnnouncementKey = announcementKey;
       }
-      stopped = terminalStates.has(state);
+      const isTerminal = terminalStates.has(state);
+      stopped = isTerminal;
+      setPollingState(
+        isTerminal ? "terminal" : document.hidden ? "paused" : "live",
+        state,
+      );
+      if (reloadButton && (isTerminal || (openedState && state !== openedState))) {
+        reloadButton.hidden = false;
+      }
     } catch (error) {
       lastAnnouncementKey = null;
+      setPollingState("error");
       statusNode.textContent = "Status update unavailable; durable page data is unchanged.";
     } finally {
       if (deadlineTimer !== null) {
@@ -162,10 +234,26 @@
       window.clearTimeout(timer);
       timer = null;
     }
-    if (!document.hidden && !stopped) {
+    if (stopped) {
+      return;
+    }
+    if (document.hidden) {
+      setPollingState("paused");
+    } else {
+      setPollingState("live");
       void refresh();
     }
   });
+
+  if (terminalStates.has(initialState)) {
+    stopped = true;
+    setPollingState("terminal", initialState);
+    return;
+  }
+
+  if (document.hidden) {
+    setPollingState("paused");
+  }
 
   void refresh();
 })();

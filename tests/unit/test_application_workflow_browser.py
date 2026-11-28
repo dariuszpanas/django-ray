@@ -269,7 +269,10 @@ def asset_route(name="task_live.js", **changes):
     return Mock(request=Mock(**request))
 
 
-@pytest.mark.parametrize("size,accepted", [(0, False), (65536, True), (65537, False)])
+@pytest.mark.parametrize(
+    "size,accepted",
+    [(0, False), (browser.MAX_ASSET_BYTES, True), (browser.MAX_ASSET_BYTES + 1, False)],
+)
 def test_source_assets_have_an_exact_raw_byte_limit(tmp_path, monkeypatch, size, accepted):
     monkeypatch.setattr(browser, "ASSET_ROOT", tmp_path)
     for name in browser.ADMIN_ASSETS:

@@ -1040,6 +1040,7 @@ class TestRayTaskExecutionAdminActionsAndDetail:
             task_id="admin-live-form-001",
             callable_path=callable_path,
             state=TaskState.RUNNING,
+            workflow_run_id="00000000-0000-0000-0000-000000990001",
             progress_data="legacy-graph" * 10_000,
             workflow_progress_summary_json="summary" * 10_000,
             workflow_plan_json="raw-workflow-plan-marker" * 1_000,

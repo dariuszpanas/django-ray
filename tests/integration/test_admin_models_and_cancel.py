@@ -816,7 +816,7 @@ class TestTaskAttemptAdmin:
         assert inline.show_change_link is False
         assert inline.fields == (
             "attempt_detail_link",
-            "state",
+            "state_display",
             "started_display",
             "finished_display",
             "error_summary",
@@ -881,11 +881,20 @@ class TestTaskAttemptAdmin:
             )
         )
 
+        execution_graph_anchor = (
+            reverse(
+                "admin:django_ray_raytaskexecution_change",
+                args=[execution.pk],
+            )
+            + "#workflow-graph-attempt-1"
+        )
         content = detail.content.decode("utf-8")
         assert detail.status_code == 200
         assert "Workflow graph" in content
+        assert f'href="{execution_graph_anchor}"' in content
         assert f'href="{graph_url}"' in content
         assert "Open graph for attempt #1" in content
+        assert "Graph JSON" in content
         assert "workflow_progress_summary_json" not in content
 
     @override_settings(MIDDLEWARE=_ADMIN_MIDDLEWARE)
@@ -1625,7 +1634,10 @@ class TestTaskWorkerLeaseAdmin:
             is_active=True,
         )
 
-        assert admin_obj.worker_id_short(lease) == "worker-12345..."
+        assert (
+            admin_obj.worker_id_short(lease)
+            == '<span title="worker-1234567890abcdef">worker-12345...</span>'
+        )
         assert "ago" in admin_obj.time_since_heartbeat(lease)
         assert admin_obj._is_heartbeat_expired(lease) is False
 

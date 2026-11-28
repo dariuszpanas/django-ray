@@ -36,14 +36,47 @@ function pending() {
 }
 
 async function loadPanel(responses, options = {}) {
-  const { hidden = false } = options;
+  const {
+    hidden = false,
+    panelHidden = false,
+    initialState = undefined,
+    hasWorkflow = undefined,
+    replayCommand = undefined,
+    clipboard = undefined,
+  } = options;
   const controller = "controller" in options ? options.controller : AbortController;
   const nodes = Object.fromEntries(
-    ["state", "attempt", "workflow", "status"].map((name) => [
+    ["state", "attempt", "workflow", "status", "indicator"].map((name) => [
       name,
       { textContent: `durable ${name}`, dataset: {} },
     ]),
   );
+  const reloadListeners = [];
+  nodes.reload = {
+    hidden: true,
+    dataset: {},
+    addEventListener: (name, fn) => {
+      if (name === "click") reloadListeners.push(fn);
+    },
+    click: () => reloadListeners.forEach((fn) => fn()),
+  };
+  if (replayCommand !== undefined) {
+    const copyListeners = [];
+    nodes["replay-command"] = { textContent: replayCommand, dataset: {} };
+    nodes["copy-replay"] = {
+      textContent: "Copy command",
+      dataset: { replayCommand },
+      addEventListener: (name, fn) => {
+        if (name === "click") copyListeners.push(fn);
+      },
+      click: async () => {
+        for (const fn of copyListeners) {
+          await fn();
+        }
+      },
+    };
+  }
+  let reloaded = 0;
   const requests = [];
   const announcements = [];
   let statusText = nodes.status.textContent;
@@ -57,16 +90,31 @@ async function loadPanel(responses, options = {}) {
   const timers = new Map();
   const listeners = new Map();
   let nextTimer = 0;
+  const panelDataset = { observabilityUrl: "/admin/task/1/observability/" };
+  if (initialState !== undefined) {
+    panelDataset.initialState = initialState;
+  }
+  if (hasWorkflow !== undefined) {
+    panelDataset.hasWorkflow = hasWorkflow;
+  }
+  const panelElement = {
+    hidden: panelHidden,
+    dataset: panelDataset,
+    querySelector: (selector) => nodes[selector.match(/"([^"]+)"/)[1]],
+  };
   const document = {
     hidden,
-    getElementById: () => ({
-      dataset: { observabilityUrl: "/admin/task/1/observability/" },
-      querySelector: (selector) => nodes[selector.match(/"([^"]+)"/)[1]],
-    }),
+    getElementById: () => panelElement,
     addEventListener: (name, listener) => listeners.set(name, listener),
   };
   const window = {
     AbortController: controller,
+    navigator: clipboard !== undefined ? { clipboard } : undefined,
+    location: {
+      reload() {
+        reloaded += 1;
+      },
+    },
     async fetch(url, options) {
       requests.push({ url, options });
       assert.ok(responses.length, "unexpected polling request");
@@ -92,9 +140,11 @@ async function loadPanel(responses, options = {}) {
   };
   return {
     nodes,
+    panelElement,
     requests,
     announcements,
     timers,
+    getReloadCount: () => reloaded,
     async retry() {
       assert.equal(timers.size, 1);
       await fireTimer(3000);
@@ -503,4 +553,87 @@ test("a throwing abort still recovers with a fresh request controller", async ()
   assert.equal(panel.requests[2].options.signal.aborted, true);
   assert.equal(panel.timers.size, 1);
   assert.equal([...panel.timers.values()][0].delay, 3000);
+});
+
+for (const terminalState of ["SUCCEEDED", "FAILED", "CANCELLED", "LOST", "EXPIRED"]) {
+  test(`initial terminal state ${terminalState} skips all polling and visibility fetches`, async () => {
+    const panel = await loadPanel([], { initialState: terminalState });
+    assert.equal(panel.requests.length, 0);
+    assert.equal(panel.timers.size, 0);
+    assert.equal(panel.nodes.indicator.dataset.pollingState, "terminal");
+    assert.equal(panel.nodes.indicator.dataset.state, terminalState);
+    await panel.visibility(true);
+    await panel.visibility(false);
+    assert.equal(panel.requests.length, 0);
+    assert.equal(panel.timers.size, 0);
+  });
+}
+
+test("state transition reveals reload CTA and updates polling indicator cleanly", async () => {
+  const panel = await loadPanel(
+    [
+      response(200, "application/json", {
+        task: { state: "RUNNING", attempt_number: 1 },
+      }),
+      response(200, "application/json", {
+        task: { state: "FAILED", attempt_number: 1 },
+      }),
+    ],
+    { initialState: "RUNNING", hasWorkflow: "false" },
+  );
+
+  assert.equal(panel.nodes.indicator.dataset.pollingState, "live");
+  assert.equal(panel.nodes.indicator.dataset.state, "RUNNING");
+  assert.equal(panel.nodes.workflow.textContent, "Not a workflow task.");
+  assert.equal(panel.nodes.reload.hidden, true);
+
+  await panel.visibility(true);
+  assert.equal(panel.nodes.indicator.dataset.pollingState, "paused");
+  await panel.visibility(false);
+
+  assert.equal(panel.nodes.state.textContent, "FAILED");
+  assert.equal(panel.nodes.indicator.dataset.pollingState, "terminal");
+  assert.equal(panel.nodes.indicator.dataset.state, "FAILED");
+  assert.equal(panel.timers.size, 0);
+  assert.equal(panel.nodes.reload.hidden, false);
+  panel.nodes.reload.click();
+  assert.equal(panel.getReloadCount(), 1);
+});
+
+test("copy-replay control copies command on terminal executions and handles clipboard fallback", async () => {
+  const copied = [];
+  const command = "python manage.py django_ray_replay task-replay-001";
+  const panel = await loadPanel([], {
+    initialState: "FAILED",
+    replayCommand: command,
+    clipboard: {
+      async writeText(text) {
+        copied.push(text);
+      },
+    },
+  });
+
+  assert.equal(panel.requests.length, 0);
+  await panel.nodes["copy-replay"].click();
+  assert.deepEqual(copied, [command]);
+  assert.equal(panel.nodes["copy-replay"].textContent, "Copied");
+  assert.equal(panel.timers.size, 1);
+
+  const fallbackPanel = await loadPanel([], {
+    initialState: "SUCCEEDED",
+    replayCommand: command,
+    clipboard: {
+      async writeText() {
+        throw new Error("clipboard denied");
+      },
+    },
+  });
+  await fallbackPanel.nodes["copy-replay"].click();
+  assert.equal(fallbackPanel.nodes["copy-replay"].textContent, "Select and copy");
+});
+
+test("hidden live panel skips polling until shown", async () => {
+  const panel = await loadPanel([], { initialState: "RUNNING", panelHidden: true });
+  assert.equal(panel.requests.length, 0);
+  assert.equal(panel.timers.size, 0);
 });
