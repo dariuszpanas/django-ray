@@ -895,7 +895,15 @@ def test_python312_ci_generates_validated_source_fenced_timing_artifact() -> Non
     assert tooling["uses"].startswith("dariuszpanas/pyrn@")
     assert (
         tooling["with"]["markers"]
-        == "tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+        == "tooling and not repo_policy and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+    )
+    repo_policy = tooling_steps["Run repo-policy tests without TIA or cache"]
+    assert repo_policy["uses"].startswith("dariuszpanas/pyrn@")
+    assert repo_policy["with"]["tia"] == "false"
+    assert repo_policy["with"]["cache"] == "false"
+    assert (
+        repo_policy["with"]["markers"]
+        == "repo_policy and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
     )
 
     validated = tooling_steps["Validate suite taxonomy inventory"]

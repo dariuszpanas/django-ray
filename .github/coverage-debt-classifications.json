@@ -1,10 +1,76 @@
 {
   "schema_version": 1,
   "files": {
+    "src/django_ray/_blob_storage.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Atomic stream-hashed filesystem writes, stale-lock recovery, client pooling, and verified S3/GCS deletes are deterministic storage contracts suited to focused unit and provider-double tests."
+      }
+    },
+    "src/django_ray/_result_tasks.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Import-free read-only task wrappers and fail-loud oversize result accessors are deterministic Django Tasks boundary contracts."
+      }
+    },
+    "src/django_ray/_storage_types.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Shared blob storage exception types, outcome dataclasses, and URI validation helpers are deterministic leaf contracts."
+      }
+    },
+    "src/django_ray/_version.py": {
+      "default": {
+        "category": "dead-or-non-behavioral-code",
+        "rationale": "Single-constant package version module without branching runtime logic."
+      }
+    },
     "src/django_ray/admin.py": {
       "default": {
         "category": "testable-behavior",
         "rationale": "Admin authorization, input validation, and bounded error responses are observable contracts that should be covered with permission and response assertions."
+      }
+    },
+    "src/django_ray/admin_views/__init__.py": {
+      "default": {
+        "category": "dead-or-non-behavioral-code",
+        "rationale": "Admin views package re-export marker without standalone runtime branches."
+      }
+    },
+    "src/django_ray/admin_views/actions.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Bounded admin retry/cancel actions and per-object authorization checks are observable admin contracts suited to exact permission and DB-state tests."
+      }
+    },
+    "src/django_ray/admin_views/badges.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "WCAG AA state badges, dark-mode CSS tokens, and dashboard URL formatting are deterministic presentation contracts."
+      }
+    },
+    "src/django_ray/admin_views/diagnostics.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Admin workflow graph, observability, and read-only progress endpoints are observable contracts suited to authorization and response-shape tests."
+      }
+    },
+    "src/django_ray/admin_views/sensitive.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Privileged sensitive-data views, parent permission checks, and redaction enforcement are security-critical admin contracts."
+      }
+    },
+    "src/django_ray/conf/validation.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Settings validation, fail-closed bounds, and Django system check warnings are deterministic configuration contracts."
+      }
+    },
+    "src/django_ray/decorators.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Declarative @ray_task contract parsing, resource/retry validation, and metadata attachment are deterministic unit-testable contracts."
       }
     },
     "src/django_ray/workflow/admin_graph.py": {
@@ -82,6 +148,18 @@
         }
       ]
     },
+    "src/django_ray/management/commands/django_ray_purge_executions.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Bounded terminal execution retention, active-lease protection, cursor pagination, and external result cleanup are deterministic operational contracts."
+      }
+    },
+    "src/django_ray/management/commands/django_ray_replay.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Read-only local task replay, input redaction, callable boundary enforcement, and optional debugger hooks are deterministic CLI contracts."
+      }
+    },
     "src/django_ray/management/commands/django_ray_worker.py": {
       "default": {
         "category": "testable-behavior",
@@ -117,6 +195,22 @@
         "category": "testable-behavior",
         "rationale": "Immutable protocol-2 generation claims, route and target lineage, exact capability and attestation snapshots, normalized outcomes, and stopped-writer reverse refusal are deterministic SQLite and PostgreSQL migration contracts suited to exact schema and race tests."
       }
+    },
+    "src/django_ray/migrations/0029_lease_engine_and_hot_indexes.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "DB-clock lease expiration fields, policy-revision backfill, SQLite trigger capture/restore, and partial hot-path indexes are deterministic migration contracts suited to exact SQLite and PostgreSQL migration tests."
+      },
+      "overrides": [
+        {
+          "ranges": [
+            "20",
+            "41"
+          ],
+          "category": "environment-specific",
+          "rationale": "The non-SQLite early-return guards around SQLite trigger capture and restore are exercised by the PostgreSQL migration job rather than the monthly SQLite coverage phases."
+        }
+      ]
     },
     "src/django_ray/migrations/__init__.py": {
       "default": {
@@ -187,6 +281,12 @@
       "default": {
         "category": "testable-behavior",
         "rationale": "Ray Job RuntimeEnv identity rejection is a deterministic runner boundary that can be covered with exact submission and mismatch assertions."
+      }
+    },
+    "src/django_ray/runner/sync.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Synchronous runner BaseRunner alignment, completion persistence, and error handling are deterministic runner contracts."
       }
     },
     "src/django_ray/runtime/compiled_graph.py": {
@@ -370,6 +470,66 @@
       "default": {
         "category": "testable-behavior",
         "rationale": "Summary-shape predicates are deterministic compatibility behavior that can be covered with malformed and valid payload assertions."
+      }
+    },
+    "src/django_ray/tracing.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Optional OpenTelemetry tracer integration, W3C traceparent parsing, parent-child workflow spans, and fail-open lifecycle hooks are deterministic observability contracts."
+      }
+    },
+    "src/django_ray/worker/__init__.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Shared worker runtime helper functions, lease fencing utilities, and status counters are deterministic coordination contracts."
+      }
+    },
+    "src/django_ray/worker/claimer.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Worker mode resolution, queue claim fencing, and lease heartbeat management are deterministic control-plane contracts."
+      }
+    },
+    "src/django_ray/worker/dispatcher.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Ray Core, Ray Job, and synchronous task submission and reconnect coordination are deterministic worker dispatch contracts."
+      }
+    },
+    "src/django_ray/worker/loop.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Worker polling cadence, drain handling, transient DB backoff, and signal exit checks are deterministic loop contracts."
+      }
+    },
+    "src/django_ray/worker/maintenance.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Stuck-task detection, queue expiration, cancellation processing, and stale-lease adoption are deterministic worker maintenance contracts."
+      }
+    },
+    "src/django_ray/worker/reconciler.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Ray Job and Ray Core completion reconciliation, post-commit handle acknowledgement, and failure persistence are deterministic worker contracts."
+      }
+    },
+    "src/django_ray/worker/shutdown.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Graceful worker shutdown, ready-completion draining, cancellation handoff, and lease deactivation are deterministic shutdown contracts."
+      }
+    },
+    "src/django_ray/workflow/_types.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Shared workflow type definitions, option normalization, and leaf protocol data structures are deterministic contracts."
+      }
+    },
+    "src/django_ray/workflow/dsl.py": {
+      "default": {
+        "category": "testable-behavior",
+        "rationale": "Workflow DSL combinators, branching, fallback semantics, and explain() rendering are deterministic workflow contracts."
       }
     },
     "src/django_ray/workflows.py": {

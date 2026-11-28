@@ -1,20 +1,7 @@
 name: Upgrade Data Qualification
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/upgrade-qualification.yml
-      - qualification/upgrade/**
-      - qualification/transactions/Dockerfile
-      - qualification/transactions/probe.py
-      - qualification/docker/scenario.py
-      - src/django_ray/migrations/**
-      - src/django_ray/backends.py
-      - src/django_ray/input_storage.py
-      - src/django_ray/result_storage.py
-      - pyproject.toml
-      - uv.lock
+  workflow_call:
   workflow_dispatch:
 
 permissions:

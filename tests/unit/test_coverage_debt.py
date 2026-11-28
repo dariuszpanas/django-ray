@@ -648,17 +648,22 @@ def test_coverage_phase_requires_fresh_valid_timing_evidence(tmp_path: Path) -> 
     )
 
 
-def test_timing_evidence_rejects_non_regular_file_without_blocking(tmp_path: Path) -> None:
+def test_timing_evidence_rejects_non_regular_file_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     timing_directory = tmp_path / "local-ray-timing.json"
     timing_directory.mkdir()
 
-    started = time.monotonic()
+    def _forbid_open(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("non-regular timing path must be rejected via lstat before os.open")
+
+    monkeypatch.setattr(coverage_debt_module.os, "open", _forbid_open)
     error = coverage_debt_module._timing_evidence_error(
         timing_directory,
         expected_lane="local-ray",
     )
 
-    assert time.monotonic() - started < 1
     assert error == "required timing evidence is not a regular file"
 
 
@@ -1111,3 +1116,37 @@ def test_coverage_debt_module_retires_windows_job_object_helpers() -> None:
     )
     for name in retired_names:
         assert not hasattr(coverage_debt_module, name), name
+
+
+def test_declared_module_floors_and_classifications_cover_wave_modules() -> None:
+    floors = coverage_debt_module.load_module_floors(ROOT / "pyproject.toml")
+    classifications = json.loads(CLASSIFICATIONS.read_text(encoding="utf-8"))["files"]
+    expected_modules = (
+        "src/django_ray/_blob_storage.py",
+        "src/django_ray/_storage_types.py",
+        "src/django_ray/_version.py",
+        "src/django_ray/admin_views/__init__.py",
+        "src/django_ray/admin_views/actions.py",
+        "src/django_ray/admin_views/badges.py",
+        "src/django_ray/admin_views/diagnostics.py",
+        "src/django_ray/admin_views/sensitive.py",
+        "src/django_ray/conf/validation.py",
+        "src/django_ray/decorators.py",
+        "src/django_ray/management/commands/django_ray_purge_executions.py",
+        "src/django_ray/management/commands/django_ray_replay.py",
+        "src/django_ray/runner/sync.py",
+        "src/django_ray/worker/__init__.py",
+        "src/django_ray/worker/claimer.py",
+        "src/django_ray/worker/dispatcher.py",
+        "src/django_ray/worker/loop.py",
+        "src/django_ray/worker/maintenance.py",
+        "src/django_ray/worker/reconciler.py",
+        "src/django_ray/worker/shutdown.py",
+        "src/django_ray/workflow/_types.py",
+        "src/django_ray/workflow/dsl.py",
+    )
+    for module_path in floors:
+        assert (ROOT / module_path).is_file(), module_path
+    for module_path in expected_modules:
+        assert module_path in floors, f"missing module floor: {module_path}"
+        assert module_path in classifications, f"missing coverage classification: {module_path}"

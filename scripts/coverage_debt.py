@@ -176,8 +176,8 @@ class Measurement:
     def from_report(cls, report: dict[str, Any]) -> Measurement:
         if report.get("schema_version") != REPORT_SCHEMA_VERSION:
             raise CoverageDebtError("unsupported coverage-debt report schema")
-        if report.get("metric") != "line":
-            raise CoverageDebtError("coverage-debt reports must use the line metric")
+        if report.get("metric") not in {"line", "branch"}:
+            raise CoverageDebtError("coverage-debt reports must use the line or branch metric")
         totals = _mapping(report.get("totals"), "report totals")
         return cls.from_mapping(
             {
@@ -396,6 +396,116 @@ def _load_central_coverage_config(path: Path) -> dict[str, object]:
     }
 
 
+def load_module_floors(pyproject_path: Path) -> dict[str, float]:
+    """Load per-module minimum coverage floors from ``[tool.django_ray.coverage.module_floors]``."""
+    try:
+        config = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise CoverageDebtError(
+            f"cannot load module coverage floors from {pyproject_path}"
+        ) from error
+    django_ray_cfg = config.get("tool", {}).get("django_ray", {})
+    if not isinstance(django_ray_cfg, dict):
+        return {}
+    coverage_cfg = django_ray_cfg.get("coverage", {})
+    if not isinstance(coverage_cfg, dict):
+        return {}
+    raw_floors = coverage_cfg.get("module_floors", {})
+    if not raw_floors:
+        return {}
+    if not isinstance(raw_floors, dict):
+        raise CoverageDebtError("tool.django_ray.coverage.module_floors must be a table")
+    floors: dict[str, float] = {}
+    for raw_path, raw_floor in raw_floors.items():
+        normalized = _normalize_path(raw_path)
+        if normalized != raw_path or not normalized.startswith("src/django_ray/"):
+            raise CoverageDebtError(f"module floor path is not canonical: {raw_path!r}")
+        if (
+            isinstance(raw_floor, bool)
+            or not isinstance(raw_floor, (int, float))
+            or not math.isfinite(raw_floor)
+            or raw_floor < 0
+            or raw_floor > 100
+        ):
+            raise CoverageDebtError(
+                f"module floor for {normalized} must be a finite percentage between 0 and 100"
+            )
+        floors[normalized] = float(raw_floor)
+    return floors
+
+
+def check_module_floors(
+    coverage_path: Path,
+    pyproject_path: Path,
+) -> dict[str, dict[str, object]]:
+    """Enforce all configured per-module coverage floors against a coverage JSON export."""
+    from coverage.results import should_fail_under
+
+    central = _load_central_coverage_config(pyproject_path)
+    precision = cast(int, central["precision"])
+    floors = load_module_floors(pyproject_path)
+    try:
+        raw = json.loads(coverage_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CoverageDebtError(f"cannot load coverage JSON from {coverage_path}") from error
+    coverage = _mapping(raw, "coverage JSON")
+    files = _mapping(coverage.get("files"), "coverage files")
+    normalized_files = {_normalize_path(path): record for path, record in files.items()}
+
+    results: dict[str, dict[str, object]] = {}
+    failures: list[str] = []
+    for module_path, minimum in sorted(floors.items()):
+        raw_record = normalized_files.get(module_path)
+        if raw_record is None:
+            failures.append(f"{module_path}: missing from coverage data (floor {minimum:.2f}%)")
+            continue
+        file_record = _mapping(raw_record, f"coverage file {module_path}")
+        summary = _mapping(file_record.get("summary"), f"coverage file {module_path} summary")
+        observed_raw = summary.get("percent_covered")
+        if (
+            isinstance(observed_raw, bool)
+            or not isinstance(observed_raw, (int, float))
+            or not math.isfinite(observed_raw)
+        ):
+            raise CoverageDebtError(f"coverage file {module_path} has invalid percent_covered")
+        observed = float(observed_raw)
+        passed = not should_fail_under(observed, minimum, precision)
+        results[module_path] = {
+            "observed_percent": round(observed, precision),
+            "minimum_percent": round(minimum, precision),
+            "passed": passed,
+        }
+        if not passed:
+            failures.append(f"{module_path}: {observed:.2f}% < {minimum:.2f}%")
+    if failures:
+        raise CoverageDebtError("per-module coverage floor(s) failed: " + "; ".join(failures))
+    return results
+
+
+def _branch_summary(record: dict[str, Any], label: str) -> dict[str, object]:
+    summary = _mapping(record.get("summary"), f"{label} summary")
+    num_branches = _non_negative_int(summary.get("num_branches"), f"{label} num_branches")
+    covered_branches = _non_negative_int(
+        summary.get("covered_branches"), f"{label} covered_branches"
+    )
+    missing_branches = _non_negative_int(
+        summary.get("missing_branches"), f"{label} missing_branches"
+    )
+    partial_branches = _non_negative_int(
+        summary.get("num_partial_branches", 0), f"{label} num_partial_branches"
+    )
+    if covered_branches + missing_branches != num_branches:
+        raise CoverageDebtError(f"{label} branch totals do not add up")
+    branch_percent = f"{covered_branches / num_branches * 100:.2f}" if num_branches else "100.00"
+    return {
+        "num_branches": num_branches,
+        "covered_branches": covered_branches,
+        "missing_branches": missing_branches,
+        "partial_branches": partial_branches,
+        "branch_coverage_percent": branch_percent,
+    }
+
+
 def _summary(record: dict[str, Any], label: str) -> dict[str, object]:
     summary = _mapping(record.get("summary"), f"{label} summary")
     statements = _non_negative_int(summary.get("num_statements"), f"{label} statements")
@@ -450,8 +560,10 @@ def build_report(
     classifications_path: Path,
     pyproject_path: Path,
     source_commit: str,
+    *,
+    allow_branch: bool = False,
 ) -> dict[str, Any]:
-    """Build one deterministic, exact line-coverage debt report."""
+    """Build one deterministic, exact line- or branch-coverage debt report."""
     if not COMMIT_RE.fullmatch(source_commit):
         raise CoverageDebtError("source commit must be a full lowercase SHA")
     try:
@@ -460,7 +572,8 @@ def build_report(
         raise CoverageDebtError(f"cannot load coverage JSON from {coverage_path}") from error
     coverage = _mapping(raw, "coverage JSON")
     metadata = _mapping(coverage.get("meta"), "coverage metadata")
-    if metadata.get("branch_coverage") is not False:
+    branch_enabled = metadata.get("branch_coverage") is True
+    if metadata.get("branch_coverage") is not False and not (allow_branch and branch_enabled):
         raise CoverageDebtError("coverage debt currently supports line coverage only")
     files = _mapping(coverage.get("files"), "coverage files")
     central_config = _load_central_coverage_config(pyproject_path)
@@ -468,13 +581,29 @@ def build_report(
 
     debt_files: list[dict[str, Any]] = []
     aggregate = {"statements": 0, "covered_lines": 0, "missed_lines": 0}
+    branch_aggregate = {
+        "num_branches": 0,
+        "covered_branches": 0,
+        "missing_branches": 0,
+        "partial_branches": 0,
+    }
     for raw_path, raw_file in files.items():
         file_record = _mapping(raw_file, f"coverage file {raw_path}")
         summary = _summary(file_record, f"coverage file {raw_path}")
         for key in aggregate:
             aggregate[key] += cast(int, summary[key])
+        file_branch_summary: dict[str, object] | None = None
+        if branch_enabled:
+            file_branch_summary = _branch_summary(file_record, f"coverage file {raw_path}")
+            for key in branch_aggregate:
+                branch_aggregate[key] += cast(int, file_branch_summary[key])
         missed_lines = cast(int, summary["missed_lines"])
-        if missed_lines == 0:
+        missed_branches = (
+            cast(int, file_branch_summary["missing_branches"])
+            if file_branch_summary is not None
+            else 0
+        )
+        if missed_lines == 0 and missed_branches == 0:
             continue
         normalized_path = _normalize_path(raw_path)
         classification = classifications.get(normalized_path)
@@ -491,13 +620,14 @@ def build_report(
         missing_line_numbers = sorted(set(cast(list[int], raw_missing_lines)))
         if len(missing_line_numbers) != missed_lines:
             raise CoverageDebtError(f"coverage file {raw_path} missing-line totals do not agree")
-        debt_files.append(
-            {
-                "path": normalized_path,
-                **summary,
-                "uncovered_ranges": _uncovered_ranges(missing_line_numbers, classification),
-            }
-        )
+        entry: dict[str, Any] = {
+            "path": normalized_path,
+            **summary,
+            "uncovered_ranges": _uncovered_ranges(missing_line_numbers, classification),
+        }
+        if file_branch_summary is not None:
+            entry["branches"] = file_branch_summary
+        debt_files.append(entry)
     debt_files.sort(key=lambda item: (-cast(int, item["missed_lines"]), item["path"]))
 
     raw_totals = _mapping(coverage.get("totals"), "coverage totals")
@@ -507,14 +637,23 @@ def build_report(
             raise CoverageDebtError(
                 f"coverage file totals for {key} do not match the overall total"
             )
-    return {
+    report: dict[str, Any] = {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "metric": "line",
+        "metric": "branch" if branch_enabled else "line",
         "source_commit": source_commit,
         "central_configuration": central_config,
         "totals": totals,
         "files": debt_files,
     }
+    if branch_enabled:
+        branch_totals = _branch_summary({"summary": raw_totals}, "coverage totals")
+        for key, value in branch_aggregate.items():
+            if value != branch_totals[key]:
+                raise CoverageDebtError(
+                    f"coverage file branch totals for {key} do not match the overall total"
+                )
+        report["branch_totals"] = branch_totals
+    return report
 
 
 def _markdown_cell(value: object) -> str:
@@ -528,10 +667,16 @@ def render_markdown(report: dict[str, Any]) -> str:
     files = report.get("files")
     if not isinstance(files, list):
         raise CoverageDebtError("report files must be a list")
+    is_branch = report.get("metric") == "branch"
+    metric_note = (
+        "> This report measures **line and branch coverage**."
+        if is_branch
+        else "> This report measures **line coverage**. Branch coverage is a separate follow-up."
+    )
     lines = [
         "# Coverage debt report",
         "",
-        "> This report measures **line coverage**. Branch coverage is a separate follow-up.",
+        metric_note,
         "",
         "| Source commit | Statements | Covered | Missed | Coverage | Floor | Precision |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -542,13 +687,31 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{config.get('precision')} decimals |"
         ),
         "",
-        "## Debt by file",
-        "",
-        "Files are sorted by missed lines, then by path.",
-        "",
-        "| File | Statements | Covered | Missed | Coverage |",
-        "|---|---:|---:|---:|---:|",
     ]
+    if is_branch and isinstance(report.get("branch_totals"), dict):
+        bt = cast(dict[str, object], report["branch_totals"])
+        lines.extend(
+            [
+                "| Branches | Covered branches | Missed branches | Partial | Branch coverage |",
+                "|---:|---:|---:|---:|---:|",
+                (
+                    f"| {bt.get('num_branches')} | {bt.get('covered_branches')} | "
+                    f"{bt.get('missing_branches')} | {bt.get('partial_branches')} | "
+                    f"{bt.get('branch_coverage_percent')}% |"
+                ),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Debt by file",
+            "",
+            "Files are sorted by missed lines, then by path.",
+            "",
+            "| File | Statements | Covered | Missed | Coverage |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
     for raw_file in files:
         file_record = _mapping(raw_file, "report file")
         lines.append(
@@ -618,6 +781,7 @@ def coverage_phases(
     *,
     default_timeout_seconds: float,
     local_ray_timeout_seconds: float,
+    branch: bool = False,
 ) -> tuple[CoveragePhase, CoveragePhase]:
     """Build the exact ordered coverage phases used locally and in automation."""
     for label, value in (
@@ -630,6 +794,7 @@ def coverage_phases(
     coverage_arguments = (
         "--cov=src",
         "--cov-config=pyproject.toml",
+        *(("--cov-branch",) if branch else ()),
         "--cov-report=",
         "--cov-fail-under=0",
         "--maxfail=1",
@@ -684,12 +849,15 @@ def coverage_phases(
     return default_resources, local_ray
 
 
-def _phase_environment() -> dict[str, str]:
+def _phase_environment(*, branch: bool = False) -> dict[str, str]:
     """Return the deterministic environment inherited by isolated coverage phases."""
     environment = os.environ.copy()
     # Local-Ray coverage reuses the synchronized driver instead of asking Ray's
     # uv hook to create a second packaged environment without installed dependencies.
     environment["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
+    if branch:
+        # Python 3.12 sys.monitoring does not record branch arcs; select ctrace explicitly.
+        environment["COVERAGE_CORE"] = "ctrace"
     environment.pop("GIT_CONFIG_PARAMETERS", None)
     for name in tuple(environment):
         if re.fullmatch(r"GIT_CONFIG_(?:KEY|VALUE)_\d+", name):
@@ -700,14 +868,14 @@ def _phase_environment() -> dict[str, str]:
     return environment
 
 
-def _launch_phase(root: Path, phase: CoveragePhase) -> _OwnedPhaseProcess:
+def _launch_phase(root: Path, phase: CoveragePhase, *, branch: bool = False) -> _OwnedPhaseProcess:
     require_linux()
     process = subprocess.Popen(
         phase.command,
         cwd=root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        env=_phase_environment(),
+        env=_phase_environment(branch=branch),
         start_new_session=True,
     )
     return _OwnedPhaseProcess(process=process)
@@ -716,8 +884,11 @@ def _launch_phase(root: Path, phase: CoveragePhase) -> _OwnedPhaseProcess:
 def _owned_process_tree_is_active(owned: _OwnedPhaseProcess) -> bool:
     """Return whether the retained Linux process group still contains live work."""
     require_linux()
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        raise CoverageDebtError("Linux process-group inspection requires os.killpg")
     try:
-        os.killpg(owned.process.pid, 0)
+        killpg(owned.process.pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -730,12 +901,15 @@ def _terminate_owned_process_tree(owned: _OwnedPhaseProcess) -> str | None:
     require_linux()
     process = owned.process
     error_message: str | None = None
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except OSError as error:
-        error_message = str(error)
+    killpg = getattr(os, "killpg", None)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if killpg is not None and sigkill is not None:
+        try:
+            killpg(process.pid, sigkill)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            error_message = str(error)
 
     if error_message is not None and process.poll() is None:
         try:
@@ -855,7 +1029,12 @@ def _reject_json_constant(constant: str) -> None:
     raise ValueError(f"invalid JSON number: {constant}")
 
 
-def _timing_evidence_error(path: Path, *, expected_lane: str) -> str | None:
+def _timing_evidence_error(
+    path: Path,
+    *,
+    expected_lane: str,
+    branch: bool = False,
+) -> str | None:
     """Return why required timing evidence is unusable, or ``None``."""
     try:
         path_metadata = path.lstat()
@@ -1002,6 +1181,8 @@ def _timing_evidence_error(path: Path, *, expected_lane: str) -> str | None:
         "--cov-append",
         "--maxfail=1",
     }
+    if branch:
+        required_arguments.add("--cov-branch")
     if (
         not isinstance(pytest_arguments, list)
         or not all(isinstance(argument, str) for argument in pytest_arguments)
@@ -1012,7 +1193,12 @@ def _timing_evidence_error(path: Path, *, expected_lane: str) -> str | None:
     return None
 
 
-def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
+def run_coverage_phase(
+    root: Path,
+    phase: CoveragePhase,
+    *,
+    branch: bool = False,
+) -> dict[str, object]:
     """Run one phase with a hard process-tree deadline and a capped log tail."""
     require_linux()
     phase.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1027,7 +1213,7 @@ def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
     launch_error: str | None = None
     capture = _BoundedPhaseOutput(MAX_PHASE_LOG_BYTES)
     try:
-        owned = _launch_phase(root, phase)
+        owned = _launch_phase(root, phase, branch=True) if branch else _launch_phase(root, phase)
     except (OSError, CoverageDebtError) as error:
         launch_error = " ".join(str(error).split())[:1_000]
         capture.append((launch_error + "\n").encode())
@@ -1101,7 +1287,11 @@ def run_coverage_phase(root: Path, phase: CoveragePhase) -> dict[str, object]:
     timing_error = (
         None
         if phase.timing_path is None
-        else _timing_evidence_error(phase.timing_path, expected_lane=phase.name)
+        else (
+            _timing_evidence_error(phase.timing_path, expected_lane=phase.name, branch=True)
+            if branch
+            else _timing_evidence_error(phase.timing_path, expected_lane=phase.name)
+        )
     )
     if outcome == "passed" and timing_error is not None:
         outcome = "invalid-timing-evidence"
@@ -1211,13 +1401,23 @@ def run_coverage_phases(
     *,
     default_timeout_seconds: float,
     local_ray_timeout_seconds: float,
+    branch: bool = False,
 ) -> None:
     """Collect replace-then-append coverage with durable per-phase diagnostics."""
     require_linux()
-    phases = coverage_phases(
-        output_dir,
-        default_timeout_seconds=default_timeout_seconds,
-        local_ray_timeout_seconds=local_ray_timeout_seconds,
+    phases = (
+        coverage_phases(
+            output_dir,
+            default_timeout_seconds=default_timeout_seconds,
+            local_ray_timeout_seconds=local_ray_timeout_seconds,
+            branch=True,
+        )
+        if branch
+        else coverage_phases(
+            output_dir,
+            default_timeout_seconds=default_timeout_seconds,
+            local_ray_timeout_seconds=local_ray_timeout_seconds,
+        )
     )
     records: list[dict[str, object]] = []
     _write_phase_summary(output_dir, records, complete=False, failure=None)
@@ -1241,7 +1441,11 @@ def run_coverage_phases(
         raise CoverageDebtError(failure)
 
     for phase in phases:
-        record = run_coverage_phase(root, phase)
+        record = (
+            run_coverage_phase(root, phase, branch=True)
+            if branch
+            else run_coverage_phase(root, phase)
+        )
         records.append(record)
         if record["outcome"] != "passed":
             failure = f"phase {phase.name} ended with outcome {record['outcome']}"
@@ -1467,6 +1671,11 @@ def _parser() -> argparse.ArgumentParser:
     phases.add_argument("--output-dir", type=Path, required=True)
     phases.add_argument("--default-timeout-seconds", type=float, required=True)
     phases.add_argument("--local-ray-timeout-seconds", type=float, required=True)
+    phases.add_argument(
+        "--branch",
+        action="store_true",
+        help="measure branch arcs using the ctrace core alongside line coverage",
+    )
 
     render = subparsers.add_parser("render", help="render exact JSON and Markdown reports")
     render.add_argument("--coverage-json", type=Path, required=True)
@@ -1475,6 +1684,18 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--source-commit", required=True)
     render.add_argument("--json-output", type=Path, required=True)
     render.add_argument("--markdown-output", type=Path, required=True)
+    render.add_argument(
+        "--branch",
+        action="store_true",
+        help="accept branch-coverage JSON exports and render branch totals",
+    )
+
+    floors = subparsers.add_parser(
+        "check-floors",
+        help="enforce per-module coverage floors declared in pyproject.toml",
+    )
+    floors.add_argument("--coverage-json", type=Path, required=True)
+    floors.add_argument("--pyproject", type=Path, required=True)
 
     tracker = subparsers.add_parser("update-tracker", help="update the single marked issue")
     tracker.add_argument("--report-json", type=Path, required=True)
@@ -1497,6 +1718,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.output_dir,
                 default_timeout_seconds=arguments.default_timeout_seconds,
                 local_ray_timeout_seconds=arguments.local_ray_timeout_seconds,
+                branch=arguments.branch,
             )
             print("Coverage-debt phases completed with combined coverage data.")
             return 0
@@ -1506,12 +1728,17 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.classifications,
                 arguments.pyproject,
                 arguments.source_commit,
+                allow_branch=arguments.branch,
             )
             write_report(report, arguments.json_output, arguments.markdown_output)
             print(
                 f"Wrote {arguments.json_output} and {arguments.markdown_output} "
                 f"for {report['source_commit']}"
             )
+            return 0
+        if arguments.command == "check-floors":
+            results = check_module_floors(arguments.coverage_json, arguments.pyproject)
+            print(f"Verified {len(results)} per-module coverage floor(s).")
             return 0
         report = _load_report(arguments.report_json)
         token = os.environ.get(arguments.token_env, "")

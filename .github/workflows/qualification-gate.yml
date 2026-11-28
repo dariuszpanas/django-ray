@@ -24,6 +24,8 @@ jobs:
       latency: ${{ steps.select.outputs.latency }}
       cancellation: ${{ steps.select.outputs.cancellation }}
       monitoring: ${{ steps.select.outputs.monitoring }}
+      data: ${{ steps.select.outputs.data }}
+      transactions: ${{ steps.select.outputs.transactions }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,10 +63,20 @@ jobs:
     if: needs.selection.outputs.monitoring == 'true'
     uses: ./.github/workflows/monitoring-qualification.yml
 
+  data:
+    needs: selection
+    if: needs.selection.outputs.data == 'true'
+    uses: ./.github/workflows/upgrade-qualification.yml
+
+  transactions:
+    needs: selection
+    if: needs.selection.outputs.transactions == 'true'
+    uses: ./.github/workflows/transaction-qualification.yml
+
   qualification-gate:
     name: Qualification Gate
     if: always()
-    needs: [selection, application, native, latency, cancellation, monitoring]
+    needs: [selection, application, native, latency, cancellation, monitoring, data, transactions]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

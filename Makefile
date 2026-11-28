@@ -5,7 +5,7 @@
 # For load testing: see mk/loadtest.mk
 # For Docker: see mk/docker.mk
 
-.PHONY: all install configure-git commit-check commit-title-check commit-policy-test format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov test-suite-inventory coverage-debt check ci build clean help
+.PHONY: all install configure-git commit-check commit-title-check commit-policy-test format fix lint typecheck audit-dependencies test test-xdist test-unit test-integration test-postgres test-testproject test-cov coverage-floors test-suite-inventory coverage-debt check ci build clean help
 .PHONY: migrate runserver shell makemigrations createsuperuser
 .PHONY: worker worker-sync worker-local worker-all
 .PHONY: docs-build docs-build-strict docs-serve workflow-check spelling-check
@@ -140,7 +140,7 @@ test-xdist:
 		-m "not real_ray and not live_cluster and not postgresql"
 
 # Local pyrn acceleration helpers; override PYRN=pyrn to use a global installation.
-PYRN ?= uvx --isolated pyrn==0.2.1
+PYRN ?= uvx --isolated pyrn==0.2.3
 pyrn-doctor:
 	$(PYRN) doctor --repo .
 
@@ -183,40 +183,7 @@ test-integration:
 # Exercise database coordination against a real PostgreSQL server.
 test-postgres:
 	python scripts/require_linux.py
-	python -m pytest \
-		tests/integration/test_postgresql_coordination.py \
-		tests/integration/test_postgresql_coordination_progress_and_input.py \
-		tests/integration/test_postgresql_coordination_rq2_and_purge.py \
-		tests/integration/test_postgresql_maintenance_scans.py \
-		tests/integration/test_postgresql_maintenance_plans.py \
-		tests/integration/test_doctor_postgresql.py \
-		tests/integration/test_lease_policy_postgresql.py \
-		tests/integration/test_runtime_env_maintenance_postgresql.py \
-		tests/integration/test_sample_admission.py \
-		tests/integration/test_transactional_enqueue.py \
-		tests/integration/test_postgresql_workflow_progress_storage.py \
-		tests/integration/test_postgresql_workflow_progress_reads.py \
-		tests/integration/test_postgresql_polling.py \
-		tests/integration/test_postgresql_metrics.py \
-		tests/integration/test_protocol_coordination.py \
-		tests/integration/test_ray_target_coordination.py \
-		tests/integration/test_ray_target_routing_coordination.py \
-		tests/integration/test_ray_worker_target_capabilities.py \
-		tests/integration/test_protocol_status.py \
-		tests/integration/test_worker_readiness.py \
-		tests/integration/test_execution_protocol_schema_migration.py \
-		tests/integration/test_ray_target_persistence_migration.py \
-		tests/integration/test_ray_task_target_binding_migration.py \
-		tests/integration/test_ray_target_route_migration.py \
-		tests/integration/test_ray_worker_target_capability_migration.py \
-		tests/integration/test_ray_task_target_execution_evidence_migration.py \
-		tests/integration/test_priority_migration.py \
-		tests/integration/test_queue_expiration_migration.py \
-		tests/integration/test_request_reference_schema_migration.py \
-		tests/integration/test_task_id_uniqueness_migration.py \
-		tests/integration/test_workflow_run_allocation_migration.py \
-		tests/unit/test_application_offline_settings.py \
-		-m postgresql -vv --durations=20
+	python -m pytest tests -m postgresql -vv --durations=20
 
 # Validate the bundled sample project's user-facing boundary
 test-testproject:
@@ -229,6 +196,7 @@ test-testproject:
 		tests/unit/test_sample_workload_limits.py \
 		tests/integration/test_testproject_admin_theme.py \
 		tests/integration/test_workflow_progress_api.py \
+		tests/unit/test_admin_live_polling.py \
 		tests/unit/test_sample_security.py \
 		tests/unit/test_ray_data_golden_path.py \
 		tests/unit/test_testproject_workflows.py \
@@ -240,12 +208,19 @@ test-testproject:
 		--cov-report=term \
 		--cov-fail-under=$(COVERAGE_TESTPROJECT_MIN)
 
+# Enforce all per-module coverage floors declared in pyproject.toml
+coverage-floors:
+	coverage json --rcfile=pyproject.toml -o .coverage-floors.json
+	python scripts/coverage_debt.py check-floors --coverage-json .coverage-floors.json --pyproject pyproject.toml
+	rm -f .coverage-floors.json
+
 # Run tests with coverage
 test-cov:
 	python scripts/require_linux.py
 	pytest -m "not live_cluster" --cov=src --cov-report=html --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
+	$(MAKE) coverage-floors
 
 # Collect exact execution-contract and CI-lane counts without running tests.
 test-suite-inventory:
@@ -265,6 +240,9 @@ coverage-debt:
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
 	coverage report --fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage json --rcfile=pyproject.toml --pretty-print -o "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage.py.json"
+	python scripts/coverage_debt.py check-floors \
+		--coverage-json "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage.py.json" \
+		--pyproject pyproject.toml
 	python scripts/coverage_debt.py render \
 		--coverage-json "$(COVERAGE_DEBT_OUTPUT_DIR)/coverage.py.json" \
 		--classifications .github/coverage-debt-classifications.json \
@@ -296,6 +274,7 @@ ci:
 	pytest -m "not live_cluster" --cov=src --cov-report=xml --cov-report=term --cov-fail-under=$(COVERAGE_GLOBAL_MIN)
 	coverage report --include="src/django_ray/management/commands/django_ray_worker.py" --fail-under=$(COVERAGE_WORKER_MIN)
 	coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=$(COVERAGE_RAY_JOB_MIN)
+	$(MAKE) coverage-floors
 	$(MAKE) test-testproject
 	zensical build --strict --clean
 	uv build
@@ -341,7 +320,7 @@ createsuperuser:
 # Worker
 # =============================================================================
 
-# Start worker (default: Ray Job API mode)
+# Start worker (default: Ray Core mode; pass --ray-job for Ray Job API)
 worker:
 	cd testproject && python manage.py django_ray_worker --queue=default
 
@@ -357,9 +336,10 @@ worker-local:
 worker-all:
 	cd testproject && python manage.py django_ray_worker --all-queues --local
 
-# Connect to Ray cluster
+# Connect to external Ray cluster (override CLUSTER_ADDRESS as needed)
+CLUSTER_ADDRESS ?= http://127.0.0.1:8265
 worker-cluster:
-	cd testproject && python manage.py django_ray_worker --queue=default --cluster=ray://localhost:10001
+	cd testproject && python manage.py django_ray_worker --queue=default --cluster=$(CLUSTER_ADDRESS)
 
 # =============================================================================
 # Utilities
@@ -391,11 +371,20 @@ help:
 	@echo "Testing:"
 	@echo "  test           - Run all tests"
 	@echo "  test-xdist     - Run the default-resource subset with configurable xdist workers"
+	@echo "  test-pyrn      - Run the default-resource subset with pyrn"
+	@echo "  test-pyrn-tia  - Run TIA-selected default-resource tests with pyrn"
+	@echo "  test-pyrn-cov  - Run default-resource tests with pyrn sysmon coverage"
+	@echo "  pyrn-doctor    - Check local pyrn runner configuration"
+	@echo "  pyrn-plan      - Preview pyrn TIA test plan against COMMIT_BASE"
+	@echo "  pyrn-daemon-start - Start the local pyrn background daemon"
+	@echo "  pyrn-daemon-stop  - Stop the local pyrn background daemon"
+	@echo "  pyrn-daemon-status - Check local pyrn background daemon status"
 	@echo "  test-unit      - Run unit tests only"
 	@echo "  test-integration - Run integration tests only"
 	@echo "  test-postgres  - Run PostgreSQL coordination tests"
 	@echo "  test-testproject - Validate the bundled sample project"
-	@echo "  test-cov       - Run tests with coverage"
+	@echo "  test-cov       - Run tests with coverage and declared per-module floors"
+	@echo "  coverage-floors - Enforce per-module coverage floors from pyproject.toml"
 	@echo "  test-suite-inventory - Classify collected tests by execution contract"
 	@echo "  coverage-debt  - Build exact JSON and Markdown line-coverage debt reports"
 	@echo "  k8s-final-gate-preflight - Validate a guarded local KubeRay gate without mutations"
@@ -411,11 +400,11 @@ help:
 	@echo "  createsuperuser - Create admin user"
 	@echo ""
 	@echo "Worker:"
-	@echo "  worker         - Start worker (Ray Job API)"
+	@echo "  worker         - Start worker (default: Ray Core; pass --ray-job for Ray Job API)"
 	@echo "  worker-local   - Start worker (local Ray) [recommended]"
 	@echo "  worker-sync    - Start worker (no Ray, for testing)"
 	@echo "  worker-all     - Process all queues (local Ray)"
-	@echo "  worker-cluster - Connect to ray://localhost:10001"
+	@echo "  worker-cluster - Connect to external Ray cluster (CLUSTER_ADDRESS)"
 	@echo ""
 	@echo "CI/CD:"
 	@echo "  commit-check   - Validate commits from COMMIT_BASE through COMMIT_HEAD"

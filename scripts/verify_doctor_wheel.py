@@ -89,25 +89,27 @@ def verify() -> None:
             environment=environment,
         )
         report = json.loads(output)
+        expected_deferred = [
+            "target",
+            "queue_capacity",
+            "artifact_availability",
+            "orphan_inventory",
+        ]
         if not (
-            status == 2
+            status == 0
             and report["schema"] == "django-ray.doctor"
             and report["schema_version"] == 1
-            and report["exit_code"] == 2
-            and not report["complete"]
+            and report["status"] == "ok"
+            and report["exit_code"] == 0
+            and report["complete"] is True
+            and report["deferred_sections"] == expected_deferred
             and report["cleanup_confirmed"]
             and report["sections"]["configuration"]["outcome"] == "observed"
             and report["sections"]["database"]["values"] == {"vendor": "sqlite", "read_only": True}
             and report["sections"]["migrations"]["values"]["missing"] == 0
             and report["sections"]["work"]["values"]["queued"] == 0
             and all(
-                report["sections"][name]["code"] == "not_implemented"
-                for name in (
-                    "target",
-                    "queue_capacity",
-                    "artifact_availability",
-                    "orphan_inventory",
-                )
+                report["sections"][name]["code"] == "not_implemented" for name in expected_deferred
             )
             and hashlib.sha256(database.read_bytes()).digest() == before
         ):
@@ -115,7 +117,7 @@ def verify() -> None:
     if directory.exists():
         raise RuntimeError("Installed doctor fixture was not removed")
     print(
-        "Installed doctor: owned SQLite observations, incomplete exit 2, read-only preservation and cleanup passed"
+        "Installed doctor: owned SQLite observations, healthy exit 0, read-only preservation and cleanup passed"
     )
 
 

@@ -224,10 +224,13 @@
       },
       "selection": {
         "paths": [
+          "tests/unit/test_architecture_conformance.py",
           "tests/unit/test_check_conventional_commits.py",
           "tests/unit/test_ci_workflow_policy.py",
+          "tests/unit/test_cli_docs_parity.py",
           "tests/unit/test_coverage_debt.py",
           "tests/unit/test_docs_theme.py",
+          "tests/unit/test_k8s_security_manifests.py",
           "tests/unit/test_makefile_test_targets.py",
           "tests/unit/test_local_ray.py",
           "tests/unit/test_require_linux.py",
@@ -252,23 +255,34 @@
       },
       "selection": {
         "paths": [
+          "tests/integration/test_ray_job_real_ray.py",
           "tests/integration/test_worker.py",
           "tests/unit/test_distributed.py",
           "tests/unit/test_distributed_mocked.py",
+          "tests/unit/test_django_ray_replay_command.py",
+          "tests/unit/test_entrypoint_completion_and_offload.py",
           "tests/unit/test_execution_codec.py",
           "tests/unit/test_ray_core.py",
+          "tests/unit/test_ray_core_cancellation_recovery.py",
           "tests/unit/test_ray_core_runner.py",
           "tests/unit/test_ray_job.py",
+          "tests/unit/test_ray_job_address_allowlist.py",
           "tests/unit/test_ray_job_request_storage.py",
           "tests/unit/test_ray_target_probe.py",
           "tests/unit/test_remote.py",
           "tests/unit/test_remote_progress_actor.py",
           "tests/unit/test_remote_real_ray.py",
+          "tests/unit/test_security_boundaries.py",
           "tests/unit/test_target_attestation.py",
           "tests/unit/test_target_execution_codec.py",
           "tests/unit/test_target_execution_transport.py",
+          "tests/unit/test_w4_security_closures.py",
+          "tests/unit/test_w4_worker_resilience.py",
+          "tests/unit/test_wave2_security_invariants.py",
           "tests/unit/test_worker_command_coverage.py",
           "tests/unit/test_worker_command_runtime.py",
+          "tests/unit/test_worker_drain_and_decomposition.py",
+          "tests/unit/test_worker_fencing_and_recovery.py",
           "tests/unit/test_worker_mode_selection.py",
           "tests/unit/test_worker_reconnect_cancellation_and_shutdown.py",
           "tests/unit/test_worker_reconnect_completion_and_timeout.py",
@@ -289,8 +303,10 @@
         "paths": [
           "tests/integration/test_failure_injection.py",
           "tests/integration/test_live_failure_injection.py",
+          "tests/integration/test_phase3_fault_matrix.py",
           "tests/integration/test_protocol_coordination.py",
           "tests/integration/test_protocol_status.py",
+          "tests/integration/test_purge_executions.py",
           "tests/integration/test_worker_readiness.py",
           "tests/integration/test_postgresql_coordination.py",
           "tests/integration/test_postgresql_coordination_progress_and_input.py",
@@ -307,6 +323,7 @@
           "tests/unit/test_maintenance_plan_diagnostic.py",
           "tests/unit/test_polling.py",
           "tests/unit/test_polling_benchmark_command.py",
+          "tests/unit/test_query_budget_regressions.py",
           "tests/unit/test_reconciliation.py",
           "tests/unit/test_target_execution_evidence.py",
           "tests/unit/test_worker_reconnect_cancellation_and_shutdown.py",
@@ -328,6 +345,7 @@
         "paths": [
           "tests/integration/test_execution_protocol_schema_migration.py",
           "tests/integration/test_input_payload_migration.py",
+          "tests/integration/test_lease_engine_0029_migration.py",
           "tests/integration/test_priority_migration.py",
           "tests/integration/test_queue_expiration_migration.py",
           "tests/integration/test_ray_task_target_binding_migration.py",
@@ -337,6 +355,7 @@
           "tests/integration/test_ray_worker_target_capability_migration.py",
           "tests/integration/test_request_reference_schema_migration.py",
           "tests/integration/test_task_id_uniqueness_migration.py",
+          "tests/integration/test_trigger_retention.py",
           "tests/integration/test_workflow_plan_migration.py",
           "tests/integration/test_workflow_progress_detail_storage_migration.py",
           "tests/integration/test_workflow_progress_migration.py",
@@ -359,8 +378,17 @@
           "tests/integration/test_task_execution.py",
           "tests/unit/test_backends.py",
           "tests/unit/test_cancellation.py",
+          "tests/unit/test_django6_backend_parity_and_signals.py",
           "tests/unit/test_lifecycle.py",
+          "tests/unit/test_lifecycle_retry_hygiene.py",
+          "tests/unit/test_ray_task_decorator.py",
           "tests/unit/test_retry.py",
+          "tests/unit/test_retry_jitter_and_denylist.py",
+          "tests/unit/test_w4_runtime_storage_dsl.py",
+          "tests/unit/test_w5_runtime_fixes.py",
+          "tests/unit/test_workflow_dsl_explain.py",
+          "tests/unit/test_workflow_experimental_invariants.py",
+          "tests/unit/test_workflow_fault_and_strategy.py",
           "tests/unit/test_workflow_plans.py",
           "tests/unit/test_workflows.py",
           "tests/unit/test_workflows_progress_and_dispatch.py",
@@ -378,17 +406,26 @@
       },
       "selection": {
         "paths": [
+          "tests/unit/test_blob_storage_engine.py",
+          "tests/unit/test_default_settings_and_checks.py",
+          "tests/unit/test_doctor_exit_zero_and_cli.py",
           "tests/unit/test_input_storage.py",
           "tests/unit/test_logging.py",
           "tests/unit/test_metrics.py",
           "tests/unit/test_observability.py",
+          "tests/unit/test_perf_reads_and_metrics.py",
           "tests/unit/test_redaction.py",
           "tests/unit/test_result_buffer.py",
           "tests/unit/test_result_fold.py",
+          "tests/unit/test_result_fold_buffer_perf.py",
           "tests/unit/test_result_storage.py",
           "tests/unit/test_runtime_env.py",
           "tests/unit/test_serialization.py",
-          "tests/unit/test_settings.py"
+          "tests/unit/test_settings.py",
+          "tests/unit/test_structured_logging.py",
+          "tests/unit/test_tracing_otel.py",
+          "tests/unit/test_w4_core_db_perf.py",
+          "tests/unit/test_w5_core_fixes.py"
         ]
       }
     },
@@ -410,7 +447,13 @@
           "tests/integration/test_api_executions.py",
           "tests/integration/test_sample_bearer_input.py",
           "tests/integration/test_testproject_admin_theme.py",
-          "tests/integration/test_workflow_progress_api.py"
+          "tests/integration/test_workflow_progress_api.py",
+          "tests/unit/test_admin_decomposition.py",
+          "tests/unit/test_admin_live_polling.py",
+          "tests/unit/test_admin_security.py",
+          "tests/unit/test_admin_ux_and_wcag.py",
+          "tests/unit/test_testproject_ux_and_api_contracts.py",
+          "tests/unit/test_w4_admin_ux_polish.py"
         ]
       }
     }
@@ -433,6 +476,7 @@
           "tests/unit/test_sample_workload_limits.py",
           "tests/integration/test_testproject_admin_theme.py",
           "tests/integration/test_workflow_progress_api.py",
+          "tests/unit/test_admin_live_polling.py",
           "tests/unit/test_sample_security.py",
           "tests/unit/test_ray_data_golden_path.py",
           "tests/unit/test_testproject_workflows.py",
@@ -465,11 +509,11 @@
     {
       "id": "supported-python",
       "owner": "Required Python compatibility and source coverage gate",
-      "contract": "Runs the normal suite with source coverage on every supported Python version.",
+      "contract": "Represents the non-live-cluster suite across all three supported Python versions; ci.yml runs portable runtime tests + real_ray per version while delegating tooling/repo_policy to Testproject & Tooling and PostgreSQL-only cases to PostgreSQL Coordination & Polling.",
       "variants": 3,
       "skip_policy": {
         "mode": "allow",
-        "reason": "The general lane intentionally selects backend-specific and capability cases that self-skip outside their dedicated resource jobs."
+        "reason": "The general lane models the broad supported-Python matrix; ci.yml excludes tooling and PostgreSQL-only tests from the per-Python portable step and executes them in dedicated blocking jobs."
       },
       "selection": {
         "paths": [
@@ -494,38 +538,7 @@
       ],
       "selection": {
         "paths": [
-          "tests/integration/test_execution_protocol_schema_migration.py",
-          "tests/integration/test_protocol_coordination.py",
-          "tests/integration/test_protocol_status.py",
-          "tests/integration/test_worker_readiness.py",
-          "tests/integration/test_postgresql_coordination.py",
-          "tests/integration/test_postgresql_coordination_progress_and_input.py",
-          "tests/integration/test_postgresql_coordination_rq2_and_purge.py",
-          "tests/integration/test_postgresql_maintenance_scans.py",
-          "tests/integration/test_postgresql_maintenance_plans.py",
-          "tests/integration/test_doctor_postgresql.py",
-          "tests/integration/test_lease_policy_postgresql.py",
-          "tests/integration/test_runtime_env_maintenance_postgresql.py",
-          "tests/integration/test_postgresql_metrics.py",
-          "tests/integration/test_transactional_enqueue.py",
-          "tests/integration/test_sample_admission.py",
-          "tests/integration/test_postgresql_polling.py",
-          "tests/integration/test_postgresql_workflow_progress_reads.py",
-          "tests/integration/test_postgresql_workflow_progress_storage.py",
-          "tests/integration/test_priority_migration.py",
-          "tests/integration/test_queue_expiration_migration.py",
-          "tests/integration/test_ray_task_target_binding_migration.py",
-          "tests/integration/test_ray_task_target_execution_evidence_migration.py",
-          "tests/integration/test_ray_target_coordination.py",
-          "tests/integration/test_ray_target_persistence_migration.py",
-          "tests/integration/test_ray_target_route_migration.py",
-          "tests/integration/test_ray_target_routing_coordination.py",
-          "tests/integration/test_ray_worker_target_capabilities.py",
-          "tests/integration/test_ray_worker_target_capability_migration.py",
-          "tests/integration/test_request_reference_schema_migration.py",
-          "tests/integration/test_task_id_uniqueness_migration.py",
-          "tests/integration/test_workflow_run_allocation_migration.py",
-          "tests/unit/test_application_offline_settings.py"
+          "tests"
         ],
         "include_markers": [
           "postgresql"
@@ -568,6 +581,7 @@
           "tests/unit/test_sample_workload_limits.py",
           "tests/integration/test_testproject_admin_theme.py",
           "tests/integration/test_workflow_progress_api.py",
+          "tests/unit/test_admin_live_polling.py",
           "tests/unit/test_sample_security.py",
           "tests/unit/test_ray_data_golden_path.py",
           "tests/unit/test_testproject_workflows.py",
@@ -579,13 +593,35 @@
       }
     },
     {
+      "id": "tooling-and-repo-policy",
+      "owner": "Required repository policy and tooling gate",
+      "contract": "Runs tooling tests on Python 3.12 (with repo_policy AST/filesystem scanners executed full without TIA or CAS cache).",
+      "variants": 1,
+      "skip_policy": {
+        "mode": "allow",
+        "reason": "Platform-gated tooling checks self-skip outside Linux while repository policy assertions execute unconditionally."
+      },
+      "selection": {
+        "paths": [
+          "tests"
+        ],
+        "include_markers": [
+          "tooling"
+        ],
+        "exclude_markers": [
+          "live_cluster",
+          "real_ray"
+        ]
+      }
+    },
+    {
       "id": "dependency-compatibility",
       "owner": "Required minimum and latest dependency gate",
-      "contract": "Repeats the portable subset under minimum-direct and latest dependency resolutions.",
+      "contract": "Repeats the non-tooling portable subset under minimum-direct and latest dependency resolutions.",
       "variants": 2,
       "skip_policy": {
         "mode": "allow",
-        "reason": "Dependency jobs intentionally select backend-specific and optional-capability cases that self-skip without their dedicated resources."
+        "reason": "Dependency jobs intentionally select backend-specific and optional-capability cases that self-skip without their dedicated resources while excluding tooling."
       },
       "selection": {
         "paths": [
@@ -593,7 +629,8 @@
         ],
         "exclude_markers": [
           "live_cluster",
-          "real_ray"
+          "real_ray",
+          "tooling"
         ]
       }
     }
@@ -617,11 +654,13 @@
         "tests/integration/test_api.py",
         "tests/integration/test_admin.py",
         "tests/integration/test_admin_sensitive_diagnostics.py",
+        "tests/unit/test_admin_live_polling.py",
         "tests/javascript/landing_auth.test.mjs",
         "tests/javascript/sensitive_task_data_theme.test.mjs",
+        "tests/javascript/task_live.test.mjs",
         "tests/javascript/workflow_diagnostics.test.mjs"
       ],
-      "reason": "Three collected pytest cases launch nested Node suites for dashboard authentication, privileged diagnostic theme selection, and lazy admin diagnostics; browser behavior overlaps surrounding HTTP adapter tests.",
+      "reason": "Four collected pytest cases launch nested Node suites for dashboard authentication, privileged diagnostic theme selection, live Admin polling, and lazy admin diagnostics; browser behavior overlaps surrounding HTTP adapter tests.",
       "review": "Keep browser behavior distinct while avoiding repeated endpoint assertions; share only proven harness pieces."
     },
     {

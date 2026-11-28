@@ -53,10 +53,12 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert EXPECTED_WORKFLOW_MODULE_FILES == {
         "django_ray/workflows.py",
         "django_ray/workflow/__init__.py",
+        "django_ray/workflow/_types.py",
         "django_ray/workflow/admin_graph.py",
         "django_ray/workflow/checkpoints.py",
         "django_ray/workflow/concurrency.py",
         "django_ray/workflow/contracts.py",
+        "django_ray/workflow/dsl.py",
         "django_ray/workflow/map_transport.py",
         "django_ray/workflow/paged_input.py",
         "django_ray/workflow/plans.py",
@@ -92,9 +94,10 @@ def test_release_boundary_tracks_latest_schema_migration() -> None:
     assert "django_ray/migrations/0026_ray_task_target_execution_evidence.py" in EXPECTED_FILES
     assert "django_ray/migrations/0027_workflow_reporting_diagnostics.py" in EXPECTED_FILES
     assert "django_ray/migrations/0028_worker_lease_policy.py" in EXPECTED_FILES
+    assert "django_ray/migrations/0029_lease_engine_and_hot_indexes.py" in EXPECTED_FILES
     assert EXPECTED_MIGRATION_LEAF == (
         "django_ray",
-        "0028_worker_lease_policy",
+        "0029_lease_engine_and_hot_indexes",
     )
 
 

@@ -27,7 +27,7 @@ RUN python -c 'import os,re; assert all(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64
     && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources \
     && printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s/ trixie main\ndeb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/%s/ trixie-security main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git make libstdc++6 \
+    && apt-get install -y --no-install-recommends ca-certificates git make libstdc++6 nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /uvx /usr/local/bin/

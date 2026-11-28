@@ -28,6 +28,8 @@ def results():
                 "latency": "true",
                 "cancellation": "true",
                 "monitoring": "true",
+                "data": "true",
+                "transactions": "true",
             },
         },
         "application": {"result": "success"},
@@ -35,6 +37,8 @@ def results():
         "latency": {"result": "success"},
         "cancellation": {"result": "success"},
         "monitoring": {"result": "success"},
+        "data": {"result": "success"},
+        "transactions": {"result": "success"},
     }
 
 
@@ -52,6 +56,8 @@ def test_workflow_owns_selection_and_every_qualification_dependency():
         "latency",
         "cancellation",
         "monitoring",
+        "data",
+        "transactions",
     }
     assert gate["jobs"]["qualification-gate"]["if"] == "always()"
     assert {entry["id"] for entry in policy} == {
@@ -60,6 +66,8 @@ def test_workflow_owns_selection_and_every_qualification_dependency():
         "latency",
         "cancellation",
         "monitoring",
+        "data",
+        "transactions",
     }
     for entry in policy:
         child = yaml.load(
@@ -85,14 +93,17 @@ def test_applicability_is_explicit():
 @pytest.mark.parametrize(
     "path,expected",
     [
-        ("qualification/docker/scenario.py", {"native", "latency", "cancellation"}),
+        (
+            "qualification/docker/scenario.py",
+            {"native", "latency", "cancellation", "data", "transactions"},
+        ),
         (
             "src/django_ray/lease_policy.py",
-            {"application", "native", "cancellation", "monitoring"},
+            {"application", "native", "cancellation", "monitoring", "data"},
         ),
         (
             "src/django_ray/management/commands/django_ray_lease_policy.py",
-            {"application", "native"},
+            {"application", "native", "data"},
         ),
     ],
 )
@@ -100,6 +111,52 @@ def test_shared_dependency_selects_every_affected_qualification(path, expected):
     root = Path(__file__).resolve().parents[2]
     policy = json.loads((root / "scripts/qualification_policy.json").read_text())
     assert {entry["id"] for entry in select(policy, {path})} == expected
+
+
+@pytest.mark.parametrize(
+    "path,expected_subset",
+    [
+        (
+            "src/django_ray/models.py",
+            {"application", "native", "cancellation", "data", "transactions"},
+        ),
+        ("src/django_ray/lifecycle.py", {"application", "native", "latency", "cancellation"}),
+        ("src/django_ray/runner/ray_job.py", {"application", "native", "latency", "cancellation"}),
+        (
+            "src/django_ray/management/commands/django_ray_worker.py",
+            {"application", "native", "latency", "cancellation"},
+        ),
+        (
+            "src/django_ray/runtime/entrypoint.py",
+            {"application", "native", "latency", "cancellation"},
+        ),
+        ("src/django_ray/ray_job_request_storage.py", {"application", "native", "latency", "data"}),
+        ("src/django_ray/runtime/runtime_env_encryption.py", {"application", "native", "data"}),
+        (
+            "src/django_ray/backends.py",
+            {"application", "native", "latency", "data", "transactions"},
+        ),
+        (
+            "src/django_ray/worker/shutdown.py",
+            {"application", "native", "latency", "cancellation", "data", "transactions"},
+        ),
+        (
+            "src/django_ray/_blob_storage.py",
+            {"application", "native", "latency", "cancellation", "data", "transactions"},
+        ),
+        (
+            "src/django_ray/_storage_types.py",
+            {"application", "native", "latency", "cancellation", "data", "transactions"},
+        ),
+    ],
+)
+def test_runtime_and_schema_paths_select_native_latency_data_and_transactions(
+    path, expected_subset
+):
+    root = Path(__file__).resolve().parents[2]
+    policy = json.loads((root / "scripts/qualification_policy.json").read_text())
+    selected = {entry["id"] for entry in select(policy, {path})}
+    assert expected_subset <= selected
 
 
 @pytest.mark.parametrize(
@@ -169,13 +226,14 @@ _APPLICATION_EXEMPT_PACKAGE_PATHS = frozenset(
         "src/django_ray/management/commands/django_ray_benchmark_workflow_progress.py",
         "src/django_ray/management/commands/django_ray_cleanup_workflow_progress.py",
         "src/django_ray/management/commands/django_ray_doctor.py",
+        "src/django_ray/management/commands/django_ray_purge_executions.py",
         "src/django_ray/management/commands/django_ray_purge_inputs.py",
+        "src/django_ray/management/commands/django_ray_replay.py",
         "src/django_ray/management/purge_cursor.py",
         "src/django_ray/runtime/compiled_graph_probe.py",
         "src/django_ray/target/capabilities.py",
         "src/django_ray/target/coordination.py",
         "src/django_ray/target/routing.py",
-        "src/django_ray/tracing.py",
     }
 )
 
@@ -281,14 +339,18 @@ def test_application_policy_classifies_every_package_module_explicitly():
 def test_only_selected_success_and_explicit_unselected_skip_pass():
     assert verify(results()) == {
         "application": "passed",
-        "native": "not_applicable",
-        "latency": "passed",
         "cancellation": "passed",
+        "data": "passed",
+        "latency": "passed",
         "monitoring": "passed",
+        "native": "not_applicable",
+        "transactions": "passed",
     }
 
 
-@pytest.mark.parametrize("name", ["application", "latency", "cancellation", "monitoring"])
+@pytest.mark.parametrize(
+    "name", ["application", "latency", "cancellation", "monitoring", "data", "transactions"]
+)
 @pytest.mark.parametrize("state", ["failure", "cancelled", "skipped", "", None])
 def test_selected_missing_or_failed_result_never_passes(name, state):
     value = results()
