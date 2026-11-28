@@ -453,3 +453,157 @@ def test_output_inside_source_and_reused_trial_are_rejected(harness):
     with pytest.raises(ValueError, match="already contains"):
         harness.run()
     assert not harness.launched
+
+
+def test_real_ray_stress_command_and_environment_mirror_ci(tmp_path):
+    (tmp_path / "tests" / "integration").mkdir(parents=True)
+    (tmp_path / "tests" / "unit").mkdir(parents=True)
+    (tmp_path / "tests" / "integration" / "test_task_execution.py").write_text("real_ray\n")
+    (tmp_path / "tests" / "unit" / "test_result_buffer.py").write_text("real_ray\n")
+    (tmp_path / "tests" / "unit" / "test_distributed.py").write_text("real_ray\n")
+    (tmp_path / "tests" / "unit" / "test_unrelated.py").write_text("plain\n")
+
+    files = investigation.discover_real_ray_files(tmp_path)
+    assert files == [
+        "tests/integration/test_task_execution.py",
+        "tests/unit/test_result_buffer.py",
+        "tests/unit/test_distributed.py",
+    ]
+    phase = tmp_path / "phase.bin"
+    cmd = investigation.real_ray_stress_command(
+        tmp_path,
+        python_executable="/venv/bin/python",
+        trace=True,
+        phase_file=phase,
+        collect_coverage=False,
+    )
+    assert cmd[:7] == [
+        "/venv/bin/python",
+        "scripts/observe_pytest_exit.py",
+        "--native-debug",
+        "--phase-journal",
+        str(phase),
+        "--trace-native-exit",
+        "--",
+    ]
+    assert cmd[7:10] == files
+    assert cmd[-3:] == ["-m", "real_ray and not live_cluster", "-v"]
+
+    env_shared = investigation.real_ray_stress_environment(tmp_path / "ray", shared_local_ray=True)
+    assert env_shared["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
+    assert env_shared["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] == "0"
+    assert env_shared["RAY_TMPDIR"] == str(tmp_path / "ray")
+    env_isolated = investigation.real_ray_stress_environment(
+        tmp_path / "ray", shared_local_ray=False
+    )
+    assert "DJANGO_RAY_SHARED_LOCAL_RAY" not in env_isolated
+
+
+def test_retain_and_emit_ray_logs_include_workers_when_requested(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(investigation.os, "O_NOFOLLOW", getattr(os, "O_NOFOLLOW", 0), raising=False)
+    monkeypatch.setattr(investigation.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), raising=False)
+    owned, output = tmp_path / "owned", tmp_path / "output"
+    output.mkdir()
+    logs = owned / "ray" / "session_0" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "raylet.err").write_text("raylet fatal line\n", encoding="utf-8")
+    (logs / "python-core-driver-abc_1.log").write_text("driver quick exit\n", encoding="utf-8")
+    for idx in range(6):
+        (logs / f"python-core-worker-{idx:02x}_{idx}.log").write_text(
+            f"worker-{idx}\n", encoding="utf-8"
+        )
+
+    retained = investigation.retain_ray_logs(owned, output, include_workers=True)
+    names = {str(item["file"]) for item in retained}
+    assert "ray-session-1-raylet.err" in names
+    assert "ray-session-1-core-driver.log" in names
+    worker_files = [name for name in names if "core-worker-" in name]
+    assert len(worker_files) == investigation.MAX_CORE_WORKER_LOGS
+
+    assert investigation.emit_ray_failure_logs(owned) == 0
+    emitted = capsys.readouterr().out
+    assert "ray-session-1-raylet.err" in emitted
+    assert "raylet fatal line" in emitted
+    assert "driver quick exit" in emitted
+
+    assert investigation.emit_ray_failure_logs(tmp_path / "missing") == 0
+    assert "No owned Ray session logs found." in capsys.readouterr().out
+
+
+def test_stress_real_ray_stops_on_first_failure_and_retains_evidence(monkeypatch, tmp_path, capsys):
+    source, output = tmp_path / "source", tmp_path / "output"
+    (source / "tests" / "unit").mkdir(parents=True)
+    (source / "tests" / "unit" / "test_distributed.py").write_text("real_ray\n")
+    monkeypatch.setattr(investigation.os, "O_NOFOLLOW", getattr(os, "O_NOFOLLOW", 0), raising=False)
+    monkeypatch.setattr(investigation.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), raising=False)
+
+    now = [0.0]
+    created_dirs: list[Path] = []
+    codes = iter([0, 1])
+
+    def fake_create_tmpdir() -> Path:
+        root = tmp_path / f"ray-{len(created_dirs)}"
+        logs = root / "ray" / "session_0" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "raylet.err").write_text("raylet died\n", encoding="utf-8")
+        created_dirs.append(root)
+        return root
+
+    monkeypatch.setattr(investigation, "create_ray_tmpdir", fake_create_tmpdir)
+    monkeypatch.setattr(
+        investigation.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=("a" * 40) + "\n" + ("b" * 40) + "\n"),
+    )
+    monkeypatch.setattr(investigation.metadata, "version", lambda name: "1.0")
+    monkeypatch.setattr(investigation, "resource_sample", lambda path: {"disk_free_bytes": 100})
+    monkeypatch.setattr(investigation, "reap_adopted_zombies", lambda pid: 0)
+    monkeypatch.setattr(
+        investigation,
+        "phase_snapshot",
+        lambda path: {"phase": "test_call", "ordinal": 26, "sequence": 133},
+    )
+
+    class Process:
+        def __init__(self, code: int) -> None:
+            self.pid = 999
+            self.code = code
+            self.returncode: int | None = None
+            payload = (
+                b'{"pytest_exit_observer": "native_exit_entry", "status": 1}\n'
+                if code
+                else b"all passed\n"
+            )
+            self.stdout = io.BytesIO(payload)
+
+        def wait(self, timeout: float) -> int:
+            now[0] += 1.0
+            self.returncode = self.code
+            return self.code
+
+    monkeypatch.setattr(
+        investigation.subprocess, "Popen", lambda *args, **kwargs: Process(next(codes))
+    )
+    monkeypatch.setattr(investigation, "cleanup_owned", lambda proc: (True, 0))
+
+    receipt = investigation.stress_real_ray(
+        source,
+        output,
+        max_iterations=5,
+        trace=True,
+        shared_local_ray=True,
+        timeout=120,
+        clock=lambda: now[0],
+    )
+    assert receipt["outcome"] == "failed-observation"
+    assert receipt["exit_code"] == 1
+    assert receipt["completed_iterations"] == 2
+    assert (output / "pytest.log").read_bytes() == (
+        b'{"pytest_exit_observer": "native_exit_entry", "status": 1}\n'
+    )
+    assert (output / "ray-session-1-raylet.err").read_text(encoding="utf-8") == "raylet died\n"
+    assert not created_dirs[0].exists()
+    assert not created_dirs[1].exists()
+    stdout = capsys.readouterr().out
+    assert '"native_exit_entry"' in stdout
+    assert "raylet died" in stdout

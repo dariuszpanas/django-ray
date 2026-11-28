@@ -314,6 +314,10 @@ gh workflow run native-shutdown-investigation.yml --ref <reviewed-branch> \
 ```
 
 Native exit controls are manual diagnostics and do not replace CI Gate.
+Real Ray stress sampling is a manual diagnostic and does not replace CI Gate.
+Use `-f probe=real-ray-stress -f trace-native-exit=true` to repeat the CI `real_ray`
+lane in fresh interpreters across Python 3.12–3.14 and stop on the first nonzero exit,
+retaining bounded GDB exit-caller frames and owned Ray session logs.
 
 Each hook setting gets its own disposable Linux VM. Historical mode fixes the source to the
 November 4 failure and uses its frozen dependencies, Python 3.14.10 and uv 0.13.7; only the
