@@ -175,6 +175,7 @@
           "tests/unit/test_workflow_progress_preparation_benchmark.py",
           "tests/unit/test_workflow_progress_preparation_cleanup.py",
           "tests/unit/test_workflow_progress_reads.py",
+          "tests/unit/test_workflow_progress_reads_pages.py",
           "tests/unit/test_workflow_progress_storage_audit.py",
           "tests/unit/test_workflow_progress_storage_boundaries.py",
           "tests/unit/test_workflow_progress_storage_models.py",
@@ -598,10 +599,11 @@
       "owner": "Workflow progress summary protocol and read fixtures",
       "paths": [
         "tests/unit/test_workflow_progress_reads.py",
+        "tests/unit/test_workflow_progress_reads_pages.py",
         "tests/unit/test_workflow_progress_summary.py"
       ],
-      "reason": "Pure summary codec cases pay for a database identity, while several read-order cases construct larger workflows than their cursor boundary requires.",
-      "review": "Split DB-free protocol cases from ORM/lifecycle cases and right-size read cardinalities without merging HTTP adapter coverage."
+      "reason": "Summary codec cases run DB-free and non-boundary cursor read fixtures are right-sized; remaining 257-node fixtures intentionally exercise the 256-item storage-page cap alongside ORM lifecycle tests.",
+      "review": "Keep the 257-node page-boundary tests distinct from HTTP adapter coverage and preserve DB-free summary protocol tests."
     },
     {
       "id": "bundled-browser-contract",
