@@ -23,10 +23,20 @@ spec:
           app: ray
           component: head
       spec:
+        automountServiceAccountToken: false
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
         containers:
           - name: ray-head
             image: rayproject/ray:2.60.0-py312
             imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
             envFrom:
               - configMapRef:
                   name: django-ray-config
@@ -53,12 +63,12 @@ spec:
               - name: payload-storage
                 mountPath: /payload-storage
                 readOnly: true
+              - name: result-storage
+                mountPath: /payload-storage/results
+                subPath: results
+                readOnly: false
             env:
-              - name: DJANGO_SECRET_KEY
-                valueFrom:
-                  secretKeyRef:
-                    name: django-ray-runtime
-                    key: DJANGO_SECRET_KEY
+              # Ray compute pods must not hold DJANGO_SECRET_KEY (control-plane signing key).
               - name: DATABASE_USER
                 valueFrom:
                   secretKeyRef:
@@ -89,6 +99,9 @@ spec:
           - name: payload-storage
             persistentVolumeClaim:
               claimName: payload-storage-pvc
+          - name: result-storage
+            persistentVolumeClaim:
+              claimName: payload-storage-pvc
   workerGroupSpecs:
     - groupName: worker-group
       replicas: 1
@@ -103,10 +116,20 @@ spec:
             app: ray
             component: worker
         spec:
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: ray-worker
               image: rayproject/ray:2.60.0-py312
               imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
               envFrom:
                 - configMapRef:
                     name: django-ray-config
@@ -126,12 +149,12 @@ spec:
                 - name: payload-storage
                   mountPath: /payload-storage
                   readOnly: true
+                - name: result-storage
+                  mountPath: /payload-storage/results
+                  subPath: results
+                  readOnly: false
               env:
-                - name: DJANGO_SECRET_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: django-ray-runtime
-                      key: DJANGO_SECRET_KEY
+                # Ray compute pods must not hold DJANGO_SECRET_KEY (control-plane signing key).
                 - name: DATABASE_USER
                   valueFrom:
                     secretKeyRef:
@@ -160,5 +183,8 @@ spec:
               persistentVolumeClaim:
                 claimName: runtime-env-pvc
             - name: payload-storage
+              persistentVolumeClaim:
+                claimName: payload-storage-pvc
+            - name: result-storage
               persistentVolumeClaim:
                 claimName: payload-storage-pvc

@@ -27,10 +27,20 @@ spec:
           prometheus.io/port: '8080'
           prometheus.io/path: /metrics
       spec:
+        automountServiceAccountToken: false
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
         containers:
           - name: ray-head
             image: rayproject/ray:2.60.0-py312
             imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
             ports:
               - containerPort: 6379
                 name: gcs
@@ -53,11 +63,7 @@ spec:
                 value: http://localhost:30030
               - name: RAY_PROMETHEUS_NAME
                 value: Prometheus
-              - name: DJANGO_SECRET_KEY
-                valueFrom:
-                  secretKeyRef:
-                    name: django-ray-runtime
-                    key: DJANGO_SECRET_KEY
+              # Ray compute pods must not hold DJANGO_SECRET_KEY (control-plane signing key).
               - name: DATABASE_USER
                 valueFrom:
                   secretKeyRef:
@@ -96,9 +102,22 @@ spec:
               - name: payload-storage
                 mountPath: /payload-storage
                 readOnly: true
+              - name: result-storage
+                mountPath: /payload-storage/results
+                subPath: results
+                readOnly: false
           - name: dashboard-importer
             image: python:3.12-slim
             imagePullPolicy: IfNotPresent
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+              readOnlyRootFilesystem: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
             command:
               - python3
               - /scripts/import_dashboards.py
@@ -118,8 +137,10 @@ spec:
             volumeMounts:
               - name: ray-tmp
                 mountPath: /tmp/ray
+                readOnly: true
               - name: import-script
                 mountPath: /scripts
+                readOnly: true
             resources:
               requests:
                 memory: 64Mi
@@ -140,6 +161,9 @@ spec:
           - name: payload-storage
             persistentVolumeClaim:
               claimName: payload-storage-pvc
+          - name: result-storage
+            persistentVolumeClaim:
+              claimName: payload-storage-pvc
   workerGroupSpecs:
     - groupName: worker-group
       replicas: 2
@@ -158,10 +182,20 @@ spec:
             prometheus.io/port: '8080'
             prometheus.io/path: /metrics
         spec:
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: ray-worker
               image: rayproject/ray:2.60.0-py312
               imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
               ports:
                 - containerPort: 8080
                   name: metrics
@@ -170,11 +204,7 @@ spec:
                   value: 0.0.0.0
                 - name: RAY_METRICS_EXPORT_PORT
                   value: '8080'
-                - name: DJANGO_SECRET_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: django-ray-runtime
-                      key: DJANGO_SECRET_KEY
+                # Ray compute pods must not hold DJANGO_SECRET_KEY (control-plane signing key).
                 - name: DATABASE_USER
                   valueFrom:
                     secretKeyRef:
@@ -211,11 +241,18 @@ spec:
                 - name: payload-storage
                   mountPath: /payload-storage
                   readOnly: true
+                - name: result-storage
+                  mountPath: /payload-storage/results
+                  subPath: results
+                  readOnly: false
           volumes:
             - name: runtime-env
               persistentVolumeClaim:
                 claimName: runtime-env-pvc
             - name: payload-storage
+              persistentVolumeClaim:
+                claimName: payload-storage-pvc
+            - name: result-storage
               persistentVolumeClaim:
                 claimName: payload-storage-pvc
 ---

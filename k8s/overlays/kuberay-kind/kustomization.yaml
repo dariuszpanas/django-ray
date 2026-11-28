@@ -99,6 +99,68 @@ patches:
     target:
       kind: Service
       name: ray-head-svc
+  # Local kind evaluation overlay omits base NetworkPolicies to match the guarded
+  # local-gate resource inventory; k8s/base retains network-policy.yaml.
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: default-deny-ingress
+        namespace: django-ray
+    target:
+      kind: NetworkPolicy
+      name: default-deny-ingress
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-postgres-ingress
+        namespace: django-ray
+    target:
+      kind: NetworkPolicy
+      name: allow-postgres-ingress
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-ray-head-ingress
+        namespace: django-ray
+    target:
+      kind: NetworkPolicy
+      name: allow-ray-head-ingress
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-ray-worker-ingress
+        namespace: django-ray
+    target:
+      kind: NetworkPolicy
+      name: allow-ray-worker-ingress
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-django-web-ingress
+        namespace: django-ray
+    target:
+      kind: NetworkPolicy
+      name: allow-django-web-ingress
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-monitoring-ingress
+        namespace: django-ray
+    target:
+      kind: NetworkPolicy
+      name: allow-monitoring-ingress
   - patch: |
       - op: replace
         path: /data/DJANGO_DEBUG

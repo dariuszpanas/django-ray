@@ -70,14 +70,22 @@ spec:
         app: prometheus
     spec:
       serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: prometheus
           image: prom/prometheus:v3.13.4@sha256:87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
             - --storage.tsdb.retention.time=7d
-            - --web.enable-lifecycle
           ports:
             - containerPort: 9090
               name: http
@@ -637,9 +645,19 @@ spec:
       labels:
         app: grafana
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: grafana
           image: grafana/grafana:12.4.12@sha256:83be3e511ede559bee80e2215bb1987cb1246075461cb961beb515b0341e7aea
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 3000
               name: http
@@ -735,13 +753,15 @@ data:
     """Import Ray Grafana dashboards into Grafana."""
     import argparse
     import base64
-    import json
-    import urllib.request
-    import urllib.error
-    import os
     import glob
-    import time
+    import json
+    import os
+    import stat
     import sys
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
 
     GRAFANA_URL = os.environ.get("GRAFANA_URL", "http://grafana-svc:3000")
     DASHBOARDS_PATH = "/tmp/ray/session_latest/metrics/grafana/dashboards"
@@ -751,18 +771,66 @@ data:
     MAX_DASHBOARD_BYTES = 2 * 1024 * 1024
     MAX_RESPONSE_BYTES = 64 * 1024
 
+    def _validated_grafana_url(url):
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("GRAFANA_URL must use http or https with a valid hostname")
+        if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+            raise ValueError("GRAFANA_URL must not embed credentials")
+        return url.rstrip("/")
+
+    def _auth_header():
+        username = os.environ.get("GF_SECURITY_ADMIN_USER", "").strip()
+        password = os.environ.get("GF_SECURITY_ADMIN_PASSWORD", "")
+        if not username or not password:
+            raise ValueError("GF_SECURITY_ADMIN_USER and GF_SECURITY_ADMIN_PASSWORD are required")
+        token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        return f"Basic {token}"
+
+    def _read_bounded_regular_file(filepath):
+        flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        if not hasattr(os, "O_NOFOLLOW") and os.path.islink(filepath):
+            raise ValueError("dashboard path must not be a symlink")
+        with open(
+            filepath,
+            "rb",
+            buffering=0,
+            opener=lambda name, mode: os.open(name, mode | flags),
+        ) as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError("dashboard path must be a regular file")
+            if st.st_size > MAX_DASHBOARD_BYTES:
+                raise ValueError("dashboard exceeds import bound")
+            chunks = bytearray()
+            limit = MAX_DASHBOARD_BYTES + 1
+            while len(chunks) < limit:
+                chunk = f.read(min(64 * 1024, limit - len(chunks)))
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+            encoded = bytes(chunks)
+        if len(encoded) > MAX_DASHBOARD_BYTES:
+            raise ValueError("dashboard exceeds import bound")
+        return encoded
+
     def wait_for_grafana():
         """Wait for Grafana to be ready."""
-        print(f"Waiting for Grafana at {GRAFANA_URL}...")
+        try:
+            base_url = _validated_grafana_url(GRAFANA_URL)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            return False
+        print(f"Waiting for Grafana at {base_url}...")
         for i in range(MAX_RETRIES):
             try:
-                req = urllib.request.Request(f"{GRAFANA_URL}/api/health")
+                req = urllib.request.Request(f"{base_url}/api/health")
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     if resp.status == 200:
                         print("Grafana is ready!")
                         return True
             except Exception as e:
-                print(f"  Attempt {i+1}/{MAX_RETRIES}: {e}")
+                print(f"  Attempt {i+1}/{MAX_RETRIES}: {type(e).__name__}")
             time.sleep(RETRY_DELAY)
         return False
 
@@ -781,13 +849,12 @@ data:
 
     def import_dashboard(filepath):
         """Import a single dashboard JSON file into Grafana."""
-        print(f"Importing {os.path.basename(filepath)}...")
+        print(f"Importing {os.path.basename(os.fspath(filepath))}...")
 
         try:
-            with open(filepath, "rb") as f:
-                encoded = f.read(MAX_DASHBOARD_BYTES + 1)
-            if len(encoded) > MAX_DASHBOARD_BYTES:
-                raise ValueError("dashboard exceeds import bound")
+            base_url = _validated_grafana_url(GRAFANA_URL)
+            auth_header = _auth_header()
+            encoded = _read_bounded_regular_file(filepath)
             dashboard = json.loads(encoded)
             if not isinstance(dashboard, dict) or not dashboard.get("uid"):
                 raise ValueError("dashboard has no identity")
@@ -802,9 +869,9 @@ data:
         }).encode("utf-8")
 
         req = urllib.request.Request(
-            f"{GRAFANA_URL}/api/dashboards/db",
+            f"{base_url}/api/dashboards/db",
             data=payload,
-            headers={"Content-Type": "application/json", "Authorization": "Basic " + base64.b64encode((os.environ["GF_SECURITY_ADMIN_USER"] + ":" + os.environ["GF_SECURITY_ADMIN_PASSWORD"]).encode()).decode()}
+            headers={"Content-Type": "application/json", "Authorization": auth_header},
         )
 
         try:
@@ -831,6 +898,12 @@ data:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--once", action="store_true", help="Exit after one import pass")
         args = parser.parse_args(argv)
+        try:
+            _validated_grafana_url(GRAFANA_URL)
+            _auth_header()
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            return 1
         if not wait_for_grafana():
             print("ERROR: Grafana not available")
             return 1

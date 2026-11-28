@@ -105,103 +105,147 @@ def test_protocol_v1_survival_requires_the_same_unclaimed_queued_row(
         gate._require_protocol_v1_survival_unchanged(fixture)
 
 
+def _execute_generated_django_shell(
+    script: str,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    filename: str,
+) -> dict[str, Any]:
+    """Execute a generated Django shell script against the real test database."""
+    exec(compile(script, filename, "exec"), {})
+    output = capsys.readouterr().out.strip()
+    parsed = json.loads(output)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+@pytest.mark.django_db
 def test_protocol_v1_survival_release_is_exactly_one_unchanged_row(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    gate = LocalKubeRayGate(_config())
-    fixture = _protocol_v1_survival_fixture()
-    released = {
-        "matched": 1,
-        "updated": 1,
-        "pk": fixture["pk"],
-        "task_id": fixture["task_id"],
-        "state": "QUEUED",
-        "attempt_number": 1,
-        "execution_generation": 0,
-        "released_at": "2026-08-14T20:30:00+00:00",
-        "run_after": "2026-08-14T20:30:00+00:00",
+    from datetime import UTC, datetime
+
+    from django_ray.models import RayTaskExecution, TaskState
+
+    initial_run_after = datetime(2026, 8, 14, 21, 0, 0, tzinfo=UTC)
+    row = RayTaskExecution.objects.create(
+        task_id=PROTOCOL_V1_SURVIVAL_TASK_ID,
+        callable_path="testproject.tasks.echo_task",
+        args_json=json.dumps([PROTOCOL_V1_SURVIVAL_MARKER], separators=(",", ":")),
+        kwargs_json="{}",
+        queue_name=gate_module.RAY_JOB_GATE_QUEUE,
+        state=TaskState.QUEUED,
+        execution_protocol_version=1,
+        attempt_number=1,
+        execution_generation=0,
+        run_after=initial_run_after,
+    )
+    decoy = RayTaskExecution.objects.create(
+        task_id="33333333-3333-4333-8333-333333333333",
+        callable_path="testproject.tasks.echo_task",
+        args_json=json.dumps([PROTOCOL_V1_SURVIVAL_MARKER], separators=(",", ":")),
+        kwargs_json="{}",
+        queue_name=gate_module.RAY_JOB_GATE_QUEUE,
+        state=TaskState.QUEUED,
+        execution_protocol_version=1,
+        attempt_number=1,
+        execution_generation=0,
+        run_after=initial_run_after,
+    )
+    fixture = {
+        **_protocol_v1_survival_fixture(),
+        "pk": row.pk,
+        "run_after": initial_run_after.isoformat(),
     }
+    gate = LocalKubeRayGate(_config())
     observed: dict[str, str] = {}
 
     def sensitive_shell(
         script: str, *, field_name: str, ray_authorized: bool = False
     ) -> Mapping[str, Any]:
-        compile(script, "<protocol-v1-survival-release>", "exec")
-        observed["script"] = script
         observed["field_name"] = field_name
-        return released
+        return _execute_generated_django_shell(
+            script, capsys, filename="<protocol-v1-survival-release>"
+        )
 
     monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
 
-    assert gate._release_protocol_v1_survival_task(fixture) == released
+    released = gate._release_protocol_v1_survival_task(fixture)
+
+    row.refresh_from_db()
+    decoy.refresh_from_db()
     assert observed["field_name"] == "protocol-v1 deferred survival release"
-    assert f"pk={fixture['pk']!r}" in observed["script"]
-    assert f"task_id={fixture['task_id']!r}" in observed["script"]
-    assert "state=TaskState.QUEUED" in observed["script"]
-    assert "execution_protocol_version=1" in observed["script"]
-    assert f"queue_name={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
-    assert "claimed_by_worker__isnull=True" in observed["script"]
-    assert "updated = queryset.update(run_after=released_at)" in observed["script"]
+    assert released["matched"] == 1
+    assert released["updated"] == 1
+    assert released["pk"] == row.pk
+    assert released["task_id"] == PROTOCOL_V1_SURVIVAL_TASK_ID
+    assert released["state"] == "QUEUED"
+    assert row.run_after is not None
+    assert row.run_after != initial_run_after
+    assert row.run_after.isoformat() == released["released_at"]
+    assert decoy.run_after == initial_run_after
+
+    # Releasing again after the row has already been claimed or modified must fail closed.
+    RayTaskExecution.objects.filter(pk=row.pk).update(
+        run_after=initial_run_after,
+        claimed_by_worker="unexpected-worker",
+    )
+    with pytest.raises(ValueError, match="not released exactly once"):
+        gate._release_protocol_v1_survival_task(fixture)
 
 
+@pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("cleanup", "expected_deleted"),
+    ("initial_state", "expected_deleted"),
     [
-        (
-            {
-                "matched": 1,
-                "states": ["QUEUED"],
-                "deleted": 1,
-                "queued_absent": True,
-            },
-            1,
-        ),
-        (
-            {
-                "matched": 1,
-                "states": ["RUNNING"],
-                "deleted": 0,
-                "queued_absent": True,
-            },
-            0,
-        ),
+        ("QUEUED", 1),
+        ("RUNNING", 0),
     ],
 )
 def test_protocol_v1_survival_failure_cleanup_deletes_only_an_unclaimed_queued_row(
     monkeypatch: pytest.MonkeyPatch,
-    cleanup: Mapping[str, Any],
+    capsys: pytest.CaptureFixture[str],
+    initial_state: str,
     expected_deleted: int,
 ) -> None:
+    from django_ray.models import RayTaskExecution
+
+    row = RayTaskExecution.objects.create(
+        task_id=PROTOCOL_V1_SURVIVAL_TASK_ID,
+        callable_path="testproject.tasks.echo_task",
+        args_json=json.dumps([PROTOCOL_V1_SURVIVAL_MARKER], separators=(",", ":")),
+        kwargs_json="{}",
+        queue_name=gate_module.RAY_JOB_GATE_QUEUE,
+        state=initial_state,
+        execution_protocol_version=1,
+        attempt_number=1,
+        execution_generation=0,
+    )
+    fixture = {**_protocol_v1_survival_fixture(), "pk": row.pk}
     gate = LocalKubeRayGate(_config())
-    fixture = _protocol_v1_survival_fixture()
     gate._protocol_v1_survival_fixture = fixture
     observed: dict[str, str] = {}
 
     def sensitive_shell(
         script: str, *, field_name: str, ray_authorized: bool = False
     ) -> Mapping[str, Any]:
-        compile(script, "<protocol-v1-survival-cleanup>", "exec")
-        observed["script"] = script
         observed["field_name"] = field_name
-        return cleanup
+        return _execute_generated_django_shell(
+            script, capsys, filename="<protocol-v1-survival-cleanup>"
+        )
 
     monkeypatch.setattr(gate, "_sensitive_django_shell", sensitive_shell)
 
-    assert gate._cleanup_protocol_v1_survival_task(fixture) == cleanup
+    cleanup = gate._cleanup_protocol_v1_survival_task(fixture)
+
     assert gate._protocol_v1_survival_fixture is None
     assert observed["field_name"] == "protocol-v1 deferred survival cleanup"
-    assert f"pk={fixture['pk']!r}" in observed["script"]
-    assert f"task_id={fixture['task_id']!r}" in observed["script"]
-    assert "execution_protocol_version=1" in observed["script"]
-    assert f"queue_name={gate_module.RAY_JOB_GATE_QUEUE!r}" in observed["script"]
-    assert 'callable_path="testproject.tasks.echo_task"' in observed["script"]
-    assert "claimed_by_worker__isnull=True" in observed["script"]
-    assert "ray_job_request_reference__isnull=True" in observed["script"]
+    assert cleanup["matched"] == 1
     assert cleanup["deleted"] == expected_deleted
-    if expected_deleted == 1:
-        assert cleanup["states"] == ["QUEUED"]
-    else:
-        assert cleanup["states"] == ["RUNNING"]
+    assert cleanup["states"] == [initial_state]
+    assert cleanup["queued_absent"] is True
+    assert RayTaskExecution.objects.filter(pk=row.pk).exists() is (expected_deleted == 0)
 
 
 def test_protocol_v2_fixture_is_seeded_only_on_the_live_ray_data_queue(
@@ -1095,10 +1139,16 @@ def test_legacy_refusal_enqueue_binds_marker_before_commit(
     assert gate._released_v040_refusal_marker not in gate.redactor.clean(scripts[0])
 
 
-def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fixture(
+def _install_protocol_handoff_harness(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    gate = LocalKubeRayGate(_config())
+    gate: LocalKubeRayGate,
+    *,
+    events: list[str],
+    record_all_events: bool = True,
+    final_policy_revision: int = 9,
+    overrides: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Install one consistent boundary double set for protocol-handoff certification."""
     gate.evidence.ray_job_manager_reconciled_same_job = True
     gate.evidence.ray_job_manager_no_resubmit = True
     released_worker = "11111111-1111-4111-8111-111111111111"
@@ -1115,170 +1165,129 @@ def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fix
         "ray_job_id": survival_job_id,
         "ray_job_request_reference": "rq2-reference",
     }
-    fixture = {
+    v2_fixture: dict[str, object] = {
         "pk": 41,
         "task_id": TASK_ID,
         "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
         "row_sha256": "d" * 64,
         "initial_revision": 7,
     }
-    manager_observations = iter(
+    managers = iter(
         (
             {"replicas": 1, "ready_replicas": 1},
             {"replicas": 1, "ready_replicas": 1},
         )
     )
-    policy_observations = iter((_protocol_policy_observation(7), _protocol_policy_observation(9)))
+    policies = iter(
+        (_protocol_policy_observation(7), _protocol_policy_observation(final_policy_revision))
+    )
     handoff_observations = iter(
         (
             _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
             _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
         )
     )
-    events: list[str] = []
 
-    monkeypatch.setattr(
-        gate,
-        "_recover_released_v040_startup_residue",
-        lambda: events.append("recover-released-startup"),
-    )
-    monkeypatch.setattr(
-        gate,
-        "_recover_protocol_v2_startup_fixture",
-        lambda: events.append("recover-protocol-v2-startup"),
-    )
-
-    monkeypatch.setattr(
-        gate,
-        "_ray_job_manager_replica_observation",
-        lambda: next(manager_observations),
-    )
+    def _record(label: str) -> None:
+        if record_all_events:
+            events.append(label)
 
     def observe_protocol_cohorts() -> Mapping[str, Any]:
-        events.append("observe-policy")
-        return next(policy_observations)
-
-    monkeypatch.setattr(gate, "_observe_protocol_cohorts", observe_protocol_cohorts)
-    monkeypatch.setattr(
-        gate,
-        "_delete_released_v040_manager",
-        lambda: events.append("delete-released-manager"),
-    )
-    monkeypatch.setattr(
-        gate,
-        "_apply_released_v040_manager",
-        lambda: events.append("apply-released-manager"),
-    )
+        _record("observe-policy")
+        return next(policies)
 
     def wait_for_cohorts() -> Mapping[str, Any]:
-        events.append("cohorts-visible")
+        _record("cohorts-visible")
         gate._released_v040_worker_id = released_worker
         gate.evidence.protocol_legacy_cohort_visible = True
         gate.evidence.protocol_explicit_cohort_visible = True
         return {}
 
-    monkeypatch.setattr(gate, "_wait_for_protocol_cohorts", wait_for_cohorts)
-    monkeypatch.setattr(
-        gate,
-        "_scale_ray_job_manager",
-        lambda replicas: events.append(f"scale-current:{replicas}"),
-    )
-    monkeypatch.setattr(gate, "_enqueue_released_v040_handoff_task", lambda: TASK_ID)
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_protocol_handoff_task",
-        lambda *_args, **_kwargs: next(handoff_observations),
-    )
-    monkeypatch.setattr(
-        gate, "_observe_protocol_handoff_task", lambda _task_id: next(handoff_observations)
-    )
-    monkeypatch.setattr(
-        gate,
-        "_delete_released_v040_worker_lease",
-        lambda: events.append("delete-released-lease"),
-    )
-
     def enqueue_survival() -> Mapping[str, Any]:
-        events.append("enqueue-protocol-v1-survival")
+        _record("enqueue-protocol-v1-survival")
         gate._protocol_v1_survival_fixture = survival_fixture
         return survival_fixture
 
-    monkeypatch.setattr(gate, "_enqueue_protocol_v1_survival_task", enqueue_survival)
-    monkeypatch.setattr(
-        gate,
-        "_require_protocol_v1_survival_unchanged",
-        lambda _fixture: events.append("require-protocol-v1-survival") or {},
-    )
-    monkeypatch.setattr(
-        gate,
-        "_release_protocol_v1_survival_task",
-        lambda _fixture: events.append("release-protocol-v1-survival") or {},
-    )
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_ray_job_gate_task",
-        lambda *_args, **_kwargs: events.append("wait-protocol-v1-terminal") or survival_terminal,
-    )
-    monkeypatch.setattr(
-        gate,
-        "_observe_protocol_v1_survival_task",
-        lambda _fixture: events.append("observe-protocol-v1-terminal") or survival_row,
-    )
-    monkeypatch.setattr(
-        gate,
-        "_protocol_metric_counts",
-        lambda: {("other", "QUEUED"): 0},
-    )
-
     def seed_fixture() -> Mapping[str, Any]:
         events.append("seed-protocol-v2")
-        gate._protocol_v2_fixture = fixture
-        return fixture
-
-    monkeypatch.setattr(gate, "_seed_protocol_v2_fixture", seed_fixture)
+        gate._protocol_v2_fixture = v2_fixture
+        return v2_fixture
 
     def verify_visibility(
         _fixture: Mapping[str, Any], *, baseline_metrics: Mapping[tuple[str, str], int]
     ) -> None:
         assert baseline_metrics == {("other", "QUEUED"): 0}
-        events.append("verify-protocol-v2-visibility")
+        _record("verify-protocol-v2-visibility")
         gate.evidence.protocol_v2_queued_unchanged = True
         gate.evidence.protocol_v2_unsupported_visible = True
 
-    monkeypatch.setattr(gate, "_verify_protocol_v2_visibility", verify_visibility)
-
     def verify_rejection(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
-        events.append("verify-protocol-v2-rejection")
+        _record("verify-protocol-v2-rejection")
         gate.evidence.protocol_v2_preinvocation_rejected = True
         gate.evidence.protocol_v2_application_marker_absent = True
         return _protocol_v2_rejection_payload()
 
-    monkeypatch.setattr(gate, "_verify_protocol_v2_rejection", verify_rejection)
-
     def verify_target_execution(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
-        events.append("verify-protocol-v2-target-execution")
+        _record("verify-protocol-v2-target-execution")
         gate.evidence.protocol_v2_target_exact_completed = True
         gate.evidence.protocol_v2_target_mismatch_rejected = True
         gate.evidence.protocol_v2_target_mismatch_marker_absent = True
         return _protocol_v2_target_execution_payload()
 
-    monkeypatch.setattr(
-        gate,
-        "_verify_protocol_v2_target_execution",
-        verify_target_execution,
-    )
-
     def cleanup_fixture(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
         events.append("cleanup-protocol-v2")
         gate._protocol_v2_fixture = None
-        return {"revision": 9}
+        return {"revision": final_policy_revision}
 
-    monkeypatch.setattr(gate, "_cleanup_protocol_v2_fixture", cleanup_fixture)
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_application_topology",
-        lambda: events.append("topology-restored"),
-    )
+    handlers: dict[str, Any] = {
+        "_recover_released_v040_startup_residue": lambda: _record("recover-released-startup"),
+        "_recover_protocol_v2_startup_fixture": lambda: (
+            _record("recover-protocol-v2-startup") or {}
+        ),
+        "_ray_job_manager_replica_observation": lambda: next(managers),
+        "_observe_protocol_cohorts": observe_protocol_cohorts,
+        "_delete_released_v040_manager": lambda: events.append("delete-released-manager"),
+        "_apply_released_v040_manager": lambda: _record("apply-released-manager"),
+        "_wait_for_protocol_cohorts": wait_for_cohorts,
+        "_scale_ray_job_manager": lambda replicas: events.append(f"scale-current:{replicas}"),
+        "_enqueue_released_v040_handoff_task": lambda: TASK_ID,
+        "_wait_for_protocol_handoff_task": lambda *_args, **_kwargs: next(handoff_observations),
+        "_observe_protocol_handoff_task": lambda _task_id: next(handoff_observations),
+        "_delete_released_v040_worker_lease": lambda: _record("delete-released-lease"),
+        "_enqueue_protocol_v1_survival_task": enqueue_survival,
+        "_require_protocol_v1_survival_unchanged": lambda _fixture: (
+            _record("require-protocol-v1-survival") or {}
+        ),
+        "_release_protocol_v1_survival_task": lambda _fixture: (
+            _record("release-protocol-v1-survival") or {}
+        ),
+        "_wait_for_ray_job_gate_task": lambda *_args, **_kwargs: (
+            _record("wait-protocol-v1-terminal") or survival_terminal
+        ),
+        "_observe_protocol_v1_survival_task": lambda _fixture: (
+            _record("observe-protocol-v1-terminal") or survival_row
+        ),
+        "_protocol_metric_counts": lambda: {("other", "QUEUED"): 0},
+        "_seed_protocol_v2_fixture": seed_fixture,
+        "_verify_protocol_v2_visibility": verify_visibility,
+        "_verify_protocol_v2_rejection": verify_rejection,
+        "_verify_protocol_v2_target_execution": verify_target_execution,
+        "_cleanup_protocol_v2_fixture": cleanup_fixture,
+        "_wait_for_application_topology": lambda: events.append("topology-restored"),
+    }
+    if overrides:
+        handlers.update(overrides)
+    for attr_name, handler in handlers.items():
+        monkeypatch.setattr(gate, attr_name, handler)
+    return survival_fixture, v2_fixture
+
+
+def test_protocol_handoff_certification_preserves_one_job_and_restores_every_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = LocalKubeRayGate(_config())
+    events: list[str] = []
+    _install_protocol_handoff_harness(monkeypatch, gate, events=events)
 
     gate._verify_protocol_handoff_certification()
 
@@ -1328,130 +1337,26 @@ def test_protocol_handoff_failure_still_removes_fixture_and_restores_topology(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = LocalKubeRayGate(_config())
-    gate.evidence.ray_job_manager_reconciled_same_job = True
-    gate.evidence.ray_job_manager_no_resubmit = True
-    released_worker = "11111111-1111-4111-8111-111111111111"
-    job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
-    survival_job_id = f"raysubmit_django_ray_rq2_{'b' * 64}"
-    survival_fixture = _protocol_v1_survival_fixture()
-    survival_terminal = _protocol_v1_survival_terminal(survival_job_id)
-    survival_row = {
-        "pk": survival_fixture["pk"],
-        "task_id": survival_fixture["task_id"],
-        "state": "SUCCEEDED",
-        "attempt_number": 1,
-        "execution_generation": survival_terminal["execution_generation"],
-        "ray_job_id": survival_job_id,
-        "ray_job_request_reference": "rq2-reference",
-    }
-    fixture = {
-        "pk": 41,
-        "task_id": TASK_ID,
-        "queue_name": gate_module.RAY_JOB_GATE_QUEUE,
-        "row_sha256": "d" * 64,
-        "initial_revision": 7,
-    }
-    managers = iter(
-        (
-            {"replicas": 1, "ready_replicas": 1},
-            {"replicas": 1, "ready_replicas": 1},
-        )
-    )
-    policies = iter((_protocol_policy_observation(7), _protocol_policy_observation(9)))
-    observations = iter(
-        (
-            _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
-            _protocol_handoff_observation(worker_id=released_worker, job_id=job_id),
-        )
-    )
     events: list[str] = []
-    monkeypatch.setattr(gate, "_recover_released_v040_startup_residue", lambda: None)
-    monkeypatch.setattr(gate, "_recover_protocol_v2_startup_fixture", dict)
-    monkeypatch.setattr(gate, "_ray_job_manager_replica_observation", lambda: next(managers))
-    monkeypatch.setattr(gate, "_observe_protocol_cohorts", lambda: next(policies))
-    monkeypatch.setattr(
-        gate,
-        "_delete_released_v040_manager",
-        lambda: events.append("delete-released-manager"),
-    )
-    monkeypatch.setattr(gate, "_apply_released_v040_manager", lambda: None)
-
-    def wait_for_cohorts() -> Mapping[str, Any]:
-        gate._released_v040_worker_id = released_worker
-        return {}
-
-    monkeypatch.setattr(gate, "_wait_for_protocol_cohorts", wait_for_cohorts)
-    monkeypatch.setattr(
-        gate,
-        "_scale_ray_job_manager",
-        lambda replicas: events.append(f"scale-current:{replicas}"),
-    )
-    monkeypatch.setattr(gate, "_enqueue_released_v040_handoff_task", lambda: TASK_ID)
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_protocol_handoff_task",
-        lambda *_args, **_kwargs: next(observations),
-    )
-    monkeypatch.setattr(gate, "_observe_protocol_handoff_task", lambda _task_id: next(observations))
-    monkeypatch.setattr(gate, "_delete_released_v040_worker_lease", lambda: None)
-
-    def enqueue_survival() -> Mapping[str, Any]:
-        gate._protocol_v1_survival_fixture = survival_fixture
-        return survival_fixture
-
-    monkeypatch.setattr(gate, "_enqueue_protocol_v1_survival_task", enqueue_survival)
-    monkeypatch.setattr(
-        gate,
-        "_require_protocol_v1_survival_unchanged",
-        lambda _fixture: {},
-    )
-    monkeypatch.setattr(gate, "_release_protocol_v1_survival_task", lambda _fixture: {})
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_ray_job_gate_task",
-        lambda *_args, **_kwargs: survival_terminal,
-    )
-    monkeypatch.setattr(
-        gate,
-        "_observe_protocol_v1_survival_task",
-        lambda _fixture: survival_row,
-    )
-    monkeypatch.setattr(
-        gate,
-        "_protocol_metric_counts",
-        lambda: {("other", "QUEUED"): 0},
-    )
-
-    def seed_fixture() -> Mapping[str, Any]:
-        events.append("seed-protocol-v2")
-        gate._protocol_v2_fixture = fixture
-        return fixture
-
-    monkeypatch.setattr(gate, "_seed_protocol_v2_fixture", seed_fixture)
 
     def fail_visibility(
         _fixture: Mapping[str, Any], *, baseline_metrics: Mapping[tuple[str, str], int]
     ) -> None:
+        del baseline_metrics
         events.append("visibility-failed")
         raise RuntimeError("protocol-v2-visibility-failure")
 
-    monkeypatch.setattr(gate, "_verify_protocol_v2_visibility", fail_visibility)
-    monkeypatch.setattr(
+    _install_protocol_handoff_harness(
+        monkeypatch,
         gate,
-        "_verify_protocol_v2_rejection",
-        lambda _fixture: pytest.fail("rejection probe must not run after visibility failure"),
-    )
-
-    def cleanup_fixture(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
-        events.append("cleanup-protocol-v2")
-        gate._protocol_v2_fixture = None
-        return {"revision": 9}
-
-    monkeypatch.setattr(gate, "_cleanup_protocol_v2_fixture", cleanup_fixture)
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_application_topology",
-        lambda: events.append("topology-restored"),
+        events=events,
+        record_all_events=False,
+        overrides={
+            "_verify_protocol_v2_visibility": fail_visibility,
+            "_verify_protocol_v2_rejection": lambda _fixture: pytest.fail(
+                "rejection probe must not run after visibility failure"
+            ),
+        },
     )
 
     with pytest.raises(RuntimeError, match="protocol-v2-visibility-failure"):
@@ -1468,70 +1373,7 @@ def test_protocol_handoff_owner_failure_cleans_the_deferred_v1_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = LocalKubeRayGate(_config())
-    gate.evidence.ray_job_manager_reconciled_same_job = True
-    gate.evidence.ray_job_manager_no_resubmit = True
-    released_worker = "11111111-1111-4111-8111-111111111111"
-    job_id = f"raysubmit_django_ray_v1_{'a' * 64}"
-    survival_fixture = _protocol_v1_survival_fixture()
-    managers = iter(
-        (
-            {"replicas": 1, "ready_replicas": 1},
-            {"replicas": 1, "ready_replicas": 1},
-        )
-    )
-    policies = iter((_protocol_policy_observation(7), _protocol_policy_observation(7)))
     events: list[str] = []
-    monkeypatch.setattr(gate, "_recover_released_v040_startup_residue", lambda: None)
-    monkeypatch.setattr(gate, "_recover_protocol_v2_startup_fixture", dict)
-    monkeypatch.setattr(gate, "_ray_job_manager_replica_observation", lambda: next(managers))
-    monkeypatch.setattr(gate, "_observe_protocol_cohorts", lambda: next(policies))
-    monkeypatch.setattr(gate, "_apply_released_v040_manager", lambda: None)
-
-    def wait_for_cohorts() -> Mapping[str, Any]:
-        gate._released_v040_worker_id = released_worker
-        return {}
-
-    monkeypatch.setattr(gate, "_wait_for_protocol_cohorts", wait_for_cohorts)
-    monkeypatch.setattr(
-        gate,
-        "_scale_ray_job_manager",
-        lambda replicas: events.append(f"scale-current:{replicas}"),
-    )
-    monkeypatch.setattr(gate, "_enqueue_released_v040_handoff_task", lambda: TASK_ID)
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_protocol_handoff_task",
-        lambda *_args, **_kwargs: _protocol_handoff_observation(
-            worker_id=released_worker,
-            job_id=job_id,
-        ),
-    )
-
-    def enqueue_survival() -> Mapping[str, Any]:
-        gate._protocol_v1_survival_fixture = survival_fixture
-        return survival_fixture
-
-    monkeypatch.setattr(gate, "_enqueue_protocol_v1_survival_task", enqueue_survival)
-    monkeypatch.setattr(
-        gate,
-        "_require_protocol_v1_survival_unchanged",
-        lambda _fixture: (_ for _ in ()).throw(RuntimeError("v1-owner-failure")),
-    )
-    monkeypatch.setattr(
-        gate,
-        "_release_protocol_v1_survival_task",
-        lambda _fixture: pytest.fail("the failed owner must not release the deferred row"),
-    )
-    monkeypatch.setattr(
-        gate,
-        "_delete_released_v040_manager",
-        lambda: events.append("delete-released-manager"),
-    )
-    monkeypatch.setattr(
-        gate,
-        "_delete_released_v040_worker_lease",
-        lambda: events.append("delete-released-lease"),
-    )
 
     def cleanup_survival(_fixture: Mapping[str, Any]) -> Mapping[str, Any]:
         events.append("cleanup-protocol-v1-survival")
@@ -1543,11 +1385,22 @@ def test_protocol_handoff_owner_failure_cleans_the_deferred_v1_row(
             "queued_absent": True,
         }
 
-    monkeypatch.setattr(gate, "_cleanup_protocol_v1_survival_task", cleanup_survival)
-    monkeypatch.setattr(
+    _install_protocol_handoff_harness(
+        monkeypatch,
         gate,
-        "_wait_for_application_topology",
-        lambda: events.append("topology-restored"),
+        events=events,
+        record_all_events=False,
+        final_policy_revision=7,
+        overrides={
+            "_delete_released_v040_worker_lease": lambda: events.append("delete-released-lease"),
+            "_require_protocol_v1_survival_unchanged": lambda _fixture: (_ for _ in ()).throw(
+                RuntimeError("v1-owner-failure")
+            ),
+            "_release_protocol_v1_survival_task": lambda _fixture: pytest.fail(
+                "the failed owner must not release the deferred row"
+            ),
+            "_cleanup_protocol_v1_survival_task": cleanup_survival,
+        },
     )
 
     with pytest.raises(RuntimeError, match="v1-owner-failure"):
@@ -1582,55 +1435,54 @@ def test_live_rq2_gate_reconciles_one_job_and_runs_negative_fixture(
 ) -> None:
     gate = LocalKubeRayGate(_config())
     job_id = f"raysubmit_django_ray_rq2_{'a' * 64}"
-    observations = iter(
-        (
-            {
-                "ready": True,
-                "state": "RUNNING",
-                "durable_state": "RUNNING",
-                "attempt_number": 1,
-                "execution_generation": 4,
-                "worker_id": "old-worker",
-                "job_id": job_id,
-                "carrier_ok": True,
-                "binding_ok": True,
-                "request_ok": True,
-                "info_clear": True,
-                "logs_clear": True,
-                "submission_count": 1,
-            },
-            {
-                "ready": True,
-                "state": "RUNNING",
-                "durable_state": "RUNNING",
-                "attempt_number": 1,
-                "execution_generation": 4,
-                "worker_id": "replacement-worker",
-                "job_id": job_id,
-                "carrier_ok": True,
-                "binding_ok": True,
-                "request_ok": True,
-                "info_clear": True,
-                "logs_clear": True,
-                "submission_count": 1,
-            },
-            {
-                "ready": True,
-                "state": "SUCCEEDED",
-                "durable_state": "SUCCEEDED",
-                "attempt_number": 1,
-                "execution_generation": 4,
-                "worker_id": "replacement-worker",
-                "job_id": job_id,
-                "carrier_ok": True,
-                "binding_ok": True,
-                "request_ok": True,
-                "info_clear": True,
-                "logs_clear": True,
-                "submission_count": 1,
-            },
-        )
+    observation_records: tuple[dict[str, object], ...] = (
+        {
+            "ready": True,
+            "state": "RUNNING",
+            "durable_state": "RUNNING",
+            "attempt_number": 1,
+            "execution_generation": 4,
+            "worker_id": "old-worker",
+            "job_id": job_id,
+            "carrier_ok": True,
+            "binding_ok": True,
+            "request_ok": True,
+            "info_clear": True,
+            "logs_clear": True,
+            "submission_count": 1,
+        },
+        {
+            "ready": True,
+            "state": "RUNNING",
+            "durable_state": "RUNNING",
+            "attempt_number": 1,
+            "execution_generation": 4,
+            "worker_id": "replacement-worker",
+            "job_id": job_id,
+            "carrier_ok": True,
+            "binding_ok": True,
+            "request_ok": True,
+            "info_clear": True,
+            "logs_clear": True,
+            "submission_count": 1,
+        },
+        {
+            "ready": True,
+            "state": "SUCCEEDED",
+            "durable_state": "SUCCEEDED",
+            "attempt_number": 1,
+            "execution_generation": 4,
+            "worker_id": "replacement-worker",
+            "job_id": job_id,
+            "carrier_ok": True,
+            "binding_ok": True,
+            "request_ok": True,
+            "info_clear": True,
+            "logs_clear": True,
+            "submission_count": 1,
+        },
     )
+    observations = iter(observation_records)
     events: list[str] = []
 
     monkeypatch.setattr(gate, "_enqueue_ray_job_gate_task", lambda: TASK_ID)

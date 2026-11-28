@@ -18,21 +18,51 @@ spec:
         app: django-ray
         component: worker
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: wait-for-postgres
           image: busybox:1.36
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - sh
             - -c
             - until nc -z postgres-svc 5432; do echo waiting for postgres; sleep 2; done;
         - name: wait-for-ray
           image: busybox:1.36
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - sh
             - -c
             - until nc -z ray-head-svc 10001; do echo waiting for ray-head; sleep 2; done;
         - name: wait-for-runtime-env
           image: busybox:1.36
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - sh
             - -c
@@ -46,6 +76,11 @@ spec:
         - name: django-ray-worker
           image: django-ray:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           args:
             - worker-cluster
           envFrom:
@@ -117,7 +152,16 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - test -d /proc/1 && grep -q python /proc/1/cmdline
+                - >-
+                  test -r /proc/1/stat &&
+                  test -r /proc/1/status &&
+                  awk '{sub(/^.*\) /,""); exit ($1=="Z"||$1=="X"||$1=="T"||$1=="D")?1:0}' /proc/1/stat &&
+                  tr '\0' ' ' < /proc/1/cmdline | grep -q django_ray_worker &&
+                  state_file="${TMPDIR:-/tmp}/.worker-liveness-ticks" &&
+                  ticks="$(awk '/^(voluntary|nonvoluntary)_ctxt_switches:/ {s+=$2} END {print s+0}' /proc/1/status)" &&
+                  prev="$(cat "$state_file" 2>/dev/null || true)" &&
+                  printf '%s\n' "$ticks" > "$state_file" &&
+                  test -z "$prev" -o "$ticks" != "$prev"
             initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 5

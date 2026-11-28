@@ -140,11 +140,10 @@ RuntimeEnv snapshots through the explicit `django-secret` fallback. The three
 selection variables are patched directly onto `django-web` and the default,
 synchronous, ML, and Ray Job task-manager containers; they are not added to the
 shared ConfigMap or `RayCluster` pod specification. The base and other overlays
-remain in the plaintext compatibility mode. This verifies the envelope and
-execution path, not production key isolation: the example Ray pods still import
-the shared Django signing secret used by the fallback. Use a dedicated key
-delivered only to Django application processes when separation from read-only
-database access is required.
+remain in the plaintext compatibility mode. `DJANGO_SECRET_KEY` is withheld from both
+static and KubeRay Ray head/worker pods. For production deployments, prefer a dedicated
+RuntimeEnv key ring delivered exclusively to Django application processes so encryption
+key rotation stays independent of `DJANGO_SECRET_KEY`.
 
 ### Local capacity profiles
 
@@ -167,7 +166,7 @@ LimitRanges supply bounded CPU, memory, and ephemeral-storage coordinates to
 the inherited init containers.
 
 This profile is local smoke capacity, not the guarded full KubeRay gate and not
-the isolated multi-session experiment tracked by issue #418. Its switch target
+an isolated multi-session soak benchmark. Its switch target
 requires an explicit `docker-desktop` or `kind-<name>` context and
 foreground-removes only the named sample workloads and routes that are absent
 from the profile. It retains the `django-ray` Namespace, the existing Secret

@@ -41,6 +41,13 @@ COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen
 
+# Run development container as a non-root user
+RUN groupadd --gid 1000 django && \
+    useradd --uid 1000 --gid django --shell /bin/bash --create-home django && \
+    chown -R django:django /app
+
+USER django
+
 # Expose ports
 EXPOSE 8000 6379 8265
 
