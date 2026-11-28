@@ -21,7 +21,12 @@ on:
         description: Maximum fresh-interpreter iterations for real-ray-stress
         type: choice
         default: "25"
-        options: ["5", "15", "25"]
+        options: ["5", "15", "25", "100"]
+      target:
+        description: Test selection for real-ray-stress
+        type: choice
+        default: all
+        options: [all, distributed]
       shared-local-ray:
         description: Use DJANGO_RAY_SHARED_LOCAL_RAY=1 during real-ray-stress
         type: boolean
@@ -277,6 +282,7 @@ jobs:
         timeout-minutes: 19
         env:
           MAX_ITERATIONS: ${{ inputs.iterations }}
+          STRESS_TARGET: ${{ inputs.target }}
           TRACE_NATIVE_EXIT: ${{ inputs.trace-native-exit }}
           SHARED_LOCAL_RAY: ${{ inputs.shared-local-ray }}
         shell: bash
@@ -294,6 +300,7 @@ jobs:
             --source "$GITHUB_WORKSPACE" \
             --output "$RUNNER_TEMP/real-ray-stress-evidence" \
             --probe real-ray-stress \
+            --target "$STRESS_TARGET" \
             --max-iterations "$MAX_ITERATIONS" \
             --timeout-seconds 1080 "${extra[@]}"
 

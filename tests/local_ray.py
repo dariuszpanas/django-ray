@@ -16,6 +16,12 @@ from scripts.require_linux import require_linux
 OBJECT_STORE_BYTES = 128 * 1024 * 1024
 MAX_LOGICAL_CPUS = 4
 SHARED_LOCAL_RAY_ENV = "DJANGO_RAY_SHARED_LOCAL_RAY"
+ISOLATED_LOCAL_RAY_TEST_PATHS = frozenset(
+    {
+        "tests/integration/test_task_execution.py",
+        "tests/unit/test_result_buffer.py",
+    }
+)
 _SHARED_LOCAL_RAY_RESOURCES: dict[str, float] = {
     "result_buffer": 1,
     "result_fold": 1,

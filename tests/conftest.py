@@ -13,7 +13,12 @@ import pytest
 from django.conf import settings
 
 from scripts.require_linux import require_linux
-from tests.local_ray import local_ray_runtime, shutdown_shared_local_ray
+from tests.local_ray import (
+    ISOLATED_LOCAL_RAY_TEST_PATHS,
+    local_ray_runtime,
+    shutdown_shared_local_ray,
+    use_shared_local_ray,
+)
 from tests.real_ray_ownership import (
     RealRayOwnershipLock,
     RealRayOwnershipPathError,
@@ -216,6 +221,48 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         _release_real_ray_ownership(config)
 
 
+def _item_relative_posix_path(item: pytest.Item, rootpath: Path) -> str | None:
+    item_path = getattr(item, "path", None)
+    if item_path is None:
+        return None
+    try:
+        return Path(str(item_path)).resolve().relative_to(rootpath).as_posix()
+    except ValueError:
+        return None
+
+
+class _SharedLocalRayOrderingPlugin:
+    """Keep isolated dashboard real_ray modules ahead of shared-Ray tests.
+
+    pytest-django reorders non-transactional ``django_db`` items ahead of
+    transactional and non-DB items, which otherwise splits shared-Ray modules
+    across isolated dashboard modules and triggers an avoidable extra local Ray
+    cluster startup/teardown cycle.
+    """
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(
+        self,
+        config: pytest.Config,
+        items: list[pytest.Item],
+    ) -> None:
+        if not use_shared_local_ray() or not items:
+            return
+        rootpath = Path(str(config.rootpath)).resolve()
+        isolated: list[pytest.Item] = []
+        shared_or_other: list[pytest.Item] = []
+        for item in items:
+            rel = _item_relative_posix_path(item, rootpath)
+            if item.get_closest_marker("real_ray") is not None and (
+                rel in ISOLATED_LOCAL_RAY_TEST_PATHS
+            ):
+                isolated.append(item)
+            else:
+                shared_or_other.append(item)
+        if isolated:
+            items[:] = isolated + shared_or_other
+
+
 def pytest_configure(config: object) -> None:
     """Configure Django for testing."""
     if isinstance(config, pytest.Config):
@@ -223,6 +270,11 @@ def pytest_configure(config: object) -> None:
             "markers",
             "tooling: Repository policy, qualification-harness, KubeRay, packaging, and docs tooling tests",
         )
+        if not config.pluginmanager.has_plugin("django_ray_shared_local_ray_ordering"):
+            config.pluginmanager.register(
+                _SharedLocalRayOrderingPlugin(),
+                name="django_ray_shared_local_ray_ordering",
+            )
     settings_module = os.environ.get("DJANGO_SETTINGS_MODULE")
     if not settings.configured and not settings_module:
         settings.configure(

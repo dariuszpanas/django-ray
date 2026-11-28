@@ -256,3 +256,43 @@ def test_required_ray_skip_policy_in_real_pytest_without_starting_ray(
     assert expected_summary in result.stdout, result.stdout + result.stderr
     if expected_code:
         assert "skip/xfail is forbidden" in result.stdout
+
+
+def test_shared_local_ray_ordering_places_isolated_dashboard_modules_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from tests import conftest
+
+    plugin = conftest._SharedLocalRayOrderingPlugin()
+    config = SimpleNamespace(rootpath=ROOT)
+
+    def make_item(rel_path: str, *, real_ray: bool = True) -> Any:
+        return SimpleNamespace(
+            path=ROOT / rel_path,
+            nodeid=f"{rel_path}::test_case",
+            get_closest_marker=lambda name: object() if real_ray and name == "real_ray" else None,
+        )
+
+    original = [
+        make_item("tests/unit/test_workflows_real_ray.py"),
+        make_item("tests/integration/test_task_execution.py"),
+        make_item("tests/unit/test_result_buffer.py"),
+        make_item("tests/unit/test_distributed.py"),
+    ]
+
+    monkeypatch.delenv(local_ray.SHARED_LOCAL_RAY_ENV, raising=False)
+    items_without_env = list(original)
+    plugin.pytest_collection_modifyitems(config, items_without_env)  # type: ignore[arg-type]
+    assert [item.nodeid for item in items_without_env] == [item.nodeid for item in original]
+
+    monkeypatch.setenv(local_ray.SHARED_LOCAL_RAY_ENV, "1")
+    items_with_env = list(original)
+    plugin.pytest_collection_modifyitems(config, items_with_env)  # type: ignore[arg-type]
+    assert [item.nodeid for item in items_with_env] == [
+        "tests/integration/test_task_execution.py::test_case",
+        "tests/unit/test_result_buffer.py::test_case",
+        "tests/unit/test_workflows_real_ray.py::test_case",
+        "tests/unit/test_distributed.py::test_case",
+    ]
