@@ -1,4 +1,4 @@
-required-version = ">=0.5.0"
+required-version = ">=0.6.0"
 description-policy-version = 1
 min-words = 8
 max-length = 65536

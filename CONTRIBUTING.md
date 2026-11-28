@@ -167,8 +167,8 @@ maintainer acknowledgment of the current head, base and policy. Findings are rev
 claims about intent. A hold fails the triage step and prevents automatic review publication. The
 owner-only publisher guard still applies after acknowledgment. Triage comments do not approve
 workflow execution, revoke existing reviews, supply a required current-head merge status or grant
-an agent permission to merge. The Action is pinned to a reviewed source commit; other YAGA quality
-checks retain the released version.
+an agent permission to merge. Both trusted triage/review and repository-wide YAGA quality
+checks are pinned to the same released YAGA 0.6.0 version.
 
 Path-selected deployed evidence is reviewed under the affected-gate policy. The public
 `Transaction Qualification` workflow runs the installed-wheel PostgreSQL fixture for relevant
@@ -317,9 +317,9 @@ or tests and must not contain secrets. Work must continue normally when Obsidian
 ### YAGA commit policy
 
 The required `Commit Messages` check and local hook/Make commands use released
-YAGA 0.5.0 with the structural policy in `.yaga.toml` and PR description rules in
+YAGA 0.6.0 with the structural policy in `.yaga.toml` and PR description rules in
 `.yaga/description-policy.toml`. All tracked YAGA policies declare
-`required-version = ">=0.5.0"` and are audited by `yaga policy check --strict`
+`required-version = ">=0.6.0"` and are audited by `yaga policy check --strict`
 during `make repository-check`. Spelling with pinned Typos 1.50.2 is an explicit
 additional check. Node.js and npm are no longer development prerequisites.
 
