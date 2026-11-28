@@ -185,6 +185,8 @@ test-postgres:
 	python scripts/require_linux.py
 	python -m pytest \
 		tests/integration/test_postgresql_coordination.py \
+		tests/integration/test_postgresql_coordination_progress_and_input.py \
+		tests/integration/test_postgresql_coordination_rq2_and_purge.py \
 		tests/integration/test_postgresql_maintenance_scans.py \
 		tests/integration/test_postgresql_maintenance_plans.py \
 		tests/integration/test_doctor_postgresql.py \
