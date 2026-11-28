@@ -213,6 +213,20 @@ provide an inline `RAY_RUNTIME_ENV`, but it cannot combine that option with
 
 ## Encrypt Durable Snapshots
 
+!!! warning "Database-at-rest protection only"
+
+    `RUNTIME_ENV_STORAGE_MODE="encrypted"` (and `"required"`) protects only the
+    persisted `runtime_env_json` database column at rest. It does **not** encrypt
+    `RuntimeEnv` fields such as `env_vars` in transit to Ray, in Ray Dashboard or
+    GCS job metadata, or in Ray worker process memory and local caches. During
+    submission, the task manager decrypts the snapshot and passes the resolved
+    `RuntimeEnv` specification to Ray (and Ray Job submissions send it to the Ray
+    Dashboard Jobs API, where Ray stores job metadata in GCS). Protect Ray
+    submission and cluster traffic with TLS, network isolation, and Ray
+    Dashboard/GCS access controls, and deliver sensitive credentials through
+    workload identity, pod secret mounts, or an external secret manager rather
+    than `RuntimeEnv` `env_vars`.
+
 RuntimeEnv encryption is an opt-in protection for the `runtime_env_json` database
 column. New installations and upgrades keep `RUNTIME_ENV_STORAGE_MODE="plaintext"`
 until an operator completes the key-distribution rollout. Encrypted mode uses a fresh
@@ -401,8 +415,9 @@ not:
   guessing low-entropy environment definitions;
 - encrypt task arguments, results, progress, workflow input, external input storage,
   or a RuntimeEnv value copied into one of those fields; or
-- keep plaintext out of Django process memory, the Ray submission channel, Ray worker
-  process memory and caches, or application-created logs.
+- keep plaintext out of Django process memory, the Ray submission channel, Ray
+  Dashboard and GCS job metadata, Ray worker process memory and caches, or
+  application-created logs.
 
 Back up keys through a different access path from database backups and test restoring
 both. Encryption is defense in depth, not permission to place long-lived credentials

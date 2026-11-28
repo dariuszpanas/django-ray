@@ -701,14 +701,13 @@ for the historical decision behind these state and evidence boundaries.
 
 The 64-slot reducer bound is accounting capacity for a versioned protocol, not native
 multi-output eligibility. The first adapter boundary remains one buffered invocation
-result until issue #116 supplies the additional Ray transport evidence.
+result until separate Ray transport evidence qualifies multi-output channels.
 
 The reducer does not prove Kubernetes side-effect safety or native multi-output and
-zero-copy behavior. [Issue #115](https://github.com/dariuszpanas/django-ray/issues/115)
-owns idempotency, partial-write, cancellation, and reconciliation evidence for
-Kubernetes synchronization. [Issue #116](https://github.com/dariuszpanas/django-ray/issues/116)
-owns exact transport and output evidence. They do not block the Ray-free reducer, but
-they block those capability claims in a native strategy.
+zero-copy behavior. Idempotency, partial-write, cancellation, reconciliation, and
+exact transport/output evidence for Kubernetes synchronization remain separate
+qualification gates; they do not block the Ray-free reducer, but they block those
+capability claims in a native strategy.
 
 ## Run, invocation, and observability identity
 
@@ -821,7 +820,7 @@ constraints must first be introduced and validated.
 
 ## Acceptance contract for plan snapshot implementation
 
-Issue #84 and later implementations can cite these stable requirements:
+Plan snapshot implementations must satisfy these stable requirements:
 
 1. **PLAN-01 -- Pre-submit boundary:** materialization, canonical validation,
    fingerprinting, and strategy eligibility complete before any remote submission,

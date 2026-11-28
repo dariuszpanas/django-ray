@@ -5,7 +5,7 @@ the existing ecosystem boundaries. That base dependency supports
 django-ray's Ray Core, Ray Client, Ray Jobs, Dashboard, and State API paths. It does
 not turn every optional Ray library into a tested django-ray integration.
 
-A disposable Ray 2.56.0 base-install probe confirmed that `ray`,
+A base-install probe (first recorded on Ray 2.56.0 and retained on the 2.60.0 floor) confirmed that `ray`,
 `ray.job_submission`, and `ray.dag` import. The base environment did not provide a
 usable Data, Train, Tune, RLlib, or Serve path without component dependencies. The
 former `ray.workflow` package is removed. Importing `ray.dag` also does not make the

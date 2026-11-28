@@ -386,7 +386,9 @@ runtime graph without development tools, then queries current PyPI advisory data
 command requires network access and its result can change when a new advisory is
 published. The check fails when its lock export is stale, incomplete, unpinned, or
 contaminated by the project or audit tool, and an advisory-service failure does not pass
-silently. Blocking CI and release workflows repeat it under every supported Python version on Linux.
+silently. Blocking CI runs it on Linux under Python 3.12 (`Runtime Dependency Audit (ubuntu-latest, Python 3.12)`),
+while the release and release-candidate qualification workflows repeat it across every supported
+Python version on Linux (3.12, 3.13, and 3.14).
 The advisory Windows workflow separately checks that platform's dependency graph.
 Each scan also cross-checks its hashed requirements
 against a second locked CycloneDX export so an omitted transitive cannot silently escape
@@ -509,8 +511,8 @@ uv run make test-testproject
 ```
 
 This runs Django's system checks, the sample API/security/workflow tests, and requires at least 80%
-coverage across the user-facing API, landing view, and URL configuration. CI runs it as the
-`Testproject Smoke` job before building the package.
+coverage across the user-facing API, landing view, and URL configuration. CI runs it inside the
+`Testproject & Tooling` job before building the package.
 
 The separate blocking `Docker Compose Smoke` job builds the tracked application image, generates
 disposable credentials, starts the shared-PostgreSQL Compose topology, and runs the bounded

@@ -26,12 +26,27 @@ profile supplies both. Verify authorized and denied Core/Client/Jobs control
 paths after replacing Ray, and preserve credentials separately from public
 qualification evidence. See the [Ray 2.60 review](../compatibility.md#ray-2600-baseline-for-080).
 
-There is **no django-ray database migration delta from 0.7.1**. The migration leaf
-remains `0028_worker_lease_policy`; retain its common lease authority and normal
-migration verification. This does not qualify mixed-version execution or prove
-that old code can safely write candidate state. Current execution protocol 1,
-rq2 request references and schema-v3 workflow history retain their separate
-compatibility contracts. Dormant target tables do not activate target routing.
+This upgrade includes migration **`0029_lease_engine_and_hot_indexes`** after
+`0028_worker_lease_policy`. Apply it during the stopped-writer window before starting
+upgraded workers. Migration `0029_lease_engine_and_hot_indexes`:
+
+- adds database-clock `lease_expires_at` (intentionally unindexed to preserve PostgreSQL
+  HOT heartbeat updates) and `lease_policy_revision` columns to `TaskWorkerLease`, and
+  backfills existing leases from the active `TaskWorkerLeasePolicy`;
+- widens `TaskWorkerLease.queue_name` to `1024` characters for multi-queue workers;
+- replaces superseded full-table indexes (`ray_task_heartbeat_idx`, legacy claim/expiry
+  indexes, and redundant reverse indexes on dormant target-revision tables) with partial
+  hot-path indexes on `RayTaskExecution` (`QUEUED`, `RUNNING`/`CANCELLING`,
+  `queue_deadline_at`, terminal `finished_at`, and `result_reference`) and `TaskAttempt`
+  (`state` and `result_reference`); and
+- captures and restores SQLite triggers around `TaskWorkerLease` table rebuild DDL in
+  both forward and reverse directions.
+
+Retain `0028_worker_lease_policy`'s shared lease authority and normal migration
+verification. This migration does not qualify mixed-version execution or prove that old
+code can safely write candidate state. Current execution protocol 1, rq2 request
+references, and schema-v3 workflow history retain their separate compatibility contracts.
+Dormant target tables do not activate target routing.
 
 For deployments using the sample manifests:
 
@@ -73,10 +88,11 @@ Do not treat an incomplete scan or exit status 2 as deletion authority. See
    Retain encryption keys separately and verify an independent restore with the
    released reader. Preserve the original backup before testing candidate writes.
 3. Keep all writers stopped while installing the candidate package and replacing
-   the compatible Ray/Python tuple. Rebuild immutable RuntimeEnv artifacts and
-   inspect the normal migration plan; django-ray has no new migration after 0028
-   for this boundary. Verify one common lease policy and matching
-   `WORKER_LEASE_SECONDS` across every process sharing the lease table.
+   the compatible Ray/Python tuple. Rebuild immutable RuntimeEnv artifacts,
+   inspect the migration plan (`python manage.py migrate --plan django_ray`), and
+   apply `0029_lease_engine_and_hot_indexes` (`python manage.py migrate django_ray`).
+   Verify one common lease policy and matching `WORKER_LEASE_SECONDS` across every
+   process sharing the lease table.
 4. Start only the candidate managers. Verify historical tasks, attempts, results
    and workflow graphs through authorized readers. Exercise current Core and Jobs
    execution, encrypted RuntimeEnv recovery, cancellation and manager recovery on
@@ -95,17 +111,22 @@ a durable `CANCELLED` row do not prove that an external effect stopped.
 
 ## Rollback decisions
 
-No new migration means there is no django-ray schema reversal required for this
-boundary. It does **not** establish a general code-only downgrade guarantee.
-Keep old producers, managers and purgers stopped until the selected recovery path
-has been rehearsed and the matching Ray/Python environment is restored.
+Migration `0029_lease_engine_and_hot_indexes` is reversible during a stopped-writer
+maintenance window (`python manage.py migrate django_ray 0028_worker_lease_policy`),
+which drops the additive lease-engine columns and partial indexes while restoring
+SQLite triggers and previous indexes. Schema reversibility does **not** establish a
+general code-only downgrade guarantee once candidate writes, cleanup tombstones, or
+artifact deletions have occurred. Rehearse both forward application and reversal on a
+staging copy before upgrading, and keep old producers, managers, and purgers stopped
+until the selected recovery path has been verified and the matching Ray/Python
+environment is restored.
 
 | Observation | Decision boundary |
 |---|---|
 | Candidate has not accepted new writes | Start from the independently verified 0.7.1 database/artifact backup, retained keys and original application/Ray environment. Verify the restored state before reopening producers. |
 | Candidate has written tasks, results, workflow history or cleanup tombstones | Preserve that state first. Restoring the pre-upgrade backup loses those writes; reconcile them and external effects before choosing restoration. |
 | Released code reads selected candidate-written history | Read-only success proves those records and artifacts only. It does not authorize released managers, request execution or cleanup against candidate-written state. |
-| Considering a code-only downgrade | The final candidate's rehearsal must explicitly prove every retained format and writer operation that the downgrade would use. Until then, use the stopped-writer restore procedure; unchanged migration files alone are insufficient. |
+| Considering a code-only downgrade | Rehearse forward and reverse `0029_lease_engine_and_hot_indexes` migration steps and verify every retained format and writer operation before downgrading. Until verified, use the stopped-writer backup-restore procedure. |
 | Cleanup removed an artifact or a retained encryption key is missing | Database restoration cannot recreate the bytes or key. Restore and verify the matching artifact/key backup or keep the missing-data outcome visible. |
 | A task may already have performed an external effect | Neither package rollback nor database restoration authorizes replay. Reconcile the effect before any explicit retry. |
 | Custom persistent monitoring data changed | Follow the monitoring component's compatible backup/restore procedure separately; replacing an image tag does not reverse a data-format change. |
@@ -117,50 +138,24 @@ requests row locks; it does not claim successful graph access in that phase.
 Other restored graph reads and stored-row preservation have separate assertions.
 These bounded read checks are distinct from restarting old writers.
 
-## Final candidate qualification
+## Upgrade verification checklist
 
-The [upgrade recipes](https://github.com/dariuszpanas/django-ray/blob/main/qualification/upgrade/README.md)
-select released 0.7.1 with its frozen Ray 2.58 environment for all four native
-recipes: Core, Jobs, Jobs manager crash and Core/Ray loss. The candidate uses its
-own installed wheel and Ray 2.60 environment. Data preservation also retains
-0.4.0, 0.5.0, 0.6.0 and 0.7.0 baselines. Rebuilt released wheels establish their
-source boundary; they do not verify independently downloaded published artifacts.
+Before cutting production traffic over to 0.8.0:
 
-Before accepting 0.8.0:
+1. **Package and environment alignment**: Verify Python 3.12–3.14, Django 6.0.8+, and
+   Ray 2.60.0+ match across web processes, task managers, Ray head, Ray workers, and
+   rebuilt RuntimeEnv archives.
+2. **Migration and rollback rehearsal**: Rehearse `python manage.py migrate django_ray`
+   through `0029_lease_engine_and_hot_indexes` (and its reverse to `0028_worker_lease_policy`)
+   against a restored copy of your 0.7.1 database, verifying lease-policy agreement,
+   historical task/result/workflow reads, and encrypted RuntimeEnv recovery.
+3. **Runtime and operations checks**: Exercise Core and Jobs task execution, cancellation,
+   `django_ray_worker --drain`, `django_ray_doctor`, `django_ray_worker_ready`, protected
+   APIs/Admin views, and monitoring dashboards after upgrading.
+4. **Known platform boundaries**: Prefer direct Ray Core/GCS or explicit HTTP(S) Ray Jobs
+   when avoiding the upstream [Ray Client startup limitation](../compatibility.md#ray-client-startup-limitation).
+   Python 3.15 and native Compiled Graph remain outside supported production execution.
 
-1. Freeze versioned source and release notes. Require exact-source Linux CI,
-   dependency audits and fresh wheel **and** sdist qualification on Python
-   3.12–3.14 using the [nonpublishing candidate workflow](../contributing.md#qualify-built-artifacts-without-publishing).
-   Review all six installed environments, including migrations, purge, doctor
-   and request-reference assertions, with their actual dependency inventories.
-2. Review all five data baselines on SQLite and PostgreSQL and all four native
-   recipes against 0.7.1. Require old-manager drain, independent restore,
-   preserved fields/artifacts, exact crash/retry identities, encrypted snapshots,
-   selected workflow history, rollback-read boundaries and owned cleanup.
-3. Run the full applicable [deployed matrix](local-kuberay-gate.md) on final
-   source. Require standard-profile cold Ray, matching source/archive/images,
-   authenticated API and Core/Jobs execution, current rq2 same-Job recovery,
-   retired-carrier refusal, protected workflow/history/log observations,
-   RuntimeEnv maintenance/refusal and preservation. Retain the separate worker,
-   transaction, cancellation, latency and monitoring/authentication receipts.
-   A co-resident transition must preserve data, credentials and task execution;
-   it does not replace the full-profile cold gate.
-4. Join the receipts into a reviewed release decision and rollback table.
-   `complete_application_gate: false` and `complete_upgrade_gate: false` remain
-   honest selected-workload limits; passing individual jobs does not complete the
-   aggregate decision. Preserve failed observations and record missing assertions
-   explicitly. Source changes require fresh applicable evidence.
-
-Pre-release Ray 2.60 qualification in
-[#703](https://github.com/dariuszpanas/django-ray/pull/703) passed selected hosted
-and local scenarios. It identifies its tested source and explicitly stops short
-of final release acceptance. Its observations cannot be relabeled for a changed
-versioned candidate.
-
-Keep the [Ray Client startup race](../compatibility.md#ray-client-startup-limitation),
-the [native shutdown investigation](https://github.com/dariuszpanas/django-ray/issues/557),
-and [constrained-profile readiness limits](https://github.com/dariuszpanas/django-ray/issues/608)
-visible in the Beta decision. Direct Core/GCS or explicit HTTP(S) Jobs avoids the
-Client connection path; a passing retry does not repair that race. Standard-profile
-acceptance does not qualify the constrained diagnostic profile or sustained soak.
-Python 3.15 and native Compiled Graph remain outside qualified runtime support.
+Maintainers qualifying a release candidate also follow the full deployed matrix and
+artifact checks in [Local KubeRay Final Gate](local-kuberay-gate.md) and
+[Contributing](../contributing.md#releasing).

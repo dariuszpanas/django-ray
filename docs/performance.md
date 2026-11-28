@@ -118,7 +118,7 @@ deployment-wide default because node-level live progress is intentionally unavai
 Terminal-only avoids the full-mode collector and publication costs. Full mode has the
 logical pending-call bound described above, but that does not measure physical Ray
 mailbox memory, network traffic, database attribution or total process lifetime cost.
-Broader preparation and large-fan-out support remain separate #79 work; the current
+Broader preparation and large-fan-out support remain planned extensions; the current
 terminal profile does not activate the larger storage-protocol ceilings or a sampled
 reporting policy.
 
@@ -495,8 +495,8 @@ deltas only between cases collected under the same server configuration.
 ## Benchmark Workflow Progress Preparation
 
 ADR-0005's opt-in preparation benchmark measures the `production-topology`
-implementation (the issue-#141 package path through legacy topology detachment; the
-non-production `prototype-composite` mode has been retired). Each sparse or high-edge
+implementation (through legacy topology detachment; the non-production
+`prototype-composite` mode has been retired). Each sparse or high-edge
 scenario runs in a fresh subprocess and removes its private workspace before the parent
 accepts the result. The benchmark does not start Ray, write Django database rows, access
 Kubernetes, or activate schema-v3 production.
@@ -505,10 +505,8 @@ The benchmark launcher and its private worker mode require Linux. Both reject
 Windows and macOS before creating a workspace or starting a subprocess. Linux
 workers run in an owned process group so timeout cleanup also stops descendants;
 RSS readings use Linux's KiB units. Resource-free report parsing and validation
-remain importable on developer hosts. This removes the benchmark's native Windows
-launch/termination and macOS RSS accommodations as a focused part of
-[issue #456](https://github.com/dariuszpanas/django-ray/issues/456); cross-platform
-filesystem defenses and host tools that launch Linux containers remain separate.
+remain importable on developer hosts; cross-platform filesystem defenses and host tools
+that launch Linux containers remain separate.
 
 Run the required production-topology decision matrix on Linux from an otherwise idle
 checkout:
@@ -555,29 +553,27 @@ individual cases completed.
 
 The committed [WSL2 Linux summary](benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.md)
 and [authoritative JSON](benchmarks/workflow-progress-preparation-sqlite-wsl2-linux-2026-07-21.json)
-join the focused canonical and lifecycle tests to satisfy ADR-0005's issue-#140 evidence
+join the focused canonical and lifecycle tests to satisfy ADR-0005's preparation evidence
 gate. They are local contract evidence, not a production latency SLO. Compare resident
-growth only after the retained node, edge, and detail caps are reached, and keep #79's
-wire, mailbox, and producer allocations separate from this preparation-only
-measurement.
+growth only after the retained node, edge, and detail caps are reached, and keep
+wire, mailbox, and producer allocations separate from this preparation-only measurement.
 
 The production adapter's required WSL2 Linux
 [summary](benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.md)
 and [JSON](benchmarks/workflow-progress-topology-sqlite-wsl2-linux-2026-07-21.json)
-record all six `production-topology` cases at the exact issue-#141 implementation
-revision. Bounded-phase memory plateaued after V1 retention caps while spill grew with
-observed node and edge identity state. The separate end-to-end fields and legacy-ID
-counts preserve the remaining O(observed) compatibility boundary tracked by #156/#157.
+record all six `production-topology` cases. Bounded-phase memory plateaued after V1
+retention caps while spill grew with observed node and edge identity state. The separate
+end-to-end fields and legacy-ID counts preserve the remaining O(observed) compatibility
+boundary for detached legacy IDs.
 
 In `production-topology` reports, detail fields are `null`, spill-item counts cover
 only nodes and edges, and `legacy_observed_node_ids` records the compatibility set
 materialized after the bounded candidate is sealed. The `bounded_phase_*` fields are
 captured after observation, selection, and page construction but before that set is
 materialized. The legacy peak fields and their `end_to_end_*` aliases include the
-later O(observed) compatibility detachment. Compare those two phases separately.
-Issue #141 removes complete Python node/edge validation collections, but it does not
-claim that the legacy returned value is O(retained); #156/#157 own that final bound.
-Their former umbrella #142 was closed as superseded, not as implemented.
+later O(observed) compatibility detachment. Compare those two phases separately: the
+preparation workspace removes complete Python node/edge validation collections, while
+the legacy returned value retains the O(observed) compatibility boundary.
 
 ## Control Fan-Out
 
@@ -625,8 +621,7 @@ physical tasks per item, so include their fixed branch count when sizing the win
 Input admission starts only after `executor.resolve()`: an upstream Ray task still
 produces its complete list, which is transferred and deserialized into coordinator
 memory before fan-out begins. Only an iterator already available locally is pulled
-lazily. Remote or paged input materialization is tracked in
-[GitHub issue #94](https://github.com/dariuszpanas/django-ray/issues/94).
+lazily; remote or paged input streaming remains an experimental building block.
 
 By default, the ordered result payload is still materialized in coordinator memory.
 An explicitly bounded map can use
@@ -638,8 +633,8 @@ have O(total output) boundaries. When only a compact summary is needed, use the 
 serialized accumulator and at most `max_concurrency - 1` out-of-order results, while
 incorporation-based admission deliberately applies head-of-line backpressure to preserve
 strict input order. Benchmark the reducer cost and accumulator size as well as map
-throughput. List-preserving chunk or hierarchical transport remains tracked in
-[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91). Calling
+throughput. List-preserving chunk or hierarchical transport remains an opt-in
+experimental module (`django_ray.workflow.map_transport`). Calling
 `map_step()` without `with_limits()` retains the legacy eager behavior.
 
 Use fractional CPUs only when a leaf is mostly waiting or deliberately shares a core.

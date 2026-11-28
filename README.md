@@ -21,8 +21,8 @@ Django projects often need background task execution. While Celery has been the 
 
 - **True distributed computing**: Ray was built for distributed workloads from the ground up, not just task queues
 - **Horizontal scaling**: Scale from a single machine to thousands of nodes without changing your code
-- **Resource-aware scheduling**: Request specific CPU, GPU, or memory for tasks
-- **Actor model support**: Maintain stateful workers when needed
+- **Resource-aware scheduling**: Request specific CPU, GPU, or memory for tasks via `@ray_task`
+- **Ray Core tasks & workflows**: Run stateless tasks, coroutines, and Ray-native workflow DAGs behind one durable Django boundary (and invoke Ray Actors inside application-owned code when needed; django-ray does not yet expose a first-class actor pool API)
 - **Explicit Ray ecosystem boundary**: Run Ray Data, Train, Tune, or RLlib in
   application-owned code after installing its component extra; keep online serving on
   Ray Serve's separate lifecycle. These are not first-class adapters in django-ray.
@@ -41,25 +41,33 @@ django-ray bridges Django's built-in Tasks framework with Ray's distributed comp
   operators can reconcile lost or stuck execution; queued work can expire or be cancelled before
   it starts, while work that does start may be replayed after uncertain completion, so side effects
   must be idempotent
-- **Multiple execution modes**: Sync, local Ray, Ray cluster, or Ray Job API
-- **Coroutine tasks**: Await Django async task functions consistently in every mode
-- **Automatic retries**: Failed tasks are retried with exponential backoff
-- **Admin visibility**: Monitor and manage tasks through Django admin
-- **Worker lifecycle controls**: Signal handling and database-backed lease coordination
+- **Native Django 6 Tasks parity**: Supports `@task`, `@task(takes_context=True)` (`TaskContext`),
+  declarative `@ray_task` resource/retry contracts, and `django.tasks.signals` (`task_enqueued` via
+  `transaction.on_commit()`, plus `task_started` and `task_finished`)
+- **Multiple execution modes**: Sync (`--sync`), local Ray Core (`--local`), remote Ray Core
+  (`--cluster=ADDRESS`), or isolated Ray Job Submission API (`--ray-job`)
+- **Coroutine tasks**: Await Django async task functions, workflow steps, and distributed helpers consistently in every mode
+- **Automatic retries with jitter**: Failed tasks are retried with exponential backoff, bounded jitter, and exception denylists
+- **Fail-loud oversized results**: Accessing `.return_value` on an unavailable or digest-only oversized result raises `ResultUnavailableError` instead of silently returning `None`
+- **Admin visibility & local debugging**: Monitor, cancel, and retry tasks through Django admin, inspect terminal workflow graphs, and debug locally with read-only `django_ray_replay`
+- **Worker lifecycle & retention controls**: Database-clock leases, graceful `--drain` handoff, exit-0 Linux `django_ray_doctor`, and bounded `django_ray_purge_executions`
 - **Django-durable workflows on Ray Core**: Chain, group, and dynamically fan out
-  low-overhead internal steps behind one durable Django task; this is unrelated to the
+  low-overhead internal steps behind one durable Django task (with `explain_workflow` dry-run inspection); this is unrelated to the
   former, removed `ray.workflow` package
 - **RuntimeEnv profiles**: Run versioned or lightweight Python environments on a
   generic Ray cluster, with immutable environment identity per durable task
-- **Observable workflow graphs**: Track dependency edges, node progress, Ray
-  execution identifiers, and correlated logs for custom monitoring UIs
 - **Operational observability**: Use versioned task services, bounded-cardinality
-  Prometheus metrics, and authenticated live updates in Django admin
+  Prometheus metrics, optional OpenTelemetry tracing (`django-ray[otel]`), and authenticated live updates in Django admin
 
 The repository includes a sample `testproject/` with a small landing page for exploring the bundled API,
 task stats, project links, and smoke-task trigger:
 
 ![django-ray testproject landing page](https://raw.githubusercontent.com/dariuszpanas/django-ray/main/docs/assets/images/testproject-landing.png)
+
+Django Admin provides top-of-page live task status, read-only local replay commands, and
+bounded terminal workflow DAG inspection with WCAG-AA status badges:
+
+![django-ray Django Admin live status and workflow DAG](https://raw.githubusercontent.com/dariuszpanas/django-ray/main/docs/assets/images/admin-workflow-dag.png)
 
 ## Requirements
 
@@ -71,48 +79,13 @@ Python 3.15 has a preparatory compatibility check without Ray Core. Full runtime
 support remains blocked by upstream Ray wheels; use Python 3.12–3.14 for installation
 and execution. See the [Python 3.15 policy](https://django-ray.readthedocs.io/en/latest/compatibility/#python-315-preparation).
 
-## Preparing to upgrade to 0.8.0
-
-The 0.8.0 Beta candidate raises the Ray minimum from 2.58.0 to 2.60.0. Follow the
-[coordinated 0.7.1 to 0.8.0 upgrade guide](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.7/)
-to stop producers and cleanup, drain old work, verify independent database/artifact
-restoration, and replace the package, managers and Ray cluster together. There are
-no new django-ray migrations after 0.7.1, but a code-only downgrade still needs its
-own rehearsal. Python 3.15 remains preparation-only, native Compiled Graph remains
-unqualified, and the Ray Client startup limitation remains open. Candidate
-preparation does not establish publication or final release acceptance.
-
-## Upgrading to 0.7.1
-
-django-ray 0.7.1 remains **Beta**. Review the
-[0.7.0 to 0.7.1 upgrade notes](https://django-ray.readthedocs.io/en/latest/changelog/#upgrade-from-070-to-071)
-before upgrading a deployment: the patch requires coordinated replacement of old
-producers, workers and purgers, environment recreation for dependency fixes, and
-attention to stricter payload cleanup and legacy-reference refusal.
-
-## Upgrading to 0.7.0
-
-django-ray 0.7.0 remains **Beta**. Follow the
-[coordinated 0.6 to 0.7 upgrade guide](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.6/)
-before upgrading an existing deployment. Stop producers and cleanup, drain or reconcile
-old work, and stop every old manager before migration. Back up the database, referenced
-artifacts, and retained encryption keys, and verify an independent restore. Mixed-version
-rolling execution is unsupported.
-
-Migration 0028 seeds one shared worker lease authority at **60 seconds**. Deployments with
-a custom duration must reconcile the authority and every process's `WORKER_LEASE_SECONDS`
-while stopped, before restarting; use the revision-checked
-[`django_ray_lease_policy` command](https://django-ray.readthedocs.io/en/latest/reference/cli/#django_ray_lease_policy).
-Once 0.7.0 writes new `rq2ref:v1:` request references, rollback to 0.6.0 requires a matching
-pre-upgrade database and artifact restore; reconcile later writes and external effects.
-
-The release also adds bounded RuntimeEnv rewrite/rewrap and opt-in required encryption.
-The default remains `plaintext`. Follow the
-[retained-snapshot maintenance procedure](https://django-ray.readthedocs.io/en/latest/runtime-environments/#maintain-retained-snapshots-and-require-encryption)
-before selecting `RUNTIME_ENV_STORAGE_MODE="required"`, which refuses plaintext execution
-and retry. Current-table verification never authorizes destroying keys needed by backups.
-Review the [changelog](https://django-ray.readthedocs.io/en/latest/changelog/) for finite purge
-continuation, monitoring upgrade boundaries, and the remaining Beta limitations.
+> **Upgrading an existing Beta deployment?** Beta releases use a coordinated stopped-writer
+> upgrade (pause producers, drain active queues with `django_ray_worker --drain`, back up database
+> and artifacts, apply migrations including `0029_lease_engine_and_hot_indexes`, and replace all
+> components together). See the
+> [0.7.1 to 0.8.0 upgrade guide](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.7/),
+> the [0.6 to 0.7 upgrade guide](https://django-ray.readthedocs.io/en/latest/deployment/upgrading-from-0.6/),
+> and the [changelog](https://django-ray.readthedocs.io/en/latest/changelog/).
 
 ## Installation
 
@@ -125,6 +98,10 @@ Or with uv:
 ```bash
 uv add django-ray
 ```
+
+Optional extras: `django-ray[postgres]`, `django-ray[s3]`, `django-ray[gcs]`,
+`django-ray[object-storage]`, and `django-ray[otel]` (`opentelemetry-sdk>=1.45.1` for exporting
+OpenTelemetry traces when `TRACING_ENABLED=True`).
 
 The base package installs `ray[default]` for Ray Core, Ray Client, Ray Jobs, and live
 Dashboard/State diagnostics. It does not install usable Ray Data, Train, Tune, RLlib,
@@ -222,13 +199,14 @@ walkthrough and its before-production checklist.
 | **sync** | `--sync` | Direct execution, no Ray (testing) |
 | **local** | `--local` | Local Ray cluster, tasks via `@ray.remote` |
 | **cluster** | `--cluster=<addr>` | Bounded low-latency work through Ray Client |
-| **ray-job** | No mode flag; `RUNNER="ray_job"` | Ray Job Submission API (process isolation) |
+| **ray-job** | `--ray-job` (or `RUNNER="ray_job"`) | Ray Job Submission API (process isolation) |
 
-Without a mode flag, the worker uses `DJANGO_RAY["RUNNER"]`, whose package default is
-`"ray_job"`. The quick-start configuration above selects `"ray_core"` with address `"auto"`,
-so its unqualified worker starts local Ray. Ray Job mode requires a retrievable
-`INPUT_STORAGE_BACKEND`, including its filesystem root or object-store namespace:
-new rq2 submissions always externalize the canonical execution request. See
+Without a mode flag, the worker uses `DJANGO_RAY["RUNNER"]`, which defaults to `"ray_core"` with
+`RAY_ADDRESS="auto"` (starting or attaching to local Ray out of the box). For remote Kubernetes
+workloads, start with **Ray Job** (`--ray-job` / `RUNNER="ray_job"` plus a retrievable
+`INPUT_STORAGE_BACKEND`) when driver isolation or task-manager restart survival matters; choose
+**Cluster Ray Core** (`--cluster=ray://...`) when lower per-task latency matters for bounded short
+work and dynamic workflows. See
 [durable input storage](https://django-ray.readthedocs.io/en/latest/reference/input-storage/).
 
 Cluster mode is tied to the task manager's Ray Client connection. If that connection
@@ -243,20 +221,23 @@ connection. See Ray's
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `RAY_ADDRESS` | `None` | Must be set at runtime; use `"auto"` locally or `"ray://host:port"` for a cluster |
-| `RUNNER` | `"ray_job"` | Worker mode when no explicit mode flag is supplied; `"ray_core"` uses the configured Ray address |
+| `RAY_ADDRESS` | `"auto"` | Ray address (`"auto"` locally, `"ray://host:port"` for Ray Client, or HTTP(S) Jobs URL; not required for `--sync`) |
+| `RUNNER` | `"ray_core"` | Worker mode when no explicit mode flag is supplied (`"ray_core"` or `"ray_job"`) |
 | `DEFAULT_CONCURRENCY` | `10` | Max concurrent tasks per worker |
+| `WORKER_POLL_MAX_INTERVAL_SECONDS` | `1.0` | Max idle polling delay with adaptive backoff (base `0.1s`) |
 | `MAX_TASK_ATTEMPTS` | `3` | Max retry attempts |
 | `RETRY_BACKOFF_SECONDS` | `60` | Base backoff for retries |
+| `RETRY_BACKOFF_JITTER_RATIO` | `0.1` | Bounded downward random jitter (`[-10%, 0%]`) applied to retry backoff |
 | `RETRY_EXCEPTION_DENYLIST` | `[]` | Exception types that skip auto-retry |
 | `STUCK_TASK_TIMEOUT_SECONDS` | `300` | Timeout before marking tasks as LOST |
 | `TASK_MONITOR_HEARTBEAT_SECONDS` | `15` | Database heartbeat interval for in-flight Ray Core tasks |
 | `RUNTIME_ENV_PROFILES` | `{}` | Named Ray environments for code and dependencies |
 | `DEFAULT_RUNTIME_ENV_PROFILE` | `None` | Default named environment |
 | `MAX_INLINE_INPUT_SIZE_BYTES` | `None` | Opt-in durable input spillover threshold |
+| `RESULT_STORAGE_BACKEND` | `"digest"` | Oversized (>1 MiB) result backend (`"digest"`, `"filesystem"`, `"s3"`, `"gcs"`); accessing `.return_value` on an unavailable digest stub raises `ResultUnavailableError` |
 
 See [Ray-Native Workflows](https://django-ray.readthedocs.io/en/latest/workflows/) for low-latency `chain`, `group`,
-and `map_step` execution.
+`map_step`, and `explain_workflow` execution.
 See [Django Gateway to Private Ray Serve](https://django-ray.readthedocs.io/en/latest/ray-serve-gateway/)
 for bounded authenticated online inference without writing a FastAPI ingress or adding
 package-owned Serve orchestration.
@@ -266,14 +247,18 @@ See [Performance](https://django-ray.readthedocs.io/en/latest/performance/) for 
 execution modes, and useful fan-out granularity.
 See [Durable Input Storage](https://django-ray.readthedocs.io/en/latest/reference/input-storage/) for oversized JSON
 arguments, storage backends, rollout, and retention.
-See [Defining Tasks](https://django-ray.readthedocs.io/en/latest/tasks/#coroutine-tasks) for async task and ORM safety
-guidance.
+See [Defining Tasks](https://django-ray.readthedocs.io/en/latest/tasks/#coroutine-tasks) for `@ray_task`,
+async task, `TaskContext`, and `django.tasks.signals` guidance.
 
 For bounded read-only Linux diagnosis, use
-[`django_ray_doctor`](https://django-ray.readthedocs.io/en/latest/reference/doctor/).
-Its report cannot yet confirm remote readiness, capacity, or artifact availability;
-exit status **2** means incomplete evidence, even when available observations are clear.
-It does not authorize cleanup, replay, or other maintenance.
+[`django_ray_doctor`](https://django-ray.readthedocs.io/en/latest/reference/doctor/):
+it exits **`0`** when all required configuration and database observations are healthy (while listing
+deferred remote-inventory sections explicitly), **`1`** on blockers, and **`2`** on incomplete
+required checks or cleanup issues. Use
+[`django_ray_replay`](https://django-ray.readthedocs.io/en/latest/reference/cli/#django_ray_replay)
+for read-only local debugging (`--dry-run` / `--pdb`),
+[`django_ray_purge_executions`](https://django-ray.readthedocs.io/en/latest/reference/cli/#django_ray_purge_executions)
+for bounded retention cleanup, and `django_ray_worker --drain` for graceful upgrade draining.
 
 ## Development Setup
 
@@ -322,7 +307,7 @@ uv run make createsuperuser  # Create admin user
 ### Worker Commands
 
 ```bash
-uv run make worker           # Ray Job API mode
+uv run make worker           # Default RUNNER="ray_core" mode (local Ray via RAY_ADDRESS="auto")
 uv run make worker-local     # Native local Ray for single-host development
 uv run make worker-sync      # Sync mode (no Ray)
 uv run make worker-all       # All django-ray backend queues, local Ray
@@ -375,12 +360,11 @@ PostgreSQL and migration ordering.
 
 ### Queue Configuration
 
-With the bundled testproject's default settings, the commands below select Ray Job mode.
-Configure a retrievable
-`INPUT_STORAGE_BACKEND` (including its filesystem root or object-store namespace) before
-starting them; new rq2 submissions always externalize the canonical execution request.
-For source-checkout development without shared request storage, add `--local` or use
-`uv run make worker-local`/`worker-all` instead.
+With the package default `RUNNER="ray_core"` and `RAY_ADDRESS="auto"`, the commands below start
+or attach to local Ray out of the box. When selecting Ray Job mode (`--ray-job` or
+`RUNNER="ray_job"`), configure a retrievable `INPUT_STORAGE_BACKEND` (including its filesystem
+root or object-store namespace) first, because new rq2 submissions always externalize the
+canonical execution request.
 
 ```bash
 # Single queue
@@ -391,6 +375,9 @@ uv run python testproject/manage.py django_ray_worker --queue=default,high-prior
 
 # All queues configured on django-ray backend aliases
 uv run python testproject/manage.py django_ray_worker --all-queues
+
+# Graceful drain for coordinated upgrades
+uv run python testproject/manage.py django_ray_worker --queue=default --drain
 ```
 
 ## Docker
@@ -443,21 +430,19 @@ See [k8s/README.md](https://github.com/dariuszpanas/django-ray/blob/main/k8s/REA
 ```
 django-ray/
 ├── src/django_ray/          # Library source code
-│   ├── models.py            # RayTaskExecution, TaskWorkerLease
-│   ├── admin.py             # Admin interface
-│   ├── backends.py          # Django Task Backend
-│   ├── conf/                # Settings
-│   ├── runner/              # Task runners
-│   │   ├── ray_job.py       # Ray Job Submission API
-│   │   ├── ray_core.py      # Ray Core (@ray.remote)
-│   │   ├── leasing.py       # Worker coordination
-│   │   └── retry.py         # Retry logic
-│   ├── runtime/             # Task execution
-│   │   ├── entrypoint.py    # Execution entry point
-│   │   ├── distributed.py   # parallel_map, scatter_gather
-│   │   └── serialization.py
-│   └── management/commands/
-│       └── django_ray_worker.py
+│   ├── models.py            # RayTaskExecution, TaskAttempt, TaskWorkerLease
+│   ├── decorators.py        # @ray_task declarative task contracts
+│   ├── backends.py          # Django Tasks backend & fail-loud RayTaskResult
+│   ├── _blob_storage.py     # Unified internal blob storage engine
+│   ├── admin.py             # Admin registrations & thin views
+│   ├── admin_views/         # Modular admin badges, actions, diagnostics & sensitive views
+│   ├── worker/              # Modular worker loop, claimer, dispatcher, reconciler & shutdown
+│   ├── workflow/            # Plan contracts, strategies, DSL (explain_workflow) & progress
+│   ├── conf/                # Defaults, settings & validation
+│   ├── runner/              # SyncRunner, RayCoreRunner, RayJobRunner, leasing & retry
+│   ├── runtime/             # Entrypoint, distributed helpers, RuntimeEnv & serialization
+│   ├── doctor/              # Bounded Linux read-only diagnostics
+│   └── management/commands/ # worker, doctor, replay, purge_executions, lease_policy, etc.
 │
 ├── testproject/             # Example project (development only)
 │   ├── api.py               # Example REST API
@@ -466,7 +451,7 @@ django-ray/
 │
 ├── tests/                   # Test suite
 ├── docs/                    # Documentation
-└── k8s/                     # Kubernetes manifests
+└── k8s/                     # Kubernetes manifests (local evaluation only)
 ```
 
 ## Documentation

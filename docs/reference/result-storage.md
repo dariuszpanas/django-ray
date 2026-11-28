@@ -3,9 +3,12 @@
 `django-ray` can keep small task results inline in `RayTaskExecution.result_data`
 and move oversized results to `result_reference`.
 
-The filesystem, S3, and GCS implementations also provide the internal load/delete
-protocol used by [Durable Input Storage](input-storage.md). Input and result settings,
-prefixes, references, retention rules, and failure semantics remain separate.
+The filesystem, S3, and GCS backends share a unified internal blob storage engine
+(`django_ray._blob_storage`) with [Durable Input Storage](input-storage.md). That shared
+engine provides pooled S3/GCS clients with bounded timeouts, stream-hashed atomic
+filesystem installs with stale-lock recovery, canonical namespace containment, and
+metadata-only 404-idempotent cloud deletion. Input and result settings, prefixes,
+references, retention rules, and failure semantics remain separate.
 
 ## Size Threshold
 
@@ -29,7 +32,10 @@ lifecycle contract.
 - Reference format: `oversize://sha256/<digest>?bytes=<n>`
 
 Use this when you only need metadata for oversized results and do not require retrieval.
-`RayTaskBackend.get_result()` cannot reconstruct the original return value from digest-only references.
+`RayTaskBackend.get_result()` returns a `RayTaskResult` with `status=SUCCESSFUL`, and
+accessing `.return_value` fails loud with `ResultUnavailableError` (exposing `task_id`,
+`digest`, `size_bytes`, and `reason`) rather than silently returning `None`. Configure
+`filesystem`, `s3`, or `gcs` when callers need to retrieve oversized return values.
 
 ## `filesystem`
 
@@ -48,9 +54,9 @@ that need to read stored payloads.
 Writers first try an atomic no-replace hard-link installation. Filesystems that report
 hard links as unsupported use a same-directory temporary file, a cooperative
 digest-specific lock directory, and an atomic replace while holding that lock. Existing
-digest objects are verified and never overwritten. A stale `*.install-lock` directory
-means a writer died during installation; preserve the referenced object and audit
-evidence, confirm that no writer is active, then remove only that digest's stale lock.
+digest objects are verified and never overwritten. The shared `_blob_storage` engine
+automatically detects and recovers abandoned `*.install-lock` directories from dead
+writers; intervene manually only if a lock persists after confirming no writer is active.
 
 Filesystem cleanup verifies the existing object's declared byte count and SHA-256
 before unlinking it. This preserves shared bytes when a historical reference has
@@ -98,11 +104,12 @@ write attempts for conditional conflicts and do not bound total operation time.
 See the [AWS retry rollout](https://aws.amazon.com/blogs/developer/updated-default-retry-behavior-for-aws-sdks-and-tools/).
 
 S3 writes use `If-None-Match: *`; a digest key that already exists is read and
-verified instead of overwritten. Cleanup first verifies the referenced bytes and
-then deletes with the observed ETag as an `If-Match` precondition. S3-compatible
-endpoints must implement these conditional `PutObject` and `DeleteObject`
-semantics. An endpoint that ignores or rejects them is not a supported durable
-storage target.
+verified instead of overwritten. Cleanup uses pooled clients, verifies object metadata
+(`HeadObject`) without downloading the entire blob, treats an already missing object
+(`404`) as idempotent success, and deletes with the observed ETag as an `If-Match`
+precondition (falling back cleanly only when an S3-compatible endpoint rejects conditional
+delete headers). To reclaim aged unshared external result blobs alongside old terminal
+executions, schedule [`django_ray_purge_executions`](cli.md#django_ray_purge_executions).
 
 ## `gcs`
 
@@ -173,7 +180,8 @@ This requires the reading process to have the same storage configuration availab
 - `s3`: the same bucket and prefix, plus credentials and optional endpoint/region settings
 - `gcs`: the same bucket and prefix, plus application default credentials or equivalent auth
 
-`digest` references remain metadata-only and do not hydrate `return_value`.
+`digest` references remain metadata-only: accessing `TaskResult.return_value` raises
+`ResultUnavailableError` instead of silently returning `None`.
 
 ```python
 import json
@@ -232,9 +240,11 @@ return value.
 
 Every backend refuses to overwrite an existing content-addressed object. Filesystem
 writers verify and atomically reuse the existing file; S3 and GCS writers use provider
-create-only preconditions and then verify a collision before reuse. S3/GCS cleanup reads
-and verifies the exact payload first, then uses its ETag or generation as a delete
-precondition. Corruption and concurrent replacement both fail closed.
+create-only preconditions and then verify a collision before reuse. S3/GCS cleanup
+checks object metadata (`HeadObject` / generation reload) without downloading the full
+payload, treats `404` as idempotent success, and deletes conditionally using the
+observed ETag (`If-Match`) or generation precondition. Corruption and concurrent
+replacement both fail closed.
 
 The canonical signed-64-bit `bytes` field is the exact upper bound supplied to each
 backend read, plus one byte for overrun detection. It is durable Django metadata, not a
@@ -361,9 +371,20 @@ contents out of tickets and unrestricted logs.
 
 ## Failure Behavior
 
-If backend resolution/storage fails at runtime, worker execution remains successful and falls back
-to digest-only references to avoid converting successful task execution into task failure.
+When an explicit retrievable result backend (`filesystem`, `s3`, or `gcs`) is configured
+and storing an oversized result fails at runtime, the executor performs bounded transient
+upload retries. If persistence still fails, the attempt fails explicitly with a
+non-retryable `ResultStoragePersistenceError` (`retryable=False`) rather than silently
+downgrading the task to `SUCCEEDED` with a digest-only pointer or automatically replaying
+potentially side-effecting task code.
 
-If result loading fails later during `get_result()`, the task still appears successful but
-`TaskResult.return_value` remains unavailable until the referenced payload can be read and
-passes the exact authority, byte-count, digest, and UTF-8 checks.
+When reading a completed task via `RayTaskBackend.get_result()`:
+
+- `get_result()` returns a `RayTaskResult` (`TaskResult` subclass) with
+  `status == TaskResultStatus.SUCCESSFUL` so Admin views and status pollers never crash.
+- Accessing `.return_value` raises `django_ray.backends.ResultUnavailableError` whenever
+  the stored reference is a digest-only `oversize://` stub or the external payload fails
+  retrieval, authority, byte-count, SHA-256 digest, or strict UTF-8 verification.
+- Similarly, accessing `.args` or `.kwargs` raises
+  `django_ray.backends.InputPayloadUnavailableError` if an external input payload cannot
+  be loaded, rather than silently fabricating empty inputs.
