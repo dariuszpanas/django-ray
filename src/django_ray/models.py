@@ -474,16 +474,38 @@ class RayTaskExecution(models.Model):
         ]
         indexes = [
             models.Index(
-                fields=["state", "queue_name", "run_after"],
-                name="ray_task_claimable_idx",
+                fields=["queue_name", "-priority", "created_at", "id"],
+                condition=models.Q(state=TaskState.QUEUED),
+                name="ray_task_claim_hot_idx",
             ),
             models.Index(
-                fields=["state", "queue_name", "queue_deadline_at"],
-                name="ray_task_expiry_idx",
+                fields=["state", "id", "queue_name"],
+                condition=models.Q(state__in=(TaskState.RUNNING, TaskState.CANCELLING)),
+                name="ray_task_active_maint_idx",
             ),
             models.Index(
-                fields=["state", "last_heartbeat_at"],
-                name="ray_task_heartbeat_idx",
+                fields=["queue_name", "queue_deadline_at", "id"],
+                condition=models.Q(state=TaskState.QUEUED, queue_deadline_at__isnull=False),
+                name="ray_task_queued_exp_idx",
+            ),
+            models.Index(
+                fields=["finished_at", "id"],
+                condition=models.Q(
+                    state__in=(
+                        TaskState.SUCCEEDED,
+                        TaskState.FAILED,
+                        TaskState.CANCELLED,
+                        TaskState.LOST,
+                        TaskState.EXPIRED,
+                    ),
+                    finished_at__isnull=False,
+                ),
+                name="ray_task_term_purge_idx",
+            ),
+            models.Index(
+                fields=["result_reference"],
+                condition=models.Q(result_reference__isnull=False),
+                name="ray_task_result_ref_idx",
             ),
         ]
         constraints = [
@@ -1201,7 +1223,17 @@ class TaskAttempt(models.Model):
                 name="ray_task_attempt_unique_number",
             ),
         ]
-        indexes = [models.Index(fields=["execution", "attempt_number"])]
+        indexes = [
+            models.Index(
+                fields=["state"],
+                name="ray_attempt_state_idx",
+            ),
+            models.Index(
+                fields=["result_reference"],
+                condition=models.Q(result_reference__isnull=False),
+                name="ray_attempt_result_ref_idx",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.execution_id} attempt {self.attempt_number} ({self.state})"
@@ -1257,7 +1289,7 @@ class TaskWorkerLease(models.Model):
         help_text="Process ID of the worker",
     )
     queue_name = models.CharField(
-        max_length=100,
+        max_length=1024,
         default="default",
         db_index=True,
         help_text="Queue(s) this worker is processing (informational only)",
@@ -1308,6 +1340,17 @@ class TaskWorkerLease(models.Model):
         default=timezone.now,
         help_text="Last heartbeat from the worker",
     )
+    lease_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Database-clock expiration timestamp for this worker lease (unindexed for PG HOT)",
+    )
+    lease_policy_revision = models.PositiveBigIntegerField(
+        default=1,
+        db_default=1,
+        validators=[MinValueValidator(1), MaxValueValidator((1 << 63) - 1)],
+        help_text="Lease policy revision stamped when this worker lease was acquired",
+    )
     is_active = models.BooleanField(
         default=True,
         db_index=True,
@@ -1353,7 +1396,12 @@ class TaskWorkerLease(models.Model):
                     "max_supported_execution_protocol_version",
                 ],
                 name="ray_worker_protocol_idx",
-            )
+            ),
+            models.Index(
+                fields=["worker_id"],
+                condition=models.Q(is_active=True),
+                name="ray_lease_active_worker_idx",
+            ),
         ]
         verbose_name = "Task Worker Lease"
         verbose_name_plural = "Task Worker Leases"
@@ -1622,12 +1670,6 @@ class RayTargetPolicyRevision(models.Model):
                 name="ray_tpolicy_target_rev_uniq",
             ),
         ]
-        indexes = [
-            models.Index(
-                fields=("target", "-revision"),
-                name="ray_tpolicy_latest_idx",
-            )
-        ]
         verbose_name = "Ray Target Policy Revision"
         verbose_name_plural = "Ray Target Policy Revisions"
 
@@ -1712,10 +1754,6 @@ class RayTargetAttestationRevision(models.Model):
             ),
         ]
         indexes = [
-            models.Index(
-                fields=("policy", "-revision"),
-                name="ray_tattest_latest_idx",
-            ),
             models.Index(
                 fields=("expires_at",),
                 name="ray_tattest_expiry_idx",
@@ -2004,12 +2042,6 @@ class RayTargetRouteRevision(models.Model):
                 fields=("route", "revision"),
                 name="ray_troute_route_rev_uniq",
             ),
-        ]
-        indexes = [
-            models.Index(
-                fields=("route", "-revision"),
-                name="ray_troute_latest_idx",
-            )
         ]
         verbose_name = "Ray Target Route Revision"
         verbose_name_plural = "Ray Target Route Revisions"

@@ -2491,7 +2491,10 @@ class TestRayJobRunnerSubmit:
         )
         monkeypatch.setattr(SubmissionClient, "_do_request", record_request)
 
-        client = _address_pinned_job_client("ray://alias-head:10001")
+        client = _address_pinned_job_client(
+            "ray://alias-head:10001",
+            extra_allowed=("ray://alias-head:10001",),
+        )
         client._do_request("GET", "/unbounded")
         with _bounded_control_requests(client):
             client._do_request("GET", "/bounded")

@@ -20,18 +20,74 @@ class Command(BaseCommand):
     requires_system_checks = []
 
     def add_arguments(self, parser):
-        parser.add_argument("--database", default="default")
-        parser.add_argument("--format", choices=("human", "json"), default="human")
-        parser.add_argument("--mode", choices=("dry-run", "check", "rewrite"), default="dry-run")
-        parser.add_argument("--confirm", action="store_true")
-        parser.add_argument("--cursor", help="Continue the same policy/mode; use --cursor=TOKEN.")
-        parser.add_argument("--max-rows", type=int, default=100)
-        parser.add_argument("--max-bytes", type=int, default=65536)
-        parser.add_argument("--max-total-bytes", type=int, default=1048576)
-        parser.add_argument("--max-seconds", type=float, default=10)
-        parser.add_argument("--max-details", type=int, default=20)
+        parser.add_argument(
+            "--database",
+            default="default",
+            help="Django database alias to inspect or maintain (default: default).",
+        )
+        parser.add_argument(
+            "--format",
+            choices=("text", "json", "human"),
+            default="text",
+            help="Output format: text or json (default: text; 'human' is accepted as an alias for text).",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            dest="as_json",
+            help="Emit JSON output (alias for --format json).",
+        )
+        parser.add_argument(
+            "--mode",
+            choices=("dry-run", "check", "rewrite"),
+            default="dry-run",
+            help=(
+                "Maintenance mode: dry-run (inspect), check (verify active key), or "
+                "rewrite (encrypt/rewrap; requires --confirm) (default: dry-run)."
+            ),
+        )
+        parser.add_argument(
+            "--confirm",
+            action="store_true",
+            help="Explicitly authorize database writes when running with --mode rewrite.",
+        )
+        parser.add_argument(
+            "--cursor",
+            help="Continue the same policy/mode; pass as --cursor=TOKEN.",
+        )
+        parser.add_argument(
+            "--max-rows",
+            type=int,
+            default=100,
+            help="Maximum task rows to process per pass, 1-1000 (default: 100).",
+        )
+        parser.add_argument(
+            "--max-bytes",
+            type=int,
+            default=65536,
+            help="Maximum single RuntimeEnv snapshot size in bytes, 1-1048576 (default: 65536).",
+        )
+        parser.add_argument(
+            "--max-total-bytes",
+            type=int,
+            default=1048576,
+            help="Maximum aggregate bytes processed per pass, 1-8388608 (default: 1048576).",
+        )
+        parser.add_argument(
+            "--max-seconds",
+            type=float,
+            default=10,
+            help="Cooperative elapsed-time budget in seconds, 0.1-60 (default: 10).",
+        )
+        parser.add_argument(
+            "--max-details",
+            type=int,
+            default=20,
+            help="Maximum per-row outcome details included in the report, 0-100 (default: 20).",
+        )
 
     def handle(self, *args, **options):
+        use_json = bool(options.get("as_json")) or options["format"] == "json"
         try:
             limits = MaintenanceLimits(
                 rows=options["max_rows"],
@@ -50,7 +106,7 @@ class Command(BaseCommand):
             )
         except MaintenanceError as error:
             raise CommandError(str(error)) from None
-        if options["format"] == "json":
+        if use_json:
             rendered = json.dumps(report, ensure_ascii=True, separators=(",", ":"))
         else:
             lines = [

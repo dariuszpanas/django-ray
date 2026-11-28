@@ -295,11 +295,43 @@ class TestWorkerDispatchAndReconnectHelpers:
 class TestWorkerReconnectPollReconcile(RealCommandLeaseTestCase):
     """DB-backed tests for reconnect, polling, and initial reconcile branches."""
 
-    def test_mark_stale_ray_core_tasks_returns_when_no_pending(self) -> None:
+    def test_mark_stale_ray_core_tasks_returns_when_no_pending(
+        self, django_assert_num_queries
+    ) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="ray-core-empty-stale-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker="worker-coverage",
+        )
         cmd = _make_command()
-        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=0, _pending_tasks={}))
 
-        cmd._mark_stale_ray_core_tasks_as_lost()
+        class EmptyRunner:
+            pending_count = 0
+            _pending_tasks: dict[int, RayCoreHandle] = {}
+
+            @property
+            def pending_task_handles(self) -> tuple[RayCoreHandle, ...]:
+                pytest.fail("empty runner must return before reading pending_task_handles")
+
+            def retire_pending_handle(self, _handle: RayCoreHandle) -> bool:
+                pytest.fail("empty runner must not retire handles")
+
+        cmd.ray_core_runner = cast(Any, EmptyRunner())
+
+        with django_assert_num_queries(0):
+            cmd._mark_stale_ray_core_tasks_as_lost()
+
+        task.refresh_from_db()
+        assert task.state == TaskState.RUNNING
+        assert task.attempt_number == 1
+        assert task.error_message is None
+        assert not TaskAttempt.objects.filter(execution=task).exists()
+        assert cmd.shutdown_requested is False
+        assert cmd.stdout.getvalue() == ""
 
     def test_ray_core_callers_fail_closed_without_authoritative_capability(
         self, monkeypatch
@@ -771,11 +803,40 @@ class TestWorkerReconnectPollReconcile(RealCommandLeaseTestCase):
         assert task.error_message is None
         assert not TaskAttempt.objects.filter(execution=task, attempt_number=2).exists()
 
-    def test_poll_ray_core_tasks_returns_when_no_pending(self) -> None:
+    def test_poll_ray_core_tasks_returns_when_no_pending(self, django_assert_num_queries) -> None:
+        task = RayTaskExecution.objects.create(
+            task_id="ray-core-empty-poll-001",
+            callable_path="testproject.tasks.add_numbers",
+            queue_name="default",
+            state=TaskState.RUNNING,
+            args_json="[1, 2]",
+            kwargs_json="{}",
+            claimed_by_worker="worker-coverage",
+        )
         cmd = _make_command()
-        cmd.ray_core_runner = cast(Any, SimpleNamespace(pending_count=0, _pending_tasks={}))
+        cmd._last_partitioned_handles = (_pending_handle(task),)
 
-        cmd.poll_ray_core_tasks()
+        class EmptyRunner:
+            pending_count = 0
+            _pending_tasks: dict[int, RayCoreHandle] = {}
+
+            def poll_completed(self, _handles=None):
+                pytest.fail("empty runner must return before polling Ray")
+
+            def peek_completed(self, _handles=None):
+                pytest.fail("empty runner must return before peeking Ray")
+
+        cmd.ray_core_runner = cast(Any, EmptyRunner())
+
+        with django_assert_num_queries(0):
+            completed = cmd.poll_ray_core_tasks()
+
+        task.refresh_from_db()
+        assert completed == 0
+        assert cmd._last_partitioned_handles == ()
+        assert task.state == TaskState.RUNNING
+        assert task.finished_at is None
+        assert not TaskAttempt.objects.filter(execution=task).exists()
 
     def test_poll_ray_core_tasks_throttles_monitor_heartbeat_writes(self, monkeypatch) -> None:
         task = RayTaskExecution.objects.create(

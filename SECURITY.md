@@ -62,3 +62,21 @@ Ordinary bugs, defense-in-depth ideas, and non-sensitive security design can
 remain in [public issues](https://github.com/dariuszpanas/django-ray/issues).
 Move concrete exploit evidence or details that make an unresolved weakness
 actionable to the private advisory.
+
+## RuntimeEnv encryption scope and cluster secret boundaries
+
+`RUNTIME_ENV_STORAGE_MODE="encrypted"` (and `"required"`) protects only the
+persisted `runtime_env_json` database column at rest (such as database dumps,
+read replicas, and backups when keys are managed separately from the database).
+It does **not** encrypt `RuntimeEnv` fields such as `env_vars` in transit to
+Ray, in Ray Dashboard or GCS job metadata, or in Ray worker process memory and
+local caches. When submitting a task to Ray, the task manager decrypts the
+stored snapshot and passes the resolved `RuntimeEnv` specification to Ray; for
+Ray Job submissions, Ray stores submitted job metadata in GCS.
+
+Protect the Ray submission channel and cluster with TLS, network isolation, and
+Ray Dashboard/GCS access controls. Do not place sensitive credentials in
+`RuntimeEnv` `env_vars` or URIs—use workload identity, pod secret mounts, or an
+external secret manager instead. See
+[Runtime Environments](docs/runtime-environments.md#understand-the-threat-boundary)
+for full rollout and threat-boundary guidance.

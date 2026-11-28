@@ -63,19 +63,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Copy virtual environment from builder
-COPY --from=builder --chown=django:django /app/.venv /app/.venv
+# Copy virtual environment from builder (root-owned, read-only to django user)
+COPY --from=builder --chown=root:root /app/.venv /app/.venv
 
-# Copy application code
-COPY --chown=django:django src/ src/
-COPY --chown=django:django testproject/ testproject/
+# Copy application code (root-owned, read-only to django user)
+COPY --chown=root:root src/ src/
+COPY --chown=root:root testproject/ testproject/
 
 # Create staticfiles directory with proper permissions
 RUN mkdir -p /app/staticfiles && chown django:django /app/staticfiles
 
 # Copy and normalize the entrypoint script so Windows checkouts still run in Linux containers.
-COPY --chown=django:django docker-entrypoint.sh /app/
-RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+COPY --chown=root:root docker-entrypoint.sh /app/
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod 0555 /app/docker-entrypoint.sh
 
 # Switch to non-root user
 USER django

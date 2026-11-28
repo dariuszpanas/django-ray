@@ -82,7 +82,8 @@ class TestFailureInjection:
         task.refresh_from_db()
         assert task.state == TaskState.QUEUED
         assert task.attempt_number == 2
-        assert "Ray connection lost" in (task.error_message or "")
+        assert task.error_message is None
+        assert "Ray connection lost" in (task.attempts.get(attempt_number=1).error_message or "")
         assert runner._pending_tasks == {}
 
     def test_ray_job_stopped_marks_task_cancelled(self, monkeypatch):

@@ -1,18 +1,19 @@
 # Operator Runbook
 
-This runbook is for operators running `django_ray_worker` in staging/production.
+This runbook is for operators running `django_ray_worker` in staging and production.
 
 It focuses on:
 
 - fast incident triage,
 - safe manual recovery actions,
+- retention cleanup and local debugging,
 - expected metrics and alert signals.
 
 ## Scope
 
 This covers the `django-ray` library runtime:
 
-- `RayTaskExecution` task lifecycle rows,
+- `RayTaskExecution` task lifecycle rows and `TaskAttempt` history,
 - `TaskInputPayload` durable-input registry and cleanup tombstones,
 - normalized workflow-progress topology/detail retention,
 - `TaskWorkerLease` worker heartbeat/coordination rows,
@@ -22,19 +23,32 @@ It does not cover custom business task logic internals.
 
 ## Quick Triage Checklist
 
-1. Check worker process health (`django_ray_worker` logs, pod/process status).
-2. Check task state distribution (`QUEUED`, `RUNNING`, `FAILED`, `LOST`, `EXPIRED`,
-   `CANCELLING`).
-3. Check active worker leases and heartbeat freshness.
-4. Check Ray connectivity from workers.
-5. Check whether failures are retrying or already terminal.
-6. For input failures, verify the configured backend, object access, and registry state.
-7. For workflow-progress cleanup failures, inspect the bounded `cleanup_error` code on
-   the retained run or pending manifest without copying progress payloads into logs.
+1. Run bounded Linux diagnostics: `python manage.py django_ray_doctor --database default` (exit `0` when all required configuration and database observations are healthy; `1` on blockers; `2` on incomplete required probes).
+2. Check worker process health (`django_ray_worker` logs, pod/process status, and `django_ray_worker_ready`).
+3. Check task state distribution (`QUEUED`, `RUNNING`, `FAILED`, `LOST`, `EXPIRED`, `CANCELLING`).
+4. Check active worker leases and database-clock `lease_expires_at` / `last_heartbeat_at` freshness.
+5. Check Ray connectivity from workers.
+6. Check whether failures are retrying or already terminal (use read-only `django_ray_replay <task_id> --dry-run` to inspect persisted inputs locally).
+7. For input failures, verify the configured backend, object access, and registry state.
+8. For workflow-progress cleanup failures, inspect the bounded `cleanup_error` code on the retained run or pending manifest without copying progress payloads into logs.
+
+## Incident Quick Index
+
+| Symptom | Playbook | First Command / Check |
+|---|---|---|
+| `queued` rising, `running` near zero | [1) Queue Backlog Keeps Growing](#1-queue-backlog-keeps-growing) | `python manage.py django_ray_doctor` / check worker leases & queue flags |
+| `RUNNING` rows with stale heartbeats | [2) Tasks Stuck In RUNNING](#2-tasks-stuck-in-running) | Inspect `claimed_by_worker` lease & `STUCK_TASK_TIMEOUT_SECONDS` |
+| Rapid growth in `FAILED` / `LOST` | [3) Retry Storm / Repeated Failures](#3-retry-storm-repeated-failures) | `python manage.py django_ray_replay <task_id> --dry-run` / check `RETRY_EXCEPTION_DENYLIST` |
+| Input reference errors / `purge_inputs` error | [4) Durable Input Retrieval or Cleanup Failure](#4-durable-input-retrieval-or-cleanup-failure) | Check `TaskInputPayload.cleanup_error` & backend credentials |
+| Workflow detail growth / cleanup nonzero | [5) Workflow Progress Retention or Orphan Cleanup Failure](#5-workflow-progress-retention-or-orphan-cleanup-failure) | `python manage.py django_ray_cleanup_workflow_progress` |
+| Reconnect errors / Ray unreachable | [6) Ray Connection Loss](#6-ray-connection-loss) | Verify `RAY_ADDRESS`, Ray head health, and worker mode |
+| Rows stuck in `CANCELLING` | [7) Cancellation Stuck In CANCELLING](#7-cancellation-stuck-in-cancelling) | Verify owning worker loop and cancellation status |
+| `ResultUnavailableError` or `result_data = NULL` | [8) Oversized Results](#8-oversized-results) | Inspect `result_reference` prefix (`oversize://`, `resultfs://`, `s3://`, `gs://`) |
+| Growing execution tables / S3/GCS result storage | [9) Execution Retention & Coordinated Drain](#9-execution-retention-and-coordinated-drain) | `python manage.py django_ray_purge_executions --older-than-days 30 --dry-run` |
 
 ## Primary Signals
 
-From `/api/metrics` in the example project:
+From `/api/metrics` in the example project (backed by `render_prometheus_metrics()`):
 
 - `django_ray_tasks_total{state="..."}`
 - `django_ray_tasks_queued`
@@ -66,6 +80,467 @@ Expected behavior:
   retries an expired attempt; `django_ray_tasks_expired` is only the current-state gauge.
 - incident signal: stale leases rise while claim latency and queue depth increase.
 
+## Safety Model
+
+Treat started production work as replayable, not exactly once. Queued work can expire or
+be cancelled before application code begins. `django-ray` can retry started work after
+application exceptions, lost worker ownership, Ray connection loss, and unknown
+completion state. That protects throughput and recovery, but it cannot prove that a
+crashed or disconnected attempt made no external side effects before disappearing.
+
+Before enabling automatic retries on side-effecting callables, confirm the task has an idempotency
+key or operation table that makes duplicate execution harmless. For payments, emails, webhooks, or
+external writes, prefer a deduplicated commit record over relying on task attempt counts.
+
+## Incident Playbooks
+
+### 1) Queue Backlog Keeps Growing
+
+Symptoms:
+
+- `django_ray_tasks_queued` rising for several minutes.
+- few or no new `RUNNING` tasks.
+
+Checks:
+
+1. Verify at least one worker is active and healthy (`python manage.py django_ray_doctor` and `django_ray_worker_ready`).
+2. Verify workers are polling the intended queue(s).
+3. Verify Ray connectivity if running `--local`, `--cluster=ADDRESS`, or `--ray-job` modes.
+
+Recovery:
+
+1. Restart unhealthy worker processes/pods.
+2. Confirm queue flags/settings match enqueue queue names.
+3. If tasks are delayed by retries, inspect `run_after` timestamps before forcing retries.
+4. Check `django_ray_tasks_expired` and the oldest `queue_deadline_at`. `EXPIRED` is
+   terminal and never automatically retries; correct worker capacity or routing before
+   using the admin or API retry action, which assigns a fresh deadline.
+5. Confirm `WORKER_POLL_INTERVAL_SECONDS` (default `0.1`) and
+   `WORKER_POLL_MAX_INTERVAL_SECONDS` (default `1.0`). An idle worker may take up to the
+   configured maximum polling delay to observe newly enqueued work; this is not an
+   end-to-end task-start bound. Sustained activity resets it to the base.
+
+If database load is high while queues are empty, run the PostgreSQL polling benchmark
+from the [performance guide](performance.md#benchmark-worker-polling) before tuning.
+Increase the maximum gradually and compare idle queries per worker-second with p95
+claim latency. Do not lengthen heartbeat, timeout, or cancellation settings to reduce
+claim-query load; those schedules are independent safety controls.
+
+For rollout-related claim regressions, also inspect the benchmark's schema-v1
+`protocol_predicate_evidence`. Require `production_claim_sql_shape_verified=true`, equal
+seeded/query-limit counts, six production-first and six control-first pairs, finite
+samples, and bounded plan shapes for both variants. The signed paired delta is
+production minus control, so negative values are valid. Compare repeated runs on the
+same database and workload before opening an index change; there is intentionally no
+single-run latency threshold. The report omits raw SQL and durable identities, so use
+ordinary database tooling separately if an authorized plan investigation needs them.
+
+### 2) Tasks Stuck In RUNNING
+
+Symptoms:
+
+- many `RUNNING` rows with stale `started_at`/`last_heartbeat_at`.
+
+Checks:
+
+1. Confirm owning workers (`claimed_by_worker`) still have active leases whose `lease_expires_at` is in the future.
+2. Confirm `STUCK_TASK_TIMEOUT_SECONDS` and `timeout_seconds` are appropriate.
+
+Recovery:
+
+1. Let normal recovery run first. Production orphan reconciliation, timeout recovery,
+   and cancellation takeover are all limited to the worker's selected queues; a
+   compatible worker selected for that queue can adopt persisted Ray Jobs from inactive
+   workers.
+2. If needed, requeue only clearly orphaned/failed tasks using admin retry actions.
+
+Notes:
+
+- A fresh `last_heartbeat_at` can mean either the owning worker is healthy or another
+  worker is still actively monitoring/reconciling the task.
+- An exact active Ray Job with `UNKNOWN` status is not generically requeued. Once its
+  monitor heartbeat exceeds the stuck-task timeout, reconciliation marks it `LOST`,
+  requests a stop for the exact persisted job ID, and suppresses automatic retry
+  because the remote execution is not proven quiescent. Inspect
+  `cancellation_status`/`cancellation_error` and Ray before retrying it manually.
+- An unversioned malformed completion retains the bounded recovery and grace behavior
+  used by legacy protocol-v1 jobs. While Ray still reports `PENDING` or `RUNNING`, an
+  expired legacy envelope follows the exact-stop, `LOST`, no-auto-retry path; a terminal
+  Ray status may use the configured failure/retry policy.
+- A partial or mismatched versioned completion cannot fall back to legacy handling. Its
+  result, result reference, and claimed error are ignored. An active or unknown exact Ray
+  Job is stopped and retained as `LOST`; a terminal job becomes a fixed non-retryable
+  failure. Inspect the bounded diagnostic and remote state before any manual retry.
+- The strict driver uses a dedicated nonzero exit when it rejects a request before
+  Django setup, but reconciliation treats that value only as diagnostic. Application or
+  import code can terminate with the same value, so the exit alone cannot prove the
+  execution phase or absence of effects.
+- Every strict Ray Job that becomes terminal without its exact completion envelope
+  waits for the normal publication grace period and then receives the same fixed generic
+  failure without automatic retry or log inspection. Missing or mismatched strict
+  metadata instead follows the exact-stop, `LOST`, no-auto-retry boundary.
+- A completion that exceeds the fixed envelope byte, depth, or node budget is also
+  rejected without automatic retry, including an unversioned legacy envelope. This is a
+  deterministic resource boundary, not legacy malformed-envelope grace; inspect the
+  remote execution before deciding whether replay is safe.
+- Ray Job version, status, stop, and log HTTP requests used by lifecycle control are
+  bounded to five seconds. A timeout can therefore leave `cancellation_status` as
+  `INDETERMINATE`; verify the exact persisted Ray Job before manually retrying. Ray
+  Client, `auto`, and GCS address discovery and remote cancellation preparation happen
+  before acquiring the execution row lock, so slow discovery or network I/O cannot block
+  completion, adoption, or retry coordination.
+- A worker warning that submission acceptance is uncertain refers to a deterministic
+  job ID that was persisted before the request. Let reconciliation resolve that exact
+  ID; do not manually start another attempt while its Ray state is unknown.
+- A deterministic rq2 preparation rejection occurs before Ray submission. Invalid,
+  oversized, corrupt, misconfigured, or ambiguously bound requests suppress automatic
+  retry and retain only a fixed classification; a definitely pre-submission storage
+  outage may follow the configured retry policy. Once the submission request starts,
+  the exact job ID, address, and request reference remain one reconciliation tuple and
+  are never cleared merely because the client call failed.
+- A `RUNNING` row with non-null `completion_data` is between entrypoint publication
+  and worker reconciliation. Cancellation reports `COMPLETION_PENDING`, and timeout
+  recovery leaves it alone; let reconciliation consume the envelope even if Ray still
+  reports the wrapper process as running.
+
+Optional targeted SQL (use carefully):
+
+```sql
+-- Example: inspect orphan candidates first (do not update blindly)
+SELECT id, task_id, callable_path, claimed_by_worker, started_at
+FROM django_ray_raytaskexecution
+WHERE state = 'RUNNING'
+ORDER BY started_at ASC;
+```
+
+### 3) Retry Storm / Repeated Failures
+
+Symptoms:
+
+- fast growth in `FAILED` + `LOST`.
+- same callable repeatedly retried.
+
+Checks:
+
+1. Identify dominant failing `callable_path`.
+2. Inspect latest `error_message` and `error_traceback`.
+3. Reproduce locally without mutating database state:
+
+   ```bash
+   python manage.py django_ray_replay <task_id> --dry-run
+   python manage.py django_ray_replay <task_id> --pdb
+   ```
+
+4. Confirm denylist policy (`RETRY_EXCEPTION_DENYLIST`) and backoff jitter (`RETRY_BACKOFF_JITTER_RATIO`) for non-retryable or synchronized failures.
+
+Recovery:
+
+1. Stop or scale down workers if failures are harmful/high-volume.
+2. Fix configuration or task code root cause.
+3. Requeue failed tasks in controlled batches after fix.
+
+### 4) Durable Input Retrieval or Cleanup Failure
+
+Symptoms:
+
+- task errors report a missing, malformed, unauthorized, or corrupt input reference;
+- the task fails before application logs appear;
+- `django_ray_purge_inputs` records `cleanup_error` or exits non-zero.
+
+Checks:
+
+1. Inspect the registry `payload_kind` and its exact execution link (`input_reference`
+   for task inputs or `ray_job_request_reference` for Ray Job requests) without copying
+   the payload or reference into tickets or logs. A kind mismatch is ambiguous and must
+   be corrected through a reviewed data repair, not guessed by cleanup.
+2. Confirm every enqueueing and task-manager process uses the same input backend,
+   filesystem root, bucket, prefix, and credentials. For rq2, the Ray Job driver must be
+   able to reach the exact locator namespace through its ambient workload identity or
+   environment; credentials must not be embedded in metadata or the locator.
+3. Verify the object exists and its access policy has not changed.
+4. If cleanup failed, inspect `cleanup_error` and fix storage access before rerunning.
+
+Recovery:
+
+1. Restore the exact content-addressed object or correct storage configuration.
+2. Use a controlled manual retry only after retrieval succeeds and the exact prior Ray
+   Job is proven quiescent. Validation failures do not auto-retry. A definitely
+   pre-submission request-store outage may follow normal retry policy, but a missing or
+   unreadable rq2 object observed by a started driver does not authorize replay.
+3. Preview retention with `django_ray_purge_inputs --retention-days=30` before using
+   `--delete`. Increase retention when historical manual retry or audit access is needed.
+   External object deletes run strictly outside database transactions. For scheduled cron
+   jobs, prefer `--until-empty` (bounded by `--max-batches`) or follow the
+   [cursor and exit-status contract](reference/cli.md#django_ray_purge_inputs), retaining
+   every page's failures/incomplete outcomes and revisiting unresolved rows in a fresh
+   pass.
+
+Do not edit either reference column, the payload kind, digest metadata, or JSON
+placeholders by hand. Successful cleanup retains a `PURGED` tombstone and execution
+references for audit.
+
+### 5) Workflow Progress Retention or Orphan Cleanup Failure
+
+Symptoms:
+
+- expired normalized detail continues to consume database storage;
+- unpublished topology candidates or unreferenced pages remain for more than one hour;
+- inactive run-storage shells remain after their last candidate or orphan page is gone;
+- `django_ray_cleanup_workflow_progress --delete` exits nonzero and a retained run or
+  pending manifest has `cleanup_error`.
+
+Checks:
+
+1. Preview one bounded pass with `django_ray_cleanup_workflow_progress`.
+2. Confirm terminal detail has `detail_retention_days` and `detail_expires_at` recorded;
+   cleanup does not invent or override the lifecycle-owned retention deadline.
+3. Treat an exact active task identity as protected even if a malformed or manually
+   altered expiry appears to be in the past.
+4. Inspect the bounded cleanup code and exception type. Exception messages are
+   intentionally redacted; use database and application logs under the deployment's
+   normal secret-handling policy for deeper diagnosis.
+
+Recovery:
+
+1. Correct the database, lock-timeout, or integrity condition reported by operations.
+2. Rerun the dry run, then run
+   `django_ray_cleanup_workflow_progress --batch-size=100 --delete`.
+3. Repeat bounded passes until zero eligible items remain. One failed item does not
+   prevent later candidates in a pass, and clean candidates are processed before retry
+   rows so a permanent oldest failure cannot starve later work. Any failure still makes
+   that command invocation exit nonzero.
+
+Cleanup removes expired run-owned detail or old unpublished orphans only. It does not
+rewrite the task-row or `TaskAttempt` summary, task state, or terminal outcome. Do not
+manually delete current manifests or referenced pages; their references are part of
+the atomic publication and integrity contract.
+
+Apply migration `0013_workflow_progress_detail_storage` before scheduling the command.
+Default full reporting creates bounded terminal detail rows, so include their
+retention cleanup in the deployment's operating schedule. The same retention
+contract covers historical pilot publications. Start with dry-run monitoring, then
+use bounded `--delete` passes at a cadence appropriate to
+database growth and the configured retention window. Alert on a nonzero exit and on an
+eligible count that does not fall across repeated successful passes.
+
+A manifest, digest, aggregate, or node-key integrity error during publication is a
+fail-closed storage fault. Do not manually promote the pending manifest or advance the
+task summary pointer. Preserve the bounded diagnostic and relevant database logs,
+stop the affected producer if it is repeatedly retrying, and investigate the exact run
+identity before allowing a fresh publication.
+
+Schedule `django_ray_audit_workflow_progress` for exact runs selected by operational
+policy, and run it before attempting manual storage recovery. The audit is read-only:
+it locks the task then exact run, verifies the current topology and every bounded
+latest-state row, and exits nonzero without changing the corrupt evidence. Supply all
+four identity fields from the summary or retained attempt record; do not substitute
+only the current task primary key when auditing an older retained run. An audit reads
+no more than the protocol limit plus one detail row and is intentionally separate from
+the sparse publication path.
+
+### 6) Ray Connection Loss
+
+Symptoms:
+
+- worker logs contain reconnect warnings/errors.
+- tasks fail with Ray connection errors.
+
+Checks:
+
+1. Verify `RAY_ADDRESS` and network reachability.
+2. Verify Ray head/dashboard/cluster health.
+3. Verify worker mode (`--local`, `--cluster=ADDRESS`, `--ray-job`, or default `RUNNER`).
+
+Recovery:
+
+1. Restore Ray cluster/network.
+2. Restart workers after Ray is healthy.
+3. Verify pending tasks move back to `QUEUED`/`RUNNING`.
+
+### 7) Cancellation Stuck In CANCELLING
+
+Symptoms:
+
+- rows remain `CANCELLING` for too long.
+
+Checks:
+
+1. Confirm owning worker is still running.
+2. Confirm cancellation processing runs in worker loop.
+
+Recovery:
+
+1. Restart worker if cancellation loop is stalled.
+2. After restart, verify `CANCELLING -> CANCELLED` transitions complete.
+
+### 8) Oversized Results
+
+Symptoms:
+
+- successful tasks with `result_data = NULL` and populated `result_reference`, or callers raising `ResultUnavailableError` when accessing `TaskResult.return_value`.
+- failed tasks with `ResultStoragePersistenceError` (`retryable=False`) when writing to an explicit external storage backend failed after bounded upload retries.
+
+Interpretation:
+
+- this occurs when result payload exceeds `MAX_RESULT_SIZE_BYTES` (1 MiB default).
+- reference format indicates backend:
+  - `oversize://sha256/...` -> digest-only pointer (no external payload; `.return_value` raises `ResultUnavailableError`)
+  - `resultfs://sha256/...` -> filesystem-backed payload reference
+  - `s3://...` -> S3/object-storage payload reference
+  - `gs://...` -> GCS payload reference
+
+Recovery:
+
+1. If this is unexpected, reduce result payload size in task design or return an application-owned artifact URI.
+2. If retrieval is required, configure a retrievable backend:
+   - `RESULT_STORAGE_BACKEND="filesystem"` with `RESULT_STORAGE_FILESYSTEM_PATH=<shared path>` (mounted read-write on Ray executors and readable on Django web/workers)
+   - `RESULT_STORAGE_BACKEND="s3"` with bucket/prefix and working credentials
+   - `RESULT_STORAGE_BACKEND="gcs"` with bucket/prefix and working credentials
+3. `RayTaskBackend.get_result()` returns a `RayTaskResult(status=SUCCESSFUL)` for every succeeded task and rehydrates `resultfs://...`, `s3://...`, and `gs://...` references when the reader has matching storage configuration. Accessing `.return_value` on an `oversize://...` digest stub or an unreadable external payload raises `ResultUnavailableError` rather than returning `None`.
+
+### 9) Execution Retention and Coordinated Drain
+
+Symptoms:
+
+- growing `RayTaskExecution`, `TaskAttempt`, or inactive `TaskWorkerLease` tables;
+- accumulating external `result_reference` objects in filesystem/S3/GCS;
+- scheduled maintenance window requiring a clean worker stop before migration or upgrade.
+
+Retention cleanup:
+
+1. Preview eligible terminal executions, archived attempts, inactive leases, and unshared external result blobs (dry run by default):
+
+   ```bash
+   python manage.py django_ray_purge_executions --older-than-days 30 --dry-run
+   ```
+
+2. Schedule bounded deletion passes (external blobs are removed strictly outside database transactions; active `QUEUED`/`RUNNING`/`CANCELLING` executions and active leases are never deleted):
+
+   ```bash
+   python manage.py django_ray_purge_executions \
+     --older-than-days 30 --delete --until-empty --format json
+   ```
+
+Coordinated upgrade drain:
+
+1. Pause task producers and scheduled purge jobs.
+2. While existing workers are still running (and after pausing external producers), wait for active queues to quiesce with `python manage.py django_ray_worker --queue=<queues> --drain --drain-timeout-seconds=120`. A `--drain` invocation is a passive observer: it does not claim `QUEUED` tasks itself and does not block external producers, instead waiting until no `QUEUED`, `RUNNING`, or `CANCELLING` executions remain across the deployment for the targeted queues before releasing its lease and exiting `0` (or exiting `1` if the timeout expires); stop the existing workers only after `--drain` succeeds.
+3. Verify no active work or leases remain (`python manage.py django_ray_doctor` and `python manage.py django_ray_protocol_status`).
+4. Back up database and external storage artifacts, apply migrations, and start the upgraded cohort together.
+
+## Useful Queries
+
+```sql
+-- Task counts by state
+SELECT state, COUNT(*) AS count
+FROM django_ray_raytaskexecution
+GROUP BY state
+ORDER BY state;
+```
+
+```sql
+-- Queued work at or beyond its snapshotted deadline
+SELECT id, task_id, callable_path, queue_name, queue_deadline_at
+FROM django_ray_raytaskexecution
+WHERE state = 'QUEUED'
+  AND queue_deadline_at IS NOT NULL
+  AND queue_deadline_at <= NOW()
+ORDER BY queue_deadline_at ASC;
+```
+
+```sql
+-- Long-running tasks (example threshold: 10 minutes)
+SELECT id, task_id, callable_path, queue_name, claimed_by_worker, started_at
+FROM django_ray_raytaskexecution
+WHERE state = 'RUNNING'
+  AND started_at < NOW() - INTERVAL '10 minutes'
+ORDER BY started_at ASC;
+```
+
+```sql
+-- Worker leases ordered by database-clock expiry
+SELECT worker_id,
+       hostname,
+       pid,
+       queue_name,
+       is_active,
+       capability_schema_version,
+       min_supported_execution_protocol_version,
+       max_supported_execution_protocol_version,
+       django_ray_version,
+       last_heartbeat_at,
+       lease_expires_at,
+       lease_policy_revision
+FROM django_ray_taskworkerlease
+ORDER BY lease_expires_at ASC;
+```
+
+```sql
+-- Singleton execution-protocol rollout policy (expected initial state: 1, 1, true, 1)
+SELECT schema_version,
+       active_write_protocol_version,
+       legacy_worker_admission_enabled,
+       revision,
+       updated_at
+FROM django_ray_taskexecutionprotocolpolicy
+WHERE singleton_key = 1;
+```
+
+```sql
+-- Nonterminal executions grouped by the normative protocol and metadata schema
+SELECT execution_protocol_version, metadata_schema_version, state, COUNT(*) AS count
+FROM django_ray_raytaskexecution
+WHERE state IN ('QUEUED', 'RUNNING', 'CANCELLING')
+GROUP BY execution_protocol_version, metadata_schema_version, state
+ORDER BY execution_protocol_version, metadata_schema_version, state;
+```
+
+## Safe Manual Actions
+
+Prefer Django admin actions for retries and cancellations. Both actions use package-owned,
+row-locked lifecycle services; do not reproduce them with direct model or SQL updates.
+
+If scripting is necessary, use Django shell, narrow authorized filters, and retain the
+attempt number and execution generation observed during authorization:
+
+```python
+from django_ray.lifecycle import request_task_cancellation, retry_task
+from django_ray.models import RayTaskExecution, TaskState
+
+failed = RayTaskExecution.objects.filter(
+    state=TaskState.FAILED,
+    queue_name="default",
+).only("pk", "attempt_number", "execution_generation")[:100]
+for execution in failed:
+    retry_task(
+        execution.pk,
+        expected_attempt_number=execution.attempt_number,
+        expected_execution_generation=execution.execution_generation,
+    )
+
+# Apply the application's object/tenant authorization before selecting this row.
+running = RayTaskExecution.objects.only(
+    "pk",
+    "attempt_number",
+    "execution_generation",
+).get(
+    task_id="authorized-task-id",
+)
+outcome = request_task_cancellation(
+    running.pk,
+    expected_attempt_number=running.attempt_number,
+    expected_execution_generation=running.execution_generation,
+)
+print(outcome.status, outcome.state)
+```
+
+Cancellation is a durable request, not a guarantee that already-running synchronous
+Python code was interrupted. A queued task becomes `CANCELLED` immediately; running
+work becomes `CANCELLING` until a worker makes its best-effort backend request and
+finalizes the row. A stale attempt or generation, terminal task, duplicate request,
+invalid state, or missing row returns a bounded no-op result rather than overwriting
+newer work.
+
 ## Pattern-Unredacted Failure Diagnostics In Admin
 
 Start on the ordinary execution or archived-attempt detail. It is safe to use for broad
@@ -90,22 +565,30 @@ RuntimeEnv snapshots, completion envelopes, workflow progress, and logs are excl
 even from this page. Use their separately bounded operational surfaces and deployment
 authorization. A value larger than 64 KiB is reported by byte size but is not loaded or
 rendered; inspect it through a deployment-owned database or result-storage procedure
-with equivalent authorization. There is no built-in task-owner field in 0.4.0, so use
+with equivalent authorization. There is no built-in task-owner field, so use
 global groups sparingly or supply an object-permission backend for tenant-scoped grants.
 
-## Safety Model
+## Escalation Guidance
 
-Treat started production work as replayable, not exactly once. Queued work can expire or
-be cancelled before application code begins. `django-ray` can retry started work after
-application exceptions, lost worker ownership, Ray connection loss, and unknown
-completion state. That protects throughput and recovery, but it cannot prove that a
-crashed or disconnected attempt made no external side effects before disappearing.
+Escalate to the engineering team when:
 
-Before enabling automatic retries on side-effecting callables, confirm the task has an idempotency
-key or operation table that makes duplicate execution harmless. For payments, emails, webhooks, or
-external writes, prefer a deduplicated commit record over relying on task attempt counts.
+- repeated failures persist after configuration/network fixes,
+- retry policy behavior differs across worker modes,
+- state transitions violate expected lifecycle semantics,
+- manual recovery requires broad database edits.
 
-## Execution Protocol Rollout Boundary
+## Appendix: Execution Protocol Rollout Boundary and Historical Internals
+
+The sections below are reference notes for protocol rollout inspection and historical
+migration boundaries. Ordinary incident triage does not require changing protocol policy
+rows; use the read-only status command when reviewing rollout state:
+
+```bash
+python manage.py django_ray_protocol_status
+python manage.py django_ray_protocol_status --database=default --json
+```
+
+### Execution Protocol Rollout Boundary
 
 Migration `0019_execution_protocol_schema` creates a read-only protocol policy and
 records bounded execution and worker capabilities. Its initial expected state is policy
@@ -211,7 +694,7 @@ the retrieved request bytes, canonical schema, exact identity, protocol, and inn
 transport before Django setup, input hydration, or callable import/invocation. A
 compatible replacement manager validates the exact persisted rq2 job ID and reference
 binding; it does not reconstruct or retrieve the request through JobInfo and does not
-use a digest to infer execution effects. The 0.6.0 entrypoint rejects unversioned
+use a digest to infer execution effects. The entrypoint rejects unversioned
 payloads and the earlier strict rq1 inline carrier before application setup.
 Historical readers and reconciliation do not authorize executing those carriers
 or replaying uncertain work.
@@ -263,68 +746,15 @@ each remote bootstrap and ordinary item arguments before the leaf body can valid
 exact Ray/Python and cluster-instance attestation remains a separate pre-serialization
 and pre-submission requirement.
 
-The following retained fixture describes historical 0.4-to-0.5 protocol qualification,
-not the supported 0.6.0 package-upgrade procedure. The original boundary paired released
-0.4 legacy/schema-`0` workers with the final 0.5 schema-`1`, protocol-`1` contract;
-intermediate development snapshots were not compatible merely because they advertised
-the same protocol. For 0.5.0-to-0.6.0 deployments, follow
-[Upgrade from 0.5](deployment/upgrading-from-0.5.md): drain old work and stop writers.
-Historical live-job adoption checks do not authorize mixed-version execution.
-
-The guarded local KubeRay script retains a regression fixture for that older boundary.
-Its presence does not establish a passing result for the current source. The fixture
-builds an ephemeral task-manager image from the pinned released `v0.4.0` tree on the
-current Ray/Python tuple,
-lets that binary acquire its legacy capability-schema-`0` lease and submit a slow
-protocol-`1` Ray Job, then stops it and requires the source under test's explicit
-schema-`1`, `1..1` lease to reconcile the same persisted job ID, attempt, and generation
-without resubmission. While the released manager is occupied, a separately deferred
-protocol-`1` row must remain byte-for-byte queued through that replacement; the current
-manager then completes the same durable row through one request-reference submission. Do
-not substitute a current binary with hand-edited legacy fields: that would test stored
-metadata, not the historical released handoff boundary.
-
-The gate's protocol-`2` path is deliberately negative and test-only. It first stages one
-synthetic row in a terminal state outside production producers while legacy admission is
-open. After the released manager and its exact schema-`0` lease are gone, the gate
-revision-checks and closes admission, then transitions that exact row to `QUEUED`.
-Migration `0020` permits the terminal marker while open but forbids the nonterminal row
-until this close; active write protocol remains `1`. It proves the current `1..1` managers
-do not claim or mutate the queued row and requires the
-read-only status, authenticated API, and fixed-label metrics surfaces to show unsupported
-work with no compatible worker. A direct
-strict Ray Core executor request then proves rejection before application invocation, with
-its unique invocation marker absent. This does not authorize a protocol-`2` producer,
-active-write change, or live `1..2` lease. Cleanup must first return the exact fixture to a
-terminal state, reopen legacy admission with a consistent token at the next revision, delete
-that fixture, and restore the current Ray Job manager replica count before passing evidence
-is emitted. The staged row and reserved release-manager hostname permit bounded recovery of
-only exact interrupted gate residue on a later run. Foreign residue, an orphan live lease
-without its exact Deployment, or ambiguity is never deleted automatically. Recovery runs
-after current image identity is verified and before any live task is submitted, then repeats
-immediately before the handoff to close the intervening race. The monotonic policy revision
-is not rolled back; any cleanup or restoration failure invalidates the run.
-
-Do not interpret the lease's informational `queue_name` text as a durable per-queue
-capability, or its protocol range as proof that Ray is ready. Ray/Python version and
-cluster-instance attestation, normalized target capacity, and supported blue/green drain
-status are separate rollout requirements.
-
-Use the read-only protocol report before reviewing any later rollout transition:
-
-```bash
-python manage.py django_ray_protocol_status
-python manage.py django_ray_protocol_status --database=default --json
-```
-
-The text and canonical JSON views share one versioned bounded observation. They report the
-policy/token relationship, live and stale-active task-manager lease totals, aggregated
-protocol ranges, nonterminal work grouped by queue/state/protocol, protocol-only work
-with no heartbeat-live compatible lease, work with no heartbeat-live explicit upgraded
-reader, and fixed closure or rollback blocker codes. The report owns one consistent
-read-only database snapshot, is redaction-safe, and does not mutate any row. Queue text
-is bounded in SQL before materialization. Repeated sections are capped with exact
-omitted totals, and the complete output is bounded to 65,536 UTF-8 bytes.
+The text and canonical JSON views of `django_ray_protocol_status` share one versioned
+bounded observation. They report the policy/token relationship, live and stale-active
+task-manager lease totals, aggregated protocol ranges, nonterminal work grouped by
+queue/state/protocol, protocol-only work with no heartbeat-live compatible lease, work
+with no heartbeat-live explicit upgraded reader, and fixed closure or rollback blocker
+codes. The report owns one consistent read-only database snapshot, is redaction-safe,
+and does not mutate any row. Queue text is bounded in SQL before materialization.
+Repeated sections are capped with exact omitted totals, and the complete output is
+bounded to 65,536 UTF-8 bytes.
 
 This is evidence, not an activation command or end-to-end readiness result.
 `queue_capacity_attested=false` is deliberate because lease queue text is
@@ -348,15 +778,14 @@ external deployment evidence for rollout decisions. Provenance is diagnostic onl
 null includes legitimate historical/unreported values and any stored value that fails
 the fixed 128-byte public-read guard.
 
-### Historical migration coordination internals
+### Historical Migration Coordination Internals
 
-The following describes the retained `0019`/`0020` migration foundation and its
-private coordination primitive. It is not the current operational upgrade or
-rollback procedure. For a deployed 0.5.0 system moving to 0.6.0,
-use [Upgrade from 0.5](deployment/upgrading-from-0.5.md) and the
-[coordinated Beta procedure](stability.md#coordinated-beta-upgrades). Historical
-policy/token compatibility does not authorize old execution carriers or a
-mixed-version worker deployment.
+The following describes the retained `0019`/`0020` migration foundation, historical
+0.4-to-0.5 qualification fixtures, and private coordination primitive. It is not the
+current operational upgrade or rollback procedure. For deployed upgrades, follow the
+[coordinated Beta procedure](stability.md#coordinated-beta-upgrades) and the matching
+release upgrade guide ([0.7.1 to 0.8.0](deployment/upgrading-from-0.7.md),
+[0.6 to 0.7](deployment/upgrading-from-0.6.md), or [0.5 to 0.6](deployment/upgrading-from-0.5.md)).
 
 The package contains a private coordination primitive for a later supported
 operator adapter. It is not an operator API: do not import or call it directly, and do
@@ -365,10 +794,9 @@ The original migration slice kept legacy admission open. A future adapter must c
 exact policy revision the operator reviewed within the database positive-bigint range
 and collect an explicit assertion that every capability-unaware web, API, and other
 enqueue producer has stopped. The database can serialize old inserts after that
-assertion, but it cannot
-discover those producer processes itself. Every active legacy lease blocks closure
-even when its heartbeat is stale; a later lifecycle operation must durably retire it
-rather than letting activation infer that it is dead.
+assertion, but it cannot discover those producer processes itself. Every active legacy
+lease blocks closure even when its heartbeat is stale; a later lifecycle operation must
+durably retire it rather than letting activation infer that it is dead.
 
 The tested primitive serializes PostgreSQL coordination calls with a transaction-scoped
 advisory mutex, then uses lease-first ordered locks followed by the policy and token for
@@ -400,439 +828,19 @@ by pre-0.4 code, drain or cancel it, or complete an application-specific audit; 
 columns cannot reconstruct its original execution contract. Do not treat an `0018`
 migration record alone as proof of the writer version.
 
-The original code-only rollback contract kept both `0019` and `0020` applied,
-policy protocol `1`, and legacy admission open. It required all nonterminal work
-to use protocol `1` and upgraded task managers to stop and reconcile before exact
-0.4.0 code started. Reversing `0020` and then `0019` was a separate stopped-writer
-maintenance operation that lost protocol, provenance, capability, policy, token,
-and fencing data. These historical preconditions are not a rollback recipe for
-0.6.0 or 0.7.x. Use the [0.6 to 0.7 independent backup/restore
-procedure](deployment/upgrading-from-0.6.md#rollback-decisions) for 0.7.x
-deployments, including restoration of matching artifacts after new rq2 references
-have been written. The [0.5 to 0.6 procedure](deployment/upgrading-from-0.5.md#rollback-decisions)
-remains the historical guide for that boundary.
-
-## Useful Queries
-
-```sql
--- Task counts by state
-SELECT state, COUNT(*) AS count
-FROM django_ray_raytaskexecution
-GROUP BY state
-ORDER BY state;
-```
-
-```sql
--- Queued work at or beyond its snapshotted deadline
-SELECT id, task_id, callable_path, queue_name, queue_deadline_at
-FROM django_ray_raytaskexecution
-WHERE state = 'QUEUED'
-  AND queue_deadline_at IS NOT NULL
-  AND queue_deadline_at <= NOW()
-ORDER BY queue_deadline_at ASC;
-```
-
-```sql
--- Long-running tasks (example threshold: 10 minutes)
-SELECT id, task_id, callable_path, queue_name, claimed_by_worker, started_at
-FROM django_ray_raytaskexecution
-WHERE state = 'RUNNING'
-  AND started_at < NOW() - INTERVAL '10 minutes'
-ORDER BY started_at ASC;
-```
-
-```sql
--- Worker leases ordered by oldest heartbeat
-SELECT worker_id,
-       hostname,
-       pid,
-       queue_name,
-       is_active,
-       capability_schema_version,
-       min_supported_execution_protocol_version,
-       max_supported_execution_protocol_version,
-       django_ray_version,
-       last_heartbeat_at
-FROM django_ray_taskworkerlease
-ORDER BY last_heartbeat_at ASC;
-```
-
-```sql
--- Singleton execution-protocol rollout policy (expected initial state: 1, 1, true, 1)
-SELECT schema_version,
-       active_write_protocol_version,
-       legacy_worker_admission_enabled,
-       revision,
-       updated_at
-FROM django_ray_taskexecutionprotocolpolicy
-WHERE singleton_key = 1;
-```
-
-```sql
--- Nonterminal executions grouped by the normative protocol and metadata schema
-SELECT execution_protocol_version, metadata_schema_version, state, COUNT(*) AS count
-FROM django_ray_raytaskexecution
-WHERE state IN ('QUEUED', 'RUNNING', 'CANCELLING')
-GROUP BY execution_protocol_version, metadata_schema_version, state
-ORDER BY execution_protocol_version, metadata_schema_version, state;
-```
-
-## Incident Playbooks
-
-## 1) Queue Backlog Keeps Growing
-
-Symptoms:
-
-- `django_ray_tasks_queued` rising for several minutes.
-- few or no new `RUNNING` tasks.
-
-Checks:
-
-1. Verify at least one worker is active and healthy.
-2. Verify workers are polling the intended queue(s).
-3. Verify Ray connectivity if running `--local` or `--cluster` modes.
-
-Recovery:
-
-1. Restart unhealthy worker processes/pods.
-2. Confirm queue flags/settings match enqueue queue names.
-3. If tasks are delayed by retries, inspect `run_after` timestamps before forcing retries.
-4. Check `django_ray_tasks_expired` and the oldest `queue_deadline_at`. `EXPIRED` is
-   terminal and never automatically retries; correct worker capacity or routing before
-   using the admin or API retry action, which assigns a fresh deadline.
-5. Confirm `WORKER_POLL_INTERVAL_SECONDS` and
-   `WORKER_POLL_MAX_INTERVAL_SECONDS`. An idle worker may take up to the configured
-   maximum polling delay to observe newly enqueued work; this is not an end-to-end
-   task-start bound. Sustained activity resets it to the base.
-
-If database load is high while queues are empty, run the PostgreSQL polling benchmark
-from the [performance guide](performance.md#benchmark-worker-polling) before tuning.
-Increase the maximum gradually and compare idle queries per worker-second with p95
-claim latency. Do not lengthen heartbeat, timeout, or cancellation settings to reduce
-claim-query load; those schedules are independent safety controls.
-
-For rollout-related claim regressions, also inspect the benchmark's schema-v1
-`protocol_predicate_evidence`. Require `production_claim_sql_shape_verified=true`, equal
-seeded/query-limit counts, six production-first and six control-first pairs, finite
-samples, and bounded plan shapes for both variants. The signed paired delta is
-production minus control, so negative values are valid. Compare repeated runs on the
-same database and workload before opening an index change; there is intentionally no
-single-run latency threshold. The report omits raw SQL and durable identities, so use
-ordinary database tooling separately if an authorized plan investigation needs them.
-
-## 2) Tasks Stuck In RUNNING
-
-Symptoms:
-
-- many `RUNNING` rows with stale `started_at`/`last_heartbeat_at`.
-
-Checks:
-
-1. Confirm owning workers (`claimed_by_worker`) still have active leases.
-2. Confirm `STUCK_TASK_TIMEOUT_SECONDS` and `timeout_seconds` are appropriate.
-
-Recovery:
-
-1. Let normal recovery run first. Production orphan reconciliation, timeout recovery,
-   and cancellation takeover are all limited to the worker's selected queues; a
-   compatible worker selected for that queue can adopt persisted Ray Jobs from inactive
-   workers.
-2. If needed, requeue only clearly orphaned/failed tasks using admin retry actions.
-
-Notes:
-
-- A fresh `last_heartbeat_at` can mean either the owning worker is healthy or another
-  worker is still actively monitoring/reconciling the task.
-- An exact active Ray Job with `UNKNOWN` status is not generically requeued. Once its
-  monitor heartbeat exceeds the stuck-task timeout, reconciliation marks it `LOST`,
-  requests a stop for the exact persisted job ID, and suppresses automatic retry
-  because the remote execution is not proven quiescent. Inspect
-  `cancellation_status`/`cancellation_error` and Ray before retrying it manually.
-- An unversioned malformed completion retains the bounded recovery and grace behavior
-  used by legacy protocol-v1 jobs. While Ray still reports `PENDING` or `RUNNING`, an
-  expired legacy envelope follows the exact-stop, `LOST`, no-auto-retry path; a terminal
-  Ray status may use the configured failure/retry policy.
-- A partial or mismatched versioned completion cannot fall back to legacy handling. Its
-  result, result reference, and claimed error are ignored. An active or unknown exact Ray
-  Job is stopped and retained as `LOST`; a terminal job becomes a fixed non-retryable
-  failure. Inspect the bounded diagnostic and remote state before any manual retry.
-- The strict driver uses a dedicated nonzero exit when it rejects a request before
-  Django setup, but reconciliation treats that value only as diagnostic. Application or
-  import code can terminate with the same value, so the exit alone cannot prove the
-  execution phase or absence of effects.
-- Every strict Ray Job that becomes terminal without its exact completion envelope
-  waits for the normal publication grace period and then receives the same fixed generic
-  failure without automatic retry or log inspection. Missing or mismatched strict
-  metadata instead follows the exact-stop, `LOST`, no-auto-retry boundary.
-- A completion that exceeds the fixed envelope byte, depth, or node budget is also
-  rejected without automatic retry, including an unversioned legacy envelope. This is a
-  deterministic resource boundary, not legacy malformed-envelope grace; inspect the
-  remote execution before deciding whether replay is safe.
-- Ray Job version, status, stop, and log HTTP requests used by lifecycle control are
-  bounded to five seconds. A timeout can therefore leave `cancellation_status` as
-  `INDETERMINATE`; verify the exact persisted Ray Job before manually retrying. Ray
-  Client, `auto`, and GCS address discovery happens before the execution row lock, so
-  slow discovery cannot block completion, adoption, or retry coordination.
-- A worker warning that submission acceptance is uncertain refers to a deterministic
-  job ID that was persisted before the request. Let reconciliation resolve that exact
-  ID; do not manually start another attempt while its Ray state is unknown.
-- A deterministic rq2 preparation rejection occurs before Ray submission. Invalid,
-  oversized, corrupt, misconfigured, or ambiguously bound requests suppress automatic
-  retry and retain only a fixed classification; a definitely pre-submission storage
-  outage may follow the configured retry policy. Once the submission request starts,
-  the exact job ID, address, and request reference remain one reconciliation tuple and
-  are never cleared merely because the client call failed.
-- A `RUNNING` row with non-null `completion_data` is between entrypoint publication
-  and worker reconciliation. Cancellation reports `COMPLETION_PENDING`, and timeout
-  recovery leaves it alone; let reconciliation consume the envelope even if Ray still
-  reports the wrapper process as running.
-
-Optional targeted SQL (use carefully):
-
-```sql
--- Example: inspect orphan candidates first (do not update blindly)
-SELECT id, task_id, callable_path, claimed_by_worker, started_at
-FROM django_ray_raytaskexecution
-WHERE state = 'RUNNING'
-ORDER BY started_at ASC;
-```
-
-## 3) Retry Storm / Repeated Failures
-
-Symptoms:
-
-- fast growth in `FAILED` + `LOST`.
-- same callable repeatedly retried.
-
-Checks:
-
-1. Identify dominant failing `callable_path`.
-2. Inspect latest `error_message` and `error_traceback`.
-3. Confirm denylist policy (`RETRY_EXCEPTION_DENYLIST`) for non-retryable failures.
-
-Recovery:
-
-1. Stop or scale down workers if failures are harmful/high-volume.
-2. Fix configuration or task code root cause.
-3. Requeue failed tasks in controlled batches after fix.
-
-## 4) Durable Input Retrieval or Cleanup Failure
-
-Symptoms:
-
-- task errors report a missing, malformed, unauthorized, or corrupt input reference;
-- the task fails before application logs appear;
-- `django_ray_purge_inputs` records `cleanup_error` or exits non-zero.
-
-Checks:
-
-1. Inspect the registry `payload_kind` and its exact execution link (`input_reference`
-   for task inputs or `ray_job_request_reference` for Ray Job requests) without copying
-   the payload or reference into tickets or logs. A kind mismatch is ambiguous and must
-   be corrected through a reviewed data repair, not guessed by cleanup.
-2. Confirm every enqueueing and task-manager process uses the same input backend,
-   filesystem root, bucket, prefix, and credentials. For rq2, the Ray Job driver must be
-   able to reach the exact locator namespace through its ambient workload identity or
-   environment; credentials must not be embedded in metadata or the locator.
-3. Verify the object exists and its access policy has not changed.
-4. If cleanup failed, inspect `cleanup_error` and fix storage access before rerunning.
-
-Recovery:
-
-1. Restore the exact content-addressed object or correct storage configuration.
-2. Use a controlled manual retry only after retrieval succeeds and the exact prior Ray
-   Job is proven quiescent. Validation failures do not auto-retry. A definitely
-   pre-submission request-store outage may follow normal retry policy, but a missing or
-   unreadable rq2 object observed by a started driver does not authorize replay.
-3. Preview retention with `django_ray_purge_inputs --retention-days=30` before using
-   `--delete`. Increase retention when historical manual retry or audit access is needed.
-   Cleanup now stops after a bounded batch. Follow the
-   [cursor and exit-status contract](reference/cli.md#django_ray_purge_inputs), retain
-   every page's failures/incomplete outcomes, and revisit unresolved rows in a fresh
-   pass. Repeating a status-2 invocation without its cursor can starve later rows.
-
-Do not edit either reference column, the payload kind, digest metadata, or JSON
-placeholders by hand. Successful cleanup retains a `PURGED` tombstone and execution
-references for audit.
-
-## 5) Workflow Progress Retention or Orphan Cleanup Failure
-
-Symptoms:
-
-- expired normalized detail continues to consume database storage;
-- unpublished topology candidates or unreferenced pages remain for more than one hour;
-- inactive run-storage shells remain after their last candidate or orphan page is gone;
-- `django_ray_cleanup_workflow_progress --delete` exits nonzero and a retained run or
-  pending manifest has `cleanup_error`.
-
-Checks:
-
-1. Preview one bounded pass with `django_ray_cleanup_workflow_progress`.
-2. Confirm terminal detail has `detail_retention_days` and `detail_expires_at` recorded;
-   cleanup does not invent or override the lifecycle-owned retention deadline.
-3. Treat an exact active task identity as protected even if a malformed or manually
-   altered expiry appears to be in the past.
-4. Inspect the bounded cleanup code and exception type. Exception messages are
-   intentionally redacted; use database and application logs under the deployment's
-   normal secret-handling policy for deeper diagnosis.
-
-Recovery:
-
-1. Correct the database, lock-timeout, or integrity condition reported by operations.
-2. Rerun the dry run, then run
-   `django_ray_cleanup_workflow_progress --batch-size=100 --delete`.
-3. Repeat bounded passes until zero eligible items remain. One failed item does not
-   prevent later candidates in a pass, and clean candidates are processed before retry
-   rows so a permanent oldest failure cannot starve later work. Any failure still makes
-   that command invocation exit nonzero.
-
-Cleanup removes expired run-owned detail or old unpublished orphans only. It does not
-rewrite the task-row or `TaskAttempt` summary, task state, or terminal outcome. Do not
-manually delete current manifests or referenced pages; their references are part of
-the atomic publication and integrity contract.
-
-Apply migration `0013_workflow_progress_detail_storage` before scheduling the command.
-Default full reporting creates bounded terminal detail rows, so include their
-retention cleanup in the deployment's operating schedule. The same retention
-contract covers historical pilot publications. Start with dry-run monitoring, then
-use bounded `--delete` passes at a cadence appropriate to
-database growth and the configured retention window. Alert on a nonzero exit and on an
-eligible count that does not fall across repeated successful passes.
-
-A manifest, digest, aggregate, or node-key integrity error during publication is a
-fail-closed storage fault. Do not manually promote the pending manifest or advance the
-task summary pointer. Preserve the bounded diagnostic and relevant database logs,
-stop the affected producer if it is repeatedly retrying, and investigate the exact run
-identity before allowing a fresh publication.
-
-Schedule `django_ray_audit_workflow_progress` for exact runs selected by operational
-policy, and run it before attempting manual storage recovery. The audit is read-only:
-it locks the task then exact run, verifies the current topology and every bounded
-latest-state row, and exits nonzero without changing the corrupt evidence. Supply all
-four identity fields from the summary or retained attempt record; do not substitute
-only the current task primary key when auditing an older retained run. An audit reads
-no more than the protocol limit plus one detail row and is intentionally separate from
-the sparse publication path.
-
-## 6) Ray Connection Loss
-
-Symptoms:
-
-- worker logs contain reconnect warnings/errors.
-- tasks fail with Ray connection errors.
-
-Checks:
-
-1. Verify `RAY_ADDRESS` and network reachability.
-2. Verify Ray head/dashboard/cluster health.
-3. Verify worker mode (`--local`, `--cluster`, default runner mode).
-
-Recovery:
-
-1. Restore Ray cluster/network.
-2. Restart workers after Ray is healthy.
-3. Verify pending tasks move back to `QUEUED`/`RUNNING`.
-
-## 7) Cancellation Stuck In CANCELLING
-
-Symptoms:
-
-- rows remain `CANCELLING` for too long.
-
-Checks:
-
-1. Confirm owning worker is still running.
-2. Confirm cancellation processing runs in worker loop.
-
-Recovery:
-
-1. Restart worker if cancellation loop is stalled.
-2. After restart, verify `CANCELLING -> CANCELLED` transitions complete.
-
-## 8) Oversized Results
-
-Symptoms:
-
-- successful tasks with `result_data = NULL` and populated `result_reference`.
-
-Interpretation:
-
-- this is expected when result payload exceeds `MAX_RESULT_SIZE_BYTES`.
-- reference format indicates backend:
-  - `oversize://sha256/...` -> digest-only pointer (no external payload)
-  - `resultfs://sha256/...` -> filesystem-backed payload reference
-  - `s3://...` -> S3/object-storage payload reference
-  - `gs://...` -> GCS payload reference
-
-Recovery:
-
-1. If this is unexpected, reduce result payload size in task design.
-2. If retrieval is required, configure a retrievable backend:
-   - `RESULT_STORAGE_BACKEND="filesystem"` with `RESULT_STORAGE_FILESYSTEM_PATH=<shared path>`
-   - `RESULT_STORAGE_BACKEND="s3"` with bucket/config and working credentials
-   - `RESULT_STORAGE_BACKEND="gcs"` with bucket/config and working credentials
-3. `RayTaskBackend.get_result()` can rehydrate `resultfs://...`, `s3://...`, and `gs://...`
-   references when the reader has matching storage configuration. `oversize://...`
-   digest references remain metadata-only.
-
-## Safe Manual Actions
-
-Prefer Django admin actions for retries and cancellations. Both actions use package-owned,
-row-locked lifecycle services; do not reproduce them with direct model or SQL updates.
-
-If scripting is necessary, use Django shell, narrow authorized filters, and retain the
-attempt number and execution generation observed during authorization:
-
-```python
-from django_ray.lifecycle import request_task_cancellation, retry_task
-from django_ray.models import RayTaskExecution, TaskState
-
-failed = RayTaskExecution.objects.filter(
-    state=TaskState.FAILED,
-    queue_name="default",
-).only("pk", "attempt_number", "execution_generation")[:100]
-for execution in failed:
-    retry_task(
-        execution.pk,
-        expected_attempt_number=execution.attempt_number,
-        expected_execution_generation=execution.execution_generation,
-    )
-
-# Apply the application's object/tenant authorization before selecting this row.
-running = RayTaskExecution.objects.only(
-    "pk",
-    "attempt_number",
-    "execution_generation",
-).get(
-    task_id="authorized-task-id",
-)
-outcome = request_task_cancellation(
-    running.pk,
-    expected_attempt_number=running.attempt_number,
-    expected_execution_generation=running.execution_generation,
-)
-print(outcome.status, outcome.state)
-```
-
-Cancellation is a durable request, not a guarantee that already-running synchronous
-Python code was interrupted. A queued task becomes `CANCELLED` immediately; running
-work becomes `CANCELLING` until a worker makes its best-effort backend request and
-finalizes the row. A stale attempt or generation, terminal task, duplicate request,
-invalid state, or missing row returns a bounded no-op result rather than overwriting
-newer work.
-
-## Escalation Guidance
-
-Escalate to development team when:
-
-- repeated failures persist after configuration/network fixes,
-- retry policy behavior differs across worker modes,
-- state transitions violate expected lifecycle semantics,
-- manual recovery requires broad database edits.
+The guarded local KubeRay script retains historical 0.4-to-0.5 retired-carrier refusal
+and negative protocol-`2` regression fixtures. Their presence does not establish a passing
+result for the current source or authorize a protocol-`2` producer, active-write change,
+or mixed-version execution. Use the [independent backup/restore rollback
+procedure](deployment/upgrading-from-0.6.md#rollback-decisions) for current Beta
+deployments, including restoration of matching artifacts after new rq2 references have
+been written.
 
 ## Related Docs
 
 - [Configuration](configuration.md)
 - [Retry & Error Handling](retry.md)
 - [Worker Modes](worker-modes.md)
+- [CLI Reference](reference/cli.md)
+- [Bounded Doctor](reference/doctor.md)
 - [Architecture](architecture.md)

@@ -75,30 +75,45 @@ its HTTP API are examples and are not installed as public django-ray APIs.
 ## Mode and pattern selection
 
 - **Execution modes**:
-  - `--sync`: synchronous in-process execution for unit tests and local debugging.
-  - `--local` (`RAY_ADDRESS="auto"`, `RUNNER="ray_core"`): single-host Ray Core execution.
-  - `--cluster` (`RAY_ADDRESS="ray://head:10001"`, `RUNNER="ray_core"`): low-latency distributed Ray Core tasks and dynamic workflows; tied to the task manager's Ray Client connection (`30s` default reconnect grace).
-  - `--execution-mode ray_job` (`RAY_ADDRESS="http://head:8265"`, `RUNNER="ray_job"`): isolated Ray Job driver per task; use with `OPTIONS={"RAY_JOB_ONLY": True}` for long-running batch jobs, Ray Data pipelines, and workloads that must survive task-manager restarts.
+  - `--sync`: synchronous in-process execution for unit tests and local debugging (works with empty `DJANGO_RAY = {}`).
+  - `--local` (`RAY_ADDRESS="auto"`, `RUNNER="ray_core"`, package defaults): single-host Ray Core execution.
+  - `--cluster=ray://head:10001` (`RAY_ADDRESS="ray://head:10001"`, `RUNNER="ray_core"`): low-latency distributed Ray Core tasks and dynamic workflows; tied to the task manager's Ray Client connection (`30s` default reconnect grace).
+  - `--ray-job` (`RAY_ADDRESS="http://head:8265"`, `RUNNER="ray_job"`): isolated Ray Job driver per task; requires retrievable `INPUT_STORAGE_BACKEND` and pairs with `OPTIONS={"RAY_JOB_ONLY": True}` for long-running batch jobs, Ray Data pipelines, and workloads that must survive task-manager restarts.
+  - `--drain` / `--drain-timeout-seconds`: drain active `QUEUED`/`RUNNING`/`CANCELLING` work on the targeted queues, release the worker lease cleanly, and exit `0` during coordinated upgrades (or exit `1` on timeout).
 - **Task vs. fan-out vs. workflows**:
-  - Standalone `@task` + `.enqueue(...)`: one durable database row per independent background job. Do not enqueue hundreds of separate database rows for fine-grained parallel loops.
+  - Standalone `@task` or `@ray_task` (`django_ray.decorators`) + `.enqueue(...)`: one durable database row per independent background job (with full Django 6 `@task(takes_context=True)` `TaskContext` and `django.tasks.signals` dispatched via `transaction.on_commit`). Do not enqueue hundreds of separate database rows for fine-grained parallel loops.
   - In-task fan-out (`parallel_map`, `parallel_starmap`, `scatter_gather` in `django_ray.runtime.distributed`): fast parallel fan-out inside a single `@task` when all inputs and outputs fit in one task's memory and share one retry/timeout boundary.
-  - Ray-native workflow DAG (`step`, `chain`, `group`, `map_step` in `django_ray.workflows`): multi-stage pipelines or large fan-out maps needing concurrency bounds (`with_limits`), coordinator-free result buffering (`with_result_buffer`), or bounded ordered reduction (`reduce`) inside one outer `RayTaskExecution`.
+  - Ray-native workflow DAG (`step`, `chain`, `group`, `map_step` in `django_ray.workflows`, which also supports `|`, `&`, `.explain()`, and re-exports `WorkflowExpr`, `pipe`, `parallel`, `branch`, and secret-free `explain_workflow()` from `django_ray.workflow.dsl`): multi-stage pipelines or large fan-out maps needing concurrency bounds (`with_limits`), coordinator-free result buffering (`with_result_buffer`), or bounded ordered reduction (`reduce`) inside one outer `RayTaskExecution`. Configure `ALLOWED_CALLABLE_MODULES` if workflow helpers live outside `INSTALLED_APPS`.
+- **Day-2 operations & observability**:
+  - Fail-loud result retrieval: `RayTaskBackend.get_result()` returns a `RayTaskResult` whose `.return_value` raises `ResultUnavailableError` for digest-only `oversize://` stubs or unreadable external payloads (never silent `None`), and `.args`/`.kwargs` raise `InputPayloadUnavailableError` on failed input loads.
+  - Read-only diagnostics & retention: `django_ray_doctor` exits `0` when all 7 required checks pass (`deferred_sections` lists out-of-scope remote probes), `django_ray_replay <task_id>` replays persisted tasks locally (`--dry-run` / `--pdb`) without mutating DB rows, and `django_ray_purge_executions` purges aged terminal executions, attempts, inactive leases, and unshared external result blobs.
+  - Opt-in tracing & cached metrics: core `django-ray` pins `opentelemetry-api>=1.45.1` only as a transitive security floor for `ray[default]>=2.60.0`; install `django-ray[otel]` for `opentelemetry-sdk` and set `DJANGO_RAY["TRACING_ENABLED"] = True` (plus `TRACING_SAMPLE_RATE`, `TRACING_MAX_WORKFLOW_NODE_SPANS`) to emit redacted, W3C-correlated lifecycle spans via `emit_task_lifecycle_span`. `METRICS_CACHE_TTL_SECONDS` (default `5.0`) caches Prometheus snapshots.
 - **KubeRay (fixed and autoscaled)**:
-  - Bake heavy dependencies into the Ray image and deliver code via pre-built `RUNTIME_ENV` archives (`snapshot_local_runtime_env()`) rather than live per-task `pip` installs to avoid cold-start penalties on autoscaled Ray nodes.
-  - Keep `WORKER_LEASE_SECONDS` aligned with the database authority (`django_ray_lease_policy`, seeded to `60s` by migration `0028`) and use `django_ray_worker_ready` for Kubernetes `readinessProbe`.
+  - Bake heavy dependencies into the Ray image and deliver code via pre-built immutable `working_dir` archives (HTTPS, S3, GCS, or a shared read-only volume) in `RUNTIME_ENV_PROFILES` rather than live per-task `pip` installs to avoid cold-start penalties on autoscaled Ray nodes.
+  - Use S3 or GCS external storage with disjoint `inputs` (read-only on Ray pods) and `results` (read-write on Ray pods) prefixes rather than RWX PVCs on cloud clusters.
+  - Keep `WORKER_LEASE_SECONDS` aligned with the database authority (`django_ray_lease_policy`, seeded to `60s` by migration `0028`; migration `0029_lease_engine_and_hot_indexes` adds DB-clock `lease_expires_at`, `lease_policy_revision`, widened `queue_name`, and partial hot-path/purge indexes) and use `django_ray_worker_ready` for Kubernetes `readinessProbe`.
 
 ## Source map
 
-- `src/django_ray/backends.py`: Django Tasks backend and result reconstruction.
+- `src/django_ray/backends.py`: Django Tasks backend, fail-loud `RayTaskResult` (`ResultUnavailableError` / `InputPayloadUnavailableError`), and `on_commit` `task_enqueued` signal dispatch.
+- `src/django_ray/decorators.py`: declarative `@ray_task` decorator and validated `RayTaskContract`.
+- `src/django_ray/_blob_storage.py`: unified internal blob storage engine (pooled S3/GCS clients, metadata-only 404-idempotent deletion, stale-lock-safe atomic filesystem installs, canonical namespace containment).
 - `src/django_ray/input_storage.py`: versioned input envelopes, storage references,
   integrity validation, and retention registration.
 - `src/django_ray/result_storage.py`: content-addressed external result storage and
   writer-owned payload registration.
+- `src/django_ray/worker/`: modular worker orchestration (`loop`, `claimer`, `dispatcher`,
+  `reconciler`, `maintenance`, `shutdown`) behind `django_ray_worker`.
+- `src/django_ray/admin_views/`: modular Django Admin views (`badges`, `actions`,
+  `diagnostics`, `sensitive`).
 - `src/django_ray/management/commands/`: `django_ray_worker`, `django_ray_doctor`,
-  `django_ray_lease_policy`, `django_ray_worker_ready`, `django_ray_purge_inputs`,
-  `django_ray_runtime_env`, `django_ray_protocol_status`,
-  `django_ray_cleanup_workflow_progress`, and `django_ray_audit_workflow_progress`.
+  `django_ray_replay`, `django_ray_purge_executions`, `django_ray_lease_policy`,
+  `django_ray_worker_ready`, `django_ray_purge_inputs`, `django_ray_runtime_env`,
+  `django_ray_protocol_status`, `django_ray_cleanup_workflow_progress`, and
+  `django_ray_audit_workflow_progress`.
 - `src/django_ray/workflows.py`: workflow signature construction and execution.
+- `src/django_ray/workflow/dsl.py`: Workflow DSL 2.0 (`explain_workflow`, `WorkflowExpr`,
+  `pipe`, `parallel`, `branch`).
 - `src/django_ray/workflow/strategy.py`: whole-plan execution-strategy seam, fixed-actor
   plan builder, and default-off Compiled Graph strategy adapter.
 - `src/django_ray/workflow/map_transport.py`: bounded chunked and tree-merged
@@ -111,19 +126,20 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   state machine and resume planner (ADR-0007).
 - `src/django_ray/workflow/progress/spill_capacity.py`: node-local spill workspace
   reservations, owner quotas, headroom checks, and stale-workspace janitor.
-- `src/django_ray/tracing.py`: manually invoked tracing primitives with redaction,
-  caller-supplied authority fencing, and tracer failure isolation; automatic
-  lifecycle instrumentation and a built-in OpenTelemetry adapter remain pending.
+- `src/django_ray/tracing.py`: opt-in lifecycle tracing (`emit_task_lifecycle_span`,
+  built-in lazy `OpenTelemetryTracer` for `django-ray[otel]`), W3C `traceparent`
+  validation, attribute redaction, authority fencing, and tracer failure isolation.
 - `src/django_ray/runtime/runtime_env.py`: profile validation, inheritance, hashing,
   and local-path preparation.
 - `src/django_ray/runtime/runtime_env_encryption.py`: key validation, HKDF
   derivation, and strict AES-256-GCM storage envelopes.
 - `src/django_ray/runtime/compiled_graph_lifecycle.py`: deterministic Ray-free
   compiled session and invocation state reducer.
+- `src/django_ray/runner/sync.py`: synchronous in-process runner (`SyncRunner`).
 - `src/django_ray/runner/ray_core.py`: low-overhead Ray Core submission.
 - `src/django_ray/runner/ray_job.py`: Ray Job submission and reconciliation.
 - `src/django_ray/observability.py`: versioned durable and optional live-Ray services.
-- `src/django_ray/metrics.py`: bounded-cardinality Prometheus rendering.
+- `src/django_ray/metrics.py`: bounded-cardinality Prometheus rendering with TTL caching.
 - `testproject/apps/cluster_tasks/`: executable workflow and RuntimeEnv examples.
 - `testproject/apps/cluster_tasks/ray_data_job.py`: application-owned finite Ray Data
   transform, bounded artifact manifest, and post-success adoption recipe with no Django
@@ -167,5 +183,6 @@ its HTTP API are examples and are not installed as public django-ray APIs.
   name its key ID. The stable `django-secret` envelope ID does not encode fallback
   position, so retain every current or fallback Django secret candidate that a row may
   depend on for the full RuntimeEnv row lifetime. The public plaintext hash still
-  reveals equality, and encryption does not protect Ray transport, process memory,
+  reveals equality, and encryption protects only the persisted database column at rest:
+  it does not protect Ray transport, Ray Dashboard or GCS job metadata, process memory,
   arguments, results, progress, or logs.

@@ -69,6 +69,7 @@ _ATTEMPT_ARCHIVE_READ_PROJECTION = {
     "workflow_progress_summary_json",
     "workflow_run_id",
 }
+_QUEUED_CANCEL_METADATA_READ_PROJECTION = _ATTEMPT_ARCHIVE_READ_PROJECTION
 _RETRY_LOCK_PROJECTION = _LOCK_PROJECTION | {
     "workflow_plan_fingerprint",
     "workflow_run_id",
@@ -300,7 +301,7 @@ def test_attempt_archival_copies_exact_protocol_and_provenance(
     assert task.metadata_schema_version == 1
     assert task.execution_protocol_version == 2
     assert task.created_with_django_ray_version == "0.4.0-creator"
-    if transition == "manual_retry":
+    if transition in {"manual_retry", "automatic_retry"}:
         assert task.ray_job_id is None
         assert task.ray_job_request_reference is None
         assert task.ray_address is None
@@ -884,8 +885,20 @@ def test_cancellation_uses_state_specific_projections_without_payload_reload() -
     queued_projections = _execution_select_projections(queued_queries)
     assert [fields for fields, _sql in queued_projections] == [
         _LOCK_PROJECTION,
-        _ATTEMPT_ARCHIVE_READ_PROJECTION,
+        _QUEUED_CANCEL_METADATA_READ_PROJECTION,
     ]
+    assert queued_projections[1][0].isdisjoint(
+        {
+            "args_json",
+            "kwargs_json",
+            "input_reference",
+            "runtime_env_json",
+            "progress_data",
+            "workflow_plan_json",
+            "completion_data",
+            "cancellation_error",
+        }
+    )
     archived = TaskAttempt.objects.get(execution=queued, attempt_number=2)
     assert archived.workflow_progress_summary_json is not None
     assert (
@@ -1889,7 +1902,7 @@ def test_cancellation_attempt_fence_rejects_automatic_retry_replacement() -> Non
     task.refresh_from_db()
     assert task.state == TaskState.QUEUED
     assert task.attempt_number == 3
-    assert task.execution_generation == stale_generation
+    assert task.execution_generation == stale_generation + 1
     assert task.run_after == next_attempt_at
     assert task.queue_deadline_at == next_attempt_at + timedelta(seconds=60)
 
@@ -1902,7 +1915,7 @@ def test_cancellation_attempt_fence_rejects_automatic_retry_replacement() -> Non
     assert result.status is TaskCancellationRequestStatus.STALE_ATTEMPT
     assert result.state == TaskState.QUEUED
     assert result.attempt_number == 3
-    assert result.execution_generation == stale_generation
+    assert result.execution_generation == stale_generation + 1
     task.refresh_from_db()
     assert task.state == TaskState.QUEUED
     assert task.attempt_number == 3

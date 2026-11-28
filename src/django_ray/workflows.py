@@ -7,23 +7,69 @@ the complete workflow needs durable queueing, retries, and result storage.
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
+import threading
 import time
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence, Sized
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from django_ray.runtime.context import WorkflowRunIdentity
-from django_ray.runtime.import_utils import import_callable
 from django_ray.runtime.ray_cancel import cancel_unready_ray_refs, select_unready_ray_refs
 from django_ray.workflow.contracts import WorkflowDefinitionKind
 
 if TYPE_CHECKING:
+    from django_ray.workflow._types import WorkflowSignatureProtocol
+    from django_ray.workflow.plans import WorkflowPlanBuildContext
     from django_ray.workflow.progress.producer import WorkflowProgressProducerSession
+
+
+def _resolve_workflow_callable(callable_path: str) -> Callable[..., Any]:
+    """Resolve a workflow callable through the allowlist-enforced workflow resolver."""
+    from django_ray.runtime import import_utils
+
+    resolver = getattr(
+        import_utils,
+        "resolve_workflow_callable",
+        import_utils.import_callable,
+    )
+    return resolver(callable_path)
+
+
+def _driver_allowed_callable_modules() -> tuple[str, ...] | None:
+    """Compute the driver's effective workflow module allowlist for remote Ray workers."""
+    from django_ray.runtime import import_utils
+
+    getter = getattr(import_utils, "get_driver_allowed_callable_modules", None)
+    if callable(getter):
+        resolved = getter()
+        return tuple(resolved) if resolved is not None else None
+    configured_fn = getattr(import_utils, "_configured_allowed_callable_modules", None)
+    configured = configured_fn() if callable(configured_fn) else None
+    if configured is not None:
+        return tuple(configured)
+    default_fn = getattr(import_utils, "_default_workflow_allowed_modules", None)
+    if callable(default_fn):
+        default_allowed = tuple(default_fn())
+        return default_allowed if default_allowed else None
+    return None
+
+
+def _callable_accepts_kwarg(target: Any, kwarg_name: str) -> bool:
+    """Return whether ``target`` accepts keyword argument ``kwarg_name``."""
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return False
+    if kwarg_name in params:
+        return True
+    return any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
 
 
 class WorkflowDefinitionError(ValueError):
@@ -139,7 +185,110 @@ def report_progress(
     )
 
 
+_EXECUTOR_INIT_LOCK = threading.Lock()
+
+
+def _is_ray_object_ref(value: Any) -> bool:
+    """Return whether ``value`` is a Ray ObjectRef (Core, Client, or compatible stub)."""
+    cls = type(value)
+    if cls.__name__ in {"ObjectRef", "ClientObjectRef"}:
+        return True
+    try:
+        import ray
+    except ImportError:
+        return False
+    ref_type = getattr(ray, "ObjectRef", None)
+    return isinstance(ref_type, type) and isinstance(value, ref_type)
+
+
+def _matching_ref_indices(
+    values: Sequence[Any],
+    ready_refs: Sequence[Any],
+) -> list[int]:
+    """Return indices in ``values`` matching ``ready_refs`` by value equality.
+
+    Uses O(N) hash-set lookup when values are unique and hashable (covering all
+    real Ray ``ObjectRef`` and ``ClientObjectRef`` instances, whose equality and
+    hash follow ObjectID even across distinct Python wrapper objects), and falls
+    back to 1-to-1 matching if a test stub returns duplicate or unhashable items.
+    """
+    if not ready_refs:
+        return []
+    try:
+        ready_set = set(ready_refs)
+        unique_values = len(set(values)) == len(values)
+    except TypeError:
+        ready_set = None
+        unique_values = False
+
+    if ready_set is not None and unique_values:
+        return [idx for idx, ref in enumerate(values) if ref in ready_set]
+
+    matched: set[int] = set()
+    indices: list[int] = []
+    for target in ready_refs:
+        found: int | None = None
+        for idx, ref in enumerate(values):
+            if idx not in matched and ref is target:
+                found = idx
+                break
+        if found is None:
+            for idx, ref in enumerate(values):
+                if idx not in matched and ref == target:
+                    found = idx
+                    break
+        if found is not None:
+            matched.add(found)
+            indices.append(found)
+    indices.sort()
+    return indices
+
+
+def _exclude_matching_refs(
+    values: Sequence[Any],
+    ready_refs: Sequence[Any],
+) -> list[Any]:
+    """Return elements of ``values`` not already matched in ``ready_refs``."""
+    matched = set(_matching_ref_indices(values, ready_refs))
+    return [ref for idx, ref in enumerate(values) if idx not in matched]
+
+
 class _Executor(ABC):
+    def _get_state_lock(self) -> threading.RLock:
+        """Return a per-executor reentrant lock (safe for ``object.__new__`` subclasses)."""
+        lock = getattr(self, "_executor_state_lock", None)
+        if lock is None:
+            with _EXECUTOR_INIT_LOCK:
+                lock = getattr(self, "_executor_state_lock", None)
+                if lock is None:
+                    lock = threading.RLock()
+                    self._executor_state_lock = lock
+        return lock
+
+    def _get_cleanup_local(self) -> threading.local:
+        """Return thread-local storage for cleanup stacks (safe for ``object.__new__``)."""
+        local_state = getattr(self, "_cleanup_capture_local", None)
+        if local_state is None:
+            with _EXECUTOR_INIT_LOCK:
+                local_state = getattr(self, "_cleanup_capture_local", None)
+                if local_state is None:
+                    local_state = threading.local()
+                    self._cleanup_capture_local = local_state
+        return local_state
+
+    @property
+    def _cleanup_capture_stack(self) -> list[list[Any]]:
+        local_state = self._get_cleanup_local()
+        stack = getattr(local_state, "stack", None)
+        if stack is None:
+            stack = []
+            local_state.stack = stack
+        return stack
+
+    @_cleanup_capture_stack.setter
+    def _cleanup_capture_stack(self, value: list[list[Any]]) -> None:
+        self._get_cleanup_local().stack = value
+
     def bind_plan(
         self,
         materialized_plan: Any,
@@ -149,6 +298,14 @@ class _Executor(ABC):
     ) -> None:
         """Attach a pre-submit snapshot to an executor implementation."""
         self.materialized_plan = materialized_plan
+
+    def bind_dynamic_run(
+        self,
+        *,
+        reporting_policy: str | None = None,
+    ) -> None:
+        """Attach one cohesive durable run identity for dynamic DSL execution."""
+        del reporting_policy
 
     @abstractmethod
     def submit_step(
@@ -176,10 +333,7 @@ class _Executor(ABC):
     @contextmanager
     def capture_cleanup(self, values: list[Any]) -> Generator[None, None, None]:
         """Capture physical refs submitted for one bounded logical item."""
-        stack = getattr(self, "_cleanup_capture_stack", None)
-        if stack is None:
-            stack = []
-            self._cleanup_capture_stack = stack
+        stack = self._cleanup_capture_stack
         stack.append(values)
         try:
             yield
@@ -189,9 +343,94 @@ class _Executor(ABC):
 
     def track_cleanup(self, value: Any) -> None:
         """Record a physical ref in the innermost active item capture."""
-        stack = getattr(self, "_cleanup_capture_stack", None)
+        stack = self._cleanup_capture_stack
         if stack:
             stack[-1].append(value)
+
+    @staticmethod
+    def _stable_cleanup_ref_key(value: Any) -> tuple[str, Any] | None:
+        """Return a GC-stable identity key for a Ray ObjectRef when available."""
+        if not _is_ray_object_ref(value):
+            return None
+        hex_fn = getattr(value, "hex", None)
+        if callable(hex_fn):
+            try:
+                hex_val = hex_fn()
+            except Exception:
+                hex_val = None
+            if isinstance(hex_val, str) and hex_val:
+                return ("hex", hex_val)
+        binary_fn = getattr(value, "binary", None)
+        if callable(binary_fn):
+            try:
+                bin_val = binary_fn()
+            except Exception:
+                bin_val = None
+            if isinstance(bin_val, bytes) and bin_val:
+                return ("bin", bin_val)
+        return None
+
+    def mark_resolved_cleanup(self, value: Any) -> None:
+        """Mark a physical ref as already resolved so teardown does not re-cancel it."""
+        stable_key = self._stable_cleanup_ref_key(value)
+        with self._get_state_lock():
+            if stable_key is not None:
+                resolved_keys = getattr(self, "_resolved_cleanup_keys", None)
+                if resolved_keys is None:
+                    resolved_keys = set()
+                    self._resolved_cleanup_keys = resolved_keys
+                resolved_keys.add(stable_key)
+                return
+
+            obj_id = id(value)
+            weak_map = getattr(self, "_resolved_cleanup_weak", None)
+            if weak_map is None:
+                weak_map = {}
+                self._resolved_cleanup_weak = weak_map
+
+            def _evict(ref: weakref.ReferenceType[Any], *, _id: int = obj_id) -> None:
+                with self._get_state_lock():
+                    if weak_map.get(_id) is ref:
+                        weak_map.pop(_id, None)
+
+            try:
+                weak_map[obj_id] = weakref.ref(value, _evict)
+            except TypeError:
+                fallback = getattr(self, "_resolved_cleanup_objects", None)
+                if fallback is None:
+                    fallback = {}
+                    self._resolved_cleanup_objects = fallback
+                fallback[obj_id] = value
+
+    def _unresolved_cleanup_refs(self, values: Sequence[Any]) -> list[Any]:
+        with self._get_state_lock():
+            resolved_keys = getattr(self, "_resolved_cleanup_keys", None)
+            key_snapshot = set(resolved_keys) if resolved_keys else None
+            weak_map = getattr(self, "_resolved_cleanup_weak", None)
+            weak_snapshot = dict(weak_map) if weak_map else None
+            fallback = getattr(self, "_resolved_cleanup_objects", None)
+            fallback_snapshot = dict(fallback) if fallback else None
+
+        if not key_snapshot and not weak_snapshot and not fallback_snapshot:
+            return list(values)
+
+        unresolved: list[Any] = []
+        for value in values:
+            stable_key = self._stable_cleanup_ref_key(value)
+            if stable_key is not None:
+                if key_snapshot and stable_key in key_snapshot:
+                    continue
+                unresolved.append(value)
+                continue
+            obj_id = id(value)
+            if weak_snapshot is not None:
+                weak_entry = weak_snapshot.get(obj_id)
+                if weak_entry is not None and weak_entry() is value:
+                    continue
+            if fallback_snapshot is not None and fallback_snapshot.get(obj_id) is value:
+                continue
+            unresolved.append(value)
+        return unresolved
 
     def store(self, value: Any) -> Any:
         """Return one future/value containing an already resolved value."""
@@ -215,6 +454,16 @@ class _Executor(ABC):
         """Select one ready leaf without resolving its payload in the coordinator."""
         return self.wait_one(values)
 
+    def wait_result_buffer_leaves(
+        self,
+        values: Sequence[Any],
+        *,
+        max_batch: int = 64,
+    ) -> list[int]:
+        """Select one or more ready result-buffer leaf indices."""
+        del max_batch
+        return [self.wait_result_buffer_leaf(values)]
+
     def append_result_buffer(
         self,
         buffer: Any,
@@ -224,6 +473,16 @@ class _Executor(ABC):
     ) -> None:
         """Append one leaf through the small-acknowledgement actor protocol."""
         raise NotImplementedError
+
+    def append_result_buffer_batch(
+        self,
+        buffer: Any,
+        *,
+        items: Sequence[tuple[int, Any]],
+    ) -> None:
+        """Append one or more ready leaves through the result-buffer actor."""
+        for index, value in items:
+            self.append_result_buffer(buffer, index=index, value=value)
 
     def finalize_result_buffer(self, buffer: Any, *, expected_items: int) -> Any:
         """Return the unresolved ordered payload from a finalized Ray buffer."""
@@ -257,8 +516,7 @@ class _Executor(ABC):
             from django_ray.runtime.entrypoint import bootstrap_django
 
             bootstrap_django()
-        reducer_callable = import_callable(reducer.callable_path)
-        import inspect
+        reducer_callable = _resolve_workflow_callable(reducer.callable_path)
 
         if (
             inspect.iscoroutinefunction(reducer_callable)
@@ -274,6 +532,16 @@ class _Executor(ABC):
         """Select a ready fold leaf without resolving it in the coordinator."""
         return self.wait_one(values)
 
+    def wait_result_fold_leaves(
+        self,
+        values: Sequence[Any],
+        *,
+        max_batch: int = 64,
+    ) -> list[int]:
+        """Select one or more ready result-fold leaf indices."""
+        del max_batch
+        return [self.wait_result_fold_leaf(values)]
+
     def append_result_fold(
         self,
         fold: Any,
@@ -283,6 +551,18 @@ class _Executor(ABC):
     ) -> int:
         """Return the total number of items incorporated by the ordered fold."""
         raise NotImplementedError
+
+    def append_result_fold_batch(
+        self,
+        fold: Any,
+        *,
+        items: Sequence[tuple[int, Any]],
+    ) -> int:
+        """Append one or more ready leaves through the result-fold actor."""
+        folded_items = 0
+        for index, value in items:
+            folded_items = self.append_result_fold(fold, index=index, value=value)
+        return folded_items
 
     def finalize_result_fold(self, fold: Any, *, expected_items: int) -> Any:
         """Return the unresolved accumulator from a finalized Ray fold."""
@@ -298,7 +578,7 @@ class _Executor(ABC):
             from django_ray.runtime.entrypoint import bootstrap_django
 
             bootstrap_django()
-        callable_obj = import_callable(signature.callable_path)
+        callable_obj = _resolve_workflow_callable(signature.callable_path)
         value = callable_obj(
             accumulator,
             item,
@@ -316,7 +596,7 @@ class _Executor(ABC):
         timeout_seconds: float,
     ) -> None:
         """Best-effort payload-safe cleanup for failed result folds."""
-        return None
+        return self.cancel_and_drain(values, timeout_seconds=timeout_seconds)
 
     def cancel_and_drain(
         self,
@@ -409,7 +689,11 @@ class _LocalExecutor(_Executor):
             requested_policy=requested_policy,
             reporting_policy="disabled",
         )
-        if task_context.attempt_number is None or task_context.execution_generation is None:
+        if (
+            task_context.read_only_replay
+            or task_context.attempt_number is None
+            or task_context.execution_generation is None
+        ):
             return
         if not pin_workflow_plan(task_context, materialized_plan.plan, selection):
             from django_ray.workflow.plans import WorkflowPlanMismatchError
@@ -426,13 +710,25 @@ class _LocalExecutor(_Executor):
         node_id: str,
         dependencies: tuple[str, ...],
     ) -> Any:
+        from django_ray.runtime import import_utils
+        from django_ray.runtime.entrypoint import (
+            _close_stale_db_connections,
+            _invoke_task_callable,
+        )
+
         if signature.bootstrap_django:
             from django_ray.runtime.entrypoint import bootstrap_django
 
             bootstrap_django()
-        callable_obj = import_callable(signature.callable_path)
+            _close_stale_db_connections()
+        resolver = getattr(import_utils, "resolve_workflow_callable", import_utils.import_callable)
+        callable_obj = resolver(signature.callable_path)
         kwargs = {**input_kwargs, **signature.bound_kwargs}
-        return callable_obj(*input_args, *signature.bound_args, **kwargs)
+        try:
+            return _invoke_task_callable(callable_obj, [*input_args, *signature.bound_args], kwargs)
+        finally:
+            if signature.bootstrap_django:
+                _close_stale_db_connections()
 
     def collect(self, values: list[Any]) -> list[Any]:
         return values
@@ -441,11 +737,64 @@ class _LocalExecutor(_Executor):
         return value
 
 
-_execute_workflow_step_remote_cached = None
-_collect_workflow_results_remote_cached = None
-_workflow_progress_actor_cached = None
-_workflow_result_buffer_actor_cached = None
-_workflow_result_fold_actor_cached = None
+_cached_workflow_remotes: dict[tuple[Any, str], Any] = {}
+_workflow_remotes_lock = threading.Lock()
+_execute_workflow_step_remote_cached: Any = None
+_collect_workflow_results_remote_cached: Any = None
+_workflow_progress_actor_cached: Any = None
+_workflow_result_buffer_actor_cached: Any = None
+_workflow_result_fold_actor_cached: Any = None
+
+
+def reset_cached_workflow_remotes() -> None:
+    """Clear session-keyed cached Ray workflow remote/actor wrappers."""
+    global _execute_workflow_step_remote_cached
+    global _collect_workflow_results_remote_cached
+    global _workflow_progress_actor_cached
+    global _workflow_result_buffer_actor_cached
+    global _workflow_result_fold_actor_cached
+    with _workflow_remotes_lock:
+        _cached_workflow_remotes.clear()
+        _execute_workflow_step_remote_cached = None
+        _collect_workflow_results_remote_cached = None
+        _workflow_progress_actor_cached = None
+        _workflow_result_buffer_actor_cached = None
+        _workflow_result_fold_actor_cached = None
+
+
+def _ray_runtime_session_key(ray_module: Any) -> tuple[Any, ...]:
+    """Build a reconnect-safe cache key for the active Ray runtime/client session."""
+    session_token: Any = None
+    get_ctx = getattr(ray_module, "get_runtime_context", None)
+    if callable(get_ctx):
+        try:
+            ctx = get_ctx()
+            job_id = getattr(ctx, "get_job_id", None)
+            if callable(job_id):
+                session_token = ("job", job_id())
+        except Exception:
+            session_token = None
+    if session_token is None:
+        private = getattr(ray_module, "_private", None)
+        worker_mod = getattr(private, "worker", None) if private is not None else None
+        global_worker = (
+            getattr(worker_mod, "global_worker", None) if worker_mod is not None else None
+        )
+        node = getattr(global_worker, "node", None) if global_worker is not None else None
+        session_name = getattr(node, "session_name", None) if node is not None else None
+        if session_name is not None:
+            session_token = ("node", session_name)
+    client_ctx = getattr(ray_module, "_client_context", None)
+    client_id = id(client_ctx) if client_ctx is not None else None
+    return (id(ray_module), session_token, client_id)
+
+
+def _evict_stale_workflow_sessions(active_session_key: tuple[Any, ...]) -> None:
+    stale_keys = [
+        cache_key for cache_key in _cached_workflow_remotes if cache_key[0] != active_session_key
+    ]
+    for stale_key in stale_keys:
+        _cached_workflow_remotes.pop(stale_key, None)
 
 
 def _get_cached_workflow_remotes() -> tuple[Any, Any, Any]:
@@ -453,48 +802,75 @@ def _get_cached_workflow_remotes() -> tuple[Any, Any, Any]:
     global _collect_workflow_results_remote_cached
     global _workflow_progress_actor_cached
 
-    if _execute_workflow_step_remote_cached is None:
-        import ray
+    import ray
 
-        from django_ray.runtime.remote import (
-            WorkflowProgressActor,
-            collect_workflow_results_remote,
-            execute_workflow_step_remote,
+    session_key = _ray_runtime_session_key(ray)
+    with _workflow_remotes_lock:
+        _evict_stale_workflow_sessions(session_key)
+        step_key = (session_key, "step")
+        collect_key = (session_key, "collect")
+        progress_key = (session_key, "progress")
+        if (
+            _execute_workflow_step_remote_cached is None
+            or step_key not in _cached_workflow_remotes
+            or collect_key not in _cached_workflow_remotes
+            or progress_key not in _cached_workflow_remotes
+        ):
+            from django_ray.runtime.remote import (
+                WorkflowProgressActor,
+                collect_workflow_results_remote,
+                execute_workflow_step_remote,
+            )
+
+            _cached_workflow_remotes[step_key] = ray.remote(execute_workflow_step_remote)
+            _cached_workflow_remotes[collect_key] = ray.remote(collect_workflow_results_remote)
+            _cached_workflow_remotes[progress_key] = ray.remote(num_cpus=0)(WorkflowProgressActor)
+
+        _execute_workflow_step_remote_cached = _cached_workflow_remotes[step_key]
+        _collect_workflow_results_remote_cached = _cached_workflow_remotes[collect_key]
+        _workflow_progress_actor_cached = _cached_workflow_remotes[progress_key]
+        return (
+            _execute_workflow_step_remote_cached,
+            _collect_workflow_results_remote_cached,
+            _workflow_progress_actor_cached,
         )
-
-        _execute_workflow_step_remote_cached = ray.remote(execute_workflow_step_remote)
-        _collect_workflow_results_remote_cached = ray.remote(collect_workflow_results_remote)
-        _workflow_progress_actor_cached = ray.remote(num_cpus=0)(WorkflowProgressActor)
-
-    return (
-        _execute_workflow_step_remote_cached,
-        _collect_workflow_results_remote_cached,
-        _workflow_progress_actor_cached,
-    )
 
 
 def _get_cached_result_buffer_actor() -> Any:
     global _workflow_result_buffer_actor_cached
 
-    if _workflow_result_buffer_actor_cached is None:
-        import ray
+    import ray
 
-        from django_ray.runtime.result_buffer import WorkflowMapResultBuffer
+    session_key = _ray_runtime_session_key(ray)
+    with _workflow_remotes_lock:
+        _evict_stale_workflow_sessions(session_key)
+        buffer_key = (session_key, "result_buffer")
+        if (
+            _workflow_result_buffer_actor_cached is None
+            or buffer_key not in _cached_workflow_remotes
+        ):
+            from django_ray.runtime.result_buffer import WorkflowMapResultBuffer
 
-        _workflow_result_buffer_actor_cached = ray.remote(WorkflowMapResultBuffer)
-    return _workflow_result_buffer_actor_cached
+            _cached_workflow_remotes[buffer_key] = ray.remote(WorkflowMapResultBuffer)
+        _workflow_result_buffer_actor_cached = _cached_workflow_remotes[buffer_key]
+        return _workflow_result_buffer_actor_cached
 
 
 def _get_cached_result_fold_actor() -> Any:
     global _workflow_result_fold_actor_cached
 
-    if _workflow_result_fold_actor_cached is None:
-        import ray
+    import ray
 
-        from django_ray.runtime.result_fold import WorkflowMapResultFold
+    session_key = _ray_runtime_session_key(ray)
+    with _workflow_remotes_lock:
+        _evict_stale_workflow_sessions(session_key)
+        fold_key = (session_key, "result_fold")
+        if _workflow_result_fold_actor_cached is None or fold_key not in _cached_workflow_remotes:
+            from django_ray.runtime.result_fold import WorkflowMapResultFold
 
-        _workflow_result_fold_actor_cached = ray.remote(WorkflowMapResultFold)
-    return _workflow_result_fold_actor_cached
+            _cached_workflow_remotes[fold_key] = ray.remote(WorkflowMapResultFold)
+        _workflow_result_fold_actor_cached = _cached_workflow_remotes[fold_key]
+        return _workflow_result_fold_actor_cached
 
 
 @dataclass
@@ -586,6 +962,8 @@ class _RayExecutor(_Executor):
 
         self.ray = ray
         self.materialized_plan = materialized_plan
+        self._executor_state_lock = threading.RLock()
+        self._cleanup_capture_local = threading.local()
 
         self.task_context = get_current_task_context()
         if self.task_context is not None:
@@ -598,7 +976,9 @@ class _RayExecutor(_Executor):
         self.remote_collect = remote_collect
 
         self.task_execution_pk = (
-            self.task_context.task_pk if self.task_context is not None else None
+            self.task_context.task_pk
+            if self.task_context is not None and not self.task_context.read_only_replay
+            else None
         )
         self.progress_actor = None
         self.workflow_run_identity: WorkflowRunIdentity | None = None
@@ -646,7 +1026,8 @@ class _RayExecutor(_Executor):
             self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
             return
         if (
-            self.task_context.attempt_number is None
+            self.task_context.read_only_replay
+            or self.task_context.attempt_number is None
             or self.task_context.execution_generation is None
         ):
             self.materialized_plan = prepare_materialized_plan_for_ray(materialized_plan)
@@ -703,6 +1084,49 @@ class _RayExecutor(_Executor):
             initialized_event, limits=progress_limits
         )
 
+    def bind_dynamic_run(
+        self,
+        *,
+        reporting_policy: str | None = None,
+    ) -> None:
+        """Allocate one cohesive durable workflow run for dynamic DSL execution.
+
+        Conditional and fallback DSL expressions do not lower to a static
+        ``WorkflowPlan``, yet nested Ray steps inside a durable task still
+        require a database-fenced ``WorkflowRunIdentity`` on the shared
+        executor.
+        """
+        effective_reporting_policy = _workflow_progress_policy(reporting_policy)
+        self.materialized_plan = None
+        self.reporting_policy = effective_reporting_policy
+        if self.task_context is None:
+            return
+        if (
+            self.task_context.read_only_replay
+            or self.task_context.attempt_number is None
+            or self.task_context.execution_generation is None
+        ):
+            return
+        from django_ray.workflow.progress.runs import (
+            allocate_workflow_run,
+            refresh_workflow_run_activity,
+        )
+
+        identity = allocate_workflow_run(self.task_context)
+        if identity is None:
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
+
+            raise WorkflowPlanMismatchError(
+                "The durable task attempt is stale; workflow run claim was rejected"
+            )
+        if not refresh_workflow_run_activity(identity):
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
+
+            raise WorkflowPlanMismatchError(
+                "The durable workflow run became stale before dynamic DSL execution"
+            )
+        self.workflow_run_identity = identity
+
     def _send_progress_event(
         self,
         actor: Any | None,
@@ -710,32 +1134,34 @@ class _RayExecutor(_Executor):
         payload: Mapping[str, Any],
     ) -> bool:
         """Best-effort one validated event while preserving the full run fence."""
-        if actor is None or getattr(self, "_progress_admission_exhausted", False):
-            return False
-        identity = self.workflow_run_identity
-        if identity is None:
-            raise AssertionError("a workflow progress actor requires a complete run identity")
-        from django_ray.workflow.progress.protocol import send_workflow_progress_event
+        with self._get_state_lock():
+            if actor is None or getattr(self, "_progress_admission_exhausted", False):
+                return False
+            identity = self.workflow_run_identity
+            if identity is None:
+                raise AssertionError("a workflow progress actor requires a complete run identity")
 
-        if str(kind) in {"node_registered", "map_registered"}:
-            admitted = getattr(self, "_progress_node_ids", None)
-            if admitted is None:
-                admitted = self._progress_node_ids = set()
-            node_id = payload["node_id"]
-            if node_id not in admitted:
-                if len(admitted) >= self.workflow_progress_limits.topology_node_max_items:
-                    self._progress_admission_exhausted = True
-                    return False
-                else:
+            if str(kind) in {"node_registered", "map_registered"}:
+                admitted = getattr(self, "_progress_node_ids", None)
+                if admitted is None:
+                    admitted = self._progress_node_ids = set()
+                node_id = payload["node_id"]
+                if node_id not in admitted:
+                    if len(admitted) >= self.workflow_progress_limits.topology_node_max_items:
+                        self._progress_admission_exhausted = True
+                        return False
                     admitted.add(node_id)
 
-        if str(kind) == "edges_registered":
-            edge_count = getattr(self, "_progress_edge_count", 0)
-            offered = len(payload["edges"])
-            if edge_count + offered > self.workflow_progress_limits.topology_edge_max_items:
-                self._progress_admission_exhausted = True
-                return False
-            self._progress_edge_count = edge_count + offered
+            if str(kind) == "edges_registered":
+                edge_count = getattr(self, "_progress_edge_count", 0)
+                offered = len(payload["edges"])
+                if edge_count + offered > self.workflow_progress_limits.topology_edge_max_items:
+                    self._progress_admission_exhausted = True
+                    return False
+                self._progress_edge_count = edge_count + offered
+            limits = self.workflow_progress_limits
+
+        from django_ray.workflow.progress.protocol import send_workflow_progress_event
 
         try:
             send_workflow_progress_event(
@@ -743,7 +1169,7 @@ class _RayExecutor(_Executor):
                 identity.as_dict(),
                 kind,
                 payload,
-                limits=self.workflow_progress_limits,
+                limits=limits,
             )
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -1002,6 +1428,12 @@ class _RayExecutor(_Executor):
         )
         if output_preview_callable_path is not None:
             remote_progress_kwargs["output_preview_path"] = output_preview_callable_path
+        from django_ray.runtime.remote import execute_workflow_step_remote
+
+        if _callable_accepts_kwarg(execute_workflow_step_remote, "allowed_callable_modules"):
+            driver_allowed = _driver_allowed_callable_modules()
+            if driver_allowed is not None:
+                remote_progress_kwargs["allowed_callable_modules"] = driver_allowed
         from django_ray.execution_codec import NestedExecutionBoundaryKind
 
         remote_progress_kwargs.update(
@@ -1015,15 +1447,31 @@ class _RayExecutor(_Executor):
         )
         track_outcome = progress_actor is not None
         if track_outcome:
-            self._poll_leaf_outcomes()
-            pending = getattr(self, "_pending_leaf_outcomes", None)
-            if pending is None:
-                pending = self._pending_leaf_outcomes = {}
-            if (
-                self.progress_actor is None
-                or len(pending) >= self.workflow_progress_limits.topology_node_max_items
-                or options.get("num_returns", 1) != 1
-            ):
+            should_poll = False
+            with self._get_state_lock():
+                pending = getattr(self, "_pending_leaf_outcomes", None)
+                if pending is None:
+                    pending = self._pending_leaf_outcomes = {}
+                now_mono = time.monotonic()
+                last_poll = getattr(self, "_last_leaf_outcome_poll_at", 0.0)
+                poll_interval = float(getattr(self, "_leaf_outcome_poll_interval_seconds", 0.25))
+                if pending and (
+                    len(pending) >= self.workflow_progress_limits.topology_node_max_items
+                    or now_mono - last_poll >= poll_interval
+                ):
+                    should_poll = True
+            if should_poll:
+                self._poll_leaf_outcomes()
+            with self._get_state_lock():
+                pending = getattr(self, "_pending_leaf_outcomes", None)
+                if pending is None:
+                    pending = self._pending_leaf_outcomes = {}
+                capacity_exceeded = (
+                    self.progress_actor is None
+                    or len(pending) >= self.workflow_progress_limits.topology_node_max_items
+                    or options.get("num_returns", 1) != 1
+                )
+            if capacity_exceeded:
                 self._disable_progress_reporting(reason="leaf_outcome_capacity")
                 progress_actor = None
                 track_outcome = False
@@ -1044,10 +1492,14 @@ class _RayExecutor(_Executor):
         )
         if track_outcome:
             object_ref, outcome_ref = object_ref
-            self._pending_leaf_outcomes[outcome_ref] = node_id
-            if not hasattr(self, "_leaf_outcome_dependencies"):
-                self._leaf_outcome_dependencies = {}
-            self._leaf_outcome_dependencies[node_id] = dependencies
+            with self._get_state_lock():
+                pending = getattr(self, "_pending_leaf_outcomes", None)
+                if pending is None:
+                    pending = self._pending_leaf_outcomes = {}
+                pending[outcome_ref] = node_id
+                if not hasattr(self, "_leaf_outcome_dependencies"):
+                    self._leaf_outcome_dependencies = {}
+                self._leaf_outcome_dependencies[node_id] = dependencies
         if progress_actor is not None:
             try:
                 ray_task_id = object_ref.task_id().hex()
@@ -1067,50 +1519,70 @@ class _RayExecutor(_Executor):
 
     def _poll_leaf_outcomes(self) -> None:
         """Observe bounded marker references, never fetch application values."""
-        pending = getattr(self, "_pending_leaf_outcomes", None)
-        if getattr(self, "_progress_admission_exhausted", False):
-            if pending is not None:
-                pending.clear()
-            return
-        if not pending or self.progress_actor is None:
-            return
-        from ray.exceptions import RayTaskError
+        with self._get_state_lock():
+            pending = getattr(self, "_pending_leaf_outcomes", None)
+            if getattr(self, "_progress_admission_exhausted", False):
+                if pending is not None:
+                    pending.clear()
+                return
+            if not pending or self.progress_actor is None:
+                return
+            self._last_leaf_outcome_poll_at = time.monotonic()
+            pending_keys = list(pending)
+        from ray.exceptions import RayTaskError, TaskCancelledError
 
         from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
         try:
-            ready, _ = self.ray.wait(list(pending), num_returns=len(pending), timeout=0)
+            ready, _ = self.ray.wait(pending_keys, num_returns=len(pending_keys), timeout=0)
         except Exception:
             self._disable_progress_reporting(reason="leaf_outcome_wait_failed")
             return
         ready_set = set(ready)
-        pending_nodes = set(pending.values())
-        # Submission order puts known dependencies before their consumers.
-        for ref in [item for item in pending if item in ready_set]:
-            node_id = pending[ref]
-            dependencies = getattr(self, "_leaf_outcome_dependencies", {}).get(node_id, ())
-            outcomes = getattr(self, "_leaf_final_outcomes", None)
-            if outcomes is None:
-                outcomes = self._leaf_final_outcomes = {}
-            if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
-                self._disable_progress_reporting(reason="leaf_outcome_capacity")
+        with self._get_state_lock():
+            pending = getattr(self, "_pending_leaf_outcomes", None)
+            if not pending or self.progress_actor is None:
                 return
+            # Submission order puts known dependencies before their consumers.
+            ready_entries = [(item, pending[item]) for item in pending if item in ready_set]
+        for ref, node_id in ready_entries:
+            with self._get_state_lock():
+                pending = getattr(self, "_pending_leaf_outcomes", None)
+                if not pending or self.progress_actor is None or ref not in pending:
+                    continue
+                outcomes = getattr(self, "_leaf_final_outcomes", None)
+                if outcomes is None:
+                    outcomes = self._leaf_final_outcomes = {}
+                if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
+                    self._disable_progress_reporting(reason="leaf_outcome_capacity")
+                    return
+                dependencies = getattr(self, "_leaf_outcome_dependencies", {}).get(node_id, ())
+                progress_actor = self.progress_actor
             failure = None
             try:
                 marker = self.ray.get(ref, timeout=0)
+            except TaskCancelledError:
+                self._disable_progress_reporting(reason="leaf_outcome_unavailable")
+                return
             except RayTaskError as error:
-                if any(parent in pending_nodes for parent in dependencies):
-                    # Dependency metadata can become locally visible after its
-                    # consumer's failure reference. Do not guess its outcome.
-                    continue
-                if any(outcomes.get(parent) is False for parent in dependencies):
-                    # Ray flattens dependency exceptions. Recorded submission
-                    # edges, not exception nesting, identify unexecuted leaves.
-                    outcomes[node_id] = False
-                    del pending[ref]
-                    pending_nodes.discard(node_id)
-                    getattr(self, "_leaf_outcome_dependencies", {}).pop(node_id, None)
-                    continue
+                with self._get_state_lock():
+                    pending = getattr(self, "_pending_leaf_outcomes", None)
+                    outcomes = getattr(self, "_leaf_final_outcomes", None)
+                    pending_nodes = set(pending.values()) if pending is not None else set()
+                    if any(parent in pending_nodes for parent in dependencies):
+                        # Dependency metadata can become locally visible after its
+                        # consumer's failure reference. Do not guess its outcome.
+                        continue
+                    if outcomes is not None and any(
+                        outcomes.get(parent) is False for parent in dependencies
+                    ):
+                        # Ray flattens dependency exceptions. Recorded submission
+                        # edges, not exception nesting, identify unexecuted leaves.
+                        outcomes[node_id] = False
+                        if pending is not None:
+                            pending.pop(ref, None)
+                        getattr(self, "_leaf_outcome_dependencies", {}).pop(node_id, None)
+                        continue
                 state = "FAILED"
                 try:
                     failure = str(error.cause)
@@ -1137,24 +1609,29 @@ class _RayExecutor(_Executor):
                         or settled.payload["state"] != "SUCCEEDED"
                     ):
                         raise ValueError("Unexpected final workflow outcome")
-                    self.progress_actor.ingest.remote(marker)
+                    progress_actor.ingest.remote(marker)
                 except Exception:
                     self._disable_progress_reporting(reason="leaf_outcome_invalid")
                     return
                 state = "SUCCEEDED"
             if state == "FAILED" and not self._send_progress_event(
-                self.progress_actor,
+                progress_actor,
                 WorkflowProgressEventKind.NODE_SETTLED,
                 {"node_id": node_id, "state": state, "error": failure},
             ):
                 self._disable_progress_reporting(reason="leaf_outcome_send_failed")
                 return
-            if getattr(self, "_pending_progress_snapshot_ref", None) is not None:
-                self._pending_progress_snapshot_stale = True
-            outcomes[node_id] = state == "SUCCEEDED"
-            del pending[ref]
-            pending_nodes.discard(node_id)
-            getattr(self, "_leaf_outcome_dependencies", {}).pop(node_id, None)
+            with self._get_state_lock():
+                if getattr(self, "_pending_progress_snapshot_ref", None) is not None:
+                    self._pending_progress_snapshot_stale = True
+                outcomes = getattr(self, "_leaf_final_outcomes", None)
+                if outcomes is None:
+                    outcomes = self._leaf_final_outcomes = {}
+                outcomes[node_id] = state == "SUCCEEDED"
+                pending = getattr(self, "_pending_leaf_outcomes", None)
+                if pending is not None:
+                    pending.pop(ref, None)
+                getattr(self, "_leaf_outcome_dependencies", {}).pop(node_id, None)
 
     def collect(self, values: list[Any]) -> Any:
         # Each value is a top-level argument so Ray resolves dependencies
@@ -1163,18 +1640,24 @@ class _RayExecutor(_Executor):
 
     def resolve(self, value: Any) -> Any:
         if self.progress_actor is None:
-            return self.ray.get(value)
+            result = self.ray.get(value)
+            self.mark_resolved_cleanup(value)
+            return result
 
         from django_ray.conf.settings import get_settings
 
         flush_seconds = float(get_settings().get("WORKFLOW_PROGRESS_FLUSH_SECONDS", 1))
         while True:
             ready, _ = self.ray.wait([value], timeout=flush_seconds)
-            self._flush_progress()
+            self._poll_leaf_outcomes()
             if ready:
-                return self.ray.get(value)
+                result = self.ray.get(value)
+                self.mark_resolved_cleanup(value)
+                return result
             if self.progress_actor is None:
-                return self.ray.get(value)
+                result = self.ray.get(value)
+                self.mark_resolved_cleanup(value)
+                return result
 
     def _progress_warning(
         self,
@@ -1211,14 +1694,15 @@ class _RayExecutor(_Executor):
         reason: str | None = None,
     ) -> None:
         """Stop local flushing and drain late reports in an obsolete actor."""
-        progress_actor = self.progress_actor
-        self.progress_actor = None
-        self._pending_progress_snapshot_ref = None
-        pending = getattr(self, "_pending_leaf_outcomes", None)
-        if pending is not None:
-            pending.clear()
-        getattr(self, "_leaf_outcome_dependencies", {}).clear()
-        getattr(self, "_leaf_final_outcomes", {}).clear()
+        with self._get_state_lock():
+            progress_actor = self.progress_actor
+            self.progress_actor = None
+            self._pending_progress_snapshot_ref = None
+            pending = getattr(self, "_pending_leaf_outcomes", None)
+            if pending is not None:
+                pending.clear()
+            getattr(self, "_leaf_outcome_dependencies", {}).clear()
+            getattr(self, "_leaf_final_outcomes", {}).clear()
         if reason is not None:
             self._progress_warning(
                 "Workflow progress reporting became unavailable",
@@ -1252,7 +1736,7 @@ class _RayExecutor(_Executor):
                 num_returns=1,
                 timeout=flush_seconds,
             )
-            self._flush_progress()
+            self._poll_leaf_outcomes()
             if ready:
                 return values.index(ready[0])
 
@@ -1273,7 +1757,7 @@ class _RayExecutor(_Executor):
                 timeout=flush_seconds,
                 fetch_local=False,
             )
-            self._flush_progress()
+            self._poll_leaf_outcomes()
             if len(ready) == num_returns:
                 return ready
 
@@ -1307,9 +1791,39 @@ class _RayExecutor(_Executor):
             raise
         return session
 
+    def _wait_ready_leaf_indices(
+        self,
+        values: Sequence[Any],
+        *,
+        max_batch: int = 64,
+    ) -> list[int]:
+        """Wait for one ready leaf and opportunistically drain additional ready refs."""
+        ready_first = self._wait_result_buffer_refs(values, num_returns=1)
+        ready_refs = list(ready_first)
+        if len(values) > 1 and max_batch > 1:
+            remaining = _exclude_matching_refs(values, ready_refs)
+            if remaining:
+                extra_limit = min(len(remaining), max_batch - len(ready_refs))
+                extra_ready, _ = self.ray.wait(
+                    remaining,
+                    num_returns=extra_limit,
+                    timeout=0,
+                    fetch_local=False,
+                )
+                ready_refs.extend(extra_ready)
+        return _matching_ref_indices(values, ready_refs)
+
     def wait_result_buffer_leaf(self, values: Sequence[Any]) -> int:
         ready = self._wait_result_buffer_refs(values, num_returns=1)
         return values.index(ready[0])
+
+    def wait_result_buffer_leaves(
+        self,
+        values: Sequence[Any],
+        *,
+        max_batch: int = 64,
+    ) -> list[int]:
+        return self._wait_ready_leaf_indices(values, max_batch=max_batch)
 
     def append_result_buffer(
         self,
@@ -1332,6 +1846,64 @@ class _RayExecutor(_Executor):
         except BaseException:
             if ack_ref is not None:
                 cancel_unready_ray_refs(self.ray, (ack_ref,), force=False, recursive=True)
+            raise
+
+    def append_result_buffer_batch(
+        self,
+        buffer: _RayResultBufferSession,
+        *,
+        items: Sequence[tuple[int, Any]],
+    ) -> None:
+        if not items:
+            return
+        if len(items) == 1:
+            index, value = items[0]
+            self.append_result_buffer(buffer, index=index, value=value)
+            return
+
+        batch_payload = list(items)
+        indices = [index for index, _value in batch_payload]
+        values = [value for _index, value in batch_payload]
+        append_batch_values_method = getattr(buffer.actor, "append_batch_values", None)
+        append_batch_method = getattr(buffer.actor, "append_batch", None)
+        has_object_ref = any(_is_ray_object_ref(value) for value in values)
+
+        if append_batch_values_method is not None:
+            acks_ref: Any | None = append_batch_values_method.remote(indices, *values)
+        elif append_batch_method is not None and not has_object_ref:
+            # Backward-compatible fallback for plain in-memory test fakes without
+            # ``append_batch_values``; never pass ObjectRefs inside containers.
+            acks_ref = append_batch_method.remote(batch_payload)
+        else:
+            for index, value in batch_payload:
+                self.append_result_buffer(buffer, index=index, value=value)
+            return
+
+        from django_ray.runtime.result_buffer import (
+            ResultBufferProtocolError,
+            validate_result_buffer_ack,
+        )
+
+        try:
+            acks = self.resolve(acks_ref)
+            acks_ref = None
+            if (
+                not isinstance(acks, Sequence)
+                or isinstance(acks, str | bytes)
+                or len(acks) != len(batch_payload)
+            ):
+                raise ResultBufferProtocolError(
+                    "Result-buffer batch acknowledgement count mismatch"
+                )
+            for (index, _value), ack in zip(batch_payload, acks, strict=True):
+                validate_result_buffer_ack(
+                    ack,
+                    state="retained",
+                    expected_index=index,
+                )
+        except BaseException:
+            if acks_ref is not None:
+                cancel_unready_ray_refs(self.ray, (acks_ref,), force=False, recursive=True)
             raise
 
     def finalize_result_buffer(
@@ -1476,8 +2048,20 @@ class _RayExecutor(_Executor):
             callable_path=reducer.callable_path,
             binding=binding,
         )
+        driver_allowed = _driver_allowed_callable_modules()
         actor_cls = _get_cached_result_fold_actor()
-        actor = actor_cls.options(**ray_options).remote(
+        configured_actor = actor_cls.options(**ray_options)
+        actor_remote_kwargs: dict[str, Any] = dict(nested_request_kwargs)
+        if driver_allowed is not None:
+            from django_ray.runtime.result_fold import WorkflowMapResultFold
+
+            if _callable_accepts_kwarg(WorkflowMapResultFold.__init__, "allowed_callable_modules"):
+                is_real_actor = actor_cls is _workflow_result_fold_actor_cached
+                if is_real_actor or _callable_accepts_kwarg(
+                    configured_actor.remote, "allowed_callable_modules"
+                ):
+                    actor_remote_kwargs["allowed_callable_modules"] = driver_allowed
+        actor = configured_actor.remote(
             max_items,
             max_concurrency,
             max_serialized_bytes,
@@ -1486,7 +2070,7 @@ class _RayExecutor(_Executor):
             reducer.bound_args,
             dict(reducer.bound_kwargs),
             initial,
-            **nested_request_kwargs,
+            **actor_remote_kwargs,
         )
         session = _RayResultFoldSession(
             actor=actor,
@@ -1522,31 +2106,31 @@ class _RayExecutor(_Executor):
         ready = self._wait_result_buffer_refs(values, num_returns=1)
         return values.index(ready[0])
 
-    def append_result_fold(
+    def wait_result_fold_leaves(
+        self,
+        values: Sequence[Any],
+        *,
+        max_batch: int = 64,
+    ) -> list[int]:
+        return self._wait_ready_leaf_indices(values, max_batch=max_batch)
+
+    def _validate_fold_ack_progress(
         self,
         fold: _RayResultFoldSession,
         *,
-        index: int,
-        value: Any,
+        ack: Any,
+        expected_index: int,
     ) -> int:
         from django_ray.runtime.result_fold import (
             ResultFoldProtocolError,
             validate_result_fold_ack,
         )
 
-        ack_ref: Any | None = fold.actor.append.remote(index, value)
-        try:
-            ack = self.resolve(ack_ref)
-            ack_ref = None
-            validated = validate_result_fold_ack(
-                ack,
-                state="folded",
-                expected_index=index,
-            )
-        except BaseException:
-            if ack_ref is not None:
-                cancel_unready_ray_refs(self.ray, (ack_ref,), force=False, recursive=True)
-            raise
+        validated = validate_result_fold_ack(
+            ack,
+            state="folded",
+            expected_index=expected_index,
+        )
         folded_items = int(validated["folded_items"])
         released_credits = int(validated["released_credits"])
         if released_credits != folded_items - fold.folded_items:
@@ -1571,6 +2155,78 @@ class _RayExecutor(_Executor):
             )
         fold.folded_items = folded_items
         return folded_items
+
+    def append_result_fold(
+        self,
+        fold: _RayResultFoldSession,
+        *,
+        index: int,
+        value: Any,
+    ) -> int:
+        ack_ref: Any | None = fold.actor.append.remote(index, value)
+        try:
+            ack = self.resolve(ack_ref)
+            ack_ref = None
+            return self._validate_fold_ack_progress(fold, ack=ack, expected_index=index)
+        except BaseException:
+            if ack_ref is not None:
+                cancel_unready_ray_refs(self.ray, (ack_ref,), force=False, recursive=True)
+            raise
+
+    def append_result_fold_batch(
+        self,
+        fold: _RayResultFoldSession,
+        *,
+        items: Sequence[tuple[int, Any]],
+    ) -> int:
+        if not items:
+            return fold.folded_items
+        if len(items) == 1:
+            index, value = items[0]
+            return self.append_result_fold(fold, index=index, value=value)
+
+        batch_payload = list(items)
+        indices = [index for index, _value in batch_payload]
+        values = [value for _index, value in batch_payload]
+        append_batch_values_method = getattr(fold.actor, "append_batch_values", None)
+        append_batch_method = getattr(fold.actor, "append_batch", None)
+        has_object_ref = any(_is_ray_object_ref(value) for value in values)
+
+        if append_batch_values_method is not None:
+            acks_ref: Any | None = append_batch_values_method.remote(indices, *values)
+        elif append_batch_method is not None and not has_object_ref:
+            # Backward-compatible fallback for plain in-memory test fakes without
+            # ``append_batch_values``; never pass ObjectRefs inside containers.
+            acks_ref = append_batch_method.remote(batch_payload)
+        else:
+            folded_items = fold.folded_items
+            for index, value in batch_payload:
+                folded_items = self.append_result_fold(fold, index=index, value=value)
+            return folded_items
+
+        from django_ray.runtime.result_fold import ResultFoldProtocolError
+
+        try:
+            acks = self.resolve(acks_ref)
+            acks_ref = None
+            if (
+                not isinstance(acks, Sequence)
+                or isinstance(acks, str | bytes)
+                or len(acks) != len(batch_payload)
+            ):
+                raise ResultFoldProtocolError("Result-fold batch acknowledgement count mismatch")
+            folded_items = fold.folded_items
+            for (index, _value), ack in zip(batch_payload, acks, strict=True):
+                folded_items = self._validate_fold_ack_progress(
+                    fold,
+                    ack=ack,
+                    expected_index=index,
+                )
+            return folded_items
+        except BaseException:
+            if acks_ref is not None:
+                cancel_unready_ray_refs(self.ray, (acks_ref,), force=False, recursive=True)
+            raise
 
     def cancel_and_drain_fold_payloads(
         self,
@@ -1691,11 +2347,13 @@ class _RayExecutor(_Executor):
 
     @contextmanager
     def suppress_progress(self) -> Generator[None, None, None]:
-        self._progress_suppression_depth += 1
+        with self._get_state_lock():
+            self._progress_suppression_depth += 1
         try:
             yield
         finally:
-            self._progress_suppression_depth -= 1
+            with self._get_state_lock():
+                self._progress_suppression_depth -= 1
 
     def map_started(
         self,
@@ -1706,16 +2364,18 @@ class _RayExecutor(_Executor):
         max_concurrency: int | None,
         max_items: int | None,
     ) -> None:
-        if (
-            self.progress_actor is None
-            or self._progress_suppression_depth
-            or getattr(self, "_progress_admission_exhausted", False)
-        ):
-            return
+        with self._get_state_lock():
+            actor = self.progress_actor
+            if (
+                actor is None
+                or self._progress_suppression_depth
+                or getattr(self, "_progress_admission_exhausted", False)
+            ):
+                return
         from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
         sent = self._send_progress_event(
-            self.progress_actor,
+            actor,
             WorkflowProgressEventKind.MAP_REGISTERED,
             {
                 "node_id": node_id,
@@ -1725,12 +2385,13 @@ class _RayExecutor(_Executor):
             },
         )
         self._send_progress_edges(
-            self.progress_actor,
+            actor,
             node_id=node_id,
             dependencies=dependencies,
         )
         if sent:
-            self._map_progress_sent_at[node_id] = time.monotonic()
+            with self._get_state_lock():
+                self._map_progress_sent_at[node_id] = time.monotonic()
 
     def map_progress(
         self,
@@ -1742,41 +2403,47 @@ class _RayExecutor(_Executor):
         input_exhausted: bool,
         force: bool = False,
     ) -> None:
-        if (
-            self.progress_actor is None
-            or self._progress_suppression_depth
-            or getattr(self, "_progress_admission_exhausted", False)
-        ):
-            return
+        with self._get_state_lock():
+            actor = self.progress_actor
+            if (
+                actor is None
+                or self._progress_suppression_depth
+                or getattr(self, "_progress_admission_exhausted", False)
+            ):
+                return
+            last_sent = self._map_progress_sent_at.get(node_id, 0.0)
+            identity = self.workflow_run_identity
+            limits = self.workflow_progress_limits
 
         from django_ray.conf.settings import get_settings
 
         now = time.monotonic()
         flush_seconds = float(get_settings().get("WORKFLOW_PROGRESS_FLUSH_SECONDS", 1))
-        last_sent = self._map_progress_sent_at.get(node_id, 0.0)
         if not force and now - last_sent < flush_seconds:
             return
-        if self.workflow_run_identity is None:
+        if identity is None:
             raise AssertionError("a workflow progress actor requires a complete run identity")
         from django_ray.workflow.progress.producer import WorkflowProgressProducerSession
 
         try:
-            producer = self._map_progress_producers.get(node_id)
-            if producer is None:
-                producer = WorkflowProgressProducerSession(
-                    self.progress_actor,
-                    self.workflow_run_identity.as_dict(),
-                    node_id,
-                    limits=self.workflow_progress_limits,
-                )
-                self._map_progress_producers[node_id] = producer
+            with self._get_state_lock():
+                producer = self._map_progress_producers.get(node_id)
+                if producer is None:
+                    producer = WorkflowProgressProducerSession(
+                        actor,
+                        identity.as_dict(),
+                        node_id,
+                        limits=limits,
+                    )
+                    self._map_progress_producers[node_id] = producer
             if producer.offer_map_progress(
                 label,
                 submitted=submitted,
                 completed=completed,
                 input_exhausted=input_exhausted,
             ):
-                self._map_progress_sent_at[node_id] = now
+                with self._get_state_lock():
+                    self._map_progress_sent_at[node_id] = now
         except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException:
@@ -1794,19 +2461,21 @@ class _RayExecutor(_Executor):
         failed: bool = False,
         error: str | None = None,
     ) -> None:
-        if (
-            self.progress_actor is None
-            or self._progress_suppression_depth
-            or getattr(self, "_progress_admission_exhausted", False)
-        ):
-            return
+        with self._get_state_lock():
+            actor = self.progress_actor
+            if (
+                actor is None
+                or self._progress_suppression_depth
+                or getattr(self, "_progress_admission_exhausted", False)
+            ):
+                return
+            outcomes = getattr(self, "_leaf_final_outcomes", None)
+            if outcomes is None:
+                outcomes = self._leaf_final_outcomes = {}
+            if node_id in outcomes:
+                return
         from django_ray.workflow.progress.protocol import WorkflowProgressEventKind
 
-        outcomes = getattr(self, "_leaf_final_outcomes", None)
-        if outcomes is None:
-            outcomes = self._leaf_final_outcomes = {}
-        if node_id in outcomes:
-            return
         self.map_progress(
             node_id,
             label,
@@ -1815,13 +2484,14 @@ class _RayExecutor(_Executor):
             input_exhausted=input_exhausted,
             force=True,
         )
-        producer = self._map_progress_producers.get(node_id)
+        with self._get_state_lock():
+            producer = self._map_progress_producers.get(node_id)
         if producer is not None:
             try:
                 report = producer.finish()
                 if report["offered"]:
                     self._send_progress_event(
-                        self.progress_actor,
+                        actor,
                         WorkflowProgressEventKind.PRODUCER_REPORT,
                         report,
                     )
@@ -1829,12 +2499,16 @@ class _RayExecutor(_Executor):
                 raise
             except BaseException:
                 pass
-        if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
-            self._disable_progress_reporting(reason="leaf_outcome_capacity")
-            return
-        outcomes[node_id] = not failed
+        with self._get_state_lock():
+            outcomes = getattr(self, "_leaf_final_outcomes", None)
+            if outcomes is None:
+                outcomes = self._leaf_final_outcomes = {}
+            if len(outcomes) >= self.workflow_progress_limits.topology_node_max_items:
+                self._disable_progress_reporting(reason="leaf_outcome_capacity")
+                return
+            outcomes[node_id] = not failed
         self._send_progress_event(
-            self.progress_actor,
+            actor,
             (WorkflowProgressEventKind.FAILED if failed else WorkflowProgressEventKind.COMPLETED),
             (
                 {
@@ -1849,7 +2523,8 @@ class _RayExecutor(_Executor):
                 }
             ),
         )
-        self._map_progress_sent_at.pop(node_id, None)
+        with self._get_state_lock():
+            self._map_progress_sent_at.pop(node_id, None)
 
     def _flush_progress(
         self,
@@ -1920,6 +2595,51 @@ class _RayExecutor(_Executor):
         # schema-v2 readers remain, but new runs do not maintain a parallel writer.
         return snapshot
 
+    def _poll_drain_status(
+        self,
+        *,
+        wait_timeout_seconds: float = 0.5,
+    ) -> Mapping[str, Any] | None:
+        """Query lightweight actor drain readiness without serializing the full DAG."""
+        actor = self.progress_actor
+        if actor is None or self.workflow_run_identity is None:
+            return None
+        drain_status_method = getattr(actor, "drain_status", None)
+        if drain_status_method is None or not callable(
+            getattr(drain_status_method, "remote", None)
+        ):
+            return None
+        self._poll_leaf_outcomes()
+        if self.progress_actor is None:
+            return None
+        status_ref = getattr(self, "_pending_progress_drain_ref", None)
+        try:
+            if status_ref is None:
+                status_ref = drain_status_method.remote()
+                self._pending_progress_drain_ref = status_ref
+            ready, _ = self.ray.wait(
+                [status_ref],
+                timeout=wait_timeout_seconds,
+            )
+        except Exception:
+            self._disable_progress_reporting(
+                notify_actor=False,
+                reason="drain_status_rpc_failed",
+            )
+            return None
+        if not ready:
+            return None
+        self._pending_progress_drain_ref = None
+        try:
+            status = self.ray.get(ready[0])
+        except Exception:
+            self._disable_progress_reporting(
+                notify_actor=False,
+                reason="drain_status_get_failed",
+            )
+            return None
+        return status if isinstance(status, Mapping) else None
+
     def finish_progress(self, *, failed: bool = False) -> None:
         if getattr(self, "reporting_policy", "full") in {"terminal_only", "disabled"}:
             return
@@ -1928,7 +2648,7 @@ class _RayExecutor(_Executor):
         self._terminal_progress_finished = True
         if getattr(self, "_progress_admission_exhausted", False):
             self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=True)
-            self._disable_progress_reporting()
+            self._cleanup_progress_actor()
             return
         if self.progress_actor is None:
             self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=False)
@@ -1943,21 +2663,57 @@ class _RayExecutor(_Executor):
                 15,
             )
         )
-        deadline = time.monotonic() + timeout_seconds
+        started_monotonic = time.monotonic()
+        deadline = started_monotonic + timeout_seconds
+        sibling_grace_deadline = min(deadline, started_monotonic + min(0.25, timeout_seconds))
         saw_snapshot = False
+        has_drain_status = callable(
+            getattr(getattr(self.progress_actor, "drain_status", None), "remote", None)
+        )
 
         # Leaf event reporting is asynchronous. Give the in-memory actor a brief
-        # chance to drain its mailbox before writing the terminal snapshot. A
-        # newly scheduled actor can also be transiently unavailable, so keep
-        # polling one pending snapshot request until the explicit total deadline.
+        # chance to drain its mailbox before writing the terminal snapshot. When
+        # the actor exposes lightweight ``drain_status()``, poll that first and
+        # fetch only one full ``snapshot()`` once terminal evidence is ready.
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
+            if has_drain_status:
+                status = self._poll_drain_status(wait_timeout_seconds=min(0.5, remaining))
+                if self.progress_actor is None:
+                    self._publish_unavailable_terminal_progress(
+                        failed=failed,
+                        limit_exceeded=False,
+                    )
+                    return
+                if status is not None:
+                    saw_snapshot = True
+                    status_terminal = int(status.get("completed_nodes", 0)) + int(
+                        status.get("failed_nodes", 0)
+                    )
+                    status_total = int(status.get("total_nodes", 0))
+                    status_cannot_publish = bool(status.get("rejected") or status.get("truncated"))
+                    pending_outcomes = bool(getattr(self, "_pending_leaf_outcomes", None))
+                    status_failure_ready = (
+                        failed
+                        and int(status.get("failed_nodes", 0)) > 0
+                        and (not pending_outcomes or time.monotonic() >= sibling_grace_deadline)
+                    )
+                    status_success_ready = (
+                        not failed and not pending_outcomes and status_terminal == status_total
+                    )
+                    if not (status_cannot_publish or status_failure_ready or status_success_ready):
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(0.05, remaining))
+                        continue
+
             snapshot = self._flush_progress(
                 bypass_interval=True,
                 failed=failed,
-                wait_timeout_seconds=min(0.5, remaining),
+                wait_timeout_seconds=min(0.5, max(0.0, deadline - time.monotonic())),
             )
             if self.progress_actor is None:
                 self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=False)
@@ -1969,27 +2725,26 @@ class _RayExecutor(_Executor):
                 ingress_cannot_publish = isinstance(ingress, Mapping) and bool(
                     ingress.get("rejected") or ingress.get("truncated")
                 )
+                pending_outcomes = bool(getattr(self, "_pending_leaf_outcomes", None))
                 failure_evidence_ready = (
                     failed
-                    and not getattr(self, "_pending_leaf_outcomes", None)
                     and _failed_snapshot_has_causally_complete_ancestors(snapshot)
+                    and (not pending_outcomes or time.monotonic() >= sibling_grace_deadline)
                 )
                 if (
                     ingress_cannot_publish
                     or failure_evidence_ready
-                    or (
-                        not failed
-                        and not getattr(self, "_pending_leaf_outcomes", None)
-                        and terminal == snapshot["total_nodes"]
-                    )
+                    or (not failed and not pending_outcomes and terminal == snapshot["total_nodes"])
                 ):
-                    if not self._publish_terminal_progress(snapshot):
+                    published = self._publish_terminal_progress(snapshot)
+                    if not published:
                         self._publish_unavailable_terminal_progress(
                             failed=failed,
                             limit_exceeded=getattr(
                                 self, "_progress_publication_limit_exceeded", False
                             ),
                         )
+                    self._cleanup_progress_actor()
                     return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -2004,7 +2759,20 @@ class _RayExecutor(_Executor):
             failed_workflow=failed,
         )
         self._publish_unavailable_terminal_progress(failed=failed, limit_exceeded=False)
+        self._cleanup_progress_actor()
+
+    def _cleanup_progress_actor(self) -> None:
+        """Disable and terminate the per-run progress actor once terminal."""
+        actor = self.progress_actor
         self._disable_progress_reporting()
+        if actor is None:
+            return
+        kill = getattr(getattr(self, "ray", None), "kill", None)
+        if callable(kill):
+            try:
+                kill(actor, no_restart=True)
+            except BaseException:
+                pass
 
     def _publish_unavailable_terminal_progress(self, *, failed: bool, limit_exceeded: bool) -> None:
         """Persist only the known terminal outcome when bounded detail is unavailable."""
@@ -2095,6 +2863,103 @@ class WorkflowSignature(ABC):
         dependencies: tuple[str, ...],
     ) -> _Submission:
         """Submit this expression and return its value or future."""
+
+    @staticmethod
+    def _coerce_operator_operand(operand: Any) -> WorkflowSignature | None:
+        if isinstance(operand, WorkflowSignature):
+            return operand
+        if isinstance(operand, WorkflowExpr):
+            return None
+        if isinstance(operand, WorkflowBuilder):
+            built = operand.build()
+            if not isinstance(built, WorkflowSignature):
+                raise TypeError("WorkflowBuilder.build() must return a WorkflowSignature")
+            return built
+        if isinstance(operand, str) or callable(operand):
+            return step(operand)
+        from django.tasks.base import Task
+
+        if isinstance(operand, Task):
+            return step(operand)
+        return None
+
+    def __or__(self, other: Any) -> Any:
+        coerced = self._coerce_operator_operand(other)
+        if coerced is None:
+            return NotImplemented
+        left_parts = self.signatures if isinstance(self, Chain) else (self,)
+        right_parts = coerced.signatures if isinstance(coerced, Chain) else (coerced,)
+        return chain(*left_parts, *right_parts)
+
+    def __ror__(self, other: Any) -> Any:
+        coerced = self._coerce_operator_operand(other)
+        if coerced is None:
+            return NotImplemented
+        left_parts = coerced.signatures if isinstance(coerced, Chain) else (coerced,)
+        right_parts = self.signatures if isinstance(self, Chain) else (self,)
+        return chain(*left_parts, *right_parts)
+
+    def __and__(self, other: Any) -> Any:
+        coerced = self._coerce_operator_operand(other)
+        if coerced is None:
+            return NotImplemented
+        left_parts = self.signatures if isinstance(self, Group) else (self,)
+        right_parts = coerced.signatures if isinstance(coerced, Group) else (coerced,)
+        return group(*left_parts, *right_parts)
+
+    def __rand__(self, other: Any) -> Any:
+        coerced = self._coerce_operator_operand(other)
+        if coerced is None:
+            return NotImplemented
+        left_parts = coerced.signatures if isinstance(coerced, Group) else (coerced,)
+        right_parts = self.signatures if isinstance(self, Group) else (self,)
+        return group(*left_parts, *right_parts)
+
+    @overload
+    def explain(
+        self,
+        *,
+        format: Literal["text"] = "text",  # noqa: A002
+        build_context: WorkflowPlanBuildContext | None = None,
+        invocation_args: Sequence[Any] = (),
+        invocation_kwargs: Mapping[str, Any] | None = None,
+    ) -> str: ...
+
+    @overload
+    def explain(
+        self,
+        *,
+        format: Literal["dict"],  # noqa: A002
+        build_context: WorkflowPlanBuildContext | None = None,
+        invocation_args: Sequence[Any] = (),
+        invocation_kwargs: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def explain(
+        self,
+        *,
+        format: Literal["text", "dict"] = "text",  # noqa: A002
+        build_context: WorkflowPlanBuildContext | None = None,
+        invocation_args: Sequence[Any] = (),
+        invocation_kwargs: Mapping[str, Any] | None = None,
+    ) -> str | dict[str, Any]:
+        """Produce a secret-free dry-run explanation of this workflow signature."""
+        sig = cast("WorkflowSignatureProtocol", self)
+        if format == "dict":
+            return explain_workflow(
+                sig,
+                format="dict",
+                build_context=build_context,
+                invocation_args=invocation_args,
+                invocation_kwargs=invocation_kwargs,
+            )
+        return explain_workflow(
+            sig,
+            format="text",
+            build_context=build_context,
+            invocation_args=invocation_args,
+            invocation_kwargs=invocation_kwargs,
+        )
 
     def run(
         self,
@@ -2234,9 +3099,7 @@ class WorkflowSignature(ABC):
                 pool_specs=pool_specs,
                 compiled_graph_capability_decision=compiled_graph_capability_decision,
             )
-            run_identity = (
-                WorkflowRunIdentity.create(task_context) if task_context is not None else None
-            )
+            run_identity = None
             prepared = strategy.prepare(
                 materialized_plan,
                 selection=selection,
@@ -2244,15 +3107,31 @@ class WorkflowSignature(ABC):
                 regions=tuple(regions),
             )
             admitted = strategy.admit(prepared)
-            handle = strategy.execute(admitted, self, args, kwargs)
+            handle: Any | None = None
+            effective_run_identity = prepared.run_identity
             try:
+                handle = strategy.execute(admitted, self, args, kwargs)
+                effective_run_identity = getattr(handle, "run_identity", prepared.run_identity)
                 return strategy.consume_result(
                     handle,
-                    expected_run_identity=prepared.run_identity,
+                    expected_run_identity=effective_run_identity,
                 )
             finally:
-                strategy.drain(handle, expected_run_identity=prepared.run_identity)
-                strategy.cleanup(handle, expected_run_identity=prepared.run_identity)
+                if handle is not None:
+                    try:
+                        strategy.drain(handle, expected_run_identity=effective_run_identity)
+                    finally:
+                        strategy.cleanup(handle, expected_run_identity=effective_run_identity)
+                else:
+                    cleanup_admitted = getattr(strategy, "cleanup", None)
+                    if callable(cleanup_admitted):
+                        try:
+                            cleanup_admitted(
+                                admitted,
+                                expected_run_identity=effective_run_identity,
+                            )
+                        except Exception:
+                            pass
 
         executor = _get_executor(use_ray)
         executor.bind_plan(
@@ -2264,10 +3143,21 @@ class WorkflowSignature(ABC):
                 "disabled" if isinstance(executor, _LocalExecutor) else effective_reporting_policy
             ),
         )
+        top_cleanup: list[Any] = []
         try:
-            submission = self._submit(executor, args, kwargs, "0", ())
+            with executor.capture_cleanup(top_cleanup):
+                submission = self._submit(executor, args, kwargs, "0", ())
             result = executor.resolve(submission.value)
         except BaseException:
+            unresolved_cleanup = executor._unresolved_cleanup_refs(list(reversed(top_cleanup)))
+            if unresolved_cleanup:
+                try:
+                    executor.cancel_and_drain_fold_payloads(
+                        unresolved_cleanup,
+                        timeout_seconds=1.0,
+                    )
+                except BaseException:
+                    pass
             executor.finish_progress(failed=True)
             raise
         executor.finish_progress()
@@ -2482,16 +3372,35 @@ class Group(WorkflowSignature):
         node_id: str,
         dependencies: tuple[str, ...],
     ) -> _Submission:
-        results = [
-            signature._submit(
-                executor,
-                input_args,
-                input_kwargs,
-                f"{node_id}.g{index}",
-                dependencies,
-            )
-            for index, signature in enumerate(self.signatures)
-        ]
+        results: list[_Submission] = []
+        branch_cleanup: list[Any] = []
+        try:
+            for index, signature in enumerate(self.signatures):
+                branch_refs: list[Any] = []
+                try:
+                    with executor.capture_cleanup(branch_refs):
+                        submitted = signature._submit(
+                            executor,
+                            input_args,
+                            input_kwargs,
+                            f"{node_id}.g{index}",
+                            dependencies,
+                        )
+                finally:
+                    branch_cleanup.extend(branch_refs)
+                    for ref in branch_refs:
+                        executor.track_cleanup(ref)
+                results.append(submitted)
+        except BaseException:
+            if branch_cleanup:
+                try:
+                    executor.cancel_and_drain_fold_payloads(
+                        list(reversed(branch_cleanup)),
+                        timeout_seconds=1.0,
+                    )
+                except BaseException:
+                    pass
+            raise
         value = executor.collect([result.value for result in results])
         executor.track_cleanup(value)
         return _Submission(
@@ -2634,7 +3543,7 @@ class Map(WorkflowSignature):
         import inspect
 
         try:
-            reducer_callable = import_callable(reducer.callable_path)
+            reducer_callable = _resolve_workflow_callable(reducer.callable_path)
         except (ImportError, AttributeError):
             # A reducer may be supplied only by its effective RuntimeEnv. The
             # actor repeats this validation after that environment is installed
@@ -2684,7 +3593,13 @@ class Map(WorkflowSignature):
         if len(input_args) != 1 or input_kwargs:
             raise WorkflowDefinitionError("map_step expects exactly one iterable input")
 
-        items = executor.resolve(input_args[0])
+        raw_input = input_args[0]
+        if isinstance(raw_input, (str, bytes, dict, int, float, bool)) or raw_input is None:
+            raise WorkflowDefinitionError("map_step input must be a non-string iterable")
+        if _is_ray_object_ref(raw_input) or not isinstance(raw_input, Iterable):
+            items = executor.resolve(raw_input)
+        else:
+            items = raw_input
         if isinstance(items, (str, bytes, dict)) or not isinstance(items, Iterable):
             raise WorkflowDefinitionError("map_step input must be a non-string iterable")
 
@@ -2700,16 +3615,35 @@ class Map(WorkflowSignature):
                 dependencies,
             )
 
-        results = [
-            self.signature._submit(
-                executor,
-                (item,),
-                {},
-                f"{node_id}.m{index}",
-                dependencies,
-            )
-            for index, item in enumerate(items)
-        ]
+        results: list[_Submission] = []
+        branch_cleanup: list[Any] = []
+        try:
+            for index, item in enumerate(items):
+                item_refs: list[Any] = []
+                try:
+                    with executor.capture_cleanup(item_refs):
+                        submitted = self.signature._submit(
+                            executor,
+                            (item,),
+                            {},
+                            f"{node_id}.m{index}",
+                            dependencies,
+                        )
+                finally:
+                    branch_cleanup.extend(item_refs)
+                    for ref in item_refs:
+                        executor.track_cleanup(ref)
+                results.append(submitted)
+        except BaseException:
+            if branch_cleanup:
+                try:
+                    executor.cancel_and_drain_fold_payloads(
+                        list(reversed(branch_cleanup)),
+                        timeout_seconds=self.cancel_timeout_seconds,
+                    )
+                except BaseException:
+                    pass
+            raise
         value = executor.collect([result.value for result in results])
         executor.track_cleanup(value)
         return _Submission(
@@ -2839,21 +3773,20 @@ class Map(WorkflowSignature):
                     continue
 
                 pending_values = [result.value for _, result, _ in pending]
-                ready_index = (
-                    executor.wait_result_fold_leaf(pending_values)
-                    if result_fold is not None
-                    else (
-                        executor.wait_result_buffer_leaf(pending_values)
-                        if result_buffer is not None
-                        else executor.wait_one(pending_values)
-                    )
-                )
-                result_index, result, resolving_cleanup = pending.pop(ready_index)
                 if result_fold is not None:
-                    folded_items = executor.append_result_fold(
+                    ready_indices = executor.wait_result_fold_leaves(pending_values)
+                    ready_entries: list[tuple[int, _Submission, tuple[Any, ...]]] = [
+                        pending[idx] for idx in ready_indices
+                    ]
+                    for idx in sorted(ready_indices, reverse=True):
+                        pending.pop(idx)
+                    resolving_cleanup = tuple(ref for _, _, refs in ready_entries for ref in refs)
+                    batch_items = [
+                        (result_index, result.value) for result_index, result, _ in ready_entries
+                    ]
+                    folded_items = executor.append_result_fold_batch(
                         result_fold,
-                        index=result_index,
-                        value=result.value,
+                        items=batch_items,
                     )
                     if folded_items < completed or folded_items > submitted:
                         from django_ray.runtime.result_fold import ResultFoldProtocolError
@@ -2862,26 +3795,36 @@ class Map(WorkflowSignature):
                             "Result-fold acknowledgement reported an invalid incorporated count"
                         )
                     completed = folded_items
-                elif self.result_fold is not None:
-                    fold_ready_results[result_index] = executor.resolve_ready(result.value)
-                    while completed in fold_ready_results:
-                        fold_accumulator = executor.reduce_local(
-                            self.result_fold.reducer,
-                            fold_accumulator,
-                            fold_ready_results.pop(completed),
-                        )
-                        completed += 1
                 elif result_buffer is not None:
-                    executor.append_result_buffer(
+                    ready_indices = executor.wait_result_buffer_leaves(pending_values)
+                    ready_entries = [pending[idx] for idx in ready_indices]
+                    for idx in sorted(ready_indices, reverse=True):
+                        pending.pop(idx)
+                    resolving_cleanup = tuple(ref for _, _, refs in ready_entries for ref in refs)
+                    batch_items = [
+                        (result_index, result.value) for result_index, result, _ in ready_entries
+                    ]
+                    executor.append_result_buffer_batch(
                         result_buffer,
-                        index=result_index,
-                        value=result.value,
+                        items=batch_items,
                     )
-                    completed += 1
+                    completed += len(batch_items)
                 else:
-                    assert ordered_results is not None
-                    ordered_results[result_index] = executor.resolve_ready(result.value)
-                    completed += 1
+                    ready_index = executor.wait_one(pending_values)
+                    result_index, result, resolving_cleanup = pending.pop(ready_index)
+                    if self.result_fold is not None:
+                        fold_ready_results[result_index] = executor.resolve_ready(result.value)
+                        while completed in fold_ready_results:
+                            fold_accumulator = executor.reduce_local(
+                                self.result_fold.reducer,
+                                fold_accumulator,
+                                fold_ready_results.pop(completed),
+                            )
+                            completed += 1
+                    else:
+                        assert ordered_results is not None
+                        ordered_results[result_index] = executor.resolve_ready(result.value)
+                        completed += 1
                 resolving_cleanup = ()
                 executor.map_progress(
                     node_id,
@@ -2925,7 +3868,7 @@ class Map(WorkflowSignature):
             cleanup_values.extend(resolving_cleanup)
             cleanup_values.extend(cleanup for _, _, values in pending for cleanup in values)
             try:
-                if self.result_fold is not None:
+                if self.result_fold is not None or self.result_buffer is not None:
                     executor.cancel_and_drain_fold_payloads(
                         cleanup_values,
                         timeout_seconds=self.cancel_timeout_seconds,
@@ -3087,19 +4030,21 @@ def _get_executor(
     *,
     materialized_plan: Any | None = None,
 ) -> _Executor:
+    ray_module: Any | None = None
     try:
         import ray
 
-        ray_ready = ray.is_initialized()
+        ray_module = ray
+        ray_ready = ray_module.is_initialized()
     except ImportError:
         ray_ready = False
 
-    if use_ray is True and not ray_ready:
+    if use_ray is not False and not ray_ready and ray_module is not None:
         from django_ray.runtime.context import get_current_task_context
 
         task_context = get_current_task_context()
         if task_context is not None and task_context.ray_job_driver:
-            ray.init(address="auto", ignore_reinit_error=True)
+            ray_module.init(address="auto", ignore_reinit_error=True)
             ray_ready = True
 
     if use_ray is True and not ray_ready:
@@ -3134,16 +4079,74 @@ def _workflow_progress_policy(value: str | None) -> str:
     return policy
 
 
+def _provide_workflow_executor(use_ray: bool | None) -> _Executor:
+    return _get_executor(use_ray)
+
+
+def _provide_local_workflow_executor() -> _LocalExecutor:
+    return _LocalExecutor()
+
+
+def _check_is_local_workflow_executor(executor: object) -> bool:
+    return isinstance(executor, _LocalExecutor)
+
+
+from django_ray.workflow._types import (  # noqa: E402
+    register_workflow_executor_providers as _register_workflow_executor_providers,
+)
+from django_ray.workflow.dsl import (  # noqa: E402
+    EXPLAIN_SCHEMA,
+    EXPLAIN_SCHEMA_VERSION,
+    WorkflowBuilder,
+    WorkflowExpr,
+    WorkflowLike,
+    branch,
+    explain_workflow,
+    parallel,
+    pipe,
+)
+from django_ray.workflow.dsl import (  # noqa: E402
+    register_workflow_dsl_primitives as _register_workflow_dsl_primitives,
+)
+
+_register_workflow_executor_providers(
+    get_executor=_provide_workflow_executor,
+    create_local_executor=_provide_local_workflow_executor,
+    is_local_executor=_check_is_local_workflow_executor,
+)
+_register_workflow_dsl_primitives(
+    workflow_signature_cls=WorkflowSignature,
+    step_cls=Step,
+    chain_cls=Chain,
+    group_cls=Group,
+    map_cls=Map,
+    definition_error_cls=WorkflowDefinitionError,
+    step_fn=step,
+    chain_fn=chain,
+    group_fn=group,
+    map_step_fn=map_step,
+)
+
 __all__ = [
+    "EXPLAIN_SCHEMA",
+    "EXPLAIN_SCHEMA_VERSION",
     "Chain",
     "Group",
     "Map",
     "Step",
+    "WorkflowBuilder",
     "WorkflowDefinitionError",
+    "WorkflowExpr",
+    "WorkflowLike",
     "WorkflowSignature",
+    "branch",
     "chain",
+    "explain_workflow",
     "group",
     "map_step",
+    "parallel",
+    "pipe",
     "report_progress",
+    "reset_cached_workflow_remotes",
     "step",
 ]

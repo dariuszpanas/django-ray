@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -371,7 +372,8 @@ class TestRayTaskExecutionAdmin:
         assert "api_token" not in rendered
         assert "ordinary-argument-value" not in rendered
         assert "ordinary-result-value" not in rendered
-        assert '"<redacted>": "[REDACTED]"' in rendered
+        assert "&lt;redacted&gt;" in rendered
+        assert '"<redacted>": "[REDACTED]"' in html.unescape(rendered)
 
     def test_execution_references_are_bounded(self) -> None:
         admin_obj = _task_admin()
@@ -554,12 +556,18 @@ class TestRayTaskExecutionAdmin:
         )
 
         assert admin_obj.args_json_display(task) == "-"
-        assert admin_obj.kwargs_json_display(task) == '{"value": 1}'
+        kwargs_html = admin_obj.kwargs_json_display(task)
+        assert 'class="django-ray-diagnostic django-ray-diagnostic--json"' in kwargs_html
+        assert "&quot;value&quot;: 1" in kwargs_html
         assert admin_obj.result_data_display(task) == (
             "Stored JSON omitted because it could not be parsed and redacted safely."
         )
-        assert admin_obj.progress_data_display(task) == '{"step": 1}'
-        assert admin_obj.completion_data_display(task) == '{"success": true}'
+        progress_html = admin_obj.progress_data_display(task)
+        assert 'class="django-ray-diagnostic django-ray-diagnostic--json"' in progress_html
+        assert "&quot;step&quot;: 1" in progress_html
+        completion_html = admin_obj.completion_data_display(task)
+        assert 'class="django-ray-diagnostic django-ray-diagnostic--json"' in completion_html
+        assert "&quot;success&quot;: true" in completion_html
         assert admin_obj.cancellation_error_display(task) == "stop uncertain\nmanual review"
         assert admin_obj.error_message_display(task) == "[REDACTED]"
         assert "[REDACTED]" in admin_obj.error_traceback_display(task)
@@ -625,7 +633,9 @@ class TestRayTaskExecutionAdmin:
         rendered = _task_admin().state_display(task)
 
         assert state in rendered
-        assert "font-weight: bold" in rendered
+        assert f"djray-badge--{state.lower()}" in rendered
+        assert f'data-state="{state}"' in rendered
+        assert "style=" not in rendered
 
     @override_settings(RAY_DASHBOARD_URL="http://ray.localhost:30080")
     def test_dashboard_links_respect_configured_dashboard_url(self) -> None:

@@ -64,43 +64,43 @@ k8s-build:
 	docker build -f Dockerfile.ray -t django-ray-worker:latest .
 
 # Deploy to Kubernetes cluster (dev overlay)
-k8s-deploy: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secret
+k8s-deploy: k8s-evaluation-warning k8s-require-local-context k8s-build k8s-bootstrap-django-ray-secret
 	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/dev
 	@echo "Waiting for deployments..."
-	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
-	kubectl wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/ray-worker -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/ray-worker -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
 	@echo ""
 	@echo "Deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with full resources (16+ CPUs, 32GB+ RAM)
-k8s-deploy-local: k8s-evaluation-warning k8s-build k8s-bootstrap-django-ray-secret
+k8s-deploy-local: k8s-evaluation-warning k8s-require-local-context k8s-build k8s-bootstrap-django-ray-secret
 	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/local
 	@echo "Waiting for deployments..."
-	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
-	kubectl wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/ray-worker -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/ray-worker -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
 	@echo ""
 	@echo "Deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls
 
 # Deploy with TLS enabled
-k8s-deploy-tls: k8s-evaluation-warning k8s-build k8s-create-tls-secret k8s-bootstrap-django-ray-secret
+k8s-deploy-tls: k8s-evaluation-warning k8s-require-local-context k8s-build k8s-create-tls-secret k8s-bootstrap-django-ray-secret
 	$(MAKE) --no-print-directory k8s-delete-local-setup-job K8S_CONTEXT="$(K8S_CONTEXT)"
 	kubectl --context "$(K8S_CONTEXT)" apply -k k8s/overlays/dev-tls
 	@echo "Waiting for deployments..."
-	kubectl wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
-	kubectl wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/ray-worker -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
-	kubectl wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/postgres -n django-ray --timeout=120s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/ray-head -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/ray-worker -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-web -n django-ray --timeout=180s || true
+	kubectl --context "$(K8S_CONTEXT)" wait --for=condition=available deployment/django-ray-worker -n django-ray --timeout=180s || true
 	@echo ""
 	@echo "TLS-enabled deployment complete!"
 	@$(MAKE) --no-print-directory k8s-urls
@@ -124,8 +124,8 @@ k8s-install-kuberay-co-resident: k8s-evaluation-warning k8s-require-local-contex
 	$(MAKE) --no-print-directory k8s-install-kuberay K8S_CONTEXT="$(K8S_CONTEXT)"
 
 # Uninstall KubeRay operator
-k8s-uninstall-kuberay: k8s-evaluation-warning
-	helm uninstall kuberay-operator -n kuberay-system || true
+k8s-uninstall-kuberay: k8s-evaluation-warning k8s-require-local-context
+	helm uninstall $(HELM_CONTEXT_ARG) kuberay-operator -n kuberay-system || true
 
 # Load locally built images into kind cluster
 k8s-kind-load: k8s-evaluation-warning
@@ -264,26 +264,26 @@ k8s-deploy-kong-local: k8s-evaluation-warning k8s-require-local-context k8s-prep
 	@$(MAKE) --no-print-directory k8s-urls-kong
 
 # Delete KubeRay operator-based overlay resources
-k8s-delete-kuberay-kind: k8s-evaluation-warning
-	kubectl delete -k k8s/overlays/kuberay-kind --ignore-not-found
+k8s-delete-kuberay-kind: k8s-evaluation-warning k8s-require-local-context
+	kubectl --context "$(K8S_CONTEXT)" delete -k k8s/overlays/kuberay-kind --ignore-not-found
 
 # Delete deployment
-k8s-delete: k8s-evaluation-warning
-	kubectl delete -k k8s/overlays/dev --ignore-not-found
+k8s-delete: k8s-evaluation-warning k8s-require-local-context
+	kubectl --context "$(K8S_CONTEXT)" delete -k k8s/overlays/dev --ignore-not-found
 
 # Show deployment status
 k8s-status:
 	@echo "=== Pods ==="
-	kubectl get pods -n django-ray
+	kubectl $(KUBECTL_CONTEXT_ARG) get pods -n django-ray
 	@echo ""
 	@echo "=== Services ==="
-	kubectl get svc -n django-ray
+	kubectl $(KUBECTL_CONTEXT_ARG) get svc -n django-ray
 	@echo ""
 	@echo "=== RayClusters ==="
-	@kubectl get crd rayclusters.ray.io >NUL 2>&1 && kubectl get rayclusters -n django-ray || echo "RayCluster CRD not installed (static Ray deployment path)"
+	@kubectl $(KUBECTL_CONTEXT_ARG) get crd rayclusters.ray.io >/dev/null 2>&1 && kubectl $(KUBECTL_CONTEXT_ARG) get rayclusters -n django-ray || echo "RayCluster CRD not installed (static Ray deployment path)"
 	@echo ""
 	@echo "=== Deployments ==="
-	kubectl get deployments -n django-ray
+	kubectl $(KUBECTL_CONTEXT_ARG) get deployments -n django-ray
 
 # Verify the bundled Ray and authenticated django-ray Prometheus scrape targets.
 k8s-check-prometheus-targets:

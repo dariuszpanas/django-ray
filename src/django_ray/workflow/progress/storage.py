@@ -22,7 +22,7 @@ from secrets import token_hex
 from threading import Lock
 from typing import Any, cast
 from uuid import UUID
-from weakref import ReferenceType, ref
+from weakref import ReferenceType, WeakKeyDictionary, WeakValueDictionary, ref
 
 from django.db import IntegrityError as DjangoIntegrityError
 from django.db import connections, transaction
@@ -242,6 +242,7 @@ class PreparedWorkflowProgressTopology:
     truncation_reasons: tuple[str, ...]
     map_node_ids: frozenset[str] = frozenset()
     _capability_token: str | None = field(default=None, repr=False, compare=False)
+    _capability_handle: _CapabilityHandle | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -292,6 +293,7 @@ class PreparedWorkflowProgressCompositeTopology:
     truncation_reasons: tuple[str, ...]
     map_node_ids: frozenset[str] = frozenset()
     _capability_token: str | None = field(default=None, repr=False, compare=False)
+    _capability_handle: _CapabilityHandle | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -302,6 +304,7 @@ class PreparedWorkflowProgressInitialPublication:
     detail: PreparedWorkflowProgressDetail
     reporting_policy: str = "full"
     _capability_token: str | None = field(default=None, repr=False, compare=False)
+    _capability_handle: _CapabilityHandle | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -364,6 +367,68 @@ class WorkflowProgressDetailAuditResult:
     state_counts: tuple[tuple[str, int], ...]
 
 
+class _CapabilityHandle:
+    """Identity-hashed handle tying one registry entry lifetime to a prepared object."""
+
+    __slots__ = ("__weakref__", "token")
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+
+class _WeakCapabilityRegistry[CapabilityT]:
+    """WeakKeyDictionary-backed capability store indexed by explicit handle and token.
+
+    Lifetime is tied directly to the ``_CapabilityHandle`` stored on the prepared
+    object rather than manual weakref finalizer callbacks or CPython ``id()`` keys,
+    so entries are automatically reclaimed on GC with zero risk of ID reuse.
+    """
+
+    def __init__(self) -> None:
+        self._by_handle: WeakKeyDictionary[_CapabilityHandle, CapabilityT] = WeakKeyDictionary()
+        self._handles_by_token: WeakValueDictionary[str, _CapabilityHandle] = WeakValueDictionary()
+
+    def register(self, handle: _CapabilityHandle, capability: CapabilityT) -> None:
+        self._handles_by_token[handle.token] = handle
+        self._by_handle[handle] = capability
+
+    def get_by_handle(self, handle: _CapabilityHandle | None) -> CapabilityT | None:
+        if handle is None:
+            return None
+        return self._by_handle.get(handle)
+
+    def get(self, token: str, default: CapabilityT | None = None) -> CapabilityT | None:
+        handle = self._handles_by_token.get(token)
+        if handle is None:
+            return default
+        return self._by_handle.get(handle, default)
+
+    def __contains__(self, token: object) -> bool:
+        if not isinstance(token, str):
+            return False
+        handle = self._handles_by_token.get(token)
+        return handle is not None and handle in self._by_handle
+
+    def __getitem__(self, token: str) -> CapabilityT:
+        handle = self._handles_by_token.get(token)
+        if handle is None or handle not in self._by_handle:
+            raise KeyError(token)
+        return self._by_handle[handle]
+
+    def __len__(self) -> int:
+        return len(self._by_handle)
+
+    def pop(self, token: str, default: CapabilityT | None = None) -> CapabilityT | None:
+        handle = self._handles_by_token.pop(token, None)
+        if handle is None:
+            return default
+        return self._by_handle.pop(handle, default)
+
+    def clear(self) -> None:
+        self._by_handle.clear()
+        self._handles_by_token.clear()
+
+
 @dataclass(frozen=True)
 class _PreparedTopologyCapability:
     reference: ReferenceType[PreparedWorkflowProgressTopology]
@@ -373,7 +438,9 @@ class _PreparedTopologyCapability:
     trusts_observed_node_ids: bool
 
 
-_PREPARED_TOPOLOGY_CAPABILITIES: dict[str, _PreparedTopologyCapability] = {}
+_PREPARED_TOPOLOGY_CAPABILITIES: _WeakCapabilityRegistry[_PreparedTopologyCapability] = (
+    _WeakCapabilityRegistry()
+)
 _PREPARED_TOPOLOGY_CAPABILITIES_LOCK = Lock()
 
 
@@ -468,16 +535,6 @@ def _prepared_topology_capability_record_matches(
     )
 
 
-def _drop_prepared_topology_capability(
-    token: str,
-    observed: ReferenceType[PreparedWorkflowProgressTopology],
-) -> None:
-    with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
-        current = _PREPARED_TOPOLOGY_CAPABILITIES.get(token)
-        if current is not None and current.reference is observed:
-            _PREPARED_TOPOLOGY_CAPABILITIES.pop(token, None)
-
-
 def _register_prepared_topology_capability(
     topology: PreparedWorkflowProgressTopology,
     *,
@@ -485,29 +542,37 @@ def _register_prepared_topology_capability(
 ) -> None:
     with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
         token = topology._capability_token
-        current = _PREPARED_TOPOLOGY_CAPABILITIES.get(token or "")
+        handle = topology._capability_handle
+        current = (
+            _PREPARED_TOPOLOGY_CAPABILITIES.get_by_handle(handle)
+            if handle is not None and handle.token == token
+            else None
+        )
         signature = _prepared_topology_capability_signature(topology)
         retained_observed_trust = bool(
             current is not None
             and current.trusts_observed_node_ids
             and _prepared_topology_capability_record_matches(current, topology)
         )
-        if token is None or (current is not None and current.reference() is not topology):
+        if (
+            token is None
+            or handle is None
+            or handle.token != token
+            or (current is not None and current.reference() is not topology)
+        ):
             token = token_hex(32)
+            handle = _CapabilityHandle(token)
             object.__setattr__(topology, "_capability_token", token)
-        observed = ref(
-            topology,
-            lambda reference, capability_token=token: _drop_prepared_topology_capability(
-                capability_token,
-                reference,
+            object.__setattr__(topology, "_capability_handle", handle)
+        _PREPARED_TOPOLOGY_CAPABILITIES.register(
+            handle,
+            _PreparedTopologyCapability(
+                reference=ref(topology),
+                signature=signature,
+                evidence_references=_prepared_topology_capability_evidence_references(topology),
+                page_signatures=_prepared_topology_page_signatures(topology),
+                trusts_observed_node_ids=trust_observed_node_ids or retained_observed_trust,
             ),
-        )
-        _PREPARED_TOPOLOGY_CAPABILITIES[token] = _PreparedTopologyCapability(
-            reference=observed,
-            signature=signature,
-            evidence_references=_prepared_topology_capability_evidence_references(topology),
-            page_signatures=_prepared_topology_page_signatures(topology),
-            trusts_observed_node_ids=trust_observed_node_ids or retained_observed_trust,
         )
 
 
@@ -515,10 +580,11 @@ def _prepared_topology_capability_matches(
     topology: PreparedWorkflowProgressTopology,
 ) -> bool:
     token = topology._capability_token
-    if token is None:
+    handle = topology._capability_handle
+    if token is None or handle is None or handle.token != token:
         return False
     with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
-        capability = _PREPARED_TOPOLOGY_CAPABILITIES.get(token)
+        capability = _PREPARED_TOPOLOGY_CAPABILITIES.get_by_handle(handle)
         return bool(
             capability is not None
             and _prepared_topology_capability_record_matches(capability, topology)
@@ -530,10 +596,11 @@ def _prepared_topology_observed_membership_capability_matches(
 ) -> bool:
     """Return whether this exact object owns complete observed membership trust."""
     token = topology._capability_token
-    if token is None:
+    handle = topology._capability_handle
+    if token is None or handle is None or handle.token != token:
         return False
     with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
-        capability = _PREPARED_TOPOLOGY_CAPABILITIES.get(token)
+        capability = _PREPARED_TOPOLOGY_CAPABILITIES.get_by_handle(handle)
         return bool(
             capability is not None
             and capability.trusts_observed_node_ids
@@ -552,7 +619,9 @@ class _PreparedInitialPublicationCapability:
     detail_record_signatures: tuple[tuple[Any, ...], ...]
 
 
-_PREPARED_INITIAL_PUBLICATION_CAPABILITIES: dict[str, _PreparedInitialPublicationCapability] = {}
+_PREPARED_INITIAL_PUBLICATION_CAPABILITIES: _WeakCapabilityRegistry[
+    _PreparedInitialPublicationCapability
+] = _WeakCapabilityRegistry()
 
 
 def _prepared_initial_publication_scalar_signature(
@@ -670,39 +739,27 @@ def _prepared_initial_publication_record_matches(
     )
 
 
-def _drop_prepared_initial_publication_capability(
-    token: str,
-    observed: ReferenceType[PreparedWorkflowProgressInitialPublication],
-) -> None:
-    with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
-        current = _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.get(token)
-        if current is not None and current.reference is observed:
-            _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.pop(token, None)
-
-
 def _register_prepared_initial_publication_capability(
     publication: PreparedWorkflowProgressInitialPublication,
 ) -> None:
     with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
         token = token_hex(32)
+        handle = _CapabilityHandle(token)
         object.__setattr__(publication, "_capability_token", token)
+        object.__setattr__(publication, "_capability_handle", handle)
         object.__setattr__(publication.topology, "_capability_token", token)
-        observed = ref(
-            publication,
-            lambda reference, capability_token=token: _drop_prepared_initial_publication_capability(
-                capability_token,
-                reference,
-            ),
-        )
-        _PREPARED_INITIAL_PUBLICATION_CAPABILITIES[token] = _PreparedInitialPublicationCapability(
-            reference=observed,
-            topology_reference=ref(publication.topology),
-            detail_reference=ref(publication.detail),
-            scalar_signature=_prepared_initial_publication_scalar_signature(publication),
-            evidence_references=_prepared_initial_publication_evidence_references(publication),
-            page_signatures=_prepared_initial_publication_page_signatures(publication.topology),
-            detail_record_signatures=_prepared_initial_publication_detail_signatures(
-                publication.detail
+        _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.register(
+            handle,
+            _PreparedInitialPublicationCapability(
+                reference=ref(publication),
+                topology_reference=ref(publication.topology),
+                detail_reference=ref(publication.detail),
+                scalar_signature=_prepared_initial_publication_scalar_signature(publication),
+                evidence_references=_prepared_initial_publication_evidence_references(publication),
+                page_signatures=_prepared_initial_publication_page_signatures(publication.topology),
+                detail_record_signatures=_prepared_initial_publication_detail_signatures(
+                    publication.detail
+                ),
             ),
         )
 
@@ -713,10 +770,11 @@ def _prepared_initial_publication_capability_matches(
     if not isinstance(publication, PreparedWorkflowProgressInitialPublication):
         return False
     token = publication._capability_token
-    if token is None:
+    handle = publication._capability_handle
+    if token is None or handle is None or handle.token != token:
         return False
     with _PREPARED_TOPOLOGY_CAPABILITIES_LOCK:
-        capability = _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.get(token)
+        capability = _PREPARED_INITIAL_PUBLICATION_CAPABILITIES.get_by_handle(handle)
         return bool(
             capability is not None
             and _prepared_initial_publication_record_matches(capability, publication)
@@ -728,8 +786,8 @@ def _reset_prepared_topology_capabilities_after_fork() -> None:
     global _PREPARED_TOPOLOGY_CAPABILITIES
     global _PREPARED_INITIAL_PUBLICATION_CAPABILITIES
     global _PREPARED_TOPOLOGY_CAPABILITIES_LOCK
-    _PREPARED_TOPOLOGY_CAPABILITIES = {}
-    _PREPARED_INITIAL_PUBLICATION_CAPABILITIES = {}
+    _PREPARED_TOPOLOGY_CAPABILITIES = _WeakCapabilityRegistry()
+    _PREPARED_INITIAL_PUBLICATION_CAPABILITIES = _WeakCapabilityRegistry()
     _PREPARED_TOPOLOGY_CAPABILITIES_LOCK = Lock()
 
 
@@ -3127,6 +3185,167 @@ def _validate_prepared_topology_reference(
     _register_prepared_topology_capability(topology)
 
 
+_TOPOLOGY_PAGE_UPSERT_BATCH_SIZE = 256
+
+
+def _upsert_topology_pages_batched(
+    *,
+    run_storage: WorkflowProgressRunStorage,
+    pages: tuple[PreparedWorkflowProgressTopologyPage, ...],
+    using: str,
+) -> list[WorkflowProgressTopologyPage]:
+    """Ensure all content-addressed topology pages exist without per-page savepoints."""
+    if not pages:
+        return []
+
+    unique_pages: dict[str, PreparedWorkflowProgressTopologyPage] = {}
+    for page in pages:
+        prior = unique_pages.get(page.digest)
+        if prior is None:
+            unique_pages[page.digest] = page
+        elif (
+            prior.collection is not page.collection
+            or prior.item_count != page.item_count
+            or prior.encoded_bytes != page.encoded_bytes
+            or prior.decoded_bytes != page.decoded_bytes
+            or prior.payload != page.payload
+        ):
+            raise WorkflowProgressStorageIntegrityError(
+                "content-addressed topology page conflicts with stored bytes"
+            )
+
+    resolved: dict[str, WorkflowProgressTopologyPage] = {}
+    all_digests = list(unique_pages)
+    for start in range(0, len(all_digests), _TOPOLOGY_PAGE_UPSERT_BATCH_SIZE):
+        chunk = all_digests[start : start + _TOPOLOGY_PAGE_UPSERT_BATCH_SIZE]
+        for stored in (
+            WorkflowProgressTopologyPage.objects.using(using)
+            .filter(run_storage=run_storage, digest__in=chunk)
+            .annotate(_payload_octets=_BlobOctetLength("payload"))
+            .annotate(
+                _bounded_payload=Case(
+                    When(
+                        _payload_octets__lte=WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ENCODED_BYTES,
+                        then=F("payload"),
+                    ),
+                    default=Value(None),
+                    output_field=BinaryField(),
+                )
+            )
+            .defer("payload")
+        ):
+            prepared = unique_pages[stored.digest]
+            octets = getattr(stored, "_payload_octets", None)
+            bounded_payload = getattr(stored, "_bounded_payload", None)
+            if (
+                type(octets) is not int
+                or octets <= 0
+                or octets > WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_ENCODED_BYTES
+                or octets > WORKFLOW_PROGRESS_TOPOLOGY_PAGE_MAX_DECODED_BYTES
+                or bounded_payload is None
+            ):
+                raise WorkflowProgressStorageIntegrityError("stored topology page is oversized")
+            payload_bytes = _as_bytes(bounded_payload, "stored topology page")
+            if (
+                stored.run_storage_id != run_storage.pk
+                or stored.collection != prepared.collection.value
+                or stored.encoding != WorkflowProgressTopologyEncoding.IDENTITY
+                or stored.item_count != prepared.item_count
+                or stored.encoded_bytes != prepared.encoded_bytes
+                or stored.decoded_bytes != prepared.decoded_bytes
+                or octets != len(payload_bytes)
+                or len(payload_bytes) != len(prepared.payload)
+                or payload_bytes != prepared.payload
+            ):
+                raise WorkflowProgressStorageIntegrityError(
+                    "content-addressed topology page conflicts with stored bytes"
+                )
+            resolved[stored.digest] = stored
+
+    missing_pages = [page for digest, page in unique_pages.items() if digest not in resolved]
+    if len(missing_pages) == 1:
+        page = missing_pages[0]
+        try:
+            with transaction.atomic(using=using):
+                stored = WorkflowProgressTopologyPage.objects.using(using).create(
+                    run_storage=run_storage,
+                    digest=page.digest,
+                    collection=page.collection.value,
+                    encoding=WorkflowProgressTopologyEncoding.IDENTITY,
+                    payload=page.payload,
+                    item_count=page.item_count,
+                    encoded_bytes=page.encoded_bytes,
+                    decoded_bytes=page.decoded_bytes,
+                )
+        except DjangoIntegrityError:
+            stored = (
+                WorkflowProgressTopologyPage.objects.using(using)
+                .filter(run_storage=run_storage, digest=page.digest)
+                .defer("payload")
+                .first()
+            )
+            if stored is None or not _stored_page_matches(
+                stored.pk,
+                page,
+                run_storage_id=run_storage.pk,
+                using=using,
+            ):
+                raise WorkflowProgressStorageIntegrityError(
+                    "concurrent topology page creation conflicted"
+                ) from None
+        resolved[page.digest] = stored
+    elif missing_pages:
+        WorkflowProgressTopologyPage.objects.using(using).bulk_create(
+            [
+                WorkflowProgressTopologyPage(
+                    run_storage=run_storage,
+                    digest=page.digest,
+                    collection=page.collection.value,
+                    encoding=WorkflowProgressTopologyEncoding.IDENTITY,
+                    payload=page.payload,
+                    item_count=page.item_count,
+                    encoded_bytes=page.encoded_bytes,
+                    decoded_bytes=page.decoded_bytes,
+                )
+                for page in missing_pages
+            ],
+            batch_size=_TOPOLOGY_PAGE_UPSERT_BATCH_SIZE,
+            ignore_conflicts=True,
+        )
+        missing_digests = [page.digest for page in missing_pages]
+        fetched: dict[str, WorkflowProgressTopologyPage] = {}
+        for start in range(0, len(missing_digests), _TOPOLOGY_PAGE_UPSERT_BATCH_SIZE):
+            chunk = missing_digests[start : start + _TOPOLOGY_PAGE_UPSERT_BATCH_SIZE]
+            for stored in (
+                WorkflowProgressTopologyPage.objects.using(using)
+                .filter(run_storage=run_storage, digest__in=chunk)
+                .annotate(_payload_octets=_BlobOctetLength("payload"))
+                .defer("payload")
+            ):
+                fetched[stored.digest] = stored
+        for page in missing_pages:
+            stored = fetched.get(page.digest)
+            if stored is None:
+                raise WorkflowProgressStorageIntegrityError(
+                    "concurrent topology page creation conflicted"
+                )
+            metadata_matches = (
+                stored.collection == page.collection.value
+                and stored.encoding == WorkflowProgressTopologyEncoding.IDENTITY
+                and stored.item_count == page.item_count
+                and stored.encoded_bytes == page.encoded_bytes
+                and stored.decoded_bytes == page.decoded_bytes
+                and getattr(stored, "_payload_octets", None) == page.encoded_bytes
+            )
+            if not metadata_matches:
+                raise WorkflowProgressStorageIntegrityError(
+                    "concurrent topology page creation conflicted"
+                )
+            resolved[page.digest] = stored
+
+    return [resolved[page.digest] for page in pages]
+
+
 def stage_workflow_progress_topology(
     topology: PreparedWorkflowProgressTopology,
     *,
@@ -3197,54 +3416,11 @@ def stage_workflow_progress_topology(
                 "another topology candidate is already pending"
             )
 
-        stored_pages: list[WorkflowProgressTopologyPage] = []
-        for page in topology.pages:
-            stored = (
-                WorkflowProgressTopologyPage.objects.using(using)
-                .filter(run_storage=run_storage, digest=page.digest)
-                .defer("payload")
-                .first()
-            )
-            if stored is not None:
-                if not _stored_page_matches(
-                    stored.pk,
-                    page,
-                    run_storage_id=run_storage.pk,
-                    using=using,
-                ):
-                    raise WorkflowProgressStorageIntegrityError(
-                        "content-addressed topology page conflicts with stored bytes"
-                    )
-            else:
-                try:
-                    with transaction.atomic(using=using):
-                        stored = WorkflowProgressTopologyPage.objects.using(using).create(
-                            run_storage=run_storage,
-                            digest=page.digest,
-                            collection=page.collection.value,
-                            encoding=WorkflowProgressTopologyEncoding.IDENTITY,
-                            payload=page.payload,
-                            item_count=page.item_count,
-                            encoded_bytes=page.encoded_bytes,
-                            decoded_bytes=page.decoded_bytes,
-                        )
-                except DjangoIntegrityError:
-                    stored = (
-                        WorkflowProgressTopologyPage.objects.using(using)
-                        .filter(run_storage=run_storage, digest=page.digest)
-                        .defer("payload")
-                        .first()
-                    )
-                    if stored is None or not _stored_page_matches(
-                        stored.pk,
-                        page,
-                        run_storage_id=run_storage.pk,
-                        using=using,
-                    ):
-                        raise WorkflowProgressStorageIntegrityError(
-                            "concurrent topology page creation conflicted"
-                        ) from None
-            stored_pages.append(stored)
+        stored_pages = _upsert_topology_pages_batched(
+            run_storage=run_storage,
+            pages=topology.pages,
+            using=using,
+        )
 
         node_page_count = sum(
             page.collection is WorkflowProgressTopologyCollection.NODE for page in topology.pages

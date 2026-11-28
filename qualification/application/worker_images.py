@@ -185,7 +185,7 @@ def source_commands(raw: bytes) -> dict:
         expected += ["--queue", mode]
         if mode == "ml":
             expected += ["--cluster", "ray://ray-head-svc:10001"]
-        expected += ["--concurrency", "20"]
+        expected += ["--concurrency", "1" if mode == "sync" else "20"]
         command = ["python", "testproject/manage.py", "django_ray_worker"]
         if container["command"] != command or container["args"] != expected:
             raise ValueError("Shipped worker CLI changed; review the qualification contract")

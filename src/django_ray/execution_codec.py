@@ -464,6 +464,15 @@ def _bounded_utf8_size(value: str, *, max_bytes: int) -> int:
     return total
 
 
+_JSON_SCAN_TOKEN_RE = re.compile(
+    r'"[^"\\]*(?:\\.[^"\\]*)*"'
+    r'|"'
+    r"|[{\[\]}:,]"
+    r"|\s+"
+    r'|[^\s"{\[\]}:,]+'
+)
+
+
 def _preparse_json_scan(
     serialized: str,
     *,
@@ -478,68 +487,45 @@ def _preparse_json_scan(
         max_nodes = EXECUTION_COMPLETION_MAX_NODES
     depth = 0
     nodes = 0
-    index = 0
     length = len(serialized)
     attempted_versioned = False
-    primitive = False
     maximum_reserved_token_chars = 2 + 6 * max(map(len, reserved_marker_keys))
 
-    def count_node() -> None:
-        nonlocal nodes
-        nodes += 1
-        if nodes > max_nodes:
-            raise _ResourceLimitError
-
-    while index < length:
-        character = serialized[index]
-        if character == '"':
-            count_node()
-            primitive = False
-            start = index
-            index += 1
-            escaped = False
-            while index < length:
-                character = serialized[index]
-                if escaped:
-                    escaped = False
-                elif character == "\\":
-                    escaped = True
-                elif character == '"':
-                    break
-                index += 1
-            if index >= length:
+    for match in _JSON_SCAN_TOKEN_RE.finditer(serialized):
+        token = match.group(0)
+        first = token[0]
+        if first == '"':
+            nodes += 1
+            if nodes > max_nodes:
+                raise _ResourceLimitError
+            if len(token) == 1:
                 return attempted_versioned
-            if depth == 1:
-                after = index + 1
+            if depth == 1 and len(token) <= maximum_reserved_token_chars:
+                after = match.end()
                 while after < length and serialized[after].isspace():
                     after += 1
-                token_chars = index + 1 - start
-                if (
-                    after < length
-                    and serialized[after] == ":"
-                    and token_chars <= maximum_reserved_token_chars
-                ):
+                if after < length and serialized[after] == ":":
                     try:
-                        key = json.loads(serialized[start : index + 1])
+                        key = json.loads(token)
                     except (TypeError, ValueError):
                         key = None
                     if key in reserved_marker_keys:
                         attempted_versioned = True
-        elif character in "{[":
-            count_node()
-            primitive = False
+        elif first in "{[":
+            nodes += 1
+            if nodes > max_nodes:
+                raise _ResourceLimitError
             depth += 1
             if depth > max_depth:
                 raise _ResourceLimitError
-        elif character in "}]":
-            primitive = False
+        elif first in "}]":
             depth = max(depth - 1, 0)
-        elif character in ",:" or character.isspace():
-            primitive = False
-        elif not primitive:
-            count_node()
-            primitive = True
-        index += 1
+        elif first in ",:" or first.isspace():
+            continue
+        else:
+            nodes += 1
+            if nodes > max_nodes:
+                raise _ResourceLimitError
     return attempted_versioned
 
 

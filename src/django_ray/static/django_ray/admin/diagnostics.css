@@ -5,6 +5,124 @@
   white-space: pre-wrap;
 }
 
+pre.django-ray-diagnostic,
+.django-ray-diagnostic--json,
+.django-ray-diagnostic--traceback {
+  background: var(--darkened-bg, #f8fafc);
+  border: 1px solid var(--hairline-color, #d9e0ea);
+  border-radius: var(--border-radius, 0.5rem);
+  box-sizing: border-box;
+  color: var(--body-fg, #0f172a);
+  font-family: var(
+    --font-family-monospace,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace
+  );
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.75rem 0.875rem;
+  tab-size: 2;
+}
+
+.django-ray-diagnostic--traceback {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  border-left: 4px solid #dc2626;
+  color: #7f1d1d;
+}
+
+.django-ray-diagnostic__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 100%;
+}
+
+.djray-badge {
+  align-items: center;
+  background: #f1f5f9;
+  border: 1px solid #94a3b8;
+  border-radius: 999px;
+  color: #334155;
+  display: inline-flex;
+  font-size: 0.75rem;
+  font-weight: 700;
+  gap: 0.25rem;
+  letter-spacing: 0.025em;
+  line-height: 1.25;
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+
+.djray-badge--queued {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+  color: #1e293b;
+}
+
+.djray-badge--running {
+  background: #e0f2fe;
+  border-color: #38bdf8;
+  color: #075985;
+}
+
+.djray-badge--succeeded {
+  background: #dcfce7;
+  border-color: #4ade80;
+  color: #14532d;
+}
+
+.djray-badge--failed,
+.djray-badge--lost {
+  background: #fee2e2;
+  border-color: #f87171;
+  color: #991b1b;
+}
+
+.djray-badge--cancelled,
+.djray-badge--expired,
+.djray-badge--warning,
+.djray-badge--stub {
+  background: #fef3c7;
+  border-color: #d97706;
+  color: #78350f;
+}
+
+.djray-badge--cancelling {
+  background: #ffedd5;
+  border-color: #fb923c;
+  color: #9a3412;
+}
+
+.djray-badge--stub {
+  white-space: normal;
+  width: fit-content;
+}
+
+.djray-muted-hint {
+  color: var(--body-quiet-color, #475569);
+  cursor: help;
+}
+
+.djray-link-sep {
+  color: var(--body-quiet-color, #64748b);
+  margin-inline: 0.35rem;
+}
+
+.djray-workflow-graph-links {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
 .django-ray-admin-action {
   align-items: center;
   background: #0369a1;
@@ -134,6 +252,256 @@ a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
   color: #0f172a;
 }
 
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--cancel {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 18%);
+  color: #fff;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 80ms ease;
+}
+
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--cancel:hover:not(:disabled) {
+  background: #991b1b;
+  border-color: #fca5a5;
+  box-shadow:
+    0 0 0 3px rgb(239 68 68 / 35%),
+    0 6px 14px rgb(15 23 42 / 25%);
+  color: #fff;
+  transform: translateY(-2px);
+}
+
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--cancel:focus-visible {
+  outline: 3px solid #991b1b;
+  outline-offset: 2px;
+}
+
+#django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--cancel:active:not(:disabled) {
+  background: #7f1d1d;
+  border-color: #7f1d1d;
+  color: #fff;
+  transform: translateY(1px);
+}
+
+.django-ray-retry-card {
+  --django-ray-retry-card-bg: var(--body-bg, #fff);
+  --django-ray-retry-card-border: var(--hairline-color, #d9e0ea);
+  --django-ray-retry-card-surface: var(--darkened-bg, #f8fafc);
+  --django-ray-retry-card-text: var(--body-fg, #0f172a);
+  --django-ray-retry-card-muted: var(--body-quiet-color, #475569);
+  --django-ray-retry-card-warning-bg: #fef2f2;
+  --django-ray-retry-card-warning-border: #dc2626;
+  --django-ray-retry-card-warning-fg: #7f1d1d;
+  --django-ray-retry-card-focus: #075985;
+  background: var(--django-ray-retry-card-bg);
+  border: 1px solid var(--django-ray-retry-card-border);
+  border-radius: var(--border-radius, 8px);
+  color: var(--django-ray-retry-card-text);
+  max-width: 64rem;
+  overflow: hidden;
+}
+
+.django-ray-retry-card__warning,
+.django-ray-retry-card__body,
+.django-ray-retry-card__actions {
+  padding: 1rem;
+}
+
+.django-ray-retry-card__warning {
+  background: var(--django-ray-retry-card-warning-bg);
+  border-left: 4px solid var(--django-ray-retry-card-warning-border);
+  color: var(--django-ray-retry-card-warning-fg);
+}
+
+.django-ray-retry-card__warning strong {
+  display: block;
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.django-ray-retry-card__body > :first-child,
+.django-ray-retry-card__warning > :first-child {
+  margin-top: 0;
+}
+
+.django-ray-retry-card__body > :last-child,
+.django-ray-retry-card__warning > :last-child {
+  margin-bottom: 0;
+}
+
+.django-ray-retry-card__metrics {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  margin: 1rem 0;
+}
+
+.django-ray-retry-card__metric {
+  background: var(--django-ray-retry-card-surface);
+  border: 1px solid var(--django-ray-retry-card-border);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.django-ray-retry-card__metric dt {
+  color: var(--django-ray-retry-card-muted);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+
+.django-ray-retry-card__metric dd {
+  color: var(--django-ray-retry-card-text);
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+  margin: 0.5rem 0 0;
+}
+
+.django-ray-retry-card__actions {
+  align-items: center;
+  border-top: 1px solid var(--django-ray-retry-card-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.django-ray-retry-card__confirm,
+.django-ray-retry-card__cancel {
+  border-radius: 6px;
+  box-sizing: border-box;
+  display: inline-flex;
+  font-weight: 600;
+  justify-content: center;
+  line-height: 1.25;
+  padding: 0.625rem 1rem;
+  text-decoration: none;
+}
+
+.django-ray-retry-card__confirm {
+  background: #b91c1c;
+  border: 1px solid #b91c1c;
+  color: #fff;
+  cursor: pointer;
+}
+
+.django-ray-retry-card__confirm:hover {
+  background: #991b1b;
+  border-color: #991b1b;
+}
+
+.django-ray-retry-card__cancel {
+  background: transparent;
+  border: 1px solid var(--django-ray-retry-card-border);
+  color: var(--django-ray-retry-card-text);
+}
+
+.django-ray-retry-card__cancel:hover {
+  background: var(--django-ray-retry-card-surface);
+}
+
+.django-ray-retry-card__confirm:focus-visible,
+.django-ray-retry-card__cancel:focus-visible {
+  outline: 3px solid var(--django-ray-retry-card-focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 40rem) {
+  .django-ray-retry-card__confirm,
+  .django-ray-retry-card__cancel {
+    width: 100%;
+  }
+}
+
+:is(html.dark, html[data-theme="dark"]) pre.django-ray-diagnostic,
+:is(html.dark, html[data-theme="dark"]) .django-ray-diagnostic--json {
+  background: #0b0c0f;
+  border-color: #303238;
+  color: #f4f4f5;
+}
+
+:is(html.dark, html[data-theme="dark"]) .django-ray-diagnostic--traceback {
+  background: #221013;
+  border-color: #7f1d1d;
+  border-left-color: #f87171;
+  color: #fecaca;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-badge {
+  background: #27282d;
+  border-color: #52525b;
+  color: #e4e4e7;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-badge--queued {
+  background: #27282d;
+  border-color: #52525b;
+  color: #e4e4e7;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-badge--running {
+  background: #0c2d48;
+  border-color: #38bdf8;
+  color: #bae6fd;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-badge--succeeded {
+  background: #0f2e1d;
+  border-color: #4ade80;
+  color: #bbf7d0;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-badge--failed,
+:is(html.dark, html[data-theme="dark"]) .djray-badge--lost {
+  background: #3b1316;
+  border-color: #f87171;
+  color: #fecaca;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-badge--cancelled,
+:is(html.dark, html[data-theme="dark"]) .djray-badge--expired,
+:is(html.dark, html[data-theme="dark"]) .djray-badge--warning,
+:is(html.dark, html[data-theme="dark"]) .djray-badge--stub {
+  background: #3b260b;
+  border-color: #fbbf24;
+  color: #fde68a;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-badge--cancelling {
+  background: #3b1f0d;
+  border-color: #fb923c;
+  color: #fed7aa;
+}
+
+:is(html.dark, html[data-theme="dark"]) .djray-muted-hint,
+:is(html.dark, html[data-theme="dark"]) .djray-link-sep {
+  color: #a1a1aa;
+}
+
+:is(html.dark, html[data-theme="dark"])
+  #django-ray-task-actions
+  .django-ray-admin-action.django-ray-admin-action--cancel:focus-visible {
+  outline-color: #fca5a5;
+}
+
+:is(html.dark, html[data-theme="dark"]) .django-ray-retry-card {
+  --django-ray-retry-card-bg: #16171a;
+  --django-ray-retry-card-border: #303238;
+  --django-ray-retry-card-surface: #212226;
+  --django-ray-retry-card-text: #f4f4f5;
+  --django-ray-retry-card-muted: #a1a1aa;
+  --django-ray-retry-card-warning-bg: #2a1215;
+  --django-ray-retry-card-warning-border: #f87171;
+  --django-ray-retry-card-warning-fg: #fecaca;
+  --django-ray-retry-card-focus: #38bdf8;
+}
+
 :is(html.dark, html[data-theme="dark"])
   .django-ray-admin-action:focus-visible {
   outline-color: #38bdf8;
@@ -225,6 +593,89 @@ a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
     border-color: #71717a;
     color: #fafafa;
   }
+
+  html[data-theme="auto"] pre.django-ray-diagnostic,
+  html[data-theme="auto"] .django-ray-diagnostic--json {
+    background: #0b0c0f;
+    border-color: #303238;
+    color: #f4f4f5;
+  }
+
+  html[data-theme="auto"] .django-ray-diagnostic--traceback {
+    background: #221013;
+    border-color: #7f1d1d;
+    border-left-color: #f87171;
+    color: #fecaca;
+  }
+
+  html[data-theme="auto"] .djray-badge {
+    background: #27282d;
+    border-color: #52525b;
+    color: #e4e4e7;
+  }
+
+  html[data-theme="auto"] .djray-badge--queued {
+    background: #27282d;
+    border-color: #52525b;
+    color: #e4e4e7;
+  }
+
+  html[data-theme="auto"] .djray-badge--running {
+    background: #0c2d48;
+    border-color: #38bdf8;
+    color: #bae6fd;
+  }
+
+  html[data-theme="auto"] .djray-badge--succeeded {
+    background: #0f2e1d;
+    border-color: #4ade80;
+    color: #bbf7d0;
+  }
+
+  html[data-theme="auto"] .djray-badge--failed,
+  html[data-theme="auto"] .djray-badge--lost {
+    background: #3b1316;
+    border-color: #f87171;
+    color: #fecaca;
+  }
+
+  html[data-theme="auto"] .djray-badge--cancelled,
+  html[data-theme="auto"] .djray-badge--expired,
+  html[data-theme="auto"] .djray-badge--warning,
+  html[data-theme="auto"] .djray-badge--stub {
+    background: #3b260b;
+    border-color: #fbbf24;
+    color: #fde68a;
+  }
+
+  html[data-theme="auto"] .djray-badge--cancelling {
+    background: #3b1f0d;
+    border-color: #fb923c;
+    color: #fed7aa;
+  }
+
+  html[data-theme="auto"] .djray-muted-hint,
+  html[data-theme="auto"] .djray-link-sep {
+    color: #a1a1aa;
+  }
+
+  html[data-theme="auto"]
+    #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--cancel:focus-visible {
+    outline-color: #fca5a5;
+  }
+
+  html[data-theme="auto"] .django-ray-retry-card {
+    --django-ray-retry-card-bg: #16171a;
+    --django-ray-retry-card-border: #303238;
+    --django-ray-retry-card-surface: #212226;
+    --django-ray-retry-card-text: #f4f4f5;
+    --django-ray-retry-card-muted: #a1a1aa;
+    --django-ray-retry-card-warning-bg: #2a1215;
+    --django-ray-retry-card-warning-border: #f87171;
+    --django-ray-retry-card-warning-fg: #fecaca;
+    --django-ray-retry-card-focus: #38bdf8;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -237,6 +688,18 @@ a.django-ray-admin-action.django-ray-admin-action--sensitive:focus-visible {
     .django-ray-admin-action.django-ray-admin-action--retry:hover:not(:disabled),
   #django-ray-task-actions
     .django-ray-admin-action.django-ray-admin-action--retry:active:not(:disabled) {
+    transform: none;
+  }
+
+  #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--cancel {
+    transition: none;
+  }
+
+  #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--cancel:hover:not(:disabled),
+  #django-ray-task-actions
+    .django-ray-admin-action.django-ray-admin-action--cancel:active:not(:disabled) {
     transform: none;
   }
 }

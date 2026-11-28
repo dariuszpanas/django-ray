@@ -51,7 +51,7 @@ def test_prometheus_duration_aggregates_execute_on_postgresql(settings) -> None:
 
     metrics = render_prometheus_metrics(queue_names=("default",), observed_at=now)
 
-    assert "django_ray_queue_wait_seconds_sum 6" in metrics
+    assert "django_ray_queue_wait_seconds_sum 2" in metrics
     assert "django_ray_claim_latency_seconds_sum 4" in metrics
     assert "django_ray_execution_duration_seconds_count 2" in metrics
     assert "django_ray_execution_duration_seconds_sum 6" in metrics

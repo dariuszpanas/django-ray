@@ -61,6 +61,21 @@ if DEPLOYMENT_MODE not in {"demo", "production"}:
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = _env_bool("DJANGO_DEBUG", default=False)
 
+# Baseline HTTP security headers and cookie hardening across all modes.
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+
+# Local HTTP cluster rehearsal (e.g. disposable in-cluster qualification) must
+# opt out explicitly; production mode enforces HTTPS/cookie hardening by default.
+DJANGO_ALLOW_INSECURE_HTTP = _env_bool("DJANGO_ALLOW_INSECURE_HTTP", default=False)
+DJANGO_ALLOW_UNAUTHENTICATED_SAMPLE_SURFACES = _env_bool(
+    "DJANGO_ALLOW_UNAUTHENTICATED_SAMPLE_SURFACES",
+    default=False,
+)
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY",
@@ -81,6 +96,17 @@ if DEPLOYMENT_MODE == "production":
         raise ImproperlyConfigured(
             "DJANGO_ALLOWED_HOSTS must contain explicit hostnames in production mode."
         )
+    if not DJANGO_ALLOW_INSECURE_HTTP:
+        SESSION_COOKIE_SECURE = True
+        CSRF_COOKIE_SECURE = True
+        SECURE_SSL_REDIRECT = _env_bool("DJANGO_SECURE_SSL_REDIRECT", default=True)
+        SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_SECURE_HSTS_SECONDS", "31536000"))
+        SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool(
+            "DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS",
+            default=True,
+        )
+        SECURE_HSTS_PRELOAD = _env_bool("DJANGO_SECURE_HSTS_PRELOAD", default=False)
+        SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 DJANGO_API_TOKEN = os.environ.get("DJANGO_API_TOKEN")
 DJANGO_API_ENABLED = _env_bool("DJANGO_API_ENABLED", default=True)
@@ -242,6 +268,14 @@ if DATABASE_ENGINE == "django.db.backends.sqlite3":
         }
     }
 else:
+    _database_options: dict[str, object] = {
+        "connect_timeout": 10,
+    }
+    _database_sslmode = os.environ.get("DATABASE_SSLMODE", "").strip()
+    if _database_sslmode:
+        _database_options["sslmode"] = _database_sslmode
+    elif DEPLOYMENT_MODE == "production" and not DJANGO_ALLOW_INSECURE_HTTP:
+        _database_options["sslmode"] = "require"
     DATABASES = {
         "default": {
             "ENGINE": DATABASE_ENGINE,
@@ -252,9 +286,7 @@ else:
             "PORT": os.environ.get("DATABASE_PORT", "5432"),
             "CONN_MAX_AGE": 60,  # Keep connections open for 60 seconds
             "CONN_HEALTH_CHECKS": True,  # Check connection health before use
-            "OPTIONS": {
-                "connect_timeout": 10,
-            },
+            "OPTIONS": _database_options,
         }
     }
 
@@ -469,6 +501,9 @@ DJANGO_RAY = {
     or None,
     "MAX_TASK_ATTEMPTS": int(os.environ.get("RAY_MAX_RETRIES", "3")),
     "RETRY_BACKOFF_SECONDS": int(os.environ.get("RAY_RETRY_DELAY_SECONDS", "5")),
+    # Sample app defaults to uncached metrics so qualification probes and tests
+    # observe state transitions immediately; override via env var in production.
+    "METRICS_CACHE_TTL_SECONDS": float(os.environ.get("DJANGO_RAY_METRICS_CACHE_TTL_SECONDS", "0")),
     # Exceptions that won't trigger auto-retry (use for manual retry testing)
     "RETRY_EXCEPTION_DENYLIST": [
         "testproject.tasks.NoRetryError",

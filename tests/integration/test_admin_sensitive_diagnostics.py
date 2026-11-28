@@ -252,6 +252,7 @@ def test_archived_attempt_page_uses_parent_inputs_and_exact_attempt_outputs(
 ) -> None:
     user = _staff_user(
         "sensitive-global-attempt-viewer",
+        "view_raytaskexecution",
         "view_taskattempt",
         _SENSITIVE_PERMISSION,
     )
@@ -874,3 +875,140 @@ def test_ordinary_execution_errors_are_redacted_and_bounded() -> None:
     assert len(message) <= ADMIN_DIAGNOSTIC_MAX_CHARS
     assert message.endswith("... [truncated]")
     assert strip_tags(str(traceback)) == "[REDACTED]"
+
+
+def test_sensitive_views_edge_guards_and_fallback_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover safe_admin_reverse, 413 plain-text fallback, auth/vanished/mismatch guards."""
+    from types import SimpleNamespace
+
+    from django.contrib.auth.models import AnonymousUser
+    from django.core.exceptions import PermissionDenied
+    from django.http import Http404
+    from django.test import RequestFactory
+
+    from django_ray.admin import TaskAttemptAdmin
+    from django_ray.admin_views import sensitive as sens_mod
+
+    rf = RequestFactory()
+    custom_site = admin.AdminSite(name="empty_custom_site")
+    assert sens_mod.safe_admin_reverse(custom_site, "nonexistent_view") is None
+    assert sens_mod.parent_execution_admin(custom_site) is None
+
+    # Plain-text 413 fallback when even the limit template exceeds response_max_bytes.
+    super_user = get_user_model().objects.create_superuser(username="sens-edge-super")
+    req = rf.get("/admin/")
+    req.user = super_user
+    resp_413 = sens_mod.sensitive_diagnostics_response(
+        req,
+        admin_site=admin.site,
+        opts=RayTaskExecution._meta,
+        title="t",
+        subject="s",
+        back_url="/admin/",
+        sections=[],
+        response_max_bytes=16,
+    )
+    assert resp_413.status_code == 413
+    assert resp_413["Content-Type"].startswith("text/plain")
+
+    exec_admin = RayTaskExecutionAdmin(RayTaskExecution, admin.site)
+    attempt_admin = TaskAttemptAdmin(TaskAttempt, admin.site)
+    assert sens_mod.resolve_attempt_sensitive_data_url(attempt_admin, req, None) is None
+
+    # Missing parent admin on unregistered site returns None / raises PermissionDenied.
+    unreg_attempt_admin = TaskAttemptAdmin(TaskAttempt, custom_site)
+    execution = RayTaskExecution.objects.create(
+        task_id="sens-edge-exec",
+        callable_path="testproject.tasks.add_numbers",
+        args_json="[]",
+        kwargs_json="{}",
+    )
+    attempt = TaskAttempt.objects.create(
+        execution=execution,
+        attempt_number=1,
+        state=TaskState.FAILED,
+    )
+    assert sens_mod.resolve_attempt_sensitive_data_url(unreg_attempt_admin, req, attempt) is None
+    with pytest.raises(PermissionDenied):
+        sens_mod.attempt_sensitive_data_view(unreg_attempt_admin, req, str(attempt.pk))
+
+    # Unauthenticated requests fail closed with PermissionDenied.
+    anon_req = rf.get("/admin/")
+    anon_req.user = AnonymousUser()
+    with pytest.raises(PermissionDenied):
+        sens_mod.execution_sensitive_data_view(exec_admin, anon_req, str(execution.pk))
+    with pytest.raises(PermissionDenied):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, anon_req, str(attempt.pk))
+
+    # Invalid PK and missing PK return 404 for global viewer, 403 for unprivileged viewer.
+    low_user = _staff_user("sens-edge-low", "view_raytaskexecution", "view_taskattempt")
+    low_req = rf.get("/admin/")
+    low_req.user = low_user
+    with pytest.raises(Http404):
+        sens_mod.execution_sensitive_data_view(exec_admin, req, "not-an-int")
+    with pytest.raises(PermissionDenied):
+        sens_mod.execution_sensitive_data_view(exec_admin, low_req, "not-an-int")
+    with pytest.raises(Http404):
+        sens_mod.execution_sensitive_data_view(exec_admin, req, "99999999")
+    with pytest.raises(PermissionDenied):
+        sens_mod.execution_sensitive_data_view(exec_admin, low_req, "99999999")
+
+    with pytest.raises(Http404):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, req, "not-an-int")
+    with pytest.raises(PermissionDenied):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, low_req, "not-an-int")
+    with pytest.raises(Http404):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, req, "99999999")
+    with pytest.raises(PermissionDenied):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, low_req, "99999999")
+
+    # Vanished object on second bounded read raises Http404.
+    monkeypatch.setattr(
+        sens_mod,
+        "bounded_sensitive_object",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RayTaskExecution.DoesNotExist()),
+    )
+    with pytest.raises(Http404):
+        sens_mod.execution_sensitive_data_view(exec_admin, req, str(execution.pk))
+    with pytest.raises(Http404):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, req, str(attempt.pk))
+
+    # Identity mismatch on second bounded read raises Http404.
+    monkeypatch.setattr(
+        sens_mod,
+        "bounded_sensitive_object",
+        lambda *_a, **_kw: (
+            SimpleNamespace(
+                pk=execution.pk, task_id="different-id", execution_id=-1, attempt_number=99
+            ),
+            {},
+        ),
+    )
+    with pytest.raises(Http404):
+        sens_mod.execution_sensitive_data_view(exec_admin, req, str(execution.pk))
+    with pytest.raises(Http404):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, req, str(attempt.pk))
+
+    # Permission revoked between initial lookup and second bounded read raises PermissionDenied.
+    monkeypatch.setattr(
+        sens_mod,
+        "bounded_sensitive_object",
+        lambda qs, *, pk, **_kw: (execution if qs.model is RayTaskExecution else attempt, {}),
+    )
+    call_count = {"n": 0}
+
+    def revoke_on_second(_req: Any, obj: Any = None) -> bool:
+        if obj is None:
+            return True
+        call_count["n"] += 1
+        return call_count["n"] == 1
+
+    monkeypatch.setattr(sens_mod, "has_sensitive_task_data_permission", revoke_on_second)
+    with pytest.raises(PermissionDenied):
+        sens_mod.execution_sensitive_data_view(exec_admin, req, str(execution.pk))
+
+    call_count["n"] = 0
+    with pytest.raises(PermissionDenied):
+        sens_mod.attempt_sensitive_data_view(attempt_admin, req, str(attempt.pk))

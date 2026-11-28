@@ -1,5 +1,10 @@
 """Fail-closed compatibility policy for Ray Compiled Graph.
 
+.. warning::
+   **Experimental quarantined module**: Ray Compiled Graph integration is
+   quarantined as experimental and is not wired into the active
+   ``django-ray`` production runtime.
+
 This module deliberately contains no imports from :mod:`ray`.  A caller can make a
 capability decision before importing or invoking Ray's beta Compiled Graph APIs.  The
 decision is JSON-safe and may be included in an effective workflow plan; process-local
@@ -570,9 +575,9 @@ def _reject(
     )
 
 
-def _parse_enum(
-    enum_type: type[StrEnum], value: StrEnum | str | None
-) -> tuple[str, StrEnum | None]:
+def _parse_enum[E: StrEnum](
+    enum_type: type[E], value: StrEnum | str | None
+) -> tuple[str, E | None]:
     text = "" if value is None else str(value)
     if len(text) > _MAX_REQUEST_DIMENSION_CHARS:
         return (

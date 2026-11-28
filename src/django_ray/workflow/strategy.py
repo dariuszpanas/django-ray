@@ -27,7 +27,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol, cast
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -65,7 +65,17 @@ from django_ray.runtime.context import (
     WorkflowRunIdentity,
     get_current_task_context,
 )
-from django_ray.runtime.import_utils import import_callable
+from django_ray.workflow._types import (
+    ChainSignatureProtocol,
+    GroupSignatureProtocol,
+    StepSignatureProtocol,
+    create_local_workflow_executor,
+    get_workflow_executor,
+    is_local_workflow_executor,
+)
+from django_ray.workflow._types import (
+    WorkflowSignatureProtocol as WorkflowSignature,
+)
 from django_ray.workflow.contracts import WorkflowDefinitionKind
 from django_ray.workflow.plans import (
     MAX_REJECTIONS,
@@ -76,9 +86,6 @@ from django_ray.workflow.plans import (
     WorkflowPlanValidationError,
     validate_plan_selection_manifest,
 )
-
-if TYPE_CHECKING:
-    from django_ray.workflows import WorkflowSignature
 
 
 class WorkflowExecutionStrategyName(StrEnum):
@@ -261,6 +268,7 @@ class DynamicTasksStrategyHandle:
     opaque_token: str
     _executor: Any = field(default=None, repr=False)
     _submission: Any = field(default=None, repr=False)
+    _cleanup_refs: tuple[Any, ...] = field(default=(), repr=False)
     _resolved_result: Any = field(default=None, repr=False)
     _resolved: bool = False
     _consumed: bool = False
@@ -536,10 +544,8 @@ def build_fixed_actor_graph_plan(
             )
             return (), False
         if kind is WorkflowDefinitionKind.STEP:
-            from django_ray.workflows import Step
-
-            assert isinstance(current, Step)
-            if current.bootstrap_django:
+            step_sig = cast(StepSignatureProtocol, current)
+            if step_sig.bootstrap_django:
                 rejections.append(
                     PlanRejection(
                         "compiled_graph",
@@ -548,15 +554,22 @@ def build_fixed_actor_graph_plan(
                         "Django/ORM bootstrap is unsupported inside fixed-actor Compiled Graph stages",
                     )
                 )
+            from django_ray.runtime import import_utils
+
+            workflow_resolver = getattr(
+                import_utils,
+                "resolve_workflow_callable",
+                import_utils.import_callable,
+            )
             try:
-                callable_obj = import_callable(current.callable_path)
+                callable_obj = workflow_resolver(step_sig.callable_path)
             except Exception:
                 rejections.append(
                     PlanRejection(
                         "compiled_graph",
                         "UNRESOLVED_CODE_IDENTITY",
                         f"nodes.{node_id}.callable",
-                        f"Callable {current.callable_path!r} could not be imported at preparation time",
+                        f"Callable {step_sig.callable_path!r} could not be imported at preparation time",
                     )
                 )
             else:
@@ -592,7 +605,7 @@ def build_fixed_actor_graph_plan(
                 StaticActorStageSpec(
                     stage_id=stage_id,
                     logical_node_ids=(node_id,),
-                    callable_path=current.callable_path,
+                    callable_path=step_sig.callable_path,
                     replicas=pool.replicas,
                     dependencies=upstream_stage_ids,
                     resources=MappingProxyType(dict(node_manifest.get("resources", {}))),
@@ -602,18 +615,16 @@ def build_fixed_actor_graph_plan(
                         or manifest["environments"]["outer"]["digest"]
                     ),
                     runtime_env_profile=binding.runtime_env_profile,
-                    bound_args=tuple(current.bound_args),
-                    bound_kwargs=MappingProxyType(dict(current.bound_kwargs)),
+                    bound_args=tuple(step_sig.bound_args),
+                    bound_kwargs=MappingProxyType(dict(step_sig.bound_kwargs)),
                 )
             )
             return (stage_id,), False
         if kind is WorkflowDefinitionKind.CHAIN:
-            from django_ray.workflows import Chain
-
-            assert isinstance(current, Chain)
+            chain_sig = cast(ChainSignatureProtocol, current)
             current_upstream = upstream_stage_ids
             gather = False
-            for index, child in enumerate(current.signatures):
+            for index, child in enumerate(chain_sig.signatures):
                 current_upstream, gather = _visit(
                     child,
                     f"{node_id}.{index}",
@@ -621,11 +632,9 @@ def build_fixed_actor_graph_plan(
                 )
             return current_upstream, gather
         if kind is WorkflowDefinitionKind.GROUP:
-            from django_ray.workflows import Group
-
-            assert isinstance(current, Group)
+            group_sig = cast(GroupSignatureProtocol, current)
             branch_terminals: list[str] = []
-            for index, child in enumerate(current.signatures):
+            for index, child in enumerate(group_sig.signatures):
                 child_terminals, child_gather = _visit(
                     child,
                     f"{node_id}.g{index}",
@@ -687,9 +696,12 @@ class _IsolatedStageActorReplica:
     """Per-run dedicated stage replica that clears state on drain/teardown (#71/#72)."""
 
     def __init__(self, spec: StaticActorStageSpec, replica_index: int) -> None:
+        from django_ray.runtime import import_utils
+
         self.spec = spec
         self.replica_index = replica_index
-        self._callable = import_callable(spec.callable_path)
+        resolver = getattr(import_utils, "resolve_workflow_callable", import_utils.import_callable)
+        self._callable = resolver(spec.callable_path)
         self.invocation_context: dict[str, Any] = {}
         self.cached_inputs: list[Any] = []
         self.cached_outputs: list[Any] = []
@@ -697,14 +709,16 @@ class _IsolatedStageActorReplica:
         self.cleaned_up: bool = False
 
     def invoke(self, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
+        from django_ray.runtime.entrypoint import _invoke_task_callable
+
         if self.cleaned_up:
             raise RuntimeError(f"Actor stage {self.spec.stage_id} replica has been torn down")
         self.invocations += 1
-        call_args = (*self.spec.bound_args, *args)
+        call_args = (*args, *self.spec.bound_args)
         call_kwargs = {**kwargs, **dict(self.spec.bound_kwargs)}
         self.cached_inputs.append((call_args, call_kwargs))
         try:
-            result = self._callable(*call_args, **call_kwargs)
+            result = _invoke_task_callable(self._callable, list(call_args), call_kwargs)
             self.cached_outputs.append(result)
             return result
         finally:
@@ -734,6 +748,7 @@ class InProcessFixedActorAdapter(CompiledGraphLifecycleAdapter):
         self._pending_kwargs: dict[str, Any] = {}
         self._buffered_output: Any = None
         self._has_buffered_output: bool = False
+        self.last_application_error: Exception | None = None
         self.prepared: bool = False
         self.drained: bool = False
         self.torn_down: bool = False
@@ -800,31 +815,45 @@ class InProcessFixedActorAdapter(CompiledGraphLifecycleAdapter):
             )
         if action.kind is LifecycleActionKind.SUBMIT:
             stage_outputs: dict[str, Any] = {}
-            for stage in self.fixed_plan.stages:
-                replicas = self.replicas_by_stage[stage.stage_id]
-                cursor = self._rr_cursor[stage.stage_id] % len(replicas)
-                self._rr_cursor[stage.stage_id] = cursor + 1
-                replica = replicas[cursor]
-                if not stage.dependencies:
-                    stage_args = self._pending_args
-                    stage_kwargs = self._pending_kwargs
-                elif len(stage.dependencies) == 1:
-                    stage_args = (stage_outputs[stage.dependencies[0]],)
-                    stage_kwargs = {}
+            self.last_application_error = None
+            try:
+                for stage in self.fixed_plan.stages:
+                    replicas = self.replicas_by_stage[stage.stage_id]
+                    cursor = self._rr_cursor[stage.stage_id] % len(replicas)
+                    self._rr_cursor[stage.stage_id] = cursor + 1
+                    replica = replicas[cursor]
+                    if not stage.dependencies:
+                        stage_args = self._pending_args
+                        stage_kwargs = self._pending_kwargs
+                    elif len(stage.dependencies) == 1:
+                        stage_args = (stage_outputs[stage.dependencies[0]],)
+                        stage_kwargs = {}
+                    else:
+                        stage_args = ([stage_outputs[dep] for dep in stage.dependencies],)
+                        stage_kwargs = {}
+                    stage_outputs[stage.stage_id] = replica.invoke(stage_args, stage_kwargs)
+                if self.fixed_plan.gather_terminal_stages:
+                    self._buffered_output = [
+                        stage_outputs[stage_id] for stage_id in self.fixed_plan.terminal_stage_ids
+                    ]
                 else:
-                    stage_args = ([stage_outputs[dep] for dep in stage.dependencies],)
-                    stage_kwargs = {}
-                stage_outputs[stage.stage_id] = replica.invoke(stage_args, stage_kwargs)
-            if self.fixed_plan.gather_terminal_stages:
-                self._buffered_output = [
-                    stage_outputs[stage_id] for stage_id in self.fixed_plan.terminal_stage_ids
-                ]
-            else:
-                terminal_id = self.fixed_plan.terminal_stage_ids[-1]
-                self._buffered_output = stage_outputs[terminal_id]
-            self._has_buffered_output = True
-            self._pending_args = ()
-            self._pending_kwargs = {}
+                    terminal_id = self.fixed_plan.terminal_stage_ids[-1]
+                    self._buffered_output = stage_outputs[terminal_id]
+                self._has_buffered_output = True
+            except Exception as error:
+                self._buffered_output = None
+                self._has_buffered_output = False
+                self.last_application_error = error
+                return LifecycleEvent(
+                    kind=LifecycleEventKind.APPLICATION_ERROR,
+                    session_identity=action.session_identity,
+                    invocation_identity=action.invocation_identity,
+                    observed_at=now,
+                    action_token=action.token,
+                )
+            finally:
+                self._pending_args = ()
+                self._pending_kwargs = {}
             return LifecycleEvent(
                 kind=LifecycleEventKind.SUBMITTED,
                 session_identity=action.session_identity,
@@ -1142,16 +1171,14 @@ class LocalWorkflowExecutionStrategy(WorkflowExecutionStrategy):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> LocalStrategyHandle:
-        from django_ray.workflows import _LocalExecutor
-
         admitted.prepared.materialized_plan.plan.assert_owner_fingerprint(
             admitted.prepared.materialized_plan.plan.fingerprint
         )
-        executor = _LocalExecutor(admitted.prepared.materialized_plan)
+        executor = create_local_workflow_executor()
         executor.bind_plan(
             admitted.prepared.materialized_plan,
             requested_policy=admitted.prepared.selection.requested_policy,
-            reporting_policy="disabled",
+            reporting_policy=admitted.prepared.selection.reporting_policy,
         )
         try:
             submission = signature._submit(executor, args, kwargs, "0", ())
@@ -1265,7 +1292,25 @@ class DynamicTasksWorkflowExecutionStrategy(WorkflowExecutionStrategy):
         *,
         invocation_identity: WorkflowInvocationIdentity | None = None,
     ) -> AdmittedWorkflowInvocation:
-        run_id = prepared.run_identity or _default_run_identity()
+        if prepared.run_identity is not None:
+            run_id = prepared.run_identity
+        else:
+            task_context = get_current_task_context()
+            if (
+                task_context is not None
+                and not task_context.read_only_replay
+                and task_context.task_pk is not None
+                and task_context.attempt_number is not None
+                and task_context.execution_generation is not None
+            ):
+                run_id = WorkflowRunIdentity(
+                    task_execution_pk=task_context.task_pk,
+                    attempt_number=task_context.attempt_number,
+                    execution_generation=task_context.execution_generation,
+                    run_id="dynamic-pending",
+                )
+            else:
+                run_id = _default_run_identity()
         inv_id = invocation_identity or WorkflowInvocationIdentity(
             run_identity=run_id,
             invocation_id=f"dynamic-{uuid.uuid4().hex[:16]}",
@@ -1284,29 +1329,56 @@ class DynamicTasksWorkflowExecutionStrategy(WorkflowExecutionStrategy):
         *,
         executor: Any | None = None,
     ) -> DynamicTasksStrategyHandle:
-        from django_ray.workflows import _get_executor
-
         admitted.prepared.materialized_plan.plan.assert_owner_fingerprint(
             admitted.prepared.materialized_plan.plan.fingerprint
         )
-        ray_executor = executor or _get_executor(True)
+        ray_executor = executor or get_workflow_executor(True)
         ray_executor.bind_plan(
             admitted.prepared.materialized_plan,
             requested_policy=admitted.prepared.selection.requested_policy,
             reporting_policy=admitted.prepared.selection.reporting_policy,
         )
+        allocated_identity = getattr(ray_executor, "workflow_run_identity", None)
+        effective_run_identity = (
+            allocated_identity if allocated_identity is not None else admitted.prepared.run_identity
+        )
+        if effective_run_identity is not None and (
+            admitted.invocation_identity.run_identity != effective_run_identity
+        ):
+            object.__setattr__(
+                admitted,
+                "invocation_identity",
+                WorkflowInvocationIdentity(
+                    run_identity=effective_run_identity,
+                    invocation_id=admitted.invocation_identity.invocation_id,
+                ),
+            )
+        cleanup_refs: list[Any] = []
+        capture_cleanup = getattr(ray_executor, "capture_cleanup", None)
         try:
-            submission = signature._submit(ray_executor, args, kwargs, "0", ())
+            if callable(capture_cleanup):
+                with capture_cleanup(cleanup_refs):
+                    submission = signature._submit(ray_executor, args, kwargs, "0", ())
+            else:
+                submission = signature._submit(ray_executor, args, kwargs, "0", ())
         except BaseException:
+            if cleanup_refs:
+                cancel_fn = getattr(ray_executor, "cancel_and_drain_fold_payloads", None)
+                if callable(cancel_fn):
+                    try:
+                        cancel_fn(list(reversed(cleanup_refs)), timeout_seconds=1.0)
+                    except BaseException:
+                        pass
             ray_executor.finish_progress(failed=True)
             raise
         return DynamicTasksStrategyHandle(
             plan_fingerprint=admitted.prepared.materialized_plan.plan.fingerprint,
-            run_identity=admitted.prepared.run_identity,
+            run_identity=effective_run_identity,
             invocation_id=admitted.invocation_identity.invocation_id,
             opaque_token=f"dynamic-handle:{admitted.invocation_identity.invocation_id}",
             _executor=ray_executor,
             _submission=submission,
+            _cleanup_refs=tuple(cleanup_refs),
         )
 
     def consume_result(
@@ -1325,6 +1397,13 @@ class DynamicTasksWorkflowExecutionStrategy(WorkflowExecutionStrategy):
                 handle._resolved_result = handle._executor.resolve(handle._submission.value)
                 handle._resolved = True
         except BaseException:
+            if handle._cleanup_refs:
+                cancel_fn = getattr(handle._executor, "cancel_and_drain_fold_payloads", None)
+                if callable(cancel_fn):
+                    try:
+                        cancel_fn(list(reversed(handle._cleanup_refs)), timeout_seconds=1.0)
+                    except BaseException:
+                        pass
             handle._executor.finish_progress(failed=True)
             raise
         handle._executor.finish_progress()
@@ -1464,10 +1543,17 @@ class CompiledGraphExecutionStrategy(WorkflowExecutionStrategy):
                 CompiledGraphRuntimeIdentity(
                     ray_version=runtime_dict.get("ray_version"),
                     python_version=runtime_dict.get("python_version"),
+                    python_implementation=runtime_dict.get("python_implementation"),
+                    python_abi=runtime_dict.get("python_abi"),
                     operating_system=runtime_dict.get("operating_system"),
                     architecture=runtime_dict.get("architecture"),
+                    platform_profile=runtime_dict.get("platform_profile"),
+                    libc_profile=runtime_dict.get("libc_profile"),
                     deployment_profile=runtime_dict.get("deployment_profile"),
                     dependency_profile=runtime_dict.get("dependency_profile"),
+                    container_profile=runtime_dict.get("container_profile"),
+                    shared_memory_profile=runtime_dict.get("shared_memory_profile"),
+                    object_store_profile=runtime_dict.get("object_store_profile"),
                 )
                 if isinstance(runtime_dict, Mapping)
                 else detect_compiled_graph_runtime()
@@ -1588,15 +1674,29 @@ class CompiledGraphExecutionStrategy(WorkflowExecutionStrategy):
                 rejections=eligibility.rejections,
             )
         session_identity = run_identity or _default_run_identity()
+        task_context = get_current_task_context()
+        if (
+            task_context is not None
+            and not task_context.read_only_replay
+            and task_context.attempt_number is not None
+            and task_context.execution_generation is not None
+        ):
+            from django_ray.workflow.plans import WorkflowPlanMismatchError
+            from django_ray.workflow.progress.runs import pin_workflow_plan
+
+            if not pin_workflow_plan(task_context, materialized_plan.plan, selection):
+                raise WorkflowPlanMismatchError(
+                    "The durable task attempt is stale; workflow plan pinning was rejected"
+                )
         now = float(self._clock())
         deadlines = LifecycleDeadlines(
-            outer=now + 60.0,
+            outer=now + 120.0,
             admission=now + 10.0,
             submission=now + 30.0,
-            result=now + 30.0,
-            cancellation=now + 10.0,
-            drain=now + 10.0,
-            teardown=now + 10.0,
+            result=now + 60.0,
+            cancellation=now + 75.0,
+            drain=now + 90.0,
+            teardown=now + 105.0,
         )
         state = initial_session(
             session_identity=session_identity,
@@ -1723,6 +1823,16 @@ class CompiledGraphExecutionStrategy(WorkflowExecutionStrategy):
             raise RuntimeError("CompiledGraphStrategyHandle output has already been consumed")
         if handle._cancelled or handle._cleaned_up:
             raise RuntimeError("CompiledGraphStrategyHandle is no longer active")
+        if handle.lifecycle_state.primary_outcome is LifecycleOutcome.APPLICATION_ERROR:
+            handle._consumed = True
+            if (
+                isinstance(handle._adapter, InProcessFixedActorAdapter)
+                and handle._adapter.last_application_error is not None
+            ):
+                raise handle._adapter.last_application_error
+            raise RuntimeError(
+                f"Compiled Graph invocation failed: {handle.lifecycle_state.primary_outcome}"
+            )
         state = self._drive_action(
             handle.lifecycle_state,
             LifecycleEvent(
@@ -1777,11 +1887,18 @@ class CompiledGraphExecutionStrategy(WorkflowExecutionStrategy):
         if handle._drained:
             return
         if handle.lifecycle_state.session_state is CompiledGraphSessionState.READY:
+            invocation_id = (
+                handle.invocation_identity
+                if handle.lifecycle_state.invocation_state
+                is not CompiledGraphInvocationState.TERMINAL
+                else None
+            )
             handle.lifecycle_state = self._drive_action(
                 handle.lifecycle_state,
                 LifecycleEvent(
                     kind=LifecycleEventKind.DRAIN_REQUESTED,
                     session_identity=handle.run_identity,
+                    invocation_identity=invocation_id,
                     observed_at=float(self._clock()),
                 ),
                 handle._adapter,
@@ -1856,14 +1973,26 @@ def resolve_execution_strategy(
             pool_specs=pool_specs,
             capability_decision=compiled_graph_capability_decision,
         )
-        selection = cg_strategy.validate(
+        cg_strategy.validate(
             materialized_plan,
             requested_policy=policy,
             reporting_policy=reporting_policy,
             regions=regions,
             config=config,
         )
-        return cg_strategy, selection
+        raise WorkflowStrategySelectionError(
+            "Execution strategy 'compiled_graph' has no verified Ray cluster adapter and "
+            "cannot fall back to InProcessFixedActorAdapter for public execution",
+            requested_policy=policy,
+            rejections=(
+                PlanRejection(
+                    "compiled_graph",
+                    "IN_PROCESS_ADAPTER_DISALLOWED",
+                    "strategy.compiled_graph.adapter",
+                    "InProcessFixedActorAdapter is restricted to internal hermetic tests",
+                ),
+            ),
+        )
 
     if policy == WorkflowRequestedStrategyPolicy.STATIC_ACTORS.value:
         rejections = tuple(
@@ -1872,7 +2001,7 @@ def resolve_execution_strategy(
             if r.strategy == "static_actors"
         )
         raise WorkflowStrategySelectionError(
-            "Execution strategy 'static_actors' is not eligible for this workflow plan",
+            "Execution strategy 'static_actors' is not available for public workflow execution",
             requested_policy=policy,
             rejections=rejections,
         )
@@ -1899,10 +2028,8 @@ def resolve_execution_strategy(
 
     # AUTO mode: choose dynamic_tasks when Ray is available/initialized, else local.
     # AUTO mode unconditionally excludes compiled_graph (#72).
-    from django_ray.workflows import _get_executor, _LocalExecutor
-
-    probe_executor = _get_executor(use_ray)
-    if isinstance(probe_executor, _LocalExecutor):
+    probe_executor = get_workflow_executor(use_ray)
+    if is_local_workflow_executor(probe_executor):
         local_strategy = LocalWorkflowExecutionStrategy()
         selection = local_strategy.validate(
             materialized_plan,

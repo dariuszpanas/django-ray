@@ -37,7 +37,8 @@
       "kind": "function",
       "parameters": [
         {"name": "queue_names", "kind": "KEYWORD_ONLY", "has_default": true},
-        {"name": "observed_at", "kind": "KEYWORD_ONLY", "has_default": true}
+        {"name": "observed_at", "kind": "KEYWORD_ONLY", "has_default": true},
+        {"name": "cache_ttl_seconds", "kind": "KEYWORD_ONLY", "has_default": true}
       ]
     },
     {"module": "django_ray.models", "name": "RayTaskExecution", "kind": "class"},

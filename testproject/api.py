@@ -33,12 +33,12 @@ from django.db.models import (
     Value,
     When,
 )
-from django.http import HttpResponse, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.tasks import TaskResultStatus
 from django.tasks.exceptions import InvalidTaskBackend
 from ninja import Schema
-from ninja.errors import HttpError
+from ninja.errors import AuthenticationError, AuthorizationError, HttpError, ValidationError
 from pydantic import Field, StrictInt, field_validator
 
 from django_ray import __version__ as django_ray_version
@@ -77,7 +77,14 @@ from testproject.admission import (
     admit_sample,
     enqueue_sample,
 )
-from testproject.api_boundary import ApiTokenAuth, BoundedParser, MetricsTokenAuth, SampleAPI
+from testproject.api_boundary import (
+    ApiTokenAuth,
+    BoundedParser,
+    DemoTokenAuth,
+    MetricsTokenAuth,
+    SampleAPI,
+    require_docs_access,
+)
 from testproject.apps.cluster_tasks import tasks as cluster_tasks
 from testproject.apps.local_ray import tasks as local_tasks
 from testproject.apps.ml_pipeline import tasks as ml_tasks
@@ -318,32 +325,124 @@ def _workflow_limit_argument(value: str | None) -> int:
     return normalized
 
 
+class ApiHttpError(HttpError):
+    """Structured HTTP error carrying a stable machine-readable error code."""
+
+    def __init__(self, status_code: int, message: str, *, code: str) -> None:
+        self.code = code
+        super().__init__(status_code, message)
+
+
+_HTTP_ERROR_DEFAULT_CODES = {
+    400: "BAD_REQUEST",
+    401: "UNAUTHORIZED",
+    403: "FORBIDDEN",
+    404: "NOT_FOUND",
+    405: "METHOD_NOT_ALLOWED",
+    409: "CONFLICT",
+    422: "INVALID_INPUT",
+    429: "RATE_LIMITED",
+    503: "SERVICE_UNAVAILABLE",
+}
+
+
+def _error_json_response(
+    *,
+    code: str,
+    message: str,
+    status: int,
+    extra: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> JsonResponse:
+    """Build a unified structured error response with defensive headers."""
+    payload: dict[str, Any] = {"code": code, "message": message}
+    if extra:
+        payload.update(extra)
+    response = JsonResponse(payload, status=status)
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    if headers:
+        for header_name, header_value in headers.items():
+            response[header_name] = header_value
+    return response
+
+
 api = SampleAPI(
     title="Django Ray API",
     version=django_ray_version,
     description="API for managing bounded sample Ray tasks",
     auth=ApiTokenAuth(),
     parser=BoundedParser(),
+    docs_decorator=require_docs_access,
 )
 
 
 @api.exception_handler(SampleAdmissionError)
 def _sample_admission_error(request, error):
-    response = JsonResponse(
-        {"code": error.code, "message": "Sample admission is temporarily unavailable."},
+    return _error_json_response(
+        code=error.code,
+        message="Sample admission is temporarily unavailable.",
         status=error.status,
+        headers={"Retry-After": error.retry_after},
     )
-    response["Retry-After"] = error.retry_after
-    response["Cache-Control"] = "no-store"
-    response["X-Content-Type-Options"] = "nosniff"
-    return response
 
 
 @api.exception_handler(SampleInputError)
 def _sample_input_error(request, error):
-    return JsonResponse(
-        {"code": "INVALID_INPUT", "message": "Sample input exceeds its supported bounds."},
+    return _error_json_response(
+        code=error.code,
+        message=error.message,
         status=422,
+    )
+
+
+@api.exception_handler(AuthenticationError)
+def _authentication_error(request, error):
+    return _error_json_response(
+        code="UNAUTHORIZED",
+        message="Authentication credentials were not provided or are invalid.",
+        status=401,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@api.exception_handler(AuthorizationError)
+def _authorization_error(request, error):
+    return _error_json_response(
+        code="FORBIDDEN",
+        message=str(error) or "Permission denied.",
+        status=403,
+    )
+
+
+@api.exception_handler(ValidationError)
+def _validation_error(request, error):
+    return _error_json_response(
+        code="VALIDATION_ERROR",
+        message="Request validation failed.",
+        status=422,
+        extra={"errors": error.errors},
+    )
+
+
+@api.exception_handler(Http404)
+def _not_found_error(request, error):
+    return _error_json_response(
+        code="NOT_FOUND",
+        message="The requested resource was not found.",
+        status=404,
+    )
+
+
+@api.exception_handler(HttpError)
+def _http_error(request, error):
+    code = getattr(error, "code", None) or _HTTP_ERROR_DEFAULT_CODES.get(
+        error.status_code, "HTTP_ERROR"
+    )
+    return _error_json_response(
+        code=code,
+        message=str(error),
+        status=error.status_code,
     )
 
 
@@ -373,6 +472,21 @@ def _configured_task_queues() -> tuple[str, ...]:
 # ============================================================================
 # Schemas
 # ============================================================================
+
+
+class ApiErrorSchema(Schema):
+    """Unified structured error envelope for the sample API."""
+
+    code: str
+    message: str
+
+
+class EchoPayloadSchema(Schema):
+    """Optional payload for POST /api/enqueue/echo."""
+
+    message: str | None = None
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskResultSchema(Schema):
@@ -580,7 +694,8 @@ class RetryExecutionOutcomeSchema(Schema):
 class RetryExecutionRuntimeEnvConflictSchema(Schema):
     """Fixed redaction-safe RuntimeEnv retry conflict."""
 
-    detail: Literal["Persisted RuntimeEnv snapshot failed validation"]
+    code: Literal["RUNTIME_ENV_INVALID"]
+    message: Literal["Persisted RuntimeEnv snapshot failed validation."]
 
 
 _RETRY_EXECUTION_RESPONSES = {
@@ -805,6 +920,7 @@ class StatsSchema(Schema):
     failed: int
     expired: int
     cancelled: int
+    cancelling: int
     lost: int
 
 
@@ -917,11 +1033,8 @@ class WorkflowProgressNodeReadSchema(Schema):
     item: dict | None
 
 
-class WorkflowProgressReadErrorSchema(Schema):
+class WorkflowProgressReadErrorSchema(ApiErrorSchema):
     """Stable bounded package-read error."""
-
-    code: str
-    message: str
 
 
 _WORKFLOW_READ_RESPONSES = {
@@ -1035,19 +1148,34 @@ def readiness_check(request):
     return payload
 
 
-@api.get("/health", response=HealthSchema, tags=["Health"], auth=None)
+@api.get("/health", response={200: HealthSchema, 503: HealthSchema}, tags=["Health"], auth=None)
 def health_check(request):
-    """Backward-compatible health endpoint for external checks."""
-    return _database_health_payload()
+    """Health endpoint that verifies database access and returns 503 when degraded."""
+    payload = _database_health_payload()
+    if payload["database"] != "ok":
+        return _ninja_status(503, payload)
+    return payload
 
 
 @api.get("/metrics", auth=MetricsTokenAuth(), tags=["Health"])
 def prometheus_metrics(request):
     """Adapt the package metrics renderer behind testproject bearer auth."""
-    return HttpResponse(
-        render_prometheus_metrics(queue_names=_configured_task_queues()),
+    django_ray_cfg = getattr(settings, "DJANGO_RAY", None)
+    cache_ttl = (
+        django_ray_cfg.get("METRICS_CACHE_TTL_SECONDS", 0.0)
+        if isinstance(django_ray_cfg, dict)
+        else 0.0
+    )
+    response = HttpResponse(
+        render_prometheus_metrics(
+            queue_names=_configured_task_queues(),
+            cache_ttl_seconds=cache_ttl,
+        ),
         content_type="text/plain; version=0.0.4; charset=utf-8",
     )
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 # ============================================================================
@@ -1184,7 +1312,7 @@ def enqueue_intermittent(request, fail_until_attempt: int = 3, queue: str = "def
     }
 
 
-@api.post("/enqueue/cpu/{n}", response=TaskResultSchema, tags=["Enqueue"])
+@api.post("/enqueue/cpu/{n}", response=TaskResultSchema, tags=["Enqueue"], auth=DemoTokenAuth())
 def enqueue_cpu(request, n: int, queue: str = "default"):
     """Enqueue cpu_intensive_task for load testing."""
     task_obj = tasks.cpu_intensive_task.using(queue_name=queue)
@@ -1202,10 +1330,22 @@ def enqueue_cpu(request, n: int, queue: str = "default"):
 
 
 @api.post("/enqueue/echo", response=TaskResultSchema, tags=["Enqueue"])
-def enqueue_echo(request, queue: str = "default"):
-    """Enqueue echo_task that returns its arguments."""
+def enqueue_echo(
+    request,
+    message: str | None = None,
+    queue: str = "default",
+    payload: EchoPayloadSchema | None = None,
+):
+    """Enqueue echo_task that returns its supplied message, args, and kwargs."""
+    call_args = list(payload.args) if payload is not None else []
+    call_kwargs = dict(payload.kwargs) if payload is not None else {}
+    effective_message = (
+        payload.message if payload is not None and payload.message is not None else message
+    )
+    if effective_message is not None and "message" not in call_kwargs:
+        call_kwargs["message"] = effective_message
     task_obj = tasks.echo_task.using(queue_name=queue)
-    result = enqueue_sample(task_obj)
+    result = enqueue_sample(task_obj, *call_args, **call_kwargs)
 
     return {
         "task_id": result.id,
@@ -1321,7 +1461,7 @@ def _decode_execution_list_cursor(
         if created_at.tzinfo is None or created_at.utcoffset() is None:
             raise ValueError
     except (signing.BadSignature, TypeError, ValueError) as error:
-        raise HttpError(422, "Invalid execution-list cursor.") from error
+        raise ApiHttpError(422, "Invalid execution-list cursor.", code="INVALID_CURSOR") from error
     return created_at, execution_id
 
 
@@ -1726,7 +1866,7 @@ def _bounded_execution_list_response(
     encoded = _encode_execution_list_response(request, response)
     if len(encoded) > _EXECUTION_LIST_RESPONSE_MAX_BYTES:
         raise ImproperlyConfigured("Execution list response metadata exceeds its byte bound")
-    return HttpResponse(encoded, status=200, content_type=api.get_content_type())
+    return _bounded_api_http_response(encoded, status_code=200)
 
 
 def _bounded_execution_detail_row(execution_id: int) -> dict[str, Any]:
@@ -1897,7 +2037,7 @@ def list_executions(
     This provides visibility into the internal execution tracking.
     """
     if any("\x00" in value for value in (state, queue, task_id) if value is not None):
-        raise HttpError(422, "Invalid execution-list filter.")
+        raise ApiHttpError(422, "Invalid execution-list filter.", code="INVALID_FILTER")
     queryset = _workflow_observability_executions()
 
     normalized_state = state.upper() if state else None
@@ -1948,6 +2088,7 @@ def get_stats(request):
         "failed": task_counts.get(TaskState.FAILED, 0),
         "expired": task_counts.get(TaskState.EXPIRED, 0),
         "cancelled": task_counts.get(TaskState.CANCELLED, 0),
+        "cancelling": task_counts.get(TaskState.CANCELLING, 0),
         "lost": task_counts.get(TaskState.LOST, 0),
     }
 
@@ -2032,9 +2173,10 @@ def retry_execution(request, execution_id: int):
             ),
         )
     except RuntimeEnvSnapshotError:
-        raise HttpError(
+        raise ApiHttpError(
             409,
-            "Persisted RuntimeEnv snapshot failed validation",
+            "Persisted RuntimeEnv snapshot failed validation.",
+            code="RUNTIME_ENV_INVALID",
         ) from None
     if outcome.accepted:
         status_code = 202
@@ -2111,7 +2253,7 @@ def local_fibonacci(request, n: int):
     }
 
 
-@api.post("/local/workload", response=TaskResultSchema, tags=["Local Ray"])
+@api.post("/local/workload", response=TaskResultSchema, tags=["Local Ray"], auth=DemoTokenAuth())
 def local_workload(request, iterations: int = 1000000, sleep_ms: int = 0):
     """Simulate CPU workload (default queue)."""
     result = enqueue_sample(local_tasks.simulate_workload, iterations=iterations, sleep_ms=sleep_ms)
@@ -2146,7 +2288,7 @@ def local_urgent(request, message: str):
 # ============================================================================
 
 
-@api.post("/stress/cpu", response=TaskResultSchema, tags=["Stress Tests"])
+@api.post("/stress/cpu", response=TaskResultSchema, tags=["Stress Tests"], auth=DemoTokenAuth())
 def stress_cpu(request, duration_seconds: float = 5.0):
     """CPU stress test - burns CPU for specified duration.
 
@@ -2165,12 +2307,12 @@ def stress_cpu(request, duration_seconds: float = 5.0):
     }
 
 
-@api.post("/stress/memory", response=TaskResultSchema, tags=["Stress Tests"])
+@api.post("/stress/memory", response=TaskResultSchema, tags=["Stress Tests"], auth=DemoTokenAuth())
 def stress_memory(request, size_mb: int = 8):
     """Memory stress test - allocates and processes large data.
 
     Args:
-        size_mb: Amount of memory to allocate in MB (default: 100)
+        size_mb: Amount of memory to allocate in MB (default: 8, max: 32)
     """
     result = enqueue_sample(local_tasks.stress_memory, size_mb=size_mb)
     return {
@@ -2184,13 +2326,13 @@ def stress_memory(request, size_mb: int = 8):
     }
 
 
-@api.post("/stress/compute", response=TaskResultSchema, tags=["Stress Tests"])
+@api.post("/stress/compute", response=TaskResultSchema, tags=["Stress Tests"], auth=DemoTokenAuth())
 def stress_compute(request, depth: int = 3, width: int = 5):
     """Nested computation stress test.
 
     Args:
-        depth: Depth of nested loops (max 15)
-        width: Width of each loop level
+        depth: Depth of nested loops (max 6)
+        width: Width of each loop level (max 10)
     """
     result = enqueue_sample(local_tasks.stress_nested_compute, depth=depth, width=width)
     return {
@@ -2204,7 +2346,7 @@ def stress_compute(request, depth: int = 3, width: int = 5):
     }
 
 
-@api.post("/stress/primes", response=TaskResultSchema, tags=["Stress Tests"])
+@api.post("/stress/primes", response=TaskResultSchema, tags=["Stress Tests"], auth=DemoTokenAuth())
 def stress_primes(request, start: int = 1000000, count: int = 100):
     """Prime number search - CPU intensive.
 
@@ -2224,7 +2366,7 @@ def stress_primes(request, start: int = 1000000, count: int = 100):
     }
 
 
-@api.post("/stress/json", response=TaskResultSchema, tags=["Stress Tests"])
+@api.post("/stress/json", response=TaskResultSchema, tags=["Stress Tests"], auth=DemoTokenAuth())
 def stress_json(request, size_kb: int = 16, depth: int = 3):
     """Large JSON structure stress test.
 
@@ -2244,7 +2386,12 @@ def stress_json(request, size_kb: int = 16, depth: int = 3):
     }
 
 
-@api.post("/stress/throughput", response=TaskResultSchema, tags=["Stress Tests"])
+@api.post(
+    "/stress/throughput",
+    response=TaskResultSchema,
+    tags=["Stress Tests"],
+    auth=DemoTokenAuth(),
+)
 def stress_throughput(request, task_count: int = 100, task_duration_ms: int = 10):
     """Throughput simulation - many small tasks.
 
@@ -2367,7 +2514,12 @@ def cluster_distributed_search(request, payload: DistributedSearchSchema):
     }
 
 
-@api.post("/cluster/cpu-benchmark", response=TaskResultSchema, tags=["Cluster Tasks"])
+@api.post(
+    "/cluster/cpu-benchmark",
+    response=TaskResultSchema,
+    tags=["Cluster Tasks"],
+    auth=DemoTokenAuth(),
+)
 def cluster_cpu_benchmark(request, num_items: int = 10, seconds_per_item: float = 2.0):
     """Benchmark distributed CPU work across the cluster.
 
@@ -2408,7 +2560,12 @@ def cluster_cpu_benchmark(request, num_items: int = 10, seconds_per_item: float 
     }
 
 
-@api.post("/cluster/workflow-benchmark", response=TaskResultSchema, tags=["Workflows"])
+@api.post(
+    "/cluster/workflow-benchmark",
+    response=TaskResultSchema,
+    tags=["Workflows"],
+    auth=DemoTokenAuth(),
+)
 def cluster_workflow_benchmark(
     request,
     num_items: int = 8,
@@ -2459,7 +2616,12 @@ def get_cluster_workflow_benchmark(
     )
 
 
-@api.post("/cluster/complex-workflow", response=TaskResultSchema, tags=["Workflows"])
+@api.post(
+    "/cluster/complex-workflow",
+    response=TaskResultSchema,
+    tags=["Workflows"],
+    auth=DemoTokenAuth(),
+)
 def cluster_complex_workflow(
     request,
     fast_items: int = 8,
@@ -2479,7 +2641,7 @@ def cluster_complex_workflow(
             failure_item=failure_item,
         )
     except ValueError as error:
-        raise HttpError(422, str(error)) from error
+        raise ApiHttpError(422, str(error), code="INVALID_INPUT") from error
     workflow_options: dict[str, Any] = {
         "fast_items": fast_items,
         "slow_items": slow_items,
@@ -2546,7 +2708,7 @@ def cluster_workflow_showcase(
             failure_item=failure_item,
         )
     except ValueError as error:
-        raise HttpError(422, str(error)) from error
+        raise ApiHttpError(422, str(error), code="INVALID_INPUT") from error
     workflow_options: dict[str, Any] = {
         "item_count": item_count,
         "work_seconds": work_seconds,
@@ -2611,7 +2773,7 @@ def cluster_workflow_recovery_showcase(
             failure_item=None,
         )
     except ValueError as error:
-        raise HttpError(422, str(error)) from error
+        raise ApiHttpError(422, str(error), code="INVALID_INPUT") from error
     try:
         recovery_runtime_env = resolve_runtime_env_profile(
             "recovery-showcase",
@@ -2633,10 +2795,11 @@ def cluster_workflow_recovery_showcase(
             work_seconds=work_seconds,
         )
     except (ImproperlyConfigured, InvalidTaskBackend, WorkflowPlanValidationError) as error:
-        raise HttpError(
+        raise ApiHttpError(
             503,
             "Workflow recovery showcase requires a valid 'recovery-showcase' task backend "
             "and RuntimeEnv profile.",
+            code="RECOVERY_SHOWCASE_UNAVAILABLE",
         ) from error
     return {
         "task_id": result.id,
@@ -3073,6 +3236,7 @@ def cluster_runtime_env_probe(
     "/cluster/runtime-env/benchmark",
     response=TaskResultSchema,
     tags=["Runtime Environments"],
+    auth=DemoTokenAuth(),
 )
 def cluster_runtime_env_benchmark(
     request,
@@ -3207,7 +3371,12 @@ class HyperparamSearchSchema(Schema):
     metric: str = "accuracy"
 
 
-@api.post("/ml/hyperparam-search", response=TaskResultSchema, tags=["ML Pipeline"])
+@api.post(
+    "/ml/hyperparam-search",
+    response=TaskResultSchema,
+    tags=["ML Pipeline"],
+    auth=DemoTokenAuth(),
+)
 def ml_hyperparam_search(request, payload: HyperparamSearchSchema):
     """Run hyperparameter grid search (ml queue)."""
     result = enqueue_sample(

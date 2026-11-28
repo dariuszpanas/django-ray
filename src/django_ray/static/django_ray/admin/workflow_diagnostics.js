@@ -454,6 +454,10 @@
     const link = element("a", "", label);
     link.href = href;
     link.dataset.actionKind = kind;
+    if (kind === "topology") {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    }
     actions.append(link);
   };
 
@@ -987,6 +991,325 @@
     return legend;
   };
 
+  let inspectorState = null;
+
+  const ensureNodeInspector = () => {
+    if (inspectorState !== null) {
+      return inspectorState;
+    }
+    const overlay = element("div", "django-ray-node-inspector");
+    overlay.dataset.nodeInspector = "";
+    overlay.hidden = true;
+
+    const dialog = element("div", "django-ray-node-inspector__dialog");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "django-ray-node-inspector-title");
+
+    const header = element("header", "django-ray-node-inspector__header");
+    const headerText = element("div", "");
+    const title = element(
+      "h3",
+      "django-ray-node-inspector__title",
+      "Node details",
+    );
+    title.setAttribute("id", "django-ray-node-inspector-title");
+    const subtitle = element("p", "django-ray-node-inspector__subtitle", "");
+    subtitle.dataset.nodeInspectorSubtitle = "";
+    headerText.append(title, subtitle);
+
+    const closeButton = element(
+      "button",
+      "django-ray-node-inspector__close",
+      "Close",
+    );
+    closeButton.type = "button";
+    closeButton.dataset.nodeInspectorClose = "";
+    closeButton.setAttribute("aria-label", "Close node inspector");
+    header.append(headerText, closeButton);
+
+    const body = element("div", "django-ray-node-inspector__body");
+    const inspectorStatus = element(
+      "p",
+      "django-ray-node-inspector__status",
+      "",
+    );
+    inspectorStatus.dataset.nodeInspectorStatus = "";
+    inspectorStatus.setAttribute("role", "status");
+    inspectorStatus.setAttribute("aria-live", "polite");
+    inspectorStatus.setAttribute("aria-atomic", "true");
+    const inspectorContent = element(
+      "div",
+      "django-ray-node-inspector__content",
+    );
+    inspectorContent.dataset.nodeInspectorContent = "";
+    inspectorContent.hidden = true;
+    body.append(inspectorStatus, inspectorContent);
+
+    const footer = element("footer", "django-ray-node-inspector__footer");
+    const rawLink = element(
+      "a",
+      "django-ray-node-inspector__raw-link",
+      "View raw JSON",
+    );
+    rawLink.dataset.nodeInspectorRaw = "";
+    rawLink.target = "_blank";
+    rawLink.rel = "noopener noreferrer";
+    const footerClose = element(
+      "button",
+      "django-ray-workflow__copy",
+      "Close",
+    );
+    footerClose.type = "button";
+    footerClose.dataset.nodeInspectorCloseFooter = "";
+    footer.append(rawLink, footerClose);
+
+    dialog.append(header, body, footer);
+    overlay.append(dialog);
+    disclosure.append(overlay);
+
+    let activeToken = 0;
+    let triggerNode = null;
+
+    const closeInspector = () => {
+      activeToken += 1;
+      overlay.hidden = true;
+      const restoreTarget = triggerNode;
+      triggerNode = null;
+      if (restoreTarget && typeof restoreTarget.focus === "function") {
+        restoreTarget.focus();
+      }
+    };
+
+    closeButton.addEventListener("click", closeInspector);
+    footerClose.addEventListener("click", closeInspector);
+    overlay.addEventListener("click", (event) => {
+      if (event && event.target === overlay) {
+        closeInspector();
+      }
+    });
+
+    const handleKeydown = (event) => {
+      if (overlay.hidden || !event) {
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault?.();
+        closeInspector();
+        return;
+      }
+      if (event.key === "Tab") {
+        const queried =
+          typeof dialog.querySelectorAll === "function"
+            ? Array.from(
+                dialog.querySelectorAll(
+                  'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+                ),
+              )
+            : [];
+        const focusables = (
+          queried.length > 0 ? queried : [closeButton, rawLink, footerClose]
+        ).filter((candidate) => !candidate.hidden && !candidate.disabled);
+        if (focusables.length === 0) {
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (event.shiftKey && active === first) {
+          event.preventDefault?.();
+          last.focus?.();
+        } else if (!event.shiftKey && active === last) {
+          event.preventDefault?.();
+          first.focus?.();
+        }
+      }
+    };
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("keydown", handleKeydown);
+    } else {
+      overlay.addEventListener("keydown", handleKeydown);
+    }
+
+    const renderFactSection = (heading, entries) => {
+      const box = element("section", "django-ray-node-inspector__section");
+      box.append(element("h4", "", heading));
+      const list = element("dl", "django-ray-node-inspector__facts");
+      for (const [label, value] of entries) {
+        const item = element("div", "");
+        item.append(
+          element("dt", "", label),
+          element("dd", "", asText(value)),
+        );
+        list.append(item);
+      }
+      box.append(list);
+      return box;
+    };
+
+    const renderNodeDetail = (payload) => {
+      const sections = [];
+      const item = isRecord(payload.item) ? payload.item : null;
+      const runIdentity = isRecord(payload.run_identity)
+        ? payload.run_identity
+        : null;
+      const summaryEntries = [
+        ["Node ID", item?.node_id ?? payload.node_id],
+        ["State", item?.state ?? payload.availability],
+        ["Found", asBoolean(payload.found)],
+        ["Availability", asIdentifier(payload.availability)],
+        ["Attempt", runIdentity?.attempt_number],
+        ["Generation", runIdentity?.execution_generation],
+        ["Run ID", runIdentity?.run_id],
+        ["Started", item?.started_at],
+        ["Finished", item?.finished_at],
+        ["Truncated", item ? asBoolean(item.truncated) : "\u2014"],
+      ];
+      sections.push(renderFactSection("Node summary", summaryEntries));
+
+      const rayEntries = [];
+      if (isRecord(item?.execution)) {
+        for (const [key, value] of Object.entries(item.execution)) {
+          if (value !== null && value !== undefined && value !== "") {
+            rayEntries.push([
+              asIdentifier(key),
+              typeof value === "object" ? JSON.stringify(value) : String(value),
+            ]);
+          }
+        }
+      }
+      if (isRecord(item?.invocation_identity)) {
+        for (const [key, value] of Object.entries(item.invocation_identity)) {
+          if (value !== null && value !== undefined && value !== "") {
+            rayEntries.push([
+              asIdentifier(key),
+              typeof value === "object" ? JSON.stringify(value) : String(value),
+            ]);
+          }
+        }
+      }
+      if (rayEntries.length > 0) {
+        sections.push(renderFactSection("Ray execution IDs", rayEntries));
+      }
+
+      if (typeof item?.error === "string" && item.error.length > 0) {
+        const errorSection = element(
+          "section",
+          "django-ray-node-inspector__section",
+        );
+        errorSection.append(
+          element("h4", "", "Error details"),
+          element("pre", "django-ray-node-inspector__error", item.error),
+        );
+        sections.push(errorSection);
+      }
+
+      const jsonSection = element(
+        "section",
+        "django-ray-node-inspector__section",
+      );
+      jsonSection.append(
+        element("h4", "", "Formatted JSON"),
+        element(
+          "pre",
+          "django-ray-node-inspector__json",
+          JSON.stringify(payload, null, 2),
+        ),
+      );
+      sections.push(jsonSection);
+      inspectorContent.replaceChildren(...sections);
+      inspectorContent.hidden = false;
+    };
+
+    const openInspector = async ({ node, url, trigger }) => {
+      activeToken += 1;
+      const token = activeToken;
+      triggerNode = trigger ?? null;
+      title.textContent = node.label || node.id;
+      subtitle.textContent = `Node ID: ${node.id} \u2022 ${
+        graphStatePresentation[node.state]?.text ?? node.state
+      }`;
+      rawLink.href = url;
+      rawLink.setAttribute(
+        "aria-label",
+        `View raw JSON for node ${node.label || node.id}`,
+      );
+      inspectorStatus.textContent = "Loading node details\u2026";
+      inspectorStatus.dataset.state = "loading";
+      inspectorStatus.setAttribute("aria-busy", "true");
+      inspectorContent.replaceChildren();
+      inspectorContent.hidden = true;
+      overlay.hidden = false;
+      closeButton.focus?.();
+
+      try {
+        const { response, contentType, payload } = await readResponse(url);
+        if (token !== activeToken) {
+          return;
+        }
+        if (
+          response.redirected ||
+          [401, 403].includes(response.status) ||
+          (response.ok && !contentType.includes("application/json"))
+        ) {
+          inspectorStatus.textContent =
+            "Node details unavailable; reload after signing in again.";
+          inspectorStatus.dataset.state = "error";
+          inspectorStatus.setAttribute("aria-busy", "false");
+          return;
+        }
+        if (response.status === 404) {
+          inspectorStatus.textContent =
+            "Node details are no longer available for this execution.";
+          inspectorStatus.dataset.state = "error";
+          inspectorStatus.setAttribute("aria-busy", "false");
+          return;
+        }
+        if (!response.ok) {
+          inspectorStatus.textContent =
+            "Node details are temporarily unavailable. Use View raw JSON to retry.";
+          inspectorStatus.dataset.state = "error";
+          inspectorStatus.setAttribute("aria-busy", "false");
+          return;
+        }
+        if (
+          !isRecord(payload) ||
+          payload.schema !== "django-ray.workflow-progress-node"
+        ) {
+          inspectorStatus.textContent =
+            "Node details could not be displayed safely.";
+          inspectorStatus.dataset.state = "error";
+          inspectorStatus.setAttribute("aria-busy", "false");
+          return;
+        }
+        renderNodeDetail(payload);
+        inspectorStatus.textContent =
+          payload.found === false
+            ? "No stored detail record was found for this node."
+            : "Node details loaded.";
+        inspectorStatus.dataset.state = "ready";
+        inspectorStatus.setAttribute("aria-busy", "false");
+      } catch (error) {
+        if (token !== activeToken) {
+          return;
+        }
+        inspectorStatus.textContent =
+          error instanceof RequestControllerUnavailable
+            ? "Node inspector is unavailable in this browser; use View raw JSON."
+            : "Node details could not be displayed safely.";
+        inspectorStatus.dataset.state = "error";
+        inspectorStatus.setAttribute("aria-busy", "false");
+      }
+    };
+
+    inspectorState = {
+      close: closeInspector,
+      open: openInspector,
+      overlay,
+    };
+    return inspectorState;
+  };
+
   const graphNodeCard = (
     node,
     layer,
@@ -994,18 +1317,19 @@
     descriptionId,
     graphEndpoints,
   ) => {
-    const link = element("a", "django-ray-workflow-graph__node");
-    link.href = nodeDetailUrl(graphEndpoints, node.id);
-    link.dataset.kind = node.kind;
-    link.dataset.layer = String(layer);
-    link.dataset.position = String(position);
-    link.dataset.state = node.state;
-    link.setAttribute("aria-describedby", descriptionId);
+    const detailHref = nodeDetailUrl(graphEndpoints, node.id);
+    const card = element("article", "django-ray-workflow-graph__node");
+    card.dataset.kind = node.kind;
+    card.dataset.layer = String(layer);
+    card.dataset.position = String(position);
+    card.dataset.state = node.state;
+    card.dataset.nodeId = node.id;
+    card.dataset.nodeDetailUrl = detailHref;
     if (node.failure_path) {
-      link.dataset.failurePath = "true";
+      card.dataset.failurePath = "true";
     }
     if (node.state === "FAILED" && node.failure_path) {
-      link.dataset.failureOrigin = "true";
+      card.dataset.failureOrigin = "true";
     }
 
     const identity = element("span", "");
@@ -1028,7 +1352,7 @@
     const stateSymbol = element("span", "", statePresentation.symbol);
     stateSymbol.setAttribute("aria-hidden", "true");
     state.append(stateSymbol, element("span", "", statePresentation.text));
-    link.append(identity, state);
+    card.append(identity, state);
 
     const kindPresentation = graphKindPresentation[node.kind];
     const metadata = element(
@@ -1070,7 +1394,7 @@
         ),
       );
     }
-    link.append(metadata);
+    card.append(metadata);
 
     const outputPresentation = graphNodeOutputPresentation(node);
     const output = element(
@@ -1093,10 +1417,10 @@
         outputPresentation.text,
       ),
     );
-    link.append(output);
+    card.append(output);
 
     if (node.message !== null) {
-      link.append(
+      card.append(
         element(
           "span",
           "django-ray-workflow-graph__node-message",
@@ -1111,9 +1435,48 @@
         `Failure: ${node.error}`,
       );
       error.dataset.failure = "true";
-      link.append(error);
+      card.append(error);
     }
-    return link;
+
+    const actions = element("div", "django-ray-workflow-graph__node-actions");
+    const inspectButton = element(
+      "button",
+      "django-ray-workflow-graph__inspect",
+      "Inspect node",
+    );
+    inspectButton.type = "button";
+    inspectButton.dataset.nodeId = node.id;
+    inspectButton.dataset.nodeDetailUrl = detailHref;
+    inspectButton.setAttribute(
+      "aria-label",
+      `Inspect node ${node.label || node.id}`,
+    );
+    inspectButton.setAttribute("aria-describedby", descriptionId);
+    inspectButton.addEventListener("click", () => {
+      const inspector = ensureNodeInspector();
+      void inspector.open({
+        node,
+        url: detailHref,
+        trigger: inspectButton,
+      });
+    });
+
+    const rawLink = element(
+      "a",
+      "django-ray-workflow-graph__raw-json",
+      "Raw JSON",
+    );
+    rawLink.href = detailHref;
+    rawLink.target = "_blank";
+    rawLink.rel = "noopener noreferrer";
+    rawLink.setAttribute(
+      "aria-label",
+      `Raw JSON for node ${node.label || node.id}`,
+    );
+
+    actions.append(inspectButton, rawLink);
+    card.append(actions);
+    return card;
   };
 
   const renderGraph = (validated, content, graphEndpoints) => {
@@ -1222,6 +1585,7 @@
   }) => {
     let graphRequested = false;
     let fallbackActions = null;
+    let refreshRow = null;
     const showFallbacks = () => {
       if (fallbackActions !== null) {
         return;
@@ -1239,6 +1603,36 @@
       fallbackActions.remove();
       fallbackActions = null;
     };
+    const showRefreshButton = () => {
+      if (!retryOnTransientFailure || refreshRow !== null) {
+        return;
+      }
+      const wrapper = element("div", "django-ray-workflow-graph__refresh-row");
+      const refreshButton = element(
+        "button",
+        "django-ray-workflow-graph__refresh",
+        "Refresh graph",
+      );
+      refreshButton.type = "button";
+      refreshButton.dataset.workflowGraphRefresh = "";
+      refreshButton.addEventListener("click", () => {
+        if (graphRequested) {
+          return;
+        }
+        graphRequested = true;
+        void loadGraph();
+      });
+      wrapper.append(refreshButton);
+      graphContent.parentNode.append(wrapper);
+      refreshRow = wrapper;
+    };
+    const removeRefreshButton = () => {
+      if (refreshRow === null) {
+        return;
+      }
+      refreshRow.remove();
+      refreshRow = null;
+    };
     const setGraphStatus = (message, state = "ready") => {
       graphStatusMessage.textContent = message;
       graphStatus.dataset.state = state;
@@ -1254,11 +1648,14 @@
       graphRequested = !retryOnTransientFailure;
       graphContent.hidden = true;
       showFallbacks();
+      if (retryOnTransientFailure) {
+        showRefreshButton();
+      }
       graph.dataset.hydrationState = "error";
       if (retryOnTransientFailure) {
-        setGraphSummary("Unavailable; reopen to retry.");
+        setGraphSummary("Unavailable; refresh or reopen to retry.");
         setGraphStatus(
-          `${message} Close and reopen this graph to retry, or use the bounded JSON views below.`,
+          `${message} Close and reopen or click Refresh graph to retry, or use the bounded JSON views below.`,
           "error",
         );
       } else {
@@ -1270,6 +1667,7 @@
       }
     };
     const loadGraph = async () => {
+      removeRefreshButton();
       if (!graphEndpoints.graph) {
         showFallbacks();
         graph.dataset.hydrationState = "unavailable";
@@ -1340,8 +1738,9 @@
             if (retryOnTransientFailure) {
               graphRequested = false;
               graph.dataset.hydrationState = "idle";
+              showRefreshButton();
               setGraphStatus(
-                `${validated.payload.message} Close and reopen this graph after the workflow reaches a terminal state to try again, or use the bounded JSON views below.`,
+                `${validated.payload.message} Close and reopen or click Refresh graph after the workflow reaches a terminal state to try again, or use the bounded JSON views below.`,
                 "warning",
               );
             } else {
@@ -1367,6 +1766,7 @@
         }
         renderGraph(validated, graphContent, graphEndpoints);
         removeFallbacks();
+        removeRefreshButton();
         graph.dataset.hydrationState = "ready";
         const { edges, nodes } = validated.payload.counts;
         setGraphSummary(
@@ -1394,13 +1794,15 @@
         recoverableFailure("The workflow graph could not be displayed safely.");
       }
     };
-    graph.addEventListener("toggle", () => {
+    const triggerLoad = () => {
       if (!graph.open || graphRequested) {
         return;
       }
       graphRequested = true;
       void loadGraph();
-    });
+    };
+    graph.addEventListener("toggle", triggerLoad);
+    return { triggerLoad };
   };
 
   const graphDisclosure = () => {
@@ -1470,7 +1872,7 @@
     graphContent.hidden = true;
     body.append(graphStatus, graphContent);
     graph.append(summary, body);
-    attachGraphLoader({
+    currentGraphController = attachGraphLoader({
       graph,
       graphContent,
       graphEndpoints: endpoints,
@@ -1547,7 +1949,7 @@
         "This archived graph could not be initialized safely.";
       return;
     }
-    attachGraphLoader({
+    return attachGraphLoader({
       graph,
       graphContent,
       graphEndpoints,
@@ -1576,7 +1978,7 @@
       currentGraphMount.replaceChildren();
       currentGraphMount.hidden = !available;
       if (available) {
-        currentGraphMount.append(graphDisclosure());
+        currentGraphMount.append(mountCurrentGraphDisclosure());
       }
     }
     if (attemptGraphStack) {
@@ -1651,7 +2053,7 @@
     if (availableActions.topology_nodes === true) {
       addAction(
         actions,
-        "Topology nodes",
+        "Topology nodes JSON",
         endpoints.topologyNodes,
         "topology",
       );
@@ -1659,13 +2061,18 @@
     if (availableActions.topology_edges === true) {
       addAction(
         actions,
-        "Topology edges",
+        "Topology edges JSON",
         endpoints.topologyEdges,
         "topology",
       );
     }
     if (availableActions.node_details === true) {
-      addAction(actions, "Node details", endpoints.nodeDetails, "topology");
+      addAction(
+        actions,
+        "Node details JSON",
+        endpoints.nodeDetails,
+        "topology",
+      );
     }
     if (actions.children.length > 0) {
       wrapper.append(actions);
@@ -1763,7 +2170,69 @@
     }
   };
 
-  archivedGraphDisclosures.forEach(attachArchivedGraphLoader);
+  const archivedLoaders = new Map();
+  let pendingGraphAttemptFromHash = null;
+  let currentGraphController = null;
+
+  const originalGraphDisclosure = graphDisclosure;
+  const mountCurrentGraphDisclosure = () => {
+    const graph = originalGraphDisclosure();
+    if (
+      pendingGraphAttemptFromHash === "current" ||
+      (pendingGraphAttemptFromHash !== null &&
+        pendingGraphAttemptFromHash === pinnedAttemptNumber)
+    ) {
+      pendingGraphAttemptFromHash = null;
+      graph.open = true;
+      currentGraphController?.triggerLoad?.();
+    }
+    return graph;
+  };
+
+  archivedGraphDisclosures.forEach((graph) => {
+    const controller = attachArchivedGraphLoader(graph);
+    const attemptNumber = graph.dataset.workflowAttemptGraph ?? "";
+    if (controller && attemptNumber) {
+      archivedLoaders.set(attemptNumber, { graph, controller });
+    }
+  });
+
+  const openGraphForHash = () => {
+    const hash = window.location?.hash ?? "";
+    if (!hash) {
+      return;
+    }
+    if (hash === "#workflow-graph") {
+      pendingGraphAttemptFromHash = "current";
+      disclosure.open = true;
+      if (!requested) {
+        requested = true;
+        void load();
+      }
+      return;
+    }
+    const match = hash.match(
+      /^#(?:workflow-graph-attempt-|django-ray-workflow-attempt-)([1-9][0-9]*)$/,
+    );
+    if (!match) {
+      return;
+    }
+    const targetAttempt = match[1];
+    disclosure.open = true;
+    const archived = archivedLoaders.get(targetAttempt);
+    if (archived) {
+      archived.graph.open = true;
+      archived.controller.triggerLoad();
+      return;
+    }
+    if (targetAttempt === pinnedAttemptNumber) {
+      pendingGraphAttemptFromHash = targetAttempt;
+      if (!requested) {
+        requested = true;
+        void load();
+      }
+    }
+  };
 
   disclosure.addEventListener("toggle", () => {
     if (!disclosure.open || requested) {
@@ -1772,4 +2241,9 @@
     requested = true;
     void load();
   });
+
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("hashchange", openGraphForHash);
+  }
+  openGraphForHash();
 })();

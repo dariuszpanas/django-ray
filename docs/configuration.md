@@ -50,7 +50,7 @@ authoritative for the Ray Job client; ambient `RAY_API_SERVER_ADDRESS` or
 `RAY_ADDRESS` process variables cannot redirect that task to another cluster.
 
 Ray Core workers choose one cluster when the process starts, through `--local`,
-`--cluster`, or the global settings. They do not switch clusters per task. Use
+`--cluster=ray://...`, or the global settings. They do not switch clusters per task. Use
 separate queues and task-manager processes when Ray Core workloads must target
 different clusters.
 
@@ -77,13 +77,13 @@ TASKS = {
 }
 ```
 
-The option is an explicit, boolean, default-off queue-affinity policy. A worker with
-no execution-mode flag uses Ray Job mode by default and may claim `ray-data`. Ray Core
-and synchronous workers reject an explicitly selected Ray-Job-only queue at startup
-and again at the durable claim boundary. Their `--all-queues` expansion reports and
-skips those queues; it fails if nothing compatible remains. An undeclared queue keeps
-the existing open-ended behavior. If multiple aliases declare the same queue, one
-`RAY_JOB_ONLY=True` declaration restricts that queue for every worker.
+The option is an explicit, boolean, default-off queue-affinity policy. Select Ray Job mode
+explicitly with `--ray-job` (or `RUNNER="ray_job"`) for workers that claim `ray-data`. Ray Core
+(the package default) and synchronous workers reject an explicitly selected Ray-Job-only queue at
+startup and again at the durable claim boundary. Their `--all-queues` expansion reports and skips
+those queues; it fails if nothing compatible remains. An undeclared queue keeps the existing
+open-ended behavior. If multiple aliases declare the same queue, one `RAY_JOB_ONLY=True`
+declaration restricts that queue for every worker.
 
 Explicit/default queue selection imports only aliases that opt in with
 `RAY_JOB_ONLY=True`, so an unrelated unavailable task backend without this option does
@@ -110,17 +110,21 @@ choose three things in order: **worker execution mode**, **task/fan-out pattern*
 
 | Mode | Worker CLI flag | Minimal `DJANGO_RAY` settings | Best for | Key trade-off |
 |---|---|---|---|---|
-| **Synchronous** (`sync`) | `--sync` | `{"RUNNER": "ray_core"}` (no Ray cluster needed) | Unit tests, local debugging, tiny maintenance queues | Runs in the worker process; no Ray parallelism or isolation |
-| **Local Ray Core** (`local`) | `--local` | `{"RAY_ADDRESS": "auto", "RUNNER": "ray_core"}` | Single-host multi-CPU tasks and local development | Starts or attaches to a local Ray instance on the worker machine |
-| **Cluster Ray Core** (`cluster`) | `--cluster` | `{"RAY_ADDRESS": "ray://ray-head-svc:10001", "RUNNER": "ray_core"}` | Low-latency distributed tasks and dynamic workflows (`chain`/`group`/`map_step`) | Tied to the task manager's Ray Client connection (`30s` default reconnect grace) |
-| **Ray Job** (`ray_job`) | `--execution-mode ray_job` | `{"RAY_ADDRESS": "http://ray-head-svc:8265", "RUNNER": "ray_job"}` | Long-running batch jobs, Ray Data pipelines, per-job RuntimeEnv isolation, and manager-restart survival | Higher per-task startup overhead (spawns an isolated Ray Job driver process) |
+| **Synchronous** (`sync`) | `--sync` | `{}` (no Ray cluster or `RAY_ADDRESS` needed) | Unit tests, local debugging, tiny maintenance queues | Runs in the worker process; no Ray parallelism or isolation |
+| **Local Ray Core** (`local`) | `--local` | `{"RAY_ADDRESS": "auto", "RUNNER": "ray_core"}` *(package defaults)* | Single-host multi-CPU tasks and local development | Starts or attaches to a local Ray instance on the worker machine |
+| **Cluster Ray Core** (`cluster`) | `--cluster=ray://ray-head-svc:10001` | `{"RAY_ADDRESS": "ray://ray-head-svc:10001", "RUNNER": "ray_core"}` | Low-latency distributed tasks and dynamic workflows (`chain`/`group`/`map_step`) | Tied to the task manager's Ray Client connection (`30s` default reconnect grace) and open Ray Client startup race |
+| **Ray Job** (`ray_job`) | `--ray-job` | `{"RAY_ADDRESS": "http://ray-head-svc:8265", "RUNNER": "ray_job", "INPUT_STORAGE_BACKEND": "s3", "INPUT_STORAGE_S3_BUCKET": "..."}` | Long-running batch jobs, Ray Data pipelines, per-job RuntimeEnv isolation, and manager-restart survival | Higher per-task startup overhead (spawns an isolated Ray Job driver) and requires retrievable `INPUT_STORAGE_BACKEND` |
 
-> [!TIP]
-> **Rule of thumb**: Start with **Cluster Ray Core** (`RUNNER="ray_core"`, `--cluster`) for
-> sub-second to multi-minute tasks and DAG workflows. Route long-running jobs, Ray Data
-> transforms, or tasks that must survive a Django worker pod restart to a dedicated
-> queue served by a **Ray Job** (`--execution-mode ray_job`) worker with
-> `OPTIONS={"RAY_JOB_ONLY": True}`.
+!!! tip "Rule of thumb"
+
+    Use **Local Ray Core** (`--local`, the package default `RUNNER="ray_core"` with
+    `RAY_ADDRESS="auto"`) for local development and `--sync` for unit tests. On remote
+    Kubernetes clusters, start with **Ray Job** (`--ray-job` / `RUNNER="ray_job"` plus
+    retrievable `INPUT_STORAGE_BACKEND` and `OPTIONS={"RAY_JOB_ONLY": True}`) for durable
+    background jobs, Ray Data transforms, and workloads that must survive a task-manager restart.
+    Choose **Cluster Ray Core** (`--cluster=ray://ray-head-svc:10001`) when measured per-task
+    startup latency matters for bounded short tasks and dynamic workflows whose lifetime includes
+    the task manager's Ray Client connection.
 
 ### 2. Task vs. in-task fan-out vs. workflow DAGs
 
@@ -142,9 +146,9 @@ matches your data size and failure boundary:
   delay when first scheduling tasks or unpacking RuntimeEnv dependencies.
 - **Avoiding cold-start penalties**:
   Bake heavy Python dependencies into your Ray container image (`Dockerfile.ray`) and
-  deliver application code via a pre-built deterministic zip archive on a shared
-  read-only volume (`snapshot_local_runtime_env()`), rather than resolving `pip`
-  packages dynamically per task.
+  deliver application code via a pre-built deterministic zip archive referenced by an
+  immutable `working_dir` URI (HTTPS, S3, GCS, or a shared read-only volume), rather
+  than resolving `pip` packages dynamically per task.
 - **Shared worker lease policy**:
   Every process sharing the database must use the same `WORKER_LEASE_SECONDS` (seeded to
   `60` seconds by migration `0028`). Inspect or update it during a drained maintenance
@@ -163,7 +167,7 @@ matches your data size and failure boundary:
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `RAY_ADDRESS` | `str` | `None` | Ray cluster address. Use `"auto"` for local, or `"ray://host:port"` for cluster |
+| `RAY_ADDRESS` | `str \| None` | `"auto"` | Ray cluster address (`"auto"` locally, `"ray://host:port"` for Ray Client, or HTTP(S) Jobs URL; validated lazily so `--sync` does not require it) |
 | `RAY_RUNTIME_ENV` | `dict` | `{}` | Ray runtime environment configuration |
 | `RAY_STATE_API_ADDRESS` | `str \| None` | `None` | Ray dashboard URL used for live task state and log lookup |
 | `RAY_STATE_API_TIMEOUT_SECONDS` | `int` | `5` | Timeout for optional Ray state and log queries |
@@ -175,7 +179,10 @@ matches your data size and failure boundary:
 | `RUNTIME_ENV_ENCRYPTION_DJANGO_SECRET_FALLBACK` | `bool` | `False` | Explicitly allow HKDF-derived keys from `SECRET_KEY` and `SECRET_KEY_FALLBACKS` |
 | `WORKFLOW_PLAN_CODE_REVISION` | `str \| None` | `None` | Immutable non-secret application build, artifact, or image revision; required for reusable-plan eligibility |
 | `WORKFLOW_PLAN_TRUST_IDENTITY` | `dict` | `{}` | Bounded non-secret trust, credential-provider, and optional full-environment revision used to decide safe actor reuse |
-| `RUNNER` | `str` | `"ray_job"` | Default runner when no mode flag is passed: `"ray_job"` or `"ray_core"` |
+| `RUNNER` | `str` | `"ray_core"` | Default runner when no mode flag is passed: `"ray_core"` or `"ray_job"` |
+| `ALLOWED_RAY_ADDRESSES` | `list[str] \| None` | `None` | Optional allowlist of trusted Ray cluster or Jobs HTTP(S) addresses |
+| `ALLOWED_CALLABLE_MODULES` | `list[str] \| None` | `None` | Optional dotted module prefixes allowed for task/workflow callable resolution (defaults to user `INSTALLED_APPS`) |
+| `REQUIRE_STRICT_NESTED_REQUEST` | `bool` | `False` | Require signed nested execution request envelopes on remote distributed helpers (`parallel_map`, `parallel_starmap`, `scatter_gather`) even outside explicit durable task contexts |
 
 ### Concurrency
 
@@ -188,59 +195,25 @@ matches your data size and failure boundary:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `WORKER_POLL_INTERVAL_SECONDS` | `int \| float` | `0.1` | Base delay between claim queries (`0.01`-`10` seconds) |
-| `WORKER_POLL_MAX_INTERVAL_SECONDS` | `int \| float` | `0.1` | Maximum idle claim delay (`0.01`-`60` seconds and not below the base) |
+| `WORKER_POLL_MAX_INTERVAL_SECONDS` | `int \| float` | `1.0` | Maximum idle claim delay (`0.01`-`60` seconds and not below the base) |
+| `WORKER_CANCELLATION_INTERVAL_SECONDS` | `int \| float` | `5.0` | Interval between worker sweeps for `CANCELLING` executions (`0.1`-`300` seconds) |
 
-The default maximum equals the 100 ms base, preserving the existing polling cadence.
-Set a larger maximum to opt into exponential idle backoff with bounded jitter, which
-keeps multiple idle workers from repeatedly querying in lockstep. A claim, completion,
-cancellation, timeout/recovery transition, or other lifecycle activity resets an
-opted-in backoff immediately.
+Adaptive idle backoff with bounded jitter is enabled by default (`0.1s` base up to `1.0s` max),
+keeping multiple idle workers from polling in lockstep. Set `WORKER_POLL_MAX_INTERVAL_SECONDS`
+equal to `WORKER_POLL_INTERVAL_SECONDS` to restore fixed-cadence polling. Any claim, completion,
+cancellation, or recovery transition resets backoff to the base interval immediately.
 
 The maximum bounds how long an idle, available worker waits between observations of its
 queue; it is not an end-to-end task-start guarantee. Heartbeats, Ray completion polling,
 reconciliation, timeout checks, cancellation recovery, and lease cleanup use independent
 monotonic schedules; idle claim backoff does not postpone them. Graceful-shutdown signals
-interrupt the current idle wait, so an opted-in maximum does not extend worker handoff.
+interrupt the current idle wait, so idle backoff does not extend worker handoff.
 
-Global orphan, running-timeout and cancellation maintenance select at most 32
-candidate identities per turn, plus one overflow sentinel. Each independent scan
-walks increasing primary keys below a frozen cycle maximum. Skipped healthy owners
-still advance the cursor; new inserts and rows becoming eligible behind the cursor
-are reconsidered in the next cycle. Changing the queue/protocol selection resets
-that scan. A pending page schedules a 100 ms continuation through the normal loop,
-after heartbeat and claim handling, without counting pending work as task activity.
-
-The candidate projection contains a primary key, three integer identities each
-limited to 21 text characters, and at most 256 owner characters. Invalid integer
-cells and truncated or overlength owners cannot authorize an operation. Advisory
-live-owner lookup and exact local Ray Core handle lookups are restricted to the
-selected page. Fresh per-row reads and the
-existing exact lease, state, attempt, generation, job and completion fences still
-decide every operation. Ray Job status reconciliation also considers at most 32
-locally tracked identities per turn. Its activity accounting retains only that
-original active page and at most 32 new orphan candidate IDs instead of copying
-every tracked ID twice. Completion counts and newly retained adoptions keep the
-same meaning, including immediate completion and re-adoption of an original ID.
-This bounds candidate/RPC counts and this bookkeeping, not database
-execution time or whole-worker memory: local tracking traversal remains proportional
-to active tracking, and authoritative lifecycle operations still read full completion
-and archival fields one row at a time. Issue #718 remains open for those boundaries,
-measured scaling and end-to-end qualification; no index or memory-peak benefit is
-established by these limits.
-
-Active Ray Jobs also have a 250 ms durable-completion poll, independent of the slower
-status/orphan recovery schedule. Each pass inspects at most 32 tracked task identities
-with one candidate query; an idle worker performs no such query. Receipt consumption
-still locks the exact live lease, checks its supported protocol range and revalidates
-the task, attempt, generation, job and completion bytes before persistence or retry.
-When a valid receipt frees capacity, the worker can claim again in the same iteration.
-The batch cursor revisits older tasks even while newer tasks arrive continuously.
-
-This fast pass never asks the Jobs API for status, logs or cancellation. Missing or
-malformed receipts, ownerless rows and orphan adoption remain on the recovery path.
-The 250 ms schedule is not a latency guarantee: larger active sets need multiple
-batches, and database locks, result storage or a blocking recovery RPC can delay the
-single worker loop. It does not change at-least-once execution or retry eligibility.
+Maintenance scans (orphan adoption, running-timeout recovery, cancellation processing, and
+Ray Job status reconciliation) advance cursor-paged batches of up to 32 candidates per turn
+under fresh per-row lease and identity fences. Active Ray Jobs also run a 250 ms durable-completion
+poll over locally tracked task identities (up to 32 per turn) without querying the Jobs API;
+missing or malformed receipts and orphan adoption remain on the periodic recovery path.
 
 ### Retry Policy
 
@@ -248,7 +221,8 @@ single worker loop. It does not change at-least-once execution or retry eligibil
 |---------|------|---------|-------------|
 | `MAX_TASK_ATTEMPTS` | `int` | `3` | Maximum number of attempts before marking as failed |
 | `RETRY_BACKOFF_SECONDS` | `int` | `60` | Base delay between retries (exponential backoff), from `0` to `3600` seconds |
-| `RETRY_EXCEPTION_DENYLIST` | `list[str]` | `[]` | Exception types that should not be retried |
+| `RETRY_BACKOFF_JITTER_RATIO` | `int \| float` | `0.1` | Bounded downward random jitter ratio (`0.0`-`1.0`, sampling `[-ratio, 0%]`) applied to exponential retry delays to prevent retry storms |
+| `RETRY_EXCEPTION_DENYLIST` | `list[str]` | `[]` | Exception types that should not be retried (short built-in names or exact fully qualified paths, with subclass matching) |
 
 ### Reliability
 
@@ -412,7 +386,8 @@ When `RESULT_STORAGE_BACKEND` is:
 `RayTaskBackend.get_result()` can automatically reload oversized payloads from
 `filesystem`, `s3`, and `gcs` references when the reading process has the same
 storage configuration and credentials available. `digest` references remain
-metadata-only and do not restore the original return value.
+metadata-only: accessing `TaskResult.return_value` raises `ResultUnavailableError`
+instead of silently returning `None`.
 
 External references are authorized against the current filesystem root or object-store
 bucket and prefix, then verified against their exact UTF-8 byte count and SHA-256 digest
@@ -429,6 +404,18 @@ Optional install extras:
 - `pip install "django-ray[s3]"` for S3 backend dependencies.
 - `pip install "django-ray[gcs]"` for GCS backend dependencies.
 - `pip install "django-ray[object-storage]"` for both.
+
+### Observability & Tracing
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `METRICS_CACHE_TTL_SECONDS` | `int \| float` | `5.0` | In-process TTL cache for `render_prometheus_metrics()` (`0.0` disables caching) |
+| `TRACING_ENABLED` | `bool` | `False` | Opt-in toggle for `emit_task_lifecycle_span()` (install `django-ray[otel]` for SDK export) |
+| `TRACING_SAMPLE_RATE` | `int \| float` | `1.0` | Lifecycle span sampling ratio (`0.0`-`1.0`) when `TRACING_ENABLED=True` |
+| `TRACING_MAX_WORKFLOW_NODE_SPANS` | `int` | `100` | Maximum child node spans emitted per `trace_workflow_execution()` call (`0`-`256`) |
+
+See [Observability](observability.md#tracing-helpers-and-integration-boundary) for
+OpenTelemetry `[otel]` setup and W3C trace context propagation.
 
 ### Admin presentation
 
@@ -592,11 +579,19 @@ DJANGO_RAY = {
 }
 ```
 
-> [!IMPORTANT]
-> Migration `0028` seeds the shared database lease authority at `60` seconds. Before
-> starting workers with `"WORKER_LEASE_SECONDS": 120`, update the database policy during
-> a stopped, drained window with
-> `python manage.py django_ray_lease_policy --set-seconds=120 --expected-revision=<rev>`.
+!!! warning "Update the shared lease policy before changing `WORKER_LEASE_SECONDS`"
+
+    Migration `0028` seeds the shared database lease authority at `60` seconds. Before
+    starting workers with `"WORKER_LEASE_SECONDS": 120`, stop and drain every process
+    sharing the lease table, then update the database policy with:
+
+    ```bash
+    python manage.py django_ray_lease_policy \
+      --set-seconds 120 \
+      --expected-seconds 60 \
+      --expected-revision 1 \
+      --all-lease-users-stopped
+    ```
 
 ### High-Throughput Starting Point
 

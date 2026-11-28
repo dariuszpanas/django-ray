@@ -26,6 +26,55 @@ def square(value: int) -> int:
 The example is runnable as written. Comments explicitly mark the one integration point
 an application would replace.
 
+!!! note "Task modules outside `INSTALLED_APPS`"
+
+    By default, workers only resolve callables from non-framework Django applications
+    listed in `INSTALLED_APPS`. If your tasks live in a project-root or shared module
+    outside `INSTALLED_APPS` (for example, `myproject/tasks.py`), add its dotted module
+    prefix to `DJANGO_RAY["ALLOWED_CALLABLE_MODULES"]`; see
+    [Settings Reference — `ALLOWED_CALLABLE_MODULES`](reference/settings.md#allowed_callable_modules).
+
+## Declarative Task Contracts (`@ray_task`)
+
+When a task needs explicit Ray resource hints, retry bounds, a timeout, or a named
+RuntimeEnv profile declared next to the function, use `@ray_task` from `django_ray`
+(or `django_ray.decorators`):
+
+```python
+from django_ray import get_ray_task_contract, ray_task
+
+
+@ray_task(
+    queue_name="gpu",
+    num_cpus=2,
+    num_gpus=1,
+    memory=4 * 1024 * 1024 * 1024,
+    max_attempts=5,
+    retry_backoff_seconds=30,
+    retry_jitter=True,
+    timeout_seconds=600,
+    runtime_env_profile="ml-inference",
+)
+def score_batch(batch_id: str) -> dict[str, int]:
+    return {"batch_id": batch_id, "scored": 100}
+
+
+contract = get_ray_task_contract(score_batch)
+```
+
+`@ray_task` layers cleanly over Django 6's `@task`, so decorated functions remain
+genuine `django.tasks.base.Task` instances compatible with `.enqueue()`, `.using()`,
+and worker callable resolution while attaching an immutable, eagerly validated
+`RayTaskContract` (raising `RayTaskContractError` at import time on invalid options).
+
+Explicit `@ray_task(...)` options take precedence over global `DJANGO_RAY` defaults
+(`MAX_TASK_ATTEMPTS`, `RETRY_BACKOFF_SECONDS`, `DEFAULT_RUNTIME_ENV_PROFILE`, and
+backend `TIMEOUT_SECONDS`), while omitted options (`None`) inherit the deployment
+default. Setting `retry_jitter=False` disables backoff jitter (`0.0`) for that task;
+leaving `retry_jitter=True` (the default) applies the configured
+`RETRY_BACKOFF_JITTER_RATIO` as downward jitter (`[-10%, 0%]` at the default `0.1`, or
+no jitter when `RETRY_BACKOFF_JITTER_RATIO` is `0.0`).
+
 ## Coroutine Tasks
 
 Django coroutine tasks use the same decorator and enqueue API. django-ray awaits them in
@@ -92,10 +141,21 @@ def update_account(account_id: int) -> None:
 `transaction.atomic()` is a synchronous context manager, so do not spread one database
 transaction across `await` points.
 
-The internal `django_ray.runtime.context.get_current_task_context()` API identifies the
-durable django-ray execution and remains available across `await` points. It is not
-Django's separate `@task(takes_context=True)` `TaskContext` feature; django-ray does not
-currently reconstruct that standard task context for workers.
+### Database Connections and Task Context
+
+django-ray automatically invokes Django's `close_old_connections()` around task
+execution in workers and distributed entrypoints so stale or broken database connections
+are cleaned up between tasks. In production PostgreSQL deployments, enable
+`CONN_HEALTH_CHECKS = True` with a bounded `CONN_MAX_AGE`, or set `CONN_MAX_AGE = 0`
+when calling `sync_to_async(thread_sensitive=False)` so worker threads do not hold open
+idle database connections.
+
+Standard Django 6 `@task(takes_context=True)` tasks are supported across sync, Ray Core,
+Ray Job, and `django_ray_replay`: workers construct a real Django 6 `TaskContext`
+(exposing `context.task_result` and `context.attempt`). The lower-level
+`django_ray.runtime.context.get_current_task_context()` helper remains available across
+`await` points when task code needs django-ray-specific metadata such as
+`execution_pk`, `execution_generation`, or `worker_id`.
 
 ## Enqueueing
 
@@ -218,6 +278,17 @@ For a one-off deferred submission, provide an aware timestamp through
 `.using(run_after=...)`. `run_after` is the earliest time that submission is eligible to
 be claimed; it is not an exact start time, expiry, or periodic schedule. Use a separate
 scheduler to enqueue recurring work.
+
+## Lifecycle Signals
+
+django-ray emits Django 6's standard `django.tasks.signals` lifecycle signals:
+
+- **`task_enqueued`**: dispatched via `transaction.on_commit(..., using="default")` so a
+  rolled-back `transaction.atomic()` block never triggers spurious signal handlers.
+- **`task_started`** and **`task_finished`**: dispatched post-commit when a worker starts
+  or finalizes an attempt. Signal receivers run with exception isolation so a failing
+  observer (for example, an APM hook or metric increment) never aborts or corrupts
+  durable task state transitions.
 
 ## Priority
 
@@ -399,8 +470,15 @@ elif enqueued.status == TaskResultStatus.FAILED:
 ```
 
 `TaskResult.refresh()` updates the snapshot through its configured backend. It does not
-subscribe to changes or wait for completion. When only the ID remains, retrieve a fresh
-matching snapshot from the task definition:
+subscribe to changes or wait for completion. `RayTaskBackend.get_result()` returns a
+`RayTaskResult` (`TaskResult` subclass) that fails loud instead of returning fabricated
+placeholders: if a succeeded task exceeded `MAX_RESULT_SIZE_BYTES` under the default
+`RESULT_STORAGE_BACKEND="digest"` (or its external result object cannot be verified),
+accessing `.return_value` raises `django_ray.backends.ResultUnavailableError`; similarly,
+accessing `.args` or `.kwargs` when durable input loading fails raises
+`django_ray.backends.InputPayloadUnavailableError`.
+
+When only the ID remains, retrieve a fresh matching snapshot from the task definition:
 
 ```python
 current = send_email.get_result(enqueued.id)
@@ -460,12 +538,13 @@ inferred from a read projection for re-enqueue.
 Successful `TaskResult.return_value`, arguments, and keyword arguments are application
 data returned to the Python caller. Failed results expose one ordinary operational
 projection through `TaskResult.errors`: terminal controls are made inert and configured
-sensitive markers are redacted. Only an unqualified built-in `BaseException` name in the
-normalized traceback tail is retained as the `TaskError` class; diagnostic text is never
-treated as a dotted import path. Unknown, custom, matching, or over-limit diagnostics use
-`builtins.Exception`. `TaskResult` has no request user or task-ownership context and
-therefore cannot grant privileged diagnostic access. Authorized incident responders can
-use the separate [pattern-unredacted Admin view](reference/settings.md#unredacted-task-diagnostics),
+sensitive markers are redacted. Unqualified built-in `BaseException` names and
+already-loaded custom exception class paths in the normalized traceback tail are
+preserved on `TaskError` without performing dynamic imports; unknown, unloaded,
+redacted, or over-limit diagnostics fall back to `builtins.Exception`. `TaskResult` has
+no request user or task-ownership context and therefore cannot grant privileged
+diagnostic access. Authorized incident responders can use the separate
+[pattern-unredacted Admin view](reference/settings.md#unredacted-task-diagnostics),
 which still applies terminal normalization and hard response bounds.
 
 The bundled testproject's `GET /api/tasks/{task_id}` endpoint is intentionally not this
@@ -482,7 +561,9 @@ For operations, graph progress, attempts, and Ray identifiers, query
 ## Arguments and Results
 
 Arguments and return values must be JSON-serializable. Prefer strings, numbers,
-booleans, `None`, lists, and dictionaries with string keys.
+booleans, `None`, lists, and dictionaries with string keys. Convert common Python types
+explicitly before enqueueing (for example, `str(uuid_value)`, `dt.isoformat()`, and
+`str(decimal_value)`).
 
 ```python
 # myapp/tasks.py

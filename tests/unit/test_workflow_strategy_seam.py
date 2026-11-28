@@ -449,6 +449,7 @@ def test_compiled_graph_strategy_fails_closed_when_capability_unverified(setting
 
 def test_compiled_graph_strategy_executes_hermetic_fixed_actor_lifecycle_and_cleans_up(
     settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings.DJANGO_RAY = {
         **getattr(settings, "DJANGO_RAY", {}),
@@ -501,7 +502,8 @@ def test_compiled_graph_strategy_executes_hermetic_fixed_actor_lifecycle_and_cle
             assert replica.cached_outputs == []
             assert replica.invocation_context == {}
 
-    # Also verify ergonomic with_execution_strategy("compiled_graph").run(...)
+    # Public with_execution_strategy("compiled_graph").run(...) must refuse to fall back
+    # to InProcessFixedActorAdapter without a verified Ray cluster adapter.
     with durable_task_execution(
         78,
         task_id="task-78",
@@ -510,20 +512,20 @@ def test_compiled_graph_strategy_executes_hermetic_fixed_actor_lifecycle_and_cle
         ray_job_driver=True,
         compiled_graph_submission_transport="ray-job",
     ):
-        # Use clean build context via monkeypatch to avoid unresolved git/image in unit test
         import django_ray.workflow.plans as plans_module
 
-        orig_default_ctx = plans_module._default_build_context
-        plans_module._default_build_context = lambda _cfg, _tc: _clean_build_context()
-        try:
-            out = wf.with_execution_strategy(
+        monkeypatch.setattr(
+            plans_module,
+            "_default_build_context",
+            lambda _cfg, _tc: _clean_build_context(),
+        )
+        with pytest.raises(WorkflowStrategySelectionError) as exc_info:
+            wf.with_execution_strategy(
                 "compiled_graph",
                 pool_specs={"0.0.g0": StaticActorPoolSpec(replicas=2)},
                 compiled_graph_capability_decision=_verified_capability_decision(),
             ).run(6)
-        finally:
-            plans_module._default_build_context = orig_default_ctx
-    assert out == 37  # (6 + 1) + (6 * 5)
+        assert any(r.code == "IN_PROCESS_ADAPTER_DISALLOWED" for r in exc_info.value.rejections)
 
 
 def test_compiled_graph_experimental_enabled_rejects_non_bool() -> None:

@@ -48,6 +48,7 @@ def test_real_ray_strict_workflow_step_round_trip_has_full_context(
         "task_id": _STRICT_IDENTITY.task_id,
         "execution_protocol_version": 1,
         "strict_execution_request": True,
+        "read_only_replay": False,
     }
     run_identity = {
         "schema_version": 1,
@@ -69,6 +70,7 @@ def test_real_ray_strict_workflow_step_round_trip_has_full_context(
             None,
             node_id,
             workflow_run_identity=run_identity,
+            allowed_callable_modules=("tests",),
             **_strict_nested_workflow_kwargs(
                 serialized,
                 runtime_identity,

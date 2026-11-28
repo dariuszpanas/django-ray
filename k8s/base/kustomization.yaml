@@ -14,6 +14,7 @@ resources:
   - django-ray-worker.yaml
   - django-setup-job.yaml
   - monitoring.yaml
+  - network-policy.yaml
 commonLabels:
   app.kubernetes.io/name: django-ray
   app.kubernetes.io/part-of: django-ray

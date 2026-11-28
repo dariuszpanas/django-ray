@@ -25,16 +25,19 @@ enqueue API, and none automatically enables the Admin workflow graph. See
 | Mode | Command | Best fit | Relative startup cost |
 |---|---|---|---|
 | Sync | `--sync` | Tests and debugging | Lowest |
-| Local Ray Core | `--local` | Development and one-machine execution | Low after Ray starts |
+| Local Ray Core | `--local` *(or default `RUNNER="ray_core"` with `RAY_ADDRESS="auto"`)* | Development and one-machine execution | Low after Ray starts |
 | Cluster Ray Core | `--cluster=ray://host:10001` | Bounded low-latency workflows with a connection-owned lifetime | Low |
-| Ray Job | no mode flag with `RUNNER="ray_job"` | Isolated, coarse jobs | Highest |
+| Ray Job | `--ray-job` *(or `RUNNER="ray_job"`)* | Isolated, coarse, or long-running jobs | Highest |
 
-If `RUNNER="ray_core"` and no mode flag is supplied, `RAY_ADDRESS="auto"` selects
-local mode and a cluster address selects cluster mode.
+Without a mode flag, `django_ray_worker` uses `DJANGO_RAY["RUNNER"]` (`"ray_core"` by default).
+If `RUNNER="ray_core"` and no mode flag is supplied, `RAY_ADDRESS="auto"` selects local mode and
+a cluster address selects cluster mode. Pass `--ray-job` or set `RUNNER="ray_job"` to run the
+Ray Job Submission API runner.
 
-Both synchronous and coroutine Django tasks are supported in every mode. A coroutine
-gets one fresh event loop for its invocation; the task manager itself remains
-synchronous and continues to own claims, heartbeats, retries, and reconciliation.
+Both synchronous and coroutine Django tasks (as well as `async def` workflow steps and
+`distributed.py` callables) are supported in every mode. A coroutine gets one fresh event loop
+for its invocation; the task manager itself remains synchronous and continues to own claims,
+heartbeats, retries, and reconciliation.
 
 ## Sync
 
@@ -114,13 +117,13 @@ application-owned Ray Job or the component's normal operator instead.
 ## Ray Job
 
 ```bash
-python manage.py django_ray_worker --queue=default
+python manage.py django_ray_worker --queue=default --ray-job
 ```
 
-With `DJANGO_RAY["RUNNER"] = "ray_job"`, each durable task is submitted through Ray's
-Job Submission API and gets an isolated driver process. Ray-native workflows are
-supported: the driver connects back to its Ray cluster when it starts submitting
-leaves.
+With `--ray-job` or `DJANGO_RAY["RUNNER"] = "ray_job"`, each durable task is submitted through
+Ray's Job Submission API and gets an isolated driver process. Ray-native workflows and
+`parallel_map()` are supported: when `use_ray=None` inside a Ray Job driver, django-ray
+automatically connects to the local cluster (`ray.init(address="auto")`) before submitting leaves.
 
 Choose Ray Job when driver isolation, independent logs, a long or coarse job lifecycle,
 or execution independent of the submitting task-manager connection is more valuable

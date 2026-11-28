@@ -8,12 +8,18 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.postgresql,
+    pytest.mark.sqlite_compatible,
+]
 
-@pytest.mark.django_db(transaction=True)
+
 def test_existing_inline_execution_round_trips_through_input_payload_migration() -> None:
     migrate_from = [("django_ray", "0008_raytaskexecution_priority_constraint")]
     migrate_to = [("django_ray", "0009_taskinputpayload_and_input_reference")]
     executor = MigrationExecutor(connection)
+    latest = executor.loader.graph.leaf_nodes("django_ray")
     executor.migrate(migrate_from)
     try:
         old_apps = executor.loader.project_state(migrate_from).apps
@@ -69,4 +75,4 @@ def test_existing_inline_execution_round_trips_through_input_payload_migration()
         assert reverted.args_json == "[1, 2]"
         assert reverted.kwargs_json == '{"scale": 3}'
     finally:
-        MigrationExecutor(connection).migrate([("django_ray", "0028_worker_lease_policy")])
+        MigrationExecutor(connection).migrate(latest)

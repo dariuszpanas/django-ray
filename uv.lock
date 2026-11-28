@@ -722,6 +722,9 @@ object-storage = [
     { name = "boto3" },
     { name = "google-cloud-storage" },
 ]
+otel = [
+    { name = "opentelemetry-sdk" },
+]
 postgres = [
     { name = "psycopg", extra = ["binary"] },
 ]
@@ -740,6 +743,7 @@ dev = [
     { name = "django-ninja" },
     { name = "django-unfold" },
     { name = "locust" },
+    { name = "opentelemetry-sdk" },
     { name = "pip-audit" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -768,6 +772,7 @@ requires-dist = [
     { name = "msgpack", specifier = ">=1.2.3" },
     { name = "multidict", specifier = ">=6.9.1" },
     { name = "opentelemetry-api", specifier = ">=1.45.1" },
+    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.45.1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
     { name = "pyasn1", specifier = ">=0.6.5" },
     { name = "ray", extras = ["default"], specifier = ">=2.60.0" },
@@ -776,13 +781,14 @@ requires-dist = [
     { name = "virtualenv", specifier = ">=21.14.13" },
     { name = "whitenoise", marker = "extra == 'sample'", specifier = ">=6.6" },
 ]
-provides-extras = ["postgres", "s3", "gcs", "object-storage", "sample"]
+provides-extras = ["otel", "postgres", "s3", "gcs", "object-storage", "sample"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "django-ninja", specifier = ">=1.5.1" },
     { name = "django-unfold", specifier = "==0.110.1" },
     { name = "locust", specifier = ">=2.43" },
+    { name = "opentelemetry-sdk", specifier = ">=1.45.1" },
     { name = "pip-audit", specifier = "==2.10.1" },
     { name = "pytest", specifier = ">=8.3.3" },
     { name = "pytest-cov", specifier = ">=4.0" },

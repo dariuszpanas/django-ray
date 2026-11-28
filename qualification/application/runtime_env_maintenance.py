@@ -554,7 +554,8 @@ def verify_maintenance(
     )
     remaining(deadline)
     if status != 409 or json.loads(body) != {
-        "detail": "Persisted RuntimeEnv snapshot failed validation"
+        "code": "RUNTIME_ENV_INVALID",
+        "message": "Persisted RuntimeEnv snapshot failed validation.",
     }:
         raise ValueError("Required RuntimeEnv plaintext retry did not return its fixed conflict")
     evidence["plaintext_refusal"]["retry_conflict"] = True

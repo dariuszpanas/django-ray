@@ -8,6 +8,7 @@ from dataclasses import is_dataclass
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from threading import Event
+from typing import Any
 
 import pytest
 from django.core.management import call_command
@@ -566,13 +567,15 @@ def test_postgresql_protocol_status_observes_one_repeatable_read_snapshot(
     def pause_after_lease_snapshot(
         *,
         using: str,
-        cutoff: datetime,
+        cutoff: datetime | None = None,
+        live_q: Any = None,
         policy: ProtocolPolicyStatus,
         leases: ProtocolLeaseCounts,
     ) -> ProtocolCapabilitySection:
         section = original_capability_section(
             using=using,
             cutoff=cutoff,
+            live_q=live_q,
             policy=policy,
             leases=leases,
         )
@@ -1065,3 +1068,129 @@ def test_revision_exhaustion_and_nonterminal_rollback_blocker_are_distinct() -> 
     assert nonterminal.non_v1_nonterminal_count == 1
     assert nonterminal_blockers[ProtocolStatusBlockerCode.NON_V1_NONTERMINAL_WORK] == 1
     assert nonterminal_blockers[ProtocolStatusBlockerCode.POLICY_REVISION_EXHAUSTED] == 1
+
+
+def test_protocol_status_validation_budget_and_error_edge_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover fail-closed policy, lease-shape, budget, and database error branches."""
+    from dataclasses import replace
+
+    from django.db import DatabaseError
+
+    from django_ray.lease_policy import LeasePolicyError
+
+    # Naive datetime rejected; non-str queue name sanitized; legacy_open filter works
+    with pytest.raises(ProtocolStatusError, match="aware observation time"):
+        protocol_status_module._utc_datetime(datetime(2026, 8, 10, 12, 0))
+    assert protocol_status_module._safe_queue_name(123) == "[INVALID]"
+    assert protocol_status_module._valid_protocol_policy(using="default", legacy_open=True).exists()
+
+    # Invalid policy schema_version, active_write_protocol_version, revision, token, timestamp
+    base_row = {
+        "singleton_key": 1,
+        "schema_version": 1,
+        "active_write_protocol_version": 1,
+        "legacy_worker_admission_enabled": True,
+        "revision": 1,
+        "updated_at": datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+    }
+
+    class _FakePolicyQs:
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            self._rows = rows
+
+        def using(self, _alias: str) -> _FakePolicyQs:
+            return self
+
+        def order_by(self, *_a: str) -> _FakePolicyQs:
+            return self
+
+        def values(self, *_a: str) -> list[dict[str, Any]]:
+            return self._rows
+
+    for patch_fields, expected_msg in [
+        ({"schema_version": 99}, "policy schema is unsupported"),
+        ({"active_write_protocol_version": 99}, "active write version is unsupported"),
+        ({"revision": 0}, "policy revision is invalid"),
+        ({"updated_at": "not-a-datetime"}, "policy timestamp is invalid"),
+    ]:
+        monkeypatch.setattr(
+            TaskExecutionProtocolPolicy,
+            "objects",
+            _FakePolicyQs([{**base_row, **patch_fields}]),
+        )
+        with pytest.raises(ProtocolStatusError, match=expected_msg):
+            protocol_status_module._load_policy(using="default")
+
+    monkeypatch.undo()
+
+    # Invalid token singleton list rejected
+    class _BadTokenQs:
+        def using(self, _alias: str) -> _BadTokenQs:
+            return self
+
+        def order_by(self, *_a: str) -> _BadTokenQs:
+            return self
+
+        def values_list(self, *_a: Any, **_kw: Any) -> list[int]:
+            return [2]
+
+    monkeypatch.setattr(LegacyWorkerAdmissionToken, "objects", _BadTokenQs())
+    with pytest.raises(ProtocolStatusError, match="token singleton is invalid"):
+        protocol_status_module._load_policy(using="default")
+    monkeypatch.undo()
+
+    # Invalid lease shape fails closed
+    class _BadLeaseQs:
+        def using(self, _alias: str) -> _BadLeaseQs:
+            return self
+
+        def exclude(self, *_a: Any, **_kw: Any) -> _BadLeaseQs:
+            return self
+
+        def exists(self) -> bool:
+            return True
+
+    monkeypatch.setattr(TaskWorkerLease, "objects", _BadLeaseQs())
+    with pytest.raises(ProtocolStatusError, match="capability advertisement is invalid"):
+        protocol_status_module._validate_lease_shapes(using="default")
+    monkeypatch.undo()
+
+    # Budget helpers: _remove_last_capability, _fit_output_budget dropping capability & header error
+    observed_at = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+    _explicit_lease("budget-cap-1", minimum=1, maximum=2, heartbeat_at=observed_at)
+    report = build_protocol_status(using="default", observed_at=observed_at)
+    trimmed = protocol_status_module._remove_last_capability(report)
+    assert trimmed.capabilities.omitted_groups == 1
+    assert trimmed.capabilities.omitted_leases == 1
+
+    monkeypatch.setattr(protocol_status_module, "_OUTPUT_CONTENT_MAX_BYTES", 10)
+    with pytest.raises(ProtocolStatusError, match="exceeded its output budget"):
+        render_protocol_status_text(report)
+    with pytest.raises(ProtocolStatusError, match="header exceeded its output budget"):
+        protocol_status_module._fit_output_budget(report)
+    monkeypatch.undo()
+
+    # Unsupported vendor, LeasePolicyError, and DatabaseError map cleanly to ProtocolStatusError
+    monkeypatch.setattr(connection, "vendor", "mysql")
+    with pytest.raises(ProtocolStatusError, match="SQLite and PostgreSQL"):
+        build_protocol_status(using="default", observed_at=observed_at)
+    monkeypatch.undo()
+
+    monkeypatch.setattr(
+        "django_ray.lease_policy.read_lease_policy",
+        lambda **_kw: (_ for _ in ()).throw(LeasePolicyError("lease_policy_unavailable")),
+    )
+    with pytest.raises(ProtocolStatusError, match="lease_policy_unavailable"):
+        build_protocol_status(using="default", observed_at=observed_at)
+
+    monkeypatch.setattr(
+        "django_ray.lease_policy.read_lease_policy",
+        lambda **_kw: (_ for _ in ()).throw(DatabaseError("boom")),
+    )
+    with pytest.raises(ProtocolStatusError, match="unavailable"):
+        build_protocol_status(using="default", observed_at=observed_at)
+
+    # Confirm replace import used cleanly
+    assert replace(report, queue_capacity_attested=True).queue_capacity_attested is True

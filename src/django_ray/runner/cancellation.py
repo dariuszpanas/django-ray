@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from django_ray.execution_protocol import (
+    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    ExecutionProtocolRange,
+)
 from django_ray.lifecycle import request_task_cancellation
+from django_ray.models import RayTaskExecution as _RayTaskExecution
 from django_ray.models import TaskState
 from django_ray.redaction import materialize_exception_text
 
@@ -137,14 +142,26 @@ def request_cancellation(
     if result.state != TaskState.CANCELLING:
         return True
 
+    # Refresh remote handle fields in case the caller held a pre-submission snapshot.
+    refreshed = (
+        _RayTaskExecution.objects.filter(pk=execution_id)
+        .values_list("ray_job_id", "ray_address", "started_at")
+        .first()
+    )
+    if refreshed is not None:
+        ray_job_id, ray_address, started = refreshed
+    else:
+        ray_job_id = task_execution.ray_job_id
+        ray_address = task_execution.ray_address
+        started = task_execution.started_at
+
     # If we have a Ray job ID, try to stop it
-    if task_execution.ray_job_id:
+    if ray_job_id:
         from django_ray.runner.base import SubmissionHandle
 
-        started = task_execution.started_at
         handle = SubmissionHandle(
-            ray_job_id=str(task_execution.ray_job_id),
-            ray_address=str(task_execution.ray_address or ""),
+            ray_job_id=str(ray_job_id),
+            ray_address=str(ray_address or ""),
             submitted_at=started if isinstance(started, datetime) else datetime.now(UTC),
         )
 
@@ -159,10 +176,10 @@ def request_cancellation(
                 )
                 if pending_handle is not None:
                     cancel_pending(pending_handle)
-            elif not str(task_execution.ray_job_id).startswith("ray_core:"):
+            elif not str(ray_job_id).startswith("ray_core:"):
                 runner.cancel(handle)
-        except (RuntimeError, ConnectionError, TimeoutError):
-            # Best effort - cancellation may fail due to Ray connection issues
+        except Exception:
+            # Best effort: CANCELLING is already durable and the worker will finalize.
             pass
 
     return True
@@ -176,6 +193,7 @@ def finalize_cancellation(
     expected_execution_generation: int | None = None,
     cancellation_status: str | None = None,
     cancellation_error: str | None = None,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> bool:
     """Finalize a cancelled task execution.
 
@@ -195,4 +213,5 @@ def finalize_cancellation(
         expected_execution_generation=expected_execution_generation,
         cancellation_status=cancellation_status,
         cancellation_error=cancellation_error,
+        supported_protocols=supported_protocols,
     )

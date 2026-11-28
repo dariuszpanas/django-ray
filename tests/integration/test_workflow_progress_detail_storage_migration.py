@@ -10,13 +10,18 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.db.models.deletion import RESTRICT
 
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.postgresql,
+    pytest.mark.sqlite_compatible,
+]
 
-@pytest.mark.django_db(transaction=True)
+
 def test_detail_storage_tables_are_additive_reversible_and_rolling_safe() -> None:
     migrate_from = [("django_ray", "0012_workflow_progress_summary")]
     migrate_to = [("django_ray", "0013_workflow_progress_detail_storage")]
-    latest = [("django_ray", "0028_worker_lease_policy")]
     executor = MigrationExecutor(connection)
+    latest = executor.loader.graph.leaf_nodes("django_ray")
     executor.migrate(migrate_from)
     try:
         old_apps = executor.loader.project_state(migrate_from).apps

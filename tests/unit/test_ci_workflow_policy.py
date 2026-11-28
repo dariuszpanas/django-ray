@@ -37,12 +37,6 @@ EXPLICIT_NONBLOCKING_PR_JOBS: dict[tuple[str, str], str] = {
         "Real Ray stress sampling is a manual diagnostic and does not replace CI Gate"
     ),
     ("windows-smoke.yml", "windows-smoke"): "Windows compatibility is hosted-only and advisory",
-    ("transaction-qualification.yml", "receipts"): (
-        "Path-selected deployed evidence is reviewed under the affected-gate policy"
-    ),
-    ("upgrade-qualification.yml", "data"): (
-        "Path-selected deployed evidence is reviewed under the affected-gate policy"
-    ),
     ("pr-review.yml", "resolve"): (
         "Automated pull-request review verdicts publish GitHub review states"
         " without replacing CI Gate"
@@ -911,6 +905,7 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     postgresql = jobs["postgresql-coordination"]
 
     assert testproject["name"] == "Testproject & Tooling"
+    assert testproject["if"] == "github.event_name != 'pull_request_target'"
     assert testproject["env"]["DJANGO_RAY_REQUIRE_KUSTOMIZE_PROBE_TESTS"] == "1"
     steps = {step.get("name"): step for step in testproject["steps"]}
     restore = steps["Restore pyrn CAS cache"]
@@ -926,7 +921,16 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     assert tooling["with"]["cache-dir"] == "${{ runner.temp }}/pyrn-cache"
     assert (
         tooling["with"]["markers"]
-        == "tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+        == "tooling and not repo_policy and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
+    )
+    repo_policy = steps["Run repo-policy tests without TIA or cache"]
+    assert repo_policy["uses"] == "dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5"
+    assert repo_policy["with"]["tier"] == "full"
+    assert repo_policy["with"]["tia"] == "false"
+    assert repo_policy["with"]["cache"] == "false"
+    assert (
+        repo_policy["with"]["markers"]
+        == "repo_policy and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)"
     )
     save = steps["Save pyrn CAS cache"]
     assert save["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
@@ -956,35 +960,55 @@ def test_proven_external_test_jobs_remain_separate_and_visible() -> None:
     assert live_cluster["name"] == "Live Cluster Fault Tests"
     assert "concurrency" not in live_cluster
     assert postgresql["name"] == "PostgreSQL Coordination & Polling"
-    assert (
-        next(
-            step["run"]
-            for step in postgresql["steps"]
-            if step.get("name") == "Run PostgreSQL coordination and polling tests"
-        )
-        == "uv run --no-sync --python 3.12 make test-postgres"
-    )
+    pg_steps = {step.get("name"): step for step in postgresql["steps"]}
+    pg_run_step = pg_steps["Run PostgreSQL coordination and polling tests"]
+    assert pg_run_step["env"] == {"COVERAGE_CORE": "sysmon"}
+    assert "python -m pytest tests -m postgresql" in pg_run_step["run"]
+    assert "--cov=src" in pg_run_step["run"]
+    assert "--cov-report=xml:coverage-postgres.xml" in pg_run_step["run"]
+    pg_upload_step = pg_steps["Upload PostgreSQL coverage evidence"]
+    assert pg_upload_step["if"] == "always()"
+    assert pg_upload_step["with"]["path"] == "coverage-postgres.xml"
     postgres_target = re.search(
         r"(?m)^test-postgres:\n(?P<recipe>(?:\t.*\n)+)",
         MAKEFILE.read_text(encoding="utf-8"),
     )
     assert postgres_target is not None
-    makefile_paths = set(re.findall(r"tests/[^\s\\]+\.py", postgres_target.group("recipe")))
+    assert "python -m pytest tests -m postgresql -vv --durations=20" in postgres_target.group(
+        "recipe"
+    )
     taxonomy = json.loads(TEST_SUITE_TAXONOMY.read_text(encoding="utf-8"))
     postgresql_lane = next(
         lane for lane in taxonomy["ci_lanes"] if lane["id"] == "postgresql-evidence"
     )
 
-    assert makefile_paths == set(postgresql_lane["selection"]["paths"])
-    assert "tests/integration/test_lease_policy_postgresql.py" in makefile_paths
-    assert "tests/integration/test_runtime_env_maintenance_postgresql.py" in makefile_paths
-    assert "tests/integration/test_execution_protocol_schema_migration.py" in makefile_paths
-    assert "tests/integration/test_protocol_coordination.py" in makefile_paths
-    assert "tests/integration/test_ray_target_route_migration.py" in makefile_paths
-    assert "tests/integration/test_ray_target_routing_coordination.py" in makefile_paths
-    assert "tests/integration/test_ray_worker_target_capabilities.py" in makefile_paths
-    assert "tests/integration/test_ray_worker_target_capability_migration.py" in makefile_paths
-    assert "tests/integration/test_workflow_run_allocation_migration.py" in makefile_paths
+    assert postgresql_lane["selection"] == {
+        "paths": ["tests"],
+        "include_markers": ["postgresql"],
+    }
+    for required_pg_module in (
+        "tests/integration/test_input_payload_migration.py",
+        "tests/integration/test_lease_policy_postgresql.py",
+        "tests/integration/test_phase3_fault_matrix.py",
+        "tests/integration/test_ray_routing_migration.py",
+        "tests/integration/test_runtime_env_maintenance_postgresql.py",
+        "tests/integration/test_execution_protocol_schema_migration.py",
+        "tests/integration/test_protocol_coordination.py",
+        "tests/integration/test_ray_target_route_migration.py",
+        "tests/integration/test_ray_target_routing_coordination.py",
+        "tests/integration/test_ray_worker_target_capabilities.py",
+        "tests/integration/test_ray_worker_target_capability_migration.py",
+        "tests/integration/test_workflow_plan_migration.py",
+        "tests/integration/test_workflow_progress_detail_storage_migration.py",
+        "tests/integration/test_workflow_progress_migration.py",
+        "tests/integration/test_workflow_progress_summary_migration.py",
+        "tests/integration/test_workflow_reporting_diagnostics_migration.py",
+        "tests/integration/test_workflow_run_allocation_migration.py",
+        "tests/integration/test_trigger_retention.py",
+    ):
+        assert "pytest.mark.postgresql" in (PROJECT_ROOT / required_pg_module).read_text(
+            encoding="utf-8"
+        )
 
     schema_migrations = next(
         domain
@@ -1211,10 +1235,13 @@ def test_release_matrix_verifies_wheel_and_sdist_metadata() -> None:
         if isinstance(step, dict) and isinstance(step.get("name"), str)
     }
 
-    smoke = steps["Verify distribution metadata and installed wheel"]["run"]
+    verify_step = steps["Verify distribution metadata and installed wheel"]
+    smoke = verify_step["run"]
+    assert verify_step["env"] == {"RELEASE_VERSION": "${{ needs.build.outputs.version }}"}
     assert "scripts/verify_wheel.py" in smoke
     assert "--dist-dir dist" in smoke
-    assert '"${{ needs.build.outputs.version }}"' in smoke
+    assert '--version "$RELEASE_VERSION"' in smoke
+    assert "${{" not in smoke
 
 
 def test_pr_concurrency_isolates_commit_message_head_revisions() -> None:
@@ -1556,3 +1583,178 @@ def test_data_upgrade_covers_current_and_historical_reviewed_baselines() -> None
     assert job["strategy"]["matrix"]["baseline"] == list(BASELINES)
     assert job["env"]["DJANGO_RAY_UPGRADE_BASELINE"] == "${{ matrix.baseline }}"
     assert job["steps"][-1]["with"]["name"] == "upgrade-data-qualification-${{ matrix.baseline }}"
+
+
+def test_workflows_pin_explicit_setup_uv_and_align_makefile_pyrn_version() -> None:
+    setup_uv_versions: set[str] = set()
+    for path in _workflow_paths():
+        for job in _jobs(path).values():
+            for step in job.get("steps", []):
+                if not isinstance(step, dict):
+                    continue
+                if not str(step.get("uses", "")).startswith("astral-sh/setup-uv@"):
+                    continue
+                version = str(step.get("with", {}).get("version", ""))
+                assert re.fullmatch(r"\d+\.\d+\.\d+", version), (path.name, version)
+                setup_uv_versions.add(version)
+    assert len(setup_uv_versions) == 1, sorted(setup_uv_versions)
+
+    ci_pyrn_versions = set(
+        re.findall(
+            r"dariuszpanas/pyrn@[0-9a-f]{40}\s+#\s+v(\d+\.\d+\.\d+)",
+            CI_WORKFLOW.read_text(encoding="utf-8"),
+        )
+    )
+    makefile_pyrn_match = re.search(
+        r"PYRN\s*\?=\s*uvx\s+--isolated\s+pyrn==(\d+\.\d+\.\d+)",
+        MAKEFILE.read_text(encoding="utf-8"),
+    )
+    assert makefile_pyrn_match is not None
+    assert ci_pyrn_versions == {makefile_pyrn_match.group(1)}
+
+
+def test_linux_test_dockerfile_provisions_all_stage_executables() -> None:
+    from scripts import linux_test_plan as plan
+
+    dockerfile = (PROJECT_ROOT / "testing" / "linux" / "Dockerfile").read_text(encoding="utf-8")
+    image_support = (PROJECT_ROOT / "testing" / "linux" / "image_support.py").read_text(
+        encoding="utf-8"
+    )
+    for package in ("git", "make", "nodejs", "npm"):
+        assert package in dockerfile
+    assert "/usr/local/bin/kubectl" in dockerfile
+    for tool in ("python", "uv", "uvx", "node", "npm", "git", "make", "kubectl"):
+        assert f'("{tool}",' in image_support
+
+    static_commands = plan.commands(plan.stage_by_id("static"))
+    assert ["make", "workflow-check"] in static_commands
+    assert ["make", "spelling-check"] in static_commands
+
+
+def test_repo_scanning_tooling_tests_are_exempt_from_tia() -> None:
+    from tests.conftest import REPO_POLICY_TEST_PREFIXES, TOOLING_TEST_PREFIXES
+
+    fs_tokens = (
+        "rglob(",
+        "glob(",
+        "read_text(",
+        "read_bytes(",
+        "ast.parse(",
+        "subprocess.run(",
+        "PROJECT_ROOT",
+        "REPO_ROOT",
+        "ROOT /",
+    )
+    repo_refs = (
+        "parents[2]",
+        "parents[1]",
+        "PROJECT_ROOT",
+        "REPO_ROOT",
+        '"src/',
+        "'src/",
+        '"scripts/',
+        "'scripts/",
+        '"testproject/',
+        "'testproject/",
+        '".github/',
+        "'.github/",
+        '"docs/',
+        "'docs/",
+        '"k8s/',
+        "'k8s/",
+        '"Makefile"',
+        "'Makefile'",
+        '"pyproject.toml"',
+        "'pyproject.toml'",
+        '"testing/',
+        "'testing/",
+        '"qualification/',
+        "'qualification/",
+        '"Dockerfile',
+        "'Dockerfile",
+        '".yaga',
+        "'.yaga",
+    )
+    missing: list[str] = []
+    for path in sorted((PROJECT_ROOT / "tests" / "unit").glob("test_*.py")):
+        if not any(path.stem.startswith(prefix) for prefix in TOOLING_TEST_PREFIXES):
+            continue
+        source = path.read_text(encoding="utf-8")
+        if any(tok in source for tok in fs_tokens) and any(ref in source for ref in repo_refs):
+            if not any(path.stem.startswith(prefix) for prefix in REPO_POLICY_TEST_PREFIXES):
+                missing.append(path.stem)
+    assert missing == []
+    for required_repo_policy in (
+        "test_admin_decomposition",
+        "test_cli_docs_parity",
+        "test_k8s_security_manifests",
+        "test_worker_drain_and_decomposition",
+    ):
+        assert required_repo_policy in TOOLING_TEST_PREFIXES
+        assert required_repo_policy in REPO_POLICY_TEST_PREFIXES
+
+
+def test_ci_and_makefile_enforce_declared_per_module_coverage_floors() -> None:
+    test_steps = {
+        step["name"]: step
+        for step in _jobs()["test"]["steps"]
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+    floor_step = test_steps["Enforce declared per-module coverage floors"]
+    assert floor_step["if"] == "matrix.python-version == '3.12'"
+    assert "scripts/coverage_debt.py check-floors" in floor_step["run"]
+    assert "coverage json" in floor_step["run"]
+
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    assert "coverage-floors:\n" in makefile
+    assert "scripts/coverage_debt.py check-floors" in makefile
+    assert "$(MAKE) coverage-floors" in makefile
+    assert "default: Ray Job API mode" not in makefile
+    assert "ray://localhost:10001" not in makefile
+
+
+def test_real_ray_ci_discovery_uses_marker_collection_not_substring_scan() -> None:
+    steps = {
+        step["name"]: step
+        for step in _jobs()["test"]["steps"]
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+    for name in ("Run real_ray tests", "Run real_ray tests with native diagnostics"):
+        run = steps[name]["run"]
+        assert "scripts.test_suite_inventory" in run
+        assert "collect_tests" in run
+        assert "in p.read_text(" not in run
+
+
+def test_k8s_makefile_avoids_windows_redirection_and_guards_mutating_targets() -> None:
+    k8s_mk = (PROJECT_ROOT / "mk" / "k8s.mk").read_text(encoding="utf-8")
+    assert ">NUL" not in k8s_mk
+    for target in (
+        "k8s-deploy",
+        "k8s-deploy-local",
+        "k8s-deploy-tls",
+        "k8s-uninstall-kuberay",
+        "k8s-delete-kuberay-kind",
+        "k8s-delete",
+    ):
+        header = next(line for line in k8s_mk.splitlines() if line.startswith(f"{target}:"))
+        assert "k8s-require-local-context" in header, target
+
+
+def test_all_javascript_suites_are_registered_in_taxonomy() -> None:
+    taxonomy = json.loads(TEST_SUITE_TAXONOMY.read_text(encoding="utf-8"))
+    browser_overlap = next(
+        entry
+        for entry in taxonomy["overlap_candidates"]
+        if entry["id"] == "bundled-browser-contract"
+    )
+    registered = set(browser_overlap["paths"])
+    js_suites = {
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in (PROJECT_ROOT / "tests" / "javascript").glob("*.test.mjs")
+    }
+    assert js_suites <= registered
+    testproject_lane = next(
+        lane for lane in taxonomy["ci_lanes"] if lane["id"] == "testproject-contract"
+    )
+    assert "tests/unit/test_admin_live_polling.py" in testproject_lane["selection"]["paths"]

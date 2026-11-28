@@ -6,22 +6,69 @@
   <title>django-ray testproject</title>
   <style>
     :root {
-      color-scheme: light;
+      color-scheme: light dark;
       --bg: #f7fafc;
+      --bg-top: #ffffff;
       --panel: #ffffff;
       --panel-soft: #f1f4f8;
+      --card-bg: rgba(255, 255, 255, 0.88);
+      --card-bg-hover: rgba(255, 255, 255, 0.96);
+      --card-border: rgba(217, 224, 234, 0.95);
+      --header-bg: rgba(255, 255, 255, 0.88);
+      --input-bg: #ffffff;
       --text: #17202a;
-      --muted: #627084;
+      --muted: #4b5563;
+      --header-muted: #475569;
       --line: #d9e0ea;
       --brand: #111827;
       --brand-soft: #1f2937;
       --accent: #38bdf8;
-      --accent-hover: #0ea5e9;
-      --accent-strong: #0284c7;
+      --accent-text: #082f49;
+      --accent-hover: #075985;
+      --accent-hover-text: #f8fafc;
+      --accent-strong: #0369a1;
       --accent-soft: #e0f2fe;
+      --badge-bg: rgba(255, 255, 255, 0.88);
+      --badge-border: rgba(3, 105, 161, 0.28);
+      --focus-ring: #0369a1;
       --danger: #b42318;
       --success: #157347;
+      --footer-bg: #111827;
+      --footer-text: #e2e8f0;
       --shadow: 0 12px 30px rgba(23, 32, 42, 0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0c0f;
+        --bg-top: #0b0c0f;
+        --panel: #16171a;
+        --panel-soft: #212226;
+        --card-bg: rgba(22, 23, 26, 0.94);
+        --card-bg-hover: rgba(33, 34, 38, 0.98);
+        --card-border: #303238;
+        --header-bg: rgba(22, 23, 26, 0.94);
+        --input-bg: #0b0c0f;
+        --text: #f4f4f5;
+        --muted: #a1a1aa;
+        --header-muted: #d4d4d8;
+        --line: #303238;
+        --brand: #f4f4f5;
+        --brand-soft: #e4e4e7;
+        --accent: #38bdf8;
+        --accent-text: #082f49;
+        --accent-hover: #7dd3fc;
+        --accent-hover-text: #082f49;
+        --accent-strong: #38bdf8;
+        --accent-soft: rgba(56, 189, 248, 0.2);
+        --badge-bg: #212226;
+        --badge-border: rgba(56, 189, 248, 0.35);
+        --focus-ring: #38bdf8;
+        --danger: #f87171;
+        --success: #4ade80;
+        --footer-bg: #16171a;
+        --footer-text: #d4d4d8;
+        --shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+      }
     }
     html { overflow-x: hidden; }
     * { box-sizing: border-box; }
@@ -34,8 +81,7 @@
       position: relative;
       background:
         radial-gradient(circle at 12% 8%, rgba(56, 189, 248, 0.1), transparent 28%),
-        radial-gradient(circle at 88% 18%, rgba(255, 255, 255, 0.92), transparent 24%),
-        linear-gradient(180deg, #ffffff, var(--bg) 36%, var(--bg));
+        linear-gradient(180deg, var(--bg-top), var(--bg) 36%, var(--bg));
     }
     .hero-bg::before,
     .hero-bg::after {
@@ -60,6 +106,10 @@
       transform: scaleX(-1);
       transform-origin: center;
     }
+    @media (prefers-color-scheme: dark) {
+      .hero-bg::before { opacity: 0.14; }
+      .hero-bg::after { opacity: 0.1; }
+    }
     main {
       position: relative;
       z-index: 1;
@@ -75,8 +125,8 @@
       margin-bottom: 28px;
       padding: 28px;
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.82);
-      border: 1px solid rgba(255, 255, 255, 0.8);
+      background: var(--header-bg);
+      border: 1px solid var(--card-border);
       color: var(--brand);
       box-shadow: var(--shadow);
     }
@@ -99,21 +149,39 @@
       line-height: 0.95;
       letter-spacing: 0;
     }
+    .section-heading {
+      margin: 0 0 6px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      line-height: 1.3;
+      color: var(--text);
+    }
     p { margin: 0; color: var(--muted); max-width: 720px; }
     header p {
-      color: #475569;
+      color: var(--header-muted);
       line-height: 1.65;
       max-width: 620px;
+    }
+    a {
+      color: var(--accent-strong);
+    }
+    a:focus-visible,
+    button:focus-visible,
+    .link-card:focus-visible,
+    input:focus-visible {
+      outline: 3px solid var(--focus-ring);
+      outline-offset: 2px;
     }
     .badge {
       display: inline-flex;
       align-items: center;
       min-height: 34px;
       padding: 6px 10px;
-      border: 1px solid rgba(2, 132, 199, 0.18);
-      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid var(--badge-border);
+      background: var(--badge-bg);
       border-radius: 8px;
       color: var(--accent-strong);
+      font-weight: 600;
       white-space: nowrap;
     }
     .grid {
@@ -121,7 +189,7 @@
       gap: 16px;
     }
     .stats {
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       margin-bottom: 16px;
     }
     .links {
@@ -158,7 +226,7 @@
       flex: 1 1 260px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fff;
+      background: var(--input-bg);
       color: var(--text);
       font: inherit;
       padding: 10px 12px;
@@ -174,13 +242,14 @@
     }
     .credential-status.authenticated { color: var(--success); }
     .credential-status.danger { color: var(--danger); }
-    .credential-panel p code {
+    .credential-panel p code,
+    .card p code {
       display: inline;
       padding: 2px 5px;
     }
     .card {
-      background: rgba(255, 255, 255, 0.84);
-      border: 1px solid rgba(255, 255, 255, 0.9);
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
       border-radius: 8px;
       box-shadow: var(--shadow);
       padding: 18px;
@@ -188,6 +257,7 @@
     .stat-label {
       color: var(--muted);
       font-size: 0.82rem;
+      font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0;
     }
@@ -198,26 +268,40 @@
       font-weight: 750;
       line-height: 1;
     }
+    .stat-meta {
+      display: block;
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      line-height: 1.35;
+    }
     .link-card {
       display: block;
       min-height: 116px;
       text-decoration: none;
       color: inherit;
-      transition: transform 140ms ease, border-color 140ms ease;
+      transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease;
     }
-    .link-card:hover {
+    a.link-card:hover,
+    button.link-card:hover {
       border-color: var(--accent);
       box-shadow: 0 14px 32px rgba(56, 189, 248, 0.14);
       transform: translateY(-2px);
     }
+    .link-card--disabled {
+      opacity: 0.78;
+      cursor: default;
+    }
     button.link-card {
       width: 100%;
       min-height: 116px;
-      background: rgba(255, 255, 255, 0.84);
+      background: var(--card-bg);
+      border-color: var(--card-border);
       color: inherit;
       font: inherit;
       font-weight: inherit;
       text-align: left;
+      box-shadow: var(--shadow);
     }
     .link-title {
       display: block;
@@ -240,26 +324,36 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 18px;
+    }
+    .action-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .action-meta {
+      margin-top: 10px;
+      font-size: 0.88rem;
     }
     button {
       appearance: none;
-      border: 1px solid rgba(2, 132, 199, 0.35);
+      border: 1px solid rgba(3, 105, 161, 0.4);
       border-radius: 8px;
       background: var(--accent);
-      color: #082f49;
+      color: var(--accent-text);
       cursor: pointer;
       font-weight: 750;
-      box-shadow: 0 10px 24px rgba(56, 189, 248, 0.24);
+      box-shadow: 0 10px 24px rgba(56, 189, 248, 0.22);
       padding: 12px 16px;
       min-height: 44px;
     }
     button:hover {
       background: var(--accent-hover);
-      color: #f8fafc;
+      color: var(--accent-hover-text);
     }
     button.link-card:hover {
-      background: rgba(255, 255, 255, 0.92);
+      background: var(--card-bg-hover);
       color: inherit;
     }
     button:disabled {
@@ -273,7 +367,7 @@
       box-shadow: none;
     }
     button.secondary:hover {
-      border-color: var(--accent);
+      border-color: var(--accent-strong);
       background: var(--accent-soft);
       color: var(--text);
     }
@@ -283,7 +377,7 @@
       border-radius: 8px;
       background: var(--panel-soft);
       padding: 12px;
-      color: var(--muted);
+      color: var(--text);
     }
     .danger { color: var(--danger); }
     .protected-response {
@@ -296,6 +390,9 @@
       gap: 16px;
       margin-bottom: 12px;
     }
+    .protected-response-header .section-heading {
+      margin: 0;
+    }
     .protected-response pre {
       max-height: 420px;
       margin: 0;
@@ -307,8 +404,11 @@
       padding: 16px 18px;
       border-top: 3px solid var(--accent);
       border-radius: 8px;
-      background: var(--brand);
-      color: #cbd5e1;
+      background: var(--footer-bg);
+      color: var(--footer-text);
+    }
+    @media (max-width: 1024px) {
+      .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
     @media (max-width: 860px) {
       .hero-bg::before {
@@ -324,9 +424,21 @@
       .brand { align-items: flex-start; }
       .logo { width: 56px; height: 56px; }
       .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .links { grid-template-columns: 1fr; }
+      .links, .project-links { grid-template-columns: 1fr; }
       .badge { white-space: normal; }
       .credential-controls { align-items: stretch; flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+      a.link-card:hover,
+      button.link-card:hover {
+        transform: none;
+      }
     }
   </style>
 </head>
@@ -346,7 +458,7 @@
 
     <section class="card credential-panel" aria-labelledby="browser-auth-heading">
       <div>
-        <strong id="browser-auth-heading">Browser API access</strong>
+        <h2 id="browser-auth-heading" class="section-heading">Browser API access</h2>
         <p>Paste the local demo's <code>DJANGO_API_TOKEN</code> to use protected dashboard actions.</p>
       </div>
       <div id="credential-controls-group" class="credential-form" role="group" aria-labelledby="browser-auth-heading">
@@ -362,7 +474,11 @@
     </section>
 
     <section class="grid stats" aria-label="Task statistics">
-      <div class="card"><span class="stat-label">Total</span><strong class="stat-value" id="stat-total">{{ total }}</strong></div>
+      <div class="card">
+        <span class="stat-label">Total</span>
+        <strong class="stat-value" id="stat-total">{{ total }}</strong>
+        <span class="stat-meta" id="stat-other-summary"{% if not other %} hidden{% endif %}>Includes {{ other }} other ({{ cancelled }} cancelled, {{ cancelling }} cancelling, {{ lost }} lost)</span>
+      </div>
       <div class="card"><span class="stat-label">Queued</span><strong class="stat-value" id="stat-queued">{{ queued }}</strong></div>
       <div class="card"><span class="stat-label">Running</span><strong class="stat-value" id="stat-running">{{ running }}</strong></div>
       <div class="card"><span class="stat-label">Succeeded</span><strong class="stat-value" id="stat-succeeded">{{ succeeded }}</strong></div>
@@ -373,37 +489,47 @@
     <section class="grid links" aria-label="Runtime links">
       <a class="card link-card" href="/api/docs"><span class="link-title">API Docs</span><p>Swagger UI for enqueue, task status, metrics, and admin endpoints.</p></a>
       <a class="card link-card" href="/admin/"><span class="link-title">Django Admin</span><p>Inspect task executions, worker leases, retries, and cancellation state.</p></a>
-      <a class="card link-card" href="{{ ray_dashboard_url }}"><span class="link-title">Ray Dashboard</span><p>Open the configured Ray dashboard for cluster and task runtime visibility.</p></a>
+      {% if ray_dashboard_url %}
+      <a class="card link-card" href="{{ ray_dashboard_url }}" target="_blank" rel="noopener noreferrer"><span class="link-title">Ray Dashboard</span><p>Open the configured Ray dashboard for cluster and task runtime visibility.</p></a>
+      {% else %}
+      <div class="card link-card link-card--disabled" aria-disabled="true"><span class="link-title">Ray Dashboard</span><p>Unavailable until a valid HTTP(S) <code>RAY_DASHBOARD_URL</code> is configured.</p></div>
+      {% endif %}
       <a class="card link-card" href="/api/health"><span class="link-title">Health</span><p>Database-backed application health check used by the Kubernetes probes.</p></a>
       <button id="view-metrics" class="card link-card" type="button"><span class="link-title">Metrics</span><span class="link-description">Fetch Prometheus-format metrics with the browser API token.</span></button>
       <button id="view-executions" class="card link-card" type="button"><span class="link-title">Executions</span><span class="link-description">Fetch recent execution records with the browser API token.</span></button>
     </section>
 
-    <section id="protected-response" class="card protected-response" aria-live="polite" hidden>
+    <section id="protected-response" class="card protected-response" aria-labelledby="protected-response-title" hidden>
       <div class="protected-response-header">
-        <strong id="protected-response-title">Protected API response</strong>
+        <h2 id="protected-response-title" class="section-heading">Protected API response</h2>
         <button id="close-protected-response" class="secondary" type="button">Close</button>
       </div>
       <pre><code id="protected-response-body"></code></pre>
     </section>
 
     <section class="grid project-links" aria-label="Project links">
-      <a class="card link-card" href="https://github.com/dariuszpanas/django-ray"><span class="link-title">GitHub</span><p>Source code, issues, examples, and development history.</p></a>
-      <a class="card link-card" href="https://django-ray.readthedocs.io/en/latest/"><span class="link-title">Read the Docs</span><p>Guides, deployment notes, API reference, and operations docs.</p></a>
-      <a class="card link-card" href="https://pypi.org/project/django-ray/"><span class="link-title">PyPI</span><p>Package releases and installation metadata.</p></a>
+      <a class="card link-card" href="https://github.com/dariuszpanas/django-ray" target="_blank" rel="noopener noreferrer"><span class="link-title">GitHub</span><p>Source code, issues, examples, and development history.</p></a>
+      <a class="card link-card" href="https://django-ray.readthedocs.io/en/latest/" target="_blank" rel="noopener noreferrer"><span class="link-title">Read the Docs</span><p>Guides, deployment notes, API reference, and operations docs.</p></a>
+      <a class="card link-card" href="https://pypi.org/project/django-ray/" target="_blank" rel="noopener noreferrer"><span class="link-title">PyPI</span><p>Package releases and installation metadata.</p></a>
     </section>
 
     <section class="actions">
       <div class="card action-panel">
         <div>
-          <strong>Trigger a smoke task</strong>
-          <p>Enqueues <code>add_numbers(2, 3)</code> on the default queue and refreshes stats.</p>
+          <h2 class="section-heading">Trigger a smoke task</h2>
+          <p>Enqueues <code>add_numbers(2, 3)</code> on the default queue and polls until completion.</p>
         </div>
-        <button id="trigger" type="button">Run test task</button>
+        <div class="action-buttons">
+          <button id="trigger" type="button">Run test task</button>
+          <button id="refresh-stats" class="secondary" type="button">Refresh stats</button>
+        </div>
       </div>
       <div class="card">
-        <strong>Last action</strong>
-        <code id="output" role="status">Enter the local demo API token to enable protected actions.</code>
+        <h2 class="section-heading">Last action</h2>
+        <code id="output" role="status" aria-live="polite" aria-atomic="true">Enter the local demo API token to enable protected actions.</code>
+        <p id="smoke-task-admin-wrap" class="action-meta" hidden>
+          <a id="smoke-task-admin-link" href="/admin/django_ray/raytaskexecution/">Inspect tasks in Django Admin</a>
+        </p>
       </div>
     </section>
 

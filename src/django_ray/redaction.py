@@ -143,6 +143,8 @@ def _configured_patterns(
                 patterns = None
     if patterns is None or (type(patterns) in (tuple, list) and not patterns):
         return _DEFAULT_COMPILED_PATTERNS
+    if type(patterns) is list and all(type(item) is str for item in patterns):
+        patterns = tuple(patterns)
     return compile_redaction_patterns(
         patterns,
         builtin_patterns=DEFAULT_REDACT_PATTERNS,

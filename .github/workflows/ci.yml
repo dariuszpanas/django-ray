@@ -30,7 +30,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python
@@ -96,7 +96,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python
@@ -127,7 +127,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python
@@ -152,7 +152,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python 3.12
@@ -197,7 +197,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -245,7 +245,7 @@ jobs:
         run: |
           mkdir -p "$RAY_TMPDIR"
           mapfile -t real_ray_files < <(
-            .venv/bin/python -c 'from pathlib import Path; files = sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8")); files.sort(key=lambda p: (0 if p in {"tests/integration/test_task_execution.py", "tests/unit/test_result_buffer.py"} else 1, p)); print("\n".join(files))'
+            .venv/bin/python -c 'from pathlib import Path; from scripts.test_suite_inventory import collect_tests; from tests.local_ray import ISOLATED_LOCAL_RAY_TEST_PATHS; isolated = set(ISOLATED_LOCAL_RAY_TEST_PATHS) | {"tests/integration/test_ray_job_real_ray.py"}; files = sorted({item.path for item in collect_tests(Path(".")) if "real_ray" in item.markers and "live_cluster" not in item.markers}); files.sort(key=lambda p: (0 if p in isolated else 1, p)); print("\n".join(files))'
           )
           cov_args=()
           if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
@@ -272,7 +272,7 @@ jobs:
         run: |
           mkdir -p "$RAY_TMPDIR"
           mapfile -t real_ray_files < <(
-            .venv/bin/python -c 'from pathlib import Path; files = sorted(p.as_posix() for p in Path("tests").rglob("test_*.py") if "real_ray" in p.read_text(encoding="utf-8")); files.sort(key=lambda p: (0 if p in {"tests/integration/test_task_execution.py", "tests/unit/test_result_buffer.py"} else 1, p)); print("\n".join(files))'
+            .venv/bin/python -c 'from pathlib import Path; from scripts.test_suite_inventory import collect_tests; from tests.local_ray import ISOLATED_LOCAL_RAY_TEST_PATHS; isolated = set(ISOLATED_LOCAL_RAY_TEST_PATHS) | {"tests/integration/test_ray_job_real_ray.py"}; files = sorted({item.path for item in collect_tests(Path(".")) if "real_ray" in item.markers and "live_cluster" not in item.markers}); files.sort(key=lambda p: (0 if p in isolated else 1, p)); print("\n".join(files))'
           )
           uv run --python ${{ matrix.python-version }} python \
             scripts/observe_pytest_exit.py --native-debug -- \
@@ -307,6 +307,12 @@ jobs:
         if: matrix.python-version == '3.12'
         run: uv run coverage report --include="src/django_ray/runner/ray_job.py" --fail-under=${{ env.COVERAGE_RAY_JOB_MIN }}
 
+      - name: Enforce declared per-module coverage floors
+        if: matrix.python-version == '3.12'
+        run: |
+          uv run coverage json --rcfile=pyproject.toml -o coverage.json
+          uv run python scripts/coverage_debt.py check-floors --coverage-json coverage.json --pyproject pyproject.toml
+
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
@@ -330,7 +336,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up stable Python 3.15
@@ -391,7 +397,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up minimum supported Python
@@ -408,7 +414,23 @@ jobs:
           "import django, psycopg, sys; print(sys.version); print('Django', django.get_version()); print('psycopg', psycopg.__version__)"
 
       - name: Run PostgreSQL coordination and polling tests
-        run: uv run --no-sync --python 3.12 make test-postgres
+        env:
+          COVERAGE_CORE: "sysmon"
+        run: >-
+          uv run --no-sync --python 3.12 python -m pytest tests -m postgresql
+          -vv --durations=20
+          --cov=src --cov-config=pyproject.toml
+          --cov-report=xml:coverage-postgres.xml --cov-report=term
+          --cov-fail-under=0
+
+      - name: Upload PostgreSQL coverage evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: postgresql-coverage-python-3.12
+          path: coverage-postgres.xml
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Show PostgreSQL diagnostics
         if: failure()
@@ -504,7 +526,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Pin exact cluster Python
@@ -688,6 +710,7 @@ jobs:
           docker network rm django-ray-live-cluster || true
 
   testproject:
+    if: github.event_name != 'pull_request_target'
     name: Testproject & Tooling
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -706,7 +729,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python
@@ -739,7 +762,21 @@ jobs:
           cache: "true"
           cache-dir: ${{ runner.temp }}/pyrn-cache
           metrics-kv: "true"
-          markers: tooling and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
+          markers: tooling and not repo_policy and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
+
+      - name: Run repo-policy tests without TIA or cache
+        uses: dariuszpanas/pyrn@2fcaa3619972e5da254a66ce2aaf8f3e880e5ec5 # v0.2.3
+        with:
+          command: run
+          repo: .
+          python: .venv/bin/python
+          workers: "4"
+          role: verify
+          tier: full
+          tia: "false"
+          cache: "false"
+          metrics-kv: "true"
+          markers: repo_policy and not live_cluster and not real_ray and (not postgresql or sqlite_compatible)
 
       - name: Save pyrn CAS cache
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -842,7 +879,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -941,7 +978,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python 3.12
@@ -993,7 +1030,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "latest"
+          version: "0.13.7"
           enable-cache: "false"
 
       - name: Set up Python

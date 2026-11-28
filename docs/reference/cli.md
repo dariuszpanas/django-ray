@@ -23,15 +23,26 @@ python manage.py django_ray_lease_policy --database default \
   --all-lease-users-stopped
 ```
 
+| Option | Description |
+|--------|-------------|
+| `--database=ALIAS` | Django database alias to inspect or update; default `default` |
+| `--set-seconds=N` | New shared worker lease duration in seconds (`1..86400`) |
+| `--expected-seconds=N` | Currently persisted lease duration required for compare-and-set update |
+| `--expected-revision=N` | Currently persisted lease policy revision required for compare-and-set update |
+| `--all-lease-users-stopped` | Operator assertion that every process sharing the lease table is stopped |
+| `--format=text\|json` | Output format: `json` (default) or `text` |
+| `--json` | Shorthand for `--format=json` |
+
 The stopped-cohort flag is an operator assertion; the database cannot discover
 old processes or prove that remote work stopped. The command also requires no
 active leases (including stale ones) and no running/cancelling executions. It
 never retires a lease or rewrites work. A stale expected value/revision refuses.
 Lock contention is bounded and returns a fixed failure; there are no retries.
-The shared policy lock follows existing worker ownership transactions, including
-their already-fenced cancellation and storage operations. It does not move those
-effects or widen their transaction scope. PostgreSQL shared locks permit peer
-workers; an exclusive policy transition refuses contention immediately.
+Workers validate the shared policy under a startup-only `SELECT ... FOR SHARE` guard and
+stamp DB-clock `lease_expires_at` and `lease_policy_revision` values (`0029_lease_engine_and_hot_indexes`)
+instead of locking the policy row on every hot-path claim or heartbeat transaction.
+PostgreSQL shared locks permit peer workers at startup; an exclusive policy transition
+refuses contention immediately.
 An explicit successful update exits 0 even when this process still has the old
 setting; its JSON reports that mismatch. Change every process's configuration
 before restart, keeping each heartbeat interval below the common duration.
@@ -49,10 +60,66 @@ Collect bounded read-only configuration and database observations on Linux:
 python manage.py django_ray_doctor --database default --format json
 ```
 
-This first slice returns exit 2 when available observations are clear because
-remote readiness and inventory sections remain unavailable. See the
-[doctor contract](doctor.md) for finite budgets, supported settings, process
-cleanup, exit codes and the standalone entry point that also bounds startup.
+Healthy hosts where all required configuration and database observations pass exit `0`
+with `"status": "ok"` and `"complete": true` while explicitly listing unimplemented
+remote-inventory sections under `deferred_sections`. Blockers exit `1`; incomplete
+required probes or cleanup failures exit `2`. See the [doctor contract](doctor.md) for
+finite budgets, supported settings, process cleanup, and exit codes.
+
+## django_ray_purge_executions
+
+Bounded, cursor-resumable retention purge for aged terminal `RayTaskExecution` rows,
+archived `TaskAttempt` rows, inactive `TaskWorkerLease` rows, and unshared external
+`result_reference` objects:
+
+```bash
+# Dry-run preview (default)
+python manage.py django_ray_purge_executions --older-than-days 30 --dry-run
+
+# Bounded deletion pass for cron jobs (external blobs removed outside DB transactions)
+python manage.py django_ray_purge_executions --older-than-days 30 --delete --until-empty --format json
+```
+
+Active (`QUEUED`, `RUNNING`, `CANCELLING`) executions and active worker leases are
+never deleted. External result blob deletions run strictly outside database transactions
+via `django_ray._blob_storage`.
+
+| Option | Description |
+|--------|-------------|
+| `--older-than-days=N` | Retain terminal executions and inactive leases newer than `N` days; default `30`, range `0..365000` |
+| `--delete` | Delete eligible executions, attempts, inactive leases, and unshared external result blobs |
+| `--dry-run` | Preview eligible rows and external results without deleting (default; mutually exclusive with `--delete`) |
+| `--batch-size=N` | Maximum executions and inactive leases to inspect per batch; default `100`, max `1000` |
+| `--max-batches=N` | Maximum batches per invocation; default `1` (`100` with `--until-empty`), max `1000` |
+| `--until-empty` | Continue across batches until exhausted or `--max-batches` is reached (recommended for cron) |
+| `--cursor=TOKEN` | Resume an incomplete purge pass with its fixed cutoff and mode |
+| `--skip-leases` | Skip purging inactive `TaskWorkerLease` rows |
+| `--skip-results` | Skip deleting external `result_reference` blobs (delete database rows only) |
+| `--database=ALIAS` | Django database alias to purge; default `default` |
+| `--format=text\|json` | Output format: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
+
+## django_ray_replay
+
+Read-only local time-travel debugger that reloads persisted task inputs (inline or
+external) and executes the task callable locally in-process without mutating durable
+database rows or external storage artifacts:
+
+```bash
+python manage.py django_ray_replay <task_id> --dry-run
+python manage.py django_ray_replay <task_id> --pdb
+```
+
+| Option | Description |
+|--------|-------------|
+| `task_id` | Durable Django `task_id` of the `RayTaskExecution` record to replay |
+| `--attempt=N` | Specific 1-based attempt number to inspect metadata for during replay |
+| `--database=ALIAS` | Django database alias to read the persisted execution from; default `default` |
+| `--format=text\|json` | Output format for the replay report: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
+| `--dry-run` | Resolve the callable and inspect persisted inputs/metadata without invoking the callable |
+| `--pdb` | Invoke the resolved task callable under `pdb.runcall` for interactive debugging (mutually exclusive with `--dry-run`) |
+| `--show-sensitive` | Display unredacted task inputs, outputs, and errors (emits an audit warning to stderr; redacted by default) |
 
 ## django_ray_worker
 
@@ -95,21 +162,30 @@ check for programmatic command use. Ray Job mode accepts them.
 | `--sync` | Run tasks synchronously (no Ray) |
 | `--local` | Use local Ray cluster |
 | `--cluster=ADDRESS` | Connect to Ray cluster at ADDRESS |
-| *(none)* | Use default from `DJANGO_RAY.RUNNER` (`ray_job` by default) |
+| `--ray-job` | Submit tasks via the Ray Job Submission API |
+| *(none)* | Use default from `DJANGO_RAY.RUNNER` (`ray_core` by default) |
 
-The explicit execution-mode flags are mutually exclusive. Omit all three to derive the
+The explicit execution-mode flags are mutually exclusive. Omit all four to derive the
 mode from `DJANGO_RAY`; contradictory flags are rejected instead of using an implicit
 precedence order.
 
-The default `ray_job` mode requires a retrievable `INPUT_STORAGE_BACKEND`, even when
-argument spillover is disabled. The worker validates that backend before creating a
-lease or claiming work, so a missing or malformed configuration fails at startup.
+`ray_job` mode (`--ray-job` or `RUNNER="ray_job"`) requires a retrievable
+`INPUT_STORAGE_BACKEND`, even when argument spillover is disabled. The worker validates
+that backend before creating a lease or claiming work, so a missing or malformed
+configuration fails at startup.
 
 #### Concurrency
 
 | Option | Description |
 |--------|-------------|
 | `--concurrency=N` | Maximum concurrent tasks (default: `DJANGO_RAY["DEFAULT_CONCURRENCY"]`, which defaults to `10`) |
+
+#### Graceful Drain
+
+| Option | Description |
+|--------|-------------|
+| `--drain` | Passive queue-quiescence observer: does not claim new `QUEUED` tasks or block external producers; waits until no `QUEUED`, `RUNNING`, or `CANCELLING` executions across the deployment (or local in-flight tasks) remain for the targeted queues, releases its worker lease cleanly, and exits `0` (or exits `1` on `--drain-timeout-seconds` expiry). Pause producers first and run while existing workers are still draining queued work |
+| `--drain-timeout-seconds=SECONDS` | Maximum seconds to wait for active queue work and in-flight tasks to finish while draining before handing off and exiting non-zero |
 
 ### Examples
 
@@ -125,6 +201,12 @@ python manage.py django_ray_worker --all-queues --local --concurrency=50
 
 # Connect to Ray cluster
 python manage.py django_ray_worker --queue=default --cluster=ray://ray-head:10001
+
+# Submit tasks via Ray Job API
+python manage.py django_ray_worker --queue=batch --ray-job
+
+# Drain in-flight work cleanly during a coordinated upgrade
+python manage.py django_ray_worker --queue=default --drain --drain-timeout-seconds=120
 
 # Sync mode for testing
 python manage.py django_ray_worker --queue=default --sync
@@ -189,7 +271,8 @@ python manage.py django_ray_protocol_status --database=default --json
 | Option | Description |
 |--------|-------------|
 | `--database=ALIAS` | Django database alias to inspect; default `default` |
-| `--json` | Emit the canonical versioned JSON report instead of the text view |
+| `--format=text\|json` | Output format: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
 
 Both formats describe the same `django-ray.protocol-status` report. It includes the
 policy and admission-token relationship, active and heartbeat-stale task-manager lease
@@ -218,17 +301,30 @@ Compare fixed and adaptive claim polling against the configured PostgreSQL datab
 python manage.py django_ray_benchmark_polling \
   --workers=4 --tasks=100 --idle-seconds=2 \
   --base-interval-seconds=0.1 --max-interval-seconds=0.5 \
-  --seed=53 --json
+  --seed=53 --format=json
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--workers=N` | Concurrent benchmark worker processes; default `4` |
+| `--tasks=N` | Tasks enqueued per active phase; default `100` |
+| `--idle-seconds=SECONDS` | Idle observation phase duration in seconds; default `2.0` |
+| `--enqueue-interval-seconds=SECONDS` | Interval between spaced task enqueues; default `0.05` |
+| `--base-interval-seconds=SECONDS` | Base polling interval in seconds; default `0.1` |
+| `--max-interval-seconds=SECONDS` | Maximum adaptive polling interval in seconds; default `0.5` |
+| `--overlap-window-ms=MS` | Cross-worker poll overlap window in milliseconds; default `25.0` |
+| `--seed=N` | Deterministic random seed; default `53` |
+| `--barrier-timeout-seconds=SECONDS` | Worker startup-barrier timeout in seconds; default `10.0` |
+| `--protocol-predicate-max-rows=N` | Row ceiling for protocol-predicate comparison queries |
+| `--background-terminal-rows=N` | Background terminal rows seeded before benchmark measurement; default `0` |
+| `--format=text\|json` | Output format: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
 
 The command starts the production worker claim loop on isolated temporary queues. It
 separately measures idle query load and poll de-synchronization, spaced enqueue-to-claim
-latency, and preloaded-burst claim throughput, then deletes its benchmark rows. Options
-control worker count, task count per active phase, idle duration, enqueue interval, base
-and maximum poll intervals, cross-worker overlap window, random seed, and
-startup-barrier timeout.
-`--json` records Django, Python, PostgreSQL, migration, timing, and seed metadata. It
-refuses SQLite and other database engines because their locking behavior is not
+latency, and preloaded-burst claim throughput, then deletes its benchmark rows.
+`--format=json` / `--json` records Django, Python, PostgreSQL, migration, timing, and seed
+metadata. It refuses SQLite and other database engines because their locking behavior is not
 representative.
 
 Every run also emits additive schema-v1 `protocol_predicate_evidence`. The command
@@ -268,12 +364,19 @@ python manage.py django_ray_purge_inputs --retention-days=30 --delete
 | `--max-attachments=N` | Execution references inspected per payload; default `100`, range `1..1000`; one extra row detects overflow |
 | `--max-details=N` | Detailed fingerprint/outcome rows; default `20`, range `0..100`, also subject to the detail-byte budget |
 | `--cursor=TOKEN` | Continue after the previous batch's registry primary key with the original fixed cutoff and mode |
+| `--until-empty` | Continue across candidate batches until exhausted or `--max-batches` is reached (recommended for cron jobs to avoid passing `--cursor` tokens in shells) |
+| `--max-batches=N` | Maximum candidate batches per invocation; default `1` (`100` with `--until-empty`), max `1000` |
 | `--discover-unregistered` | Bounded dry-run inventory of backend storage prefixes for canonical payload envelopes lacking a database registry row |
 | `--delete-unregistered` | Reap eligible unregistered canonical payload objects after inserting a coordinated `PURGED` registry tombstone |
 | `--grace-seconds=N` | Minimum object age in seconds before an unregistered canonical payload is eligible; default `3600`, range `60..315360000` |
 | `--max-inventory-objects=N` | Maximum backend objects inspected during unregistered discovery; default `100`, range `1..1000` |
 | `--max-inventory-pages=N` | Maximum backend listing pages fetched during unregistered discovery; default `10`, range `1..100` |
+| `--database=ALIAS` | Django database alias to purge; default `default` |
 | `--format=text\|json` | Human-readable text (default) or a versioned JSON report |
+| `--json` | Shorthand for `--format=json` |
+
+External blob deletion runs in a two-phase tombstone flow strictly **outside** database
+row locks, so slow S3/GCS deletes cannot block concurrent enqueue or claim transactions.
 
 Each invocation fetches at most `max-candidates + 1` registry keys and, for each
 selected key, at most `max-attachments + 1` execution rows. A payload with more
@@ -324,11 +427,11 @@ python manage.py django_ray_purge_inputs --format=json --max-candidates=100
 python manage.py django_ray_purge_inputs --format=json --cursor="$PURGE_CURSOR"
 ```
 
-Keep the equals sign in `--cursor=TOKEN`: a valid opaque token can start with
-`-`, which the argument parser would otherwise mistake for another option.
-Quoting a separate token does not remove this ambiguity. Programmatic callers
-passing argument strings to `call_command` should likewise use one
-`f"--cursor={token}"` argument; keyword callers can pass `cursor=token`.
+Keep the equals sign in `--cursor=TOKEN`: newly generated tokens carry the
+non-hyphen `ipc1.` prefix (while legacy unprefixed tokens remain accepted and can
+start with `-`), so passing `--cursor=TOKEN` works consistently across versions.
+Programmatic callers passing argument strings to `call_command` should likewise use
+one `f"--cursor={token}"` argument; keyword callers can pass `cursor=token`.
 
 **Scheduling migration:** the formerly unbounded invocation now stops after 100
 candidates by default. Update scheduled jobs to read JSON, retain each page's
@@ -436,6 +539,9 @@ python manage.py django_ray_cleanup_workflow_progress --delete
 |--------|-------------|
 | `--batch-size=N` | Check at most `N` expired runs, pending manifests, orphan pages, and empty runs per class; default `100`, range `1`-`1000` |
 | `--delete` | Delete candidates that remain eligible after row locking |
+| `--database=ALIAS` | Django database alias to clean; default `default` |
+| `--format=text\|json` | Output format: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
 
 An expired run is protected while its complete attempt, generation, and run identity
 is still the active task identity. Independently, only unpublished `PENDING` manifests
@@ -465,9 +571,10 @@ python manage.py django_ray_runtime_env --mode check --format json
 | Option | Default | Maximum or contract |
 |---|---|---|
 | `--database` | `default` | Plain SQLite file or PostgreSQL Django database alias; custom backends and unsupported connection options fail closed |
-| `--mode` | `dry-run` | Every mode requires a valid selected active key; `dry-run` and `check` authenticate/inspect without writes; `rewrite` converts plaintext and rewraps old keys |
+| `--mode` | `dry-run` | `dry-run` and `check` inspect/authenticate retained snapshots without writes (including under `plaintext` configuration); `rewrite` converts plaintext and rewraps old keys and requires encrypted/required writes with a valid selected active key |
 | `--confirm` | Off | Required only for `rewrite`; configuration must select encrypted/required writes and an active key |
-| `--format` | `human` | `human` or versioned `json` |
+| `--format` | `text` | `text` (default), versioned `json`, or legacy alias `human` |
+| `--json` | Off | Shorthand for `--format=json` |
 | `--cursor=TOKEN` | Fresh pass | Same mode, database/table and key policy; changing `SECRET_KEY` invalidates tokens |
 | `--max-rows` | 100 | 1–1,000 candidate rows; one additional numeric PK detects continuation |
 | `--max-bytes` | 65,536 | 1–1,048,576 bytes per stored or replacement snapshot; identity fields have separate fixed limits |
@@ -557,6 +664,8 @@ task row now belongs to another attempt; it does not substitute that newer summa
 | `--execution-generation=N` | Required execution fencing generation |
 | `--run-id=UUID` | Required workflow run identifier |
 | `--database=ALIAS` | Django database alias; default `default` |
+| `--format=text\|json` | Output format: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
 
 ## django_ray_worker_ready
 
@@ -576,7 +685,8 @@ python manage.py django_ray_worker_ready \
 | `--queue=QUEUE` | Required queue coordinate recorded on the worker lease |
 | `--hostname=HOST` | Required hostname coordinate recorded on the worker lease |
 | `--worker-id=ID` | Optional exact worker ID when multiple workers share a queue and hostname |
-| `--json` | Emit the canonical versioned JSON report instead of the text summary |
+| `--format=text\|json` | Output format: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
 
 The command checks that `WORKER_LEASE_SECONDS` matches the database `TaskWorkerLeasePolicy` authority and that exactly one active, non-stopped lease matches the supplied coordinates within the current lease duration window. It never connects to Ray, never proves queue or cluster capacity, and never echoes coordinates or lease rows into output. Exit code `0` means `ready` (`live_lease`); `1` means `not_ready` (`no_live_lease` or `ambiguous_lease`); and `2` means `error` (such as `invalid_coordinates`, `invalid_database`, `invalid_settings`, `transaction_active`, `database_unavailable`, or a lease-policy mismatch).
 
@@ -606,4 +716,6 @@ python manage.py django_ray_benchmark_workflow_progress \
 | `--database-deployment=LABEL` | Metadata label recorded in the benchmark report; default `unspecified` |
 | `--output-json=PATH` | Optional path to write the canonical JSON benchmark report |
 | `--output-markdown=PATH` | Optional path to write the rendered Markdown summary (must differ from `--output-json`) |
+| `--format=text\|json` | Output format: `text` (default) or `json` |
+| `--json` | Shorthand for `--format=json` |
 

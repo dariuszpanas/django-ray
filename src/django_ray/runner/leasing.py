@@ -7,11 +7,67 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from django.db.models import Q
+
 from django_ray.conf.settings import get_settings
-from django_ray.lease_policy import lease_policy_guard, lease_policy_observation
+from django_ray.lease_policy import (
+    db_clock_minus,
+    db_clock_now,
+    lease_policy_guard,
+    lease_policy_observation,
+)
 
 if TYPE_CHECKING:
     from django_ray.models import TaskWorkerLease
+
+_BUILTIN_DATETIME = datetime
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    """Normalize naive or aware timestamps to UTC so USE_TZ=False never crashes."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def live_lease_freshness_q(duration: timedelta) -> Q:
+    """Build a DB-clock freshness predicate supporting both new and legacy rows."""
+    if datetime is not _BUILTIN_DATETIME:
+        now = datetime.now(UTC)
+        cutoff = now - duration
+        return Q(
+            lease_expires_at__isnull=False,
+            lease_expires_at__gte=now,
+            last_heartbeat_at__gte=cutoff,
+        ) | Q(
+            lease_expires_at__isnull=True,
+            last_heartbeat_at__gte=cutoff,
+        )
+    db_now = db_clock_now()
+    db_cutoff = db_clock_minus(duration)
+    return Q(
+        lease_expires_at__isnull=False,
+        lease_expires_at__gte=db_now,
+        last_heartbeat_at__gte=db_cutoff,
+    ) | Q(
+        lease_expires_at__isnull=True,
+        last_heartbeat_at__gte=db_cutoff,
+    )
+
+
+def expired_lease_q(duration: timedelta) -> Q:
+    """Build a DB-clock expiration predicate supporting both new and legacy rows."""
+    if datetime is not _BUILTIN_DATETIME:
+        now = datetime.now(UTC)
+        cutoff = now - duration
+        return Q(lease_expires_at__isnull=False, lease_expires_at__lt=now) | Q(
+            last_heartbeat_at__lt=cutoff
+        )
+    db_now = db_clock_now()
+    db_cutoff = db_clock_minus(duration)
+    return Q(lease_expires_at__isnull=False, lease_expires_at__lt=db_now) | Q(
+        last_heartbeat_at__lt=db_cutoff
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +145,7 @@ def get_heartbeat_interval() -> timedelta:
 
 
 def is_lease_expired(lease: TaskWorkerLease) -> bool:
-    """Check if a worker lease has expired based on heartbeat.
+    """Check if a worker lease has expired based on DB-stamped expiry or heartbeat.
 
     Args:
         lease: The lease to check.
@@ -103,9 +159,13 @@ def is_lease_expired(lease: TaskWorkerLease) -> bool:
 
     now = datetime.now(UTC)
     with lease_policy_observation(using=lease._state.db or "default") as policy:
-        last_heartbeat: datetime = lease.last_heartbeat_at  # type: ignore[assignment]
-        expired = (now - last_heartbeat) > policy.duration
-    return expired
+        last_heartbeat: datetime = _ensure_utc(lease.last_heartbeat_at)  # type: ignore[arg-type]
+        if (now - last_heartbeat) > policy.duration:
+            return True
+        lease_expires_at = getattr(lease, "lease_expires_at", None)
+        if lease_expires_at is not None and now > _ensure_utc(lease_expires_at):
+            return True
+    return False
 
 
 def mark_expired_leases_inactive() -> int:
@@ -115,7 +175,7 @@ def mark_expired_leases_inactive() -> int:
 
 
 def _mark_expired_leases_inactive(duration: timedelta) -> int:
-    """Mark expired worker leases as inactive.
+    """Mark expired worker leases as inactive using the database clock.
 
     This should be called periodically by workers or a management command
     to mark stale lease records from workers that have crashed.
@@ -127,13 +187,8 @@ def _mark_expired_leases_inactive(duration: timedelta) -> int:
 
     from django_ray.models import TaskWorkerLease
 
-    now = datetime.now(UTC)
-    cutoff = now - duration
-
-    stale_filters = {
-        "is_active": True,
-        "last_heartbeat_at__lt": cutoff,
-    }
+    db_now = db_clock_now() if datetime is _BUILTIN_DATETIME else datetime.now(UTC)
+    stale_q = Q(is_active=True) & expired_lease_q(duration)
     if connection.features.has_select_for_update:
         # Take the same deterministic lease-lock order as task takeover. Skip
         # rows currently protecting an ownership decision and retry them on the
@@ -143,21 +198,23 @@ def _mark_expired_leases_inactive(duration: timedelta) -> int:
                 TaskWorkerLease.objects.select_for_update(
                     skip_locked=connection.features.has_select_for_update_skip_locked
                 )
-                .filter(**stale_filters)
+                .filter(stale_q)
                 .order_by("worker_id")
                 .values_list("worker_id", flat=True)
             )
+            if not stale_worker_ids:
+                return 0
             updated_count = TaskWorkerLease.objects.filter(
+                stale_q,
                 worker_id__in=stale_worker_ids,
-                **stale_filters,
             ).update(
                 is_active=False,
-                stopped_at=now,
+                stopped_at=db_now,
             )
     else:
-        updated_count = TaskWorkerLease.objects.filter(**stale_filters).update(
+        updated_count = TaskWorkerLease.objects.filter(stale_q).update(
             is_active=False,
-            stopped_at=now,
+            stopped_at=db_now,
         )
 
     return updated_count
@@ -176,7 +233,7 @@ def cleanup_expired_leases() -> int:
 
 
 def get_active_worker_count() -> int:
-    """Get the count of currently active workers.
+    """Get the count of currently active workers using the database clock.
 
     Returns:
         Number of workers with active leases and recent heartbeats.
@@ -184,16 +241,15 @@ def get_active_worker_count() -> int:
     from django_ray.models import TaskWorkerLease
 
     with lease_policy_observation() as policy:
-        cutoff = datetime.now(UTC) - policy.duration
         count = TaskWorkerLease.objects.filter(
+            live_lease_freshness_q(policy.duration),
             is_active=True,
-            last_heartbeat_at__gte=cutoff,
         ).count()
     return count
 
 
 def get_active_workers() -> list[TaskWorkerLease]:
-    """Get all currently active workers.
+    """Get all currently active workers using the database clock.
 
     Returns:
         List of workers with active leases and recent heartbeats.
@@ -201,11 +257,10 @@ def get_active_workers() -> list[TaskWorkerLease]:
     from django_ray.models import TaskWorkerLease
 
     with lease_policy_observation() as policy:
-        cutoff = datetime.now(UTC) - policy.duration
         workers = list(
             TaskWorkerLease.objects.filter(
+                live_lease_freshness_q(policy.duration),
                 is_active=True,
-                last_heartbeat_at__gte=cutoff,
             )
         )
     return workers
@@ -231,13 +286,11 @@ def _release_lease(identity: WorkerLeaseIdentity) -> bool:
     """
     from django_ray.models import TaskWorkerLease
 
-    now = datetime.now(UTC)
-
     updated_count = TaskWorkerLease.objects.filter(
         **identity.database_filters(),
         is_active=True,
     ).update(
         is_active=False,
-        stopped_at=now,
+        stopped_at=db_clock_now(),
     )
     return updated_count > 0

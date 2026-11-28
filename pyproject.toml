@@ -58,6 +58,9 @@ Repository = "https://github.com/dariuszpanas/django-ray"
 Issues = "https://github.com/dariuszpanas/django-ray/issues"
 
 [project.optional-dependencies]
+otel = [
+    "opentelemetry-sdk>=1.45.1",
+]
 postgres = [
     "psycopg[binary]>=3.1",
 ]
@@ -82,6 +85,7 @@ sample = [
 dev = [
     "django-ninja>=1.5.1",
     "django-unfold==0.110.1",
+    "opentelemetry-sdk>=1.45.1",
     "whitenoise>=6.6",
     "ruff>=0.14.13",
     "ty>=0.0.102",
@@ -125,11 +129,146 @@ indent-style = "space"
 python-version = "3.12"
 
 [tool.ty.rules]
-# Compatibility for dynamic Django ORM descriptors and generated attributes
-missing-attribute = "ignore"
+# Enforce core type-safety rules globally; narrow Django ORM / legacy stub
+# exemptions are scoped strictly in [[tool.ty.overrides]] below.
+missing-attribute = "error"
 missing-union-attribute = "error"
+invalid-argument-type = "error"
+possibly-missing-attribute = "error"
+invalid-assignment = "error"
+
+[[tool.ty.overrides]]
+# Django ORM `.objects` descriptors (no django-stubs) and POSIX-only helpers.
+include = [
+    "src/django_ray/doctor/probe.py",
+    "src/django_ray/doctor/supervisor.py",
+    "src/django_ray/input_storage.py",
+    "src/django_ray/lease_policy.py",
+    "src/django_ray/management/commands/django_ray_purge_executions.py",
+    "src/django_ray/management/commands/django_ray_purge_inputs.py",
+    "src/django_ray/management/commands/django_ray_replay.py",
+    "src/django_ray/payload_registry.py",
+    "src/django_ray/protocol_status.py",
+    "src/django_ray/runtime/entrypoint.py",
+    "src/django_ray/worker_readiness.py",
+    "src/django_ray/workflow/progress/cleanup.py",
+    "src/django_ray/workflow/progress/reporting_diagnostics.py",
+    "src/django_ray/workflow/strategy.py",
+]
+
+[tool.ty.overrides.rules]
+missing-attribute = "ignore"
+
+[[tool.ty.overrides]]
+# Narrowing / Ray / Django Field-descriptor argument-type gaps awaiting cleanup.
+include = [
+    "src/django_ray/doctor/contracts.py",
+    "src/django_ray/execution_codec.py",
+    "src/django_ray/management/purge_cursor.py",
+    "src/django_ray/management/runtime_env_cursor.py",
+    "src/django_ray/management/runtime_env_maintenance.py",
+    "src/django_ray/runner/ray_job.py",
+    "src/django_ray/runner/reconciliation.py",
+    "src/django_ray/runtime/context.py",
+    "src/django_ray/runtime/remote.py",
+    "src/django_ray/runtime/result_fold.py",
+    "src/django_ray/target/attestation.py",
+    "src/django_ray/target/execution_codec.py",
+    "src/django_ray/workflow/plans.py",
+    "src/django_ray/workflow/progress/protocol.py",
+    "src/django_ray/workflows.py",
+]
+
+[tool.ty.overrides.rules]
 invalid-argument-type = "ignore"
-possibly-missing-attribute = "ignore"
+
+[[tool.ty.overrides]]
+# Django ORM PositiveIntegerField descriptor assignment.
+include = ["src/django_ray/runner/retry.py"]
+
+[tool.ty.overrides.rules]
+invalid-assignment = "ignore"
+
+[[tool.ty.overrides]]
+# Ray Core / Ray Job protocol narrowing gaps.
+include = [
+    "src/django_ray/ray_job_protocol.py",
+    "src/django_ray/runner/ray_core.py",
+]
+
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+
+[[tool.ty.overrides]]
+# Django ORM query/model modules (missing `.objects` + Field-descriptor args)
+# and POSIX-only signal helpers with argument-narrowing gaps.
+include = [
+    "src/django_ray/backends.py",
+    "src/django_ray/doctor/runner.py",
+    "src/django_ray/management/commands/django_ray_benchmark_workflow_progress.py",
+    "src/django_ray/metrics.py",
+    "src/django_ray/observability.py",
+    "src/django_ray/runner/leasing.py",
+    "src/django_ray/target/capabilities.py",
+    "src/django_ray/target/coordination.py",
+    "src/django_ray/target/routing.py",
+    "src/django_ray/workflow/progress/publication.py",
+    "src/django_ray/workflow/progress/reads.py",
+    "src/django_ray/workflow/progress/storage.py",
+]
+
+[tool.ty.overrides.rules]
+missing-attribute = "ignore"
+invalid-argument-type = "ignore"
+
+[[tool.ty.overrides]]
+# Full Django ORM / Admin / Worker state-mutation modules.
+include = [
+    "src/django_ray/admin.py",
+    "src/django_ray/lifecycle.py",
+    "src/django_ray/management/commands/django_ray_benchmark_polling.py",
+    "src/django_ray/management/commands/django_ray_worker.py",
+    "src/django_ray/protocol_coordination.py",
+    "src/django_ray/ray_job_request_storage.py",
+    "src/django_ray/runner/cancellation.py",
+    "src/django_ray/target/probe.py",
+    "src/django_ray/workflow/progress/runs.py",
+]
+
+[tool.ty.overrides.rules]
+missing-attribute = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+
+[[tool.ty.overrides]]
+# Non-package tooling, sample app, qualification harnesses, docs, and tests.
+include = [
+    "docs/**",
+    "locustfile.py",
+    "qualification/**",
+    "scripts/benchmark_distributed_preparation.py",
+    "scripts/benchmark_workflow_progress_preparation.py",
+    "scripts/benchmark_workflow_progress_publication.py",
+    "scripts/benchmark_workflow_progress_reads.py",
+    "scripts/check_python315_compatibility.py",
+    "scripts/check_rq2_reference_compatibility.py",
+    "scripts/compiled_session_topology_probe.py",
+    "scripts/investigate_native_exit.py",
+    "scripts/investigate_pytest_shutdown.py",
+    "scripts/local_kuberay_gate.py",
+    "scripts/ray_data_golden_path_probe.py",
+    "scripts/test_suite_inventory.py",
+    "scripts/verify_doctor_wheel.py",
+    "scripts/verify_runtime_env_maintenance_wheel.py",
+    "scripts/verify_wheel.py",
+    "testproject/**",
+    "tests/**",
+]
+
+[tool.ty.overrides.rules]
+missing-attribute = "ignore"
+invalid-argument-type = "ignore"
 invalid-assignment = "ignore"
 
 [tool.pytest.ini_options]
@@ -164,3 +303,50 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
+
+[tool.django_ray.coverage]
+# Branch coverage is collected via `scripts/coverage_debt.py run-phases --branch`
+# and `render --branch` using the ctrace core so Python 3.12 sysmon line-mode
+# CI shards remain combine-compatible.
+branch_supported = true
+branch_fail_under = 85
+
+[tool.django_ray.coverage.module_floors]
+"src/django_ray/_blob_storage.py" = 85
+"src/django_ray/_storage_types.py" = 85
+"src/django_ray/_version.py" = 90
+"src/django_ray/admin_views/__init__.py" = 90
+"src/django_ray/admin_views/actions.py" = 90
+"src/django_ray/admin_views/badges.py" = 90
+"src/django_ray/admin_views/diagnostics.py" = 85
+"src/django_ray/admin_views/sensitive.py" = 90
+"src/django_ray/backends.py" = 90
+"src/django_ray/conf/validation.py" = 90
+"src/django_ray/decorators.py" = 90
+"src/django_ray/execution_codec.py" = 90
+"src/django_ray/input_storage.py" = 90
+"src/django_ray/lease_policy.py" = 90
+"src/django_ray/lifecycle.py" = 90
+"src/django_ray/management/commands/django_ray_purge_executions.py" = 90
+"src/django_ray/management/commands/django_ray_replay.py" = 90
+"src/django_ray/management/commands/django_ray_worker.py" = 90
+"src/django_ray/models.py" = 90
+"src/django_ray/ray_job_protocol.py" = 90
+"src/django_ray/result_storage.py" = 90
+"src/django_ray/runner/cancellation.py" = 90
+"src/django_ray/runner/leasing.py" = 90
+"src/django_ray/runner/ray_core.py" = 90
+"src/django_ray/runner/ray_job.py" = 90
+"src/django_ray/runner/reconciliation.py" = 90
+"src/django_ray/runner/sync.py" = 90
+"src/django_ray/runtime/entrypoint.py" = 90
+"src/django_ray/runtime/remote.py" = 90
+"src/django_ray/worker/__init__.py" = 90
+"src/django_ray/worker/claimer.py" = 85
+"src/django_ray/worker/dispatcher.py" = 85
+"src/django_ray/worker/loop.py" = 85
+"src/django_ray/worker/maintenance.py" = 85
+"src/django_ray/worker/reconciler.py" = 85
+"src/django_ray/worker/shutdown.py" = 85
+"src/django_ray/workflow/_types.py" = 85
+"src/django_ray/workflow/dsl.py" = 90

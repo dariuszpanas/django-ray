@@ -1,5 +1,5 @@
 {% extends "admin/base_site.html" %}
-{% load static %}
+{% load i18n static %}
 
 {% block extrastyle %}
   {{ block.super }}
@@ -9,10 +9,18 @@
 
 {% block breadcrumbs %}
   <div class="breadcrumbs">
-    <a href="{% url 'admin:index' %}">Home</a>
+    <a href="{{ django_ray_sensitive_index_url|default:'/admin/' }}">{% translate "Home" %}</a>
+    {% if django_ray_sensitive_app_url %}
+      &rsaquo;
+      <a href="{{ django_ray_sensitive_app_url }}">{{ opts.app_config.verbose_name }}</a>
+    {% endif %}
+    {% if django_ray_sensitive_changelist_url %}
+      &rsaquo;
+      <a href="{{ django_ray_sensitive_changelist_url }}">{{ opts.verbose_name_plural|capfirst }}</a>
+    {% endif %}
     &rsaquo;
-    <a href="{{ django_ray_sensitive_back_url }}">Redacted task detail</a>
-    &rsaquo; Unredacted task data
+    <a href="{{ django_ray_sensitive_back_url }}">{% translate "Redacted task detail" %}</a>
+    &rsaquo; {{ title }}
   </div>
 {% endblock %}
 
@@ -21,7 +29,7 @@
 {% block content %}
   <div id="content-main" class="django-ray-sensitive-data">
     <header class="django-ray-sensitive-data__header">
-      <p class="django-ray-sensitive-data__eyebrow">Privileged diagnostics</p>
+      <p class="django-ray-sensitive-data__eyebrow">{% translate "Privileged diagnostics" %}</p>
       <h1>{{ title }}</h1>
       <p class="django-ray-sensitive-data__subject">
         {{ django_ray_sensitive_subject }}
@@ -30,27 +38,23 @@
         href="{{ django_ray_sensitive_back_url }}"
         class="django-ray-admin-action django-ray-admin-action--secondary"
       >
-        Return to redacted task detail
+        {% translate "Return to redacted task detail" %}
       </a>
     </header>
 
     <section class="module django-ray-sensitive-data__warning" aria-labelledby="sensitive-warning-title">
-      <h2 id="sensitive-warning-title">Sensitive, unredacted values</h2>
+      <h2 id="sensitive-warning-title">{% translate "Sensitive, unredacted values" %}</h2>
       <div class="django-ray-sensitive-data__warning-body">
         <p>
-          These stored values bypass django-ray's display redaction and may contain
-          credentials, personal data, or external-system payloads. Handle them under
-          your deployment's secret and incident-data policy.
+          {% translate "These stored values bypass django-ray's display redaction and may contain credentials, personal data, or external-system payloads. Handle them under your deployment's secret and incident-data policy." %}
         </p>
         <p>
-          Terminal formatting and control characters are rendered inert for safe
-          browser inspection. Printable diagnostic text remains unredacted.
+          {% translate "Terminal formatting and control characters are rendered inert for safe browser inspection. Printable diagnostic text remains unredacted." %}
         </p>
         <p>
-          Access requires the ordinary object-view permission and
-          <code>django_ray.view_sensitive_task_data</code>. This GET-only response is
-          not cached. RuntimeEnv, completion envelopes, workflow progress, and logs
-          are never included here.
+          {% translate "Access requires the ordinary object-view permission and" %}
+          <code>django_ray.view_sensitive_task_data</code>.
+          {% translate "This GET-only response is not cached. RuntimeEnv, completion envelopes, workflow progress, and logs are never included here." %}
         </p>
       </div>
     </section>
@@ -66,22 +70,23 @@
                 {% if field.status == "value" %}
                   <pre class="django-ray-sensitive-data__value">{{ field.value }}</pre>
                 {% elif field.status == "empty" %}
-                  <p class="django-ray-sensitive-data__placeholder">Empty string</p>
+                  <p class="django-ray-sensitive-data__placeholder">{% translate "Empty string" %}</p>
                 {% elif field.status == "normalized_empty" %}
                   <p class="django-ray-sensitive-data__placeholder">
-                    Stored value contained only terminal formatting or control characters.
+                    {% translate "Stored value contained only terminal formatting or control characters." %}
                   </p>
                 {% elif field.status == "null" %}
-                  <p class="django-ray-sensitive-data__placeholder">No stored value</p>
+                  <p class="django-ray-sensitive-data__placeholder">{% translate "No stored value" %}</p>
                 {% elif field.status == "oversized" %}
                   <p class="django-ray-sensitive-data__placeholder">
-                    Not shown: the stored value is {{ field.byte_length }} bytes and
-                    exceeds the {{ django_ray_sensitive_field_limit_bytes }}-byte
+                    Not shown: the stored value is {{ field.byte_length|filesizeformat }}
+                    ({{ field.byte_length }} bytes) and exceeds the {{ django_ray_sensitive_field_limit_bytes }}-byte
+                    ({{ django_ray_sensitive_field_limit_bytes|filesizeformat }})
                     per-field display limit.
                   </p>
                 {% else %}
                   <p class="django-ray-sensitive-data__placeholder">
-                    Not shown: the bounded response limit was reached.
+                    {% translate "Not shown: the bounded response limit was reached." %}
                   </p>
                 {% endif %}
               </dd>

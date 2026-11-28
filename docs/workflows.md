@@ -186,8 +186,8 @@ Lazy admission begins only after `map_step` calls `executor.resolve()` for its i
 an upstream Ray task returns a list or inventory, that task still produces the complete
 value and Ray transfers and deserializes it into the workflow coordinator before the
 first map item is admitted. Only an iterator that is already available locally is pulled
-one item at a time by the admission loop. Remote or paged input materialization is
-tracked in [GitHub issue #94](https://github.com/dariuszpanas/django-ray/issues/94).
+one item at a time by the admission loop. For pull-driven paginated external sources, see
+`django_ray.workflow.paged_input` below.
 
 For every admitted item, django-ray retains the terminal result reference and the
 physical dependency references created by its nested `chain` or `group`. Those cleanup
@@ -219,9 +219,9 @@ counters remain available.
 
 Incremental collection bounds pending references, not total result bytes. The ordered
 result list is still materialized in the workflow coordinator before it is placed back
-in Ray, so coordinator memory remains proportional to total output size. A bounded
-in-Ray reduction or aggregation path is tracked in
-[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91).
+in Ray, so coordinator memory remains proportional to total output size. Use
+`with_result_buffer()`, `reduce()`, or the bounded chunked transport helpers below when
+intermediate output size dominates coordinator memory.
 
 ### Opt-in Ray result buffer
 
@@ -285,10 +285,8 @@ If the buffered map is terminal, `run()` necessarily resolves that final referen
 the coordinator still uses O(total output) memory. A downstream step also materializes
 the complete ordered list and therefore uses O(total output) consumer memory, while the
 object store holds the final object. The actor itself transiently decodes the complete
-list during finalization. Chunked/reducer transport and total-independent object-store
-or consumer memory remain in [GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91),
-and the bounded Stage A throughput and memory evaluation is recorded in
-[GitHub issue #87](https://github.com/dariuszpanas/django-ray/issues/87).
+list during finalization. Chunked/reducer transport primitives live in
+`django_ray.workflow.map_transport` for future executor integration.
 
 A version 1 result-buffer map cannot be nested inside a dynamic map; plan
 materialization rejects that topology before actor or leaf effects so actor
@@ -396,10 +394,8 @@ materialization rejects both shapes before actor or leaf effects. Static `chain`
 cancellation failures stop admission, recursively cancel pending nested dependencies
 without fetching their payloads into the coordinator, discard actor state, and preserve
 the original exception. Non-detached ownership and fixed no-restart semantics match the
-result-buffer protocol. List-preserving chunk or hierarchical transport remains in
-[GitHub issue #91](https://github.com/dariuszpanas/django-ray/issues/91), and the
-bounded Stage A evaluation is recorded in
-[GitHub issue #87](https://github.com/dariuszpanas/django-ray/issues/87).
+result-buffer protocol. List-preserving chunked or hierarchical transport helpers are
+provided in `django_ray.workflow.map_transport`.
 
 Calling `map_step()` without `with_limits()` retains the original eager behavior for
 compatibility. New dynamic workloads should normally choose an explicit window and an
@@ -738,10 +734,59 @@ degrade the rest of the graph to `CORRUPT`. Terminal-only and disabled policies 
 no node-detail graph and do not run the projector. Local execution also leaves
 projection disabled so local workflow semantics stay identical to the callable result.
 
+## Workflow DSL and Dry-Run Inspection (`django_ray.workflow.dsl`)
+
+`django_ray.workflow.dsl` (also re-exported from `django_ray.workflows`) provides an
+additive, side-effect-free DSL layered on top of `WorkflowSignature` for ergonomic
+composition and dry-run plan inspection. `WorkflowSignature` itself also supports `|`
+(`Chain`), `&` (`Group`), and `.explain(...)` directly:
+
+```python
+from django_ray.workflows import WorkflowExpr, branch, explain_workflow, parallel, pipe, step
+
+pipeline = (
+    WorkflowExpr(build_items).map(calculate, max_concurrency=16, max_items=10_000) | summarize
+)
+
+# Or compose WorkflowSignature objects directly with |, &, and .explain():
+direct = step(build_items) | (step(branch_a) & step(branch_b))
+
+# Inspect topology, limits, RuntimeEnv profiles, stability, and plan fingerprint
+# without running callables or touching Ray or the database:
+print(pipeline.explain())  # or direct.explain() / explain_workflow(calculation, format="dict")
+
+# Materialize a standard WorkflowSignature or execute directly:
+signature = pipeline.build()
+result = pipeline.run(4, use_ray=False)
+```
+
+Key primitives in `django_ray.workflow.dsl` (re-exported from `django_ray.workflows`):
+
+- **`explain_workflow(workflow, *, format="text" | "dict")`**: secret-free dry-run
+  inspector accepting any `WorkflowSignature`, `WorkflowExpr`, or `WorkflowBuilder`.
+  Reports topology tree, canonical dotted callable paths, map bounds, RuntimeEnv profile
+  names, stability classification, retry safety, and effective-plan fingerprint without
+  executing user code or connecting to Ray.
+- **`WorkflowExpr`**: immutable expression wrapper supporting `|` (sequential `Chain`),
+  `&` (parallel `Group`), `.map(...)`, `.with_fallback(fallback_fn, exceptions=..., pass_error=...)`,
+  `.explain(...)`, `.build()`, and `.run(...)`. Also accepts Django `@task` objects.
+- **`pipe(*stages)`**, **`parallel(*branches)`**, and **`branch(predicate, on_true, on_false)`**:
+  functional combinators with eager validation of module-level callable identities.
+
+!!! note "Workflow helper modules outside `INSTALLED_APPS`"
+
+    Workflow step and reducer callables are resolved against allowed module prefixes
+    (derived automatically from your user apps in `INSTALLED_APPS`). If a workflow helper
+    lives in a non-app module such as `myproject.workflows`, add its prefix to
+    `DJANGO_RAY["ALLOWED_CALLABLE_MODULES"]`; see
+    [Settings Reference](reference/settings.md#allowed_callable_modules).
+
 ## Local Execution
 
-Signatures run locally when Ray is not initialized. This makes workflow logic easy to
-exercise in unit tests:
+Signatures run locally when Ray is not initialized (`use_ray=False`). Inside an active
+Ray Core worker or a Ray Job driver, omitting `use_ray` (`use_ray=None`) automatically
+connects to Ray before submitting workflow leaves. Both synchronous and `async def`
+workflow steps are supported and awaited automatically:
 
 ```python
 result = calculation.run(4, use_ray=False)
@@ -886,7 +931,7 @@ The outer Django task is the durability and retry boundary:
 ADR-0004 accepts the replacement storage contract: a dedicated always-bounded
 task-row summary points to immutable topology manifests/pages and normalized
 latest-state node-detail rows. Changed detail rows are batch-upserted before the
-#81-fenced summary pointer advances; each accepted detail-changing publication expires
+run-identity-fenced summary pointer advances; each accepted detail-changing publication expires
 prior cursors, while static topology is not duplicated across repeated publications or
 state transitions within one run and topology version.
 Authorized readers use revision-bound pagination. The ADR defines exact V1 limits,
@@ -917,16 +962,14 @@ bounded SQLite workspace without materializing unbounded Python `observed_node_i
 25,000 nodes). `SpillCapacityController` in
 `django_ray.workflow.progress.spill_capacity` enforces node-local aggregate byte
 reservations, workspace and per-owner quotas, filesystem free-space headroom checks,
-and PID-reuse-safe janitor cleanup of proven-stale workspaces and quarantines
-(#156, #158). This standalone controller requires a finite positive lock timeout
+and PID-reuse-safe janitor cleanup of proven-stale workspaces and quarantines.
+This standalone controller requires a finite positive lock timeout
 and finite nonnegative stale-owner grace; zero grace remains valid. NaN, either
 infinity, and duration integers too large to convert to a float raise
 `WorkflowProgressSpillCapacityConfigurationError` before root or lock access.
 These validation rules do not activate the controller in executor admission.
-Open issue
-[#157](https://github.com/dariuszpanas/django-ray/issues/157) owns the remaining
-25k/100k/250k-node native Linux benchmark matrix; #142 was closed as superseded.
-This does not block the admitted terminal path described above. See
+Large-scale (25k/100k/250k-node) native Linux scale benchmarking remains separate
+qualification work and does not block the admitted terminal path described above. See
 [ADR-0004: Bounded Workflow Progress Storage](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0004-bounded-workflow-progress.md)
 and
 [ADR-0005: Bounded Workflow Progress Preparation](https://github.com/dariuszpanas/django-ray/blob/main/adrs/adr-0005-bounded-workflow-preparation.md).
@@ -1311,3 +1354,5 @@ bounded initial workflow preparation.
 | `signature.with_progress_reporting(policy).run(...)` | Execute one invocation with explicit `"full"`, `"terminal_only"`, or `"disabled"` progress reporting without reserving an application keyword |
 | `signature.with_execution_strategy(policy, *, regions=(), pool_specs=None, ...).run(...)` | Execute one invocation under an explicit whole-plan strategy policy (`"auto"`, `"local"`, `"dynamic_tasks"`, `"static_actors"`, or experimental default-off `"compiled_graph"`) |
 | `signature.inspect_strategy(*args, use_ray=None, requested_policy=None, ...)` | Validate whole-plan strategy selection and return bounded observability metadata without executing |
+| `explain_workflow(workflow, *, format="text" \| "dict")` | Secret-free dry-run inspection of topology, limits, RuntimeEnv profiles, and plan fingerprint (`django_ray.workflow.dsl`) |
+| `WorkflowExpr(target)` / `pipe(...)` / `parallel(...)` / `branch(...)` | Immutable composable DSL combinators (`\|`, `&`, `.map()`, `.with_fallback()`, `.explain()`, `.build()`, `.run()`) in `django_ray.workflow.dsl` |

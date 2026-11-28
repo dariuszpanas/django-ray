@@ -140,7 +140,7 @@ def _booby_trap_application_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(entrypoint, "load_task_input", forbidden)
     monkeypatch.setattr(entrypoint, "_invoke_task_callable", forbidden)
     monkeypatch.setattr(entrypoint, "_persist_task_completion", forbidden)
-    monkeypatch.setattr("django_ray.runtime.import_utils.import_callable", forbidden)
+    monkeypatch.setattr("django_ray.runtime.import_utils.resolve_task_callable", forbidden)
     monkeypatch.setattr("django_ray.runtime.context.durable_task_execution", forbidden)
 
 
@@ -1271,7 +1271,7 @@ class TestEntrypointPayload:
             }
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda path: read_context,
         )
         monkeypatch.setattr(
@@ -1328,7 +1328,7 @@ class TestEntrypointPayload:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(entrypoint, "load_task_input", lambda **_values: ([3], {}))
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: lambda value: {"value": value},
         )
 
@@ -1357,7 +1357,7 @@ class TestEntrypointPayload:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(entrypoint, "load_task_input", lambda **_values: ([], {}))
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: lambda: "legacy",
         )
 
@@ -1384,7 +1384,7 @@ class TestEntrypointPayload:
             return left + right
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: add_numbers,
         )
 
@@ -1434,7 +1434,7 @@ class TestEntrypointPayload:
             raise ValueError("async failure")
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: fail,
         )
 
@@ -1507,7 +1507,7 @@ class TestEntrypointPayload:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(entrypoint, "load_task_input", lambda **_kwargs: ([], {}))
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: failing_sync if callable_kind == "sync" else failing_async,
         )
         monkeypatch.setattr("django_ray.runtime.context.durable_task_execution", fake_context)
@@ -1590,7 +1590,7 @@ class TestEntrypointPayload:
             raise ValueError("\x1b[31mformatted failure\x1b[39m\rnext line")
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: fail,
         )
 
@@ -1609,7 +1609,7 @@ class TestEntrypointPayload:
             raise WorkflowPlanMismatchError("pinned plan changed")
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: mismatch,
         )
 
@@ -1629,7 +1629,7 @@ class TestEntrypointPayload:
             raise NestedExecutionRequestRejected(NestedExecutionRequestRejection.CALLABLE_MISMATCH)
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: reject,
         )
 
@@ -1667,7 +1667,7 @@ class TestEntrypointPayload:
             raise wrapped
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: reject,
         )
 
@@ -1697,24 +1697,38 @@ class TestEntrypointPayload:
 
         assert find_nested_execution_request_rejection(wrapped) is None
 
-    @pytest.mark.parametrize("exception_type", [asyncio.CancelledError, KeyboardInterrupt])
-    def test_execute_task_does_not_serialize_async_cancellation_base_exceptions(
+    def test_execute_task_does_not_serialize_keyboard_interrupt_base_exception(
         self,
         monkeypatch,
-        exception_type: type[BaseException],
     ) -> None:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
 
         async def cancel() -> None:
-            raise exception_type()
+            raise KeyboardInterrupt()
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: cancel,
         )
 
-        with pytest.raises(exception_type):
+        with pytest.raises(KeyboardInterrupt):
             entrypoint.execute_task("tests.async_cancel", "[]", "{}")
+
+    def test_execute_task_serializes_asyncio_cancelled_error_cleanly(self, monkeypatch) -> None:
+        monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
+
+        async def cancel() -> None:
+            raise asyncio.CancelledError("cancelled inside task")
+
+        monkeypatch.setattr(
+            "django_ray.runtime.import_utils.resolve_task_callable",
+            lambda _path: cancel,
+        )
+
+        result = json.loads(entrypoint.execute_task("tests.async_cancel", "[]", "{}"))
+        assert result["success"] is False
+        assert result["retryable"] is False
+        assert result["exception_type"].endswith("CancelledError")
 
     def test_execute_task_cancels_child_tasks_before_closing_loop(self, monkeypatch) -> None:
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
@@ -1736,7 +1750,7 @@ class TestEntrypointPayload:
             return "complete"
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: spawn_child,
         )
 
@@ -1762,7 +1776,7 @@ class TestEntrypointPayload:
             }
 
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: read_context,
         )
 
@@ -1816,7 +1830,7 @@ class TestEntrypointPayload:
         )
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: lambda: {"value": 7},
         )
         monkeypatch.setattr(
@@ -1851,7 +1865,7 @@ class TestEntrypointPayload:
         )
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: lambda: "stale",
         )
         monkeypatch.setattr(
@@ -1882,7 +1896,7 @@ class TestEntrypointPayload:
         )
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: lambda: "legacy",
         )
         monkeypatch.setattr(
@@ -1911,7 +1925,7 @@ class TestEntrypointPayload:
         )
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: lambda: {"message": "x" * 256},
         )
         monkeypatch.setattr(
@@ -1951,7 +1965,7 @@ class TestEntrypointPayload:
         expected = {"message": "x" * 256}
         monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
         monkeypatch.setattr(
-            "django_ray.runtime.import_utils.import_callable",
+            "django_ray.runtime.import_utils.resolve_task_callable",
             lambda _path: lambda: expected,
         )
         monkeypatch.setattr(
@@ -1994,35 +2008,46 @@ class TestEntrypointPayload:
         assert "Traceback (most recent call last)" not in caplog.text
         assert "[REDACTED]" in caplog.text
 
-    def test_prepare_completion_falls_back_to_digest_storage(self, monkeypatch, caplog) -> None:
+    def test_prepare_completion_fails_loud_instead_of_digest_downgrade(
+        self, monkeypatch, caplog
+    ) -> None:
         from django_ray.result_storage import ResultStorageError
 
         secret = "result-storage-api-key"
+        attempts = 0
 
         class FailingStorage:
             def store(self, *, serialized_result: str) -> str:
+                nonlocal attempts
+                attempts += 1
                 raise ResultStorageError(f"object storage unavailable api_key={secret}")
 
         monkeypatch.setattr(
             entrypoint,
             "get_settings",
-            lambda: {"MAX_RESULT_SIZE_BYTES": 1, "RESULT_STORAGE_BACKEND": "digest"},
+            lambda: {"MAX_RESULT_SIZE_BYTES": 1, "RESULT_STORAGE_BACKEND": "filesystem"},
+        )
+        monkeypatch.setattr(
+            entrypoint,
+            "_RESULT_STORAGE_STORE_BACKOFF_SECONDS",
+            (0.0, 0.0),
         )
         monkeypatch.setattr(
             "django_ray.result_storage.get_result_storage_backend",
             lambda _settings: FailingStorage(),
         )
 
-        result, reference = entrypoint._prepare_completion_result(
-            {"large": "value"},
-            task_execution_pk=1,
-            attempt_number=1,
-            execution_generation=1,
-        )
+        with pytest.raises(entrypoint.ResultStoragePersistenceError) as exc_info:
+            entrypoint._prepare_completion_result(
+                {"large": "value"},
+                task_execution_pk=1,
+                attempt_number=1,
+                execution_generation=1,
+            )
 
-        assert result is None
-        assert reference is not None and reference.startswith("oversize://sha256/")
-        assert "using digest-only reference" in caplog.text
+        assert attempts == entrypoint._RESULT_STORAGE_STORE_MAX_ATTEMPTS
+        assert secret not in str(exc_info.value)
+        assert "refusing silent digest downgrade" in caplog.text
         assert secret not in caplog.text
         assert "ResultStorageError" in caplog.text
 
@@ -2115,7 +2140,7 @@ def test_bound_task_encoding_failure_preserves_one_execution(monkeypatch, result
     monkeypatch.setattr(entrypoint, "bootstrap_django", lambda: None)
     monkeypatch.setattr(entrypoint, "load_task_input", lambda **_values: ([], {}))
     monkeypatch.setattr(
-        "django_ray.runtime.import_utils.import_callable", lambda _path: callable_result
+        "django_ray.runtime.import_utils.resolve_task_callable", lambda _path: callable_result
     )
     monkeypatch.setattr(
         entrypoint, "_persist_task_completion", lambda *args: persisted.append(args)
@@ -2177,7 +2202,7 @@ def test_bound_result_preparation_failure_cannot_authorize_replay(monkeypatch, k
     monkeypatch.setattr(entrypoint, "get_settings", lambda: {"MAX_RESULT_SIZE_BYTES": 1024})
     monkeypatch.setattr(entrypoint, "_persist_task_completion", lambda *args: None)
     monkeypatch.setattr(
-        "django_ray.runtime.import_utils.import_callable", lambda path: execute_once
+        "django_ray.runtime.import_utils.resolve_task_callable", lambda path: execute_once
     )
     wire = entrypoint.execute_task(
         "tests.effect",

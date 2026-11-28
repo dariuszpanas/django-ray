@@ -27,7 +27,9 @@ If you need a REST API for task management in your project, you can use the test
 
 ## Example Endpoints (testproject)
 
-> ⚠️ **Note**: These endpoints are from the testproject, not the django-ray library.
+!!! note "Bundled testproject endpoints"
+
+    These endpoints are from the bundled `testproject`, not the `django-ray` library.
 
 | Endpoint | Description |
 |----------|-------------|

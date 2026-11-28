@@ -8,13 +8,18 @@ import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.postgresql,
+    pytest.mark.sqlite_compatible,
+]
 
-@pytest.mark.django_db(transaction=True)
+
 def test_ray_target_address_is_additive_nullable_and_reversible() -> None:
     migrate_from = [("django_ray", "0013_workflow_progress_detail_storage")]
     migrate_to = [("django_ray", "0014_raytaskexecution_ray_target_address")]
-    latest = [("django_ray", "0028_worker_lease_policy")]
     executor = MigrationExecutor(connection)
+    latest = executor.loader.graph.leaf_nodes("django_ray")
     executor.migrate(migrate_from)
     try:
         old_apps = executor.loader.project_state(migrate_from).apps

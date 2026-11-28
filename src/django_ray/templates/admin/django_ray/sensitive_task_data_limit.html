@@ -1,4 +1,4 @@
-{% load static %}<!doctype html>
+{% load i18n static %}<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -13,7 +13,7 @@
   <body class="django-ray-sensitive-limit-page">
     <main class="django-ray-sensitive-data django-ray-sensitive-data--limit">
       <header class="django-ray-sensitive-data__header">
-        <p class="django-ray-sensitive-data__eyebrow">Privileged diagnostics</p>
+        <p class="django-ray-sensitive-data__eyebrow">{% translate "Privileged diagnostics" %}</p>
         <h1>{{ title }}</h1>
         <p class="django-ray-sensitive-data__subject">
           {{ django_ray_sensitive_subject }}
@@ -22,7 +22,7 @@
           href="{{ django_ray_sensitive_back_url }}"
           class="django-ray-admin-action django-ray-admin-action--secondary"
         >
-          Return to redacted task detail
+          {% translate "Return to redacted task detail" %}
         </a>
       </header>
 
@@ -30,14 +30,15 @@
         class="django-ray-sensitive-data__warning"
         aria-labelledby="sensitive-limit-title"
       >
-        <h2 id="sensitive-limit-title">Display safety limit reached</h2>
+        <h2 id="sensitive-limit-title">{% translate "Display safety limit reached" %}</h2>
         <div class="django-ray-sensitive-data__warning-body">
           <p>
             This privileged view could not be displayed because its rendered
             response exceeded the fixed
-            {{ django_ray_sensitive_response_limit_bytes }}-byte safety limit.
+            {{ django_ray_sensitive_response_limit_bytes|filesizeformat }}
+            ({{ django_ray_sensitive_response_limit_bytes }}-byte) safety limit.
           </p>
-          <p>No stored diagnostic values were included in this response.</p>
+          <p>{% translate "No stored diagnostic values were included in this response." %}</p>
         </div>
       </section>
     </main>

@@ -67,10 +67,9 @@ candidate dependency set. Supported native execution remains Linux with Python
 3.12–3.14 and Ray 2.58 or later. Python 3.15 package preparation without Ray Core
 does not add native runtime support. See [compatibility](../compatibility.md).
 
-The bundled monitoring stack moves to Prometheus 3.13.4 LTS and Grafana 12.4.12
-([#627](https://github.com/dariuszpanas/django-ray/pull/627)). The sample uses
-ephemeral storage. For persistent custom deployments, take compatible backups
-and follow the upstream upgrade procedures before changing images: **Prometheus
+The bundled monitoring stack moves to Prometheus 3.13.4 LTS and Grafana 12.4.12.
+The sample uses ephemeral storage. For persistent custom deployments, take compatible
+backups and follow the upstream upgrade procedures before changing images: **Prometheus
 3 data cannot be opened by the formerly bundled 2.48 image**. Returning to the
 old container image alone is not a data rollback. Back up Grafana configuration,
 plugins and its database separately, and follow its own upgrade/rollback plan.
@@ -179,109 +178,23 @@ active leases or running/cancelling work. That database check is not proof that
 old processes or remote effects stopped, and does not waive the artifact, key,
 request-carrier or monitoring rollback boundaries above. Retain migration 0027.
 
-## Candidate qualification checklist
+## Upgrade verification checklist
 
-The [upgrade recipes](https://github.com/dariuszpanas/django-ray/blob/main/qualification/upgrade/README.md)
-pin the released 0.6.0 tag and build its wheel using its own locked environment.
-The candidate uses a separate installed wheel and environment. The data workflow
-also retains 0.4.0 and 0.5.0 baselines for historical readability. These rebuilt
-wheels are not a verification of the separately published release binaries.
+Before cutting production traffic over to 0.7.x:
 
-Before accepting the final candidate:
+1. **Dependencies and artifacts**: Verify Python 3.12–3.14, Django 6.0.8+, Ray 2.58+,
+   and rebuilt application/RuntimeEnv images match across all processes.
+2. **Migration and lease policy**: Confirm migration `0028_worker_lease_policy` applied
+   cleanly during the stopped-writer window and `django_ray_lease_policy` reports
+   `matched` for every process sharing the lease table.
+3. **Runtime and storage verification**: Exercise Core and Jobs execution (`rq2ref:v1:`
+   request references), historical task/result/workflow reads, encrypted RuntimeEnv
+   recovery (and plaintext refusal if `required` mode is enabled), cancellation, and
+   `django_ray_doctor` / `django_ray_worker_ready`.
+4. **Cleanup and monitoring**: Update scheduled `django_ray_purge_inputs` jobs to honor
+   bounded pagination and exit status `2`, and verify Prometheus/Grafana dashboards after
+   upgrading monitoring components.
 
-1. Freeze the intended source and verify version agreement, Beta classification,
-   release notes, dependency audits and the full exact-source Linux CI matrix.
-   Preserve installed wheel/source-distribution checks across supported Python
-   versions using the [nonpublishing candidate workflow](../contributing.md#qualify-built-artifacts-without-publishing);
-   require the installed doctor, purge and request-reference assertions in all
-   six fresh environments: wheel and sdist on Python 3.12, 3.13 and 3.14.
-   A wheel built from an sdist is not a separate fresh sdist installation, and
-   source-checkout tests do not replace either artifact check.
-2. Run the data matrix for all three released baselines, 0.4.0, 0.5.0 and 0.6.0,
-   on SQLite and PostgreSQL against the final 0.7.0 candidate. Require all eight
-   phases in each of the six runs, including independent restore, original
-   field/artifact equality, candidate writes, database-enforced read-only old-code
-   access and the old-backup write-loss observation. The 0.6.0 pair covers the
-   immediate release boundary; older pairs add historical-reader evidence and
-   do not authorize mixed-version execution.
-3. Run all four native recipes against 0.6.0: Core, Jobs, Jobs manager crash and
-   Core/Ray loss. Require current execution, preserved history, encrypted
-   RuntimeEnv, exact recovery identities and owned-resource cleanup.
-   On both databases, require the ordinary, non-crash candidate Core phase's
-   `worker_modes` receipt with all nine facts for each installed `--sync` and
-   `--cluster auto` manager. Each must actually consume its own queue with one
-   attempt/generation and the expected mode,
-   preserve older unselected work, exit gracefully, release its lease and remove
-   only owned rows without changing prior history. These sequential observations
-   share existing capacity and a finite budget; they do not qualify every sample
-   Deployment unchanged.
-4. Run the applicable [deployed matrix](local-kuberay-gate.md) with the final
-   candidate's **standard acceptance profile**. Require source, archive and
-   image correspondence, rendered current and archived workflow history, the
-   configured Dashboard proxy, API/task smoke and an explicit required cold-Ray
-   pass with two disjoint two-node generations. A constrained diagnostic run
-   cannot substitute for this release gate.
-   Require both invalid RuntimeEnv cases and all direct Jobs request-reference
-   assertions in each Ray generation. Require the protected HTTP/log observations
-   and the actual driver-argument check, unsupported queued-work preservation
-   while the current manager heartbeats, pre-invocation protocol refusal, and
-   the fixed reservation-failure showcase. Inspect all sixteen application log
-   receipts and the two separate host protected-log receipts. Active-write
-   protocol 1 and the original admission state must be preserved; this is not
-   mixed-version or new-target activation evidence. The normal application
-   smoke does not invoke doctor; its Linux process, database and installed-package
-   evidence remains separate.
-   Also require the current image's `worker_images` receipt for source-derived
-   sync and ML queue managers after the cold generations and reporting. Verify
-   shipped CLI/queue/concurrency, actual PID1 and Pod/image ownership, one result
-   and attempt, unchanged unselected work, lease release and owned cleanup.
-   Confirm the original manager is absent before replacements and restore it
-   only after temporary controllers and Pods are gone. Keep fixture substitutions
-   explicit. Simple ML queue consumption does not qualify an ML framework or
-   model lifecycle.
-5. Retain the separate controlled Core and Jobs cancellation proof
-   ([#626](https://github.com/dariuszpanas/django-ray/pull/626)): actual progress,
-   no-cancel completion, accepted lifecycle cancellation, durable status, and
-   independent callable or original-driver exit. Do not equate a `CANCELLED`
-   row with stopped execution or extend the result to arbitrary descendants
-   and external effects. Require ordinary-result presentation checks and the
-   monitoring replacement/reimport/query/browser assertions on the final source;
-   server-HTML inspection and a browser-rendered panel are distinct evidence.
-   Require all twelve `ray_auth` facts: Dashboard, Jobs, Client and GCS each deny
-   anonymous and invalid credentials and accept the authorized client. This
-   observation follows dashboard replay and precedes browser rendering, with
-   bounded observation and cleanup. Successful authentication does not attest
-   target compatibility or authorize a worker to claim a different cohort.
-6. Retain PostgreSQL transactional-enqueue evidence and assess other affected
-   performance, lifecycle and storage scenarios. Inspect actual child-process
-   and supervisor exits as well as pytest outcomes; a successful pytest result
-   cannot negate a native child signal. Keep the
-   [native shutdown investigation](https://github.com/dariuszpanas/django-ray/issues/557)
-   and [diagnostic readiness investigation](https://github.com/dariuszpanas/django-ray/issues/608)
-   visible in the final Beta risk decision. A diagnostic resource profile or a
-   passing retry does not resolve an earlier failure's cause. The owned
-   single-worker acceptance fixture excludes spontaneous request-count recycling;
-   the bounded recycle experiment remains separate mechanism evidence, not a
-   diagnosis of the earlier timeout samples or a production settings change.
-7. Inspect the final receipts and unresolved qualification issues. Record any
-   missing assertion as missing, together with the operator's drain, backup,
-   rollback and uncertain-outcome decisions.
-
-Database and native receipts intentionally retain `complete_upgrade_gate: false`;
-the application stage similarly describes its selected coverage. Their scope
-must be reconciled with the full release checklist. Historical receipts from
-another candidate source cannot be relabeled as 0.7.0 evidence. The new worker
-and authentication assertions still require exact-source hosted proof. The
-source-derived worker phase has its own 180-second budget: 135 seconds for
-observation and 45 seconds reserved for cleanup, after the 2820-second cold
-application phase. That application allowance combines the
-repaired 2160-second core/rq2 envelope with 660 seconds for two generations of
-showcase, protocol and protected-log observations. The resource footprint
-stays unchanged. The native step permits 55 minutes, including the separate
-180-second worker phase and inherited 300-second external aggregate allowance.
-That allowance does not guarantee capacity for every operation's maximum
-timeout. Review actual combined timing evidence for the selected source.
-Preserve finite deadlines, cleanup reserves and owned capacity, and
-inspect actual integrated receipts before acceptance. Preparation does not
-authorize a release workflow dispatch, tag or publication; follow the
-[release procedure](../contributing.md#releasing) after candidate acceptance.
+Maintainers qualifying a release candidate also follow the full deployed matrix and
+artifact checks in [Local KubeRay Final Gate](local-kuberay-gate.md) and
+[Contributing](../contributing.md#releasing).

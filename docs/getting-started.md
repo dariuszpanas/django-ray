@@ -25,66 +25,17 @@ With PostgreSQL:
 python -m pip install "django-ray[postgres]"
 ```
 
-The equivalent uv command is `uv add django-ray`.
+The equivalent uv command is `uv add django-ray`. Add optional extras when needed:
+`django-ray[postgres]`, `django-ray[s3]`, `django-ray[gcs]`, `django-ray[object-storage]`, or
+`django-ray[otel]` (installs `opentelemetry-sdk>=1.45.1` for exporting traces; core
+`django-ray` pins `opentelemetry-api>=1.45.1` solely as a transitive security floor for
+`ray[default]>=2.60.0` and keeps tracing disabled until `TRACING_ENABLED = True`).
 
-### Projects that prohibit prerelease dependencies
+!!! note "Using `uv` with `prerelease = 'disallow'`"
 
-If your project sets uv's `prerelease = "disallow"`, resolution can fail at
-`opentelemetry-exporter-prometheus`. django-ray depends on `ray[default]`, which
-includes OpenTelemetry dependencies with prerelease version numbers. The
-project's stable-only policy rejects those dependencies even when the django-ray
-and Ray version identifiers have no prerelease suffix. django-ray remains Beta.
-Ordinary installs using the default resolver policy do not need this exception.
-
-Keep the project's stable-only policy and explicitly permit only the required
-packages. Pin a compatible OpenTelemetry exporter and semantic-conventions pair
-as direct dependencies, then use uv's
-[per-package prerelease setting](https://docs.astral.sh/uv/reference/settings/#prerelease-package).
-This standalone example was verified on 2026-10-11 with uv 0.12.17 and CPython
-3.14.2 against the published django-ray 0.6.0 package:
-
-```toml
-[project]
-name = "django-ray-install-reproduction"
-version = "0.0.0"
-requires-python = ">=3.12,<3.15"
-dependencies = [
-    "django-ray==0.6.0",
-    "opentelemetry-exporter-prometheus==0.64b0",
-    "opentelemetry-semantic-conventions==0.64b0",
-]
-
-[tool.uv]
-prerelease = "disallow"
-prerelease-package = { opentelemetry-exporter-prometheus = "explicit", opentelemetry-semantic-conventions = "explicit" }
-```
-
-Merge the relevant entries into your existing `pyproject.toml`; retain its
-Python support range, existing dependencies, constraints and security floors.
-The exact versions above are a dated installation example, not permanent
-OpenTelemetry compatibility pins or a recommendation to select an older
-django-ray release. For another release or Ray version, review the resolver's
-dependency chain and the matching OpenTelemetry package requirements before
-updating those pins. Do not replace the project's policy with a global
-`--prerelease allow` just to resolve these two packages. This configuration was
-tested with uv 0.12.17; older uv versions may not support `prerelease-package`.
-
-In a fresh directory containing the example, verify resolution and installation:
-
-```bash
-uv lock --python 3.14 --default-index https://pypi.org/simple
-uv sync --frozen --python 3.14 --default-index https://pypi.org/simple
-uv pip check
-```
-
-The verified example resolved 64 packages and installed 63, including Ray
-2.59.0, OpenTelemetry API/SDK 1.43.0 and the two 0.64b0 packages. The installed
-metadata check passed in a fresh environment without starting Ray. Removing
-the package exceptions while retaining `prerelease = "disallow"` reproduced
-the resolution failure; the ordinary default policy resolved successfully.
-These checks establish installation and dependency consistency, not Linux
-runtime or cluster qualification. Follow [Compatibility](compatibility.md)
-when choosing and validating the execution environment.
+    Ordinary installs work out of the box. If your project enforces `prerelease = "disallow"` in
+    `pyproject.toml`, `ray[default]` pulls OpenTelemetry exporter prereleases that require scoped
+    `prerelease-package` entries; see [Compatibility](compatibility.md#uv-prerelease-disallow).
 
 ## Configure Django
 
@@ -114,17 +65,23 @@ DJANGO_RAY = {
 ```
 
 `TASKS` tells Django where to enqueue work. `DJANGO_RAY` configures the worker that
-claims it. For a remote cluster, use a Ray Client address such as
-`ray://ray-head.example:10001` only for bounded, low-latency work whose lifetime
-includes the task manager's client connection. See the
-[worker execution modes](worker-modes.md#cluster-ray-core) before choosing it for
-production work.
+claims it (`RAY_ADDRESS="auto"` and `RUNNER="ray_core"` are the package defaults, so local
+walkthroughs and `--sync` workers start without extra boilerplate).
 
-This walkthrough uses local Ray for development. For ordinary durable background
-jobs on Kubernetes, begin with the [Ray Job execution mode](worker-modes.md#ray-job)
-and its required retrievable input storage. Configure how the Ray environment gets
-your application code and dependencies before submitting work. A remote address
-alone does not deliver the application or expose its dashboard to your browser.
+This walkthrough uses local Ray for development. When moving to a remote cluster:
+
+- Ensure every remote Ray execution environment exports `DJANGO_SETTINGS_MODULE` (via the Ray
+  container environment or `RUNTIME_ENV_PROFILES`) so workers can bootstrap Django and import
+  your application code and dependencies.
+- Set `RAY_DASHBOARD_URL` (top-level Django setting, e.g.
+  `RAY_DASHBOARD_URL = "http://localhost:8265"`, or inside `DJANGO_RAY["RAY_DASHBOARD_URL"]`
+  as a fallback) if you want clickable Ray Dashboard deep links in Django Admin.
+- For ordinary durable background jobs on Kubernetes that need driver isolation or must survive
+  task-manager restarts, start with the [Ray Job execution mode](worker-modes.md#ray-job)
+  (`--ray-job` / `RUNNER="ray_job"`) and a retrievable `INPUT_STORAGE_BACKEND`. Choose
+  [Cluster Ray Core](worker-modes.md#cluster-ray-core) (`--cluster=ray://ray-head.example:10001`)
+  when lower per-task latency matters for bounded work whose lifetime includes the task manager's
+  client connection.
 
 Apply the database migrations:
 
@@ -219,6 +176,10 @@ when a UI, API, or management command needs the current state.
 >   a replay, not a resume. Prefer Ray Job mode for long or coarse execution that must
 >   continue independently of that connection. See
 >   [Cluster Ray Core](worker-modes.md#cluster-ray-core).
+> - Results larger than `MAX_RESULT_SIZE_BYTES` (1 MiB by default) write a digest-only stub under
+>   the default `RESULT_STORAGE_BACKEND="digest"`; accessing `.return_value` on a digest stub raises
+>   `ResultUnavailableError`. Configure `"filesystem"`, `"s3"`, or `"gcs"` if callers must retrieve
+>   oversized return values. See [Result Storage](reference/result-storage.md).
 >
 > Review [Defining Tasks](tasks.md), [Retry and Error Handling](retry.md), and the
 > workflow [durability semantics](workflows.md#durability-semantics) before moving a

@@ -17,7 +17,7 @@ from qualification.application.run_api import ApplicationHttp
 
 BROWSER_PYTHON = "/opt/qualification-browser/bin/python"
 MAX_PACKET_BYTES = 4096
-MAX_ASSET_BYTES = 64 * 1024
+MAX_ASSET_BYTES = 96 * 1024
 ADMIN_ASSETS = ("task_live.js", "workflow_diagnostics.js")
 ADMIN_CONTENT_TYPE = 'text/javascript; charset="utf-8"'
 ASSET_ROOT = Path(__file__).resolve().parents[2] / "src/django_ray/static/django_ray/admin"

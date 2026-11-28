@@ -222,7 +222,7 @@ def test_source_derived_commands_and_admitted_template_are_preserved():
         value = probe.deployment(base, commands, OWNER, mode)
         container = value["spec"]["template"]["spec"]["containers"][0]
         assert container["command"] == commands[mode][0]
-        assert container["args"][-2:] == ["--concurrency", "20"]
+        assert container["args"][-2:] == ["--concurrency", "1" if mode == "sync" else "20"]
         assert (
             container["resources"] == base["spec"]["template"]["spec"]["containers"][0]["resources"]
         )

@@ -64,7 +64,7 @@ function contrastRatio(firstHexColor, secondHexColor) {
 }
 
 class FakeElement {
-  constructor(tagName = "div") {
+  constructor(tagName = "div", ownerDocument = null) {
     this.attributes = new Map();
     this.children = [];
     this.className = "";
@@ -72,10 +72,14 @@ class FakeElement {
     this.disabled = false;
     this.hidden = false;
     this.href = "";
+    this.id = "";
     this.listeners = new Map();
     this.open = false;
+    this.ownerDocument = ownerDocument;
     this.parentNode = null;
+    this.rel = "";
     this.tagName = tagName.toUpperCase();
+    this.target = "";
     this.type = "";
     this._textContent = "";
   }
@@ -98,6 +102,22 @@ class FakeElement {
     this.listeners.set(name, listeners);
   }
 
+  removeEventListener(name, callback) {
+    const listeners = this.listeners.get(name) ?? [];
+    this.listeners.set(
+      name,
+      listeners.filter((item) => item !== callback),
+    );
+  }
+
+  focus() {
+    if (this.ownerDocument) {
+      this.ownerDocument.activeElement = this;
+    }
+  }
+
+  scrollIntoView() {}
+
   append(...children) {
     for (const child of children) {
       assert.ok(child instanceof FakeElement);
@@ -106,9 +126,13 @@ class FakeElement {
     }
   }
 
-  async dispatch(name) {
+  async dispatch(name, event = {}) {
     const listeners = this.listeners.get(name) ?? [];
-    await Promise.all(listeners.map((listener) => listener({ target: this })));
+    await Promise.all(
+      listeners.map((listener) =>
+        listener({ target: this, preventDefault() {}, ...event }),
+      ),
+    );
   }
 
   getBoundingClientRect() {
@@ -171,6 +195,9 @@ class FakeElement {
     this.attributes.set(name, String(value));
     if (name === "class") {
       this.className = String(value);
+    }
+    if (name === "id") {
+      this.id = String(value);
     }
   }
 }
@@ -428,8 +455,37 @@ function loadDiagnostics({
   archivedAttempts = [],
   currentAttemptState = "RUNNING",
   controller = AbortController,
+  hash = "",
 } = {}) {
-  const details = new FakeElement("details");
+  const docListeners = new Map();
+  const winListeners = new Map();
+  const document = {
+    activeElement: null,
+    body: null,
+    createElement(tagName) {
+      return new FakeElement(tagName, document);
+    },
+    createElementNS(_namespace, tagName) {
+      return new FakeElement(tagName, document);
+    },
+    addEventListener(name, callback) {
+      const list = docListeners.get(name) ?? [];
+      list.push(callback);
+      docListeners.set(name, list);
+    },
+    removeEventListener(name, callback) {
+      const list = docListeners.get(name) ?? [];
+      docListeners.set(
+        name,
+        list.filter((item) => item !== callback),
+      );
+    },
+    getElementById(id) {
+      return id === "django-ray-workflow-diagnostics" ? details : null;
+    },
+  };
+  document.body = new FakeElement("body", document);
+  const details = new FakeElement("details", document);
   details.dataset = {
     diagnosticsUrl: "/admin/execution/1/workflow/diagnostics/",
     graphUrl: "/admin/execution/1/workflow/graph/",
@@ -442,23 +498,27 @@ function loadDiagnostics({
     nodeDetailUrl: "/admin/execution/1/workflow/node/",
     ...dataset,
   };
-  const status = new FakeElement("p");
+  const status = new FakeElement("p", document);
   status.dataset.workflowDiagnosticsStatus = "";
   status.textContent = "Open this section to load workflow diagnostics.";
-  const content = new FakeElement("div");
+  const content = new FakeElement("div", document);
   content.dataset.workflowDiagnosticsContent = "";
   content.hidden = true;
-  const archivedGraphs = archivedAttempts.map((configuration) =>
-    typeof configuration === "number"
-      ? archivedGraphDisclosure(configuration)
-      : archivedGraphDisclosure(configuration.attemptNumber, configuration),
-  );
-  const attemptGraphStack = new FakeElement("section");
+  const archivedGraphs = archivedAttempts.map((configuration) => {
+    const disc =
+      typeof configuration === "number"
+        ? archivedGraphDisclosure(configuration)
+        : archivedGraphDisclosure(configuration.attemptNumber, configuration);
+    disc.ownerDocument = document;
+    disc.id = `workflow-graph-attempt-${disc.dataset.workflowGraphAttempt}`;
+    return disc;
+  });
+  const attemptGraphStack = new FakeElement("section", document);
   attemptGraphStack.dataset.workflowAttemptGraphs = "";
   attemptGraphStack.hidden = archivedGraphs.length === 0;
-  const attemptGraphHeading = new FakeElement("div");
+  const attemptGraphHeading = new FakeElement("div", document);
   attemptGraphHeading.textContent = "Attempt execution graphs";
-  const currentGraphMount = new FakeElement("div");
+  const currentGraphMount = new FakeElement("div", document);
   currentGraphMount.dataset.workflowCurrentGraph = "";
   currentGraphMount.dataset.currentAttemptNumber =
     details.dataset.pinnedAttemptNumber;
@@ -476,19 +536,14 @@ function loadDiagnostics({
   const copied = [];
   const timers = new Map();
   let nextTimer = 0;
-  const document = {
-    createElement(tagName) {
-      return new FakeElement(tagName);
-    },
-    createElementNS(_namespace, tagName) {
-      return new FakeElement(tagName);
-    },
-    getElementById(id) {
-      return id === "django-ray-workflow-diagnostics" ? details : null;
-    },
-  };
   const window = {
     AbortController: controller,
+    location: { hash },
+    addEventListener(name, callback) {
+      const list = winListeners.get(name) ?? [];
+      list.push(callback);
+      winListeners.set(name, list);
+    },
     setTimeout(callback, delay) {
       assert.equal(delay, 15000, "diagnostics only schedule owned request deadlines");
       const id = ++nextTimer;
@@ -545,6 +600,8 @@ function loadDiagnostics({
     content,
     copied,
     details,
+    document,
+    window,
     archivedGraphs,
     attemptGraphStack,
     fetchCalls,
@@ -552,6 +609,15 @@ function loadDiagnostics({
     queuedResponses,
     status,
     timers,
+    async dispatchKeydown(key, extra = {}) {
+      const list = [...(docListeners.get("keydown") ?? [])];
+      await Promise.all(
+        list.map((listener) =>
+          listener({ key, preventDefault() {}, ...extra }),
+        ),
+      );
+      await settle();
+    },
     async expire(id = [...timers.keys()][0]) {
       assert.ok(timers.has(id), "expected an active request deadline");
       const timer = timers.get(id);
@@ -656,6 +722,14 @@ function elementsByClass(app, className) {
 
 function graphNodeLinks(app) {
   return elementsByClass(app, "django-ray-workflow-graph__node");
+}
+
+function graphNodeInspectButton(card) {
+  return elementsByClass({ content: card }, "django-ray-workflow-graph__inspect")[0];
+}
+
+function graphNodeRawLink(card) {
+  return elementsByClass({ content: card }, "django-ray-workflow-graph__raw-json")[0];
 }
 
 function graphStatus(app) {
@@ -862,8 +936,8 @@ test("bounded JSON actions remain available without a graph endpoint", async () 
   assert.deepEqual(linkLabels(app), [
     "Download plan JSON",
     "Download selection JSON",
-    "Topology nodes",
-    "Node details",
+    "Topology nodes JSON",
+    "Node details JSON",
   ]);
   assert.equal(
     elementsByClass(app, "django-ray-workflow-graph").length,
@@ -1363,8 +1437,8 @@ test("archived attempt graphs are independently lazy, exact, and cached", async 
   );
   assert.equal(first.dataset.hydrationState, "ready");
   assert.ok(
-    graphNodeLinks({ content: first }).every((link) =>
-      link.href.includes("attempt_number=1&node_id="),
+    graphNodeLinks({ content: first }).every((card) =>
+      graphNodeRawLink(card).href.includes("attempt_number=1&node_id="),
     ),
   );
   assert.equal(app.archivedGraphs[1].dataset.hydrationState, "idle");
@@ -1377,13 +1451,13 @@ test("archived attempt graphs are independently lazy, exact, and cached", async 
   );
   assert.equal(second.dataset.hydrationState, "ready");
   assert.ok(
-    graphNodeLinks({ content: second }).every((link) =>
-      link.href.includes("attempt_number=2&node_id="),
+    graphNodeLinks({ content: second }).every((card) =>
+      graphNodeRawLink(card).href.includes("attempt_number=2&node_id="),
     ),
   );
   const descriptionIds = app.archivedGraphs.flatMap((graph) =>
-    graphNodeLinks({ content: graph }).map((link) =>
-      link.attributes.get("aria-describedby"),
+    graphNodeLinks({ content: graph }).map((card) =>
+      graphNodeInspectButton(card).attributes.get("aria-describedby"),
     ),
   );
   assert.equal(new Set(descriptionIds).size, descriptionIds.length);
@@ -1495,13 +1569,13 @@ test("failed and current attempts share one ordered accessible graph stack", asy
     ],
   );
   assert.ok(
-    graphNodeLinks({ content: orderedPanels[2] }).every((link) =>
-      link.href.includes("attempt_number=3&node_id="),
+    graphNodeLinks({ content: orderedPanels[2] }).every((card) =>
+      graphNodeRawLink(card).href.includes("attempt_number=3&node_id="),
     ),
   );
   const descriptionIds = orderedPanels.flatMap((panel) =>
-    graphNodeLinks({ content: panel }).map((link) =>
-      link.attributes.get("aria-describedby"),
+    graphNodeLinks({ content: panel }).map((card) =>
+      graphNodeInspectButton(card).attributes.get("aria-describedby"),
     ),
   );
   assert.equal(new Set(descriptionIds).size, descriptionIds.length);
@@ -1677,9 +1751,21 @@ test("the nested graph is lazy, cached, topological, and keyboard navigable", as
     "Output: Not requested \u2014 value not retained in workflow diagnostics",
     "Output: Not requested \u2014 value not retained in workflow diagnostics",
   ]);
-  assert.ok(nodeLinks.every((link) => link.tagName === "A"));
+  assert.ok(nodeLinks.every((card) => card.tagName === "ARTICLE"));
+  assert.ok(
+    nodeLinks.every((card) => {
+      const inspectButton = graphNodeInspectButton(card);
+      const rawLink = graphNodeRawLink(card);
+      return (
+        inspectButton?.tagName === "BUTTON" &&
+        rawLink?.tagName === "A" &&
+        rawLink.target === "_blank" &&
+        rawLink.rel === "noopener noreferrer"
+      );
+    }),
+  );
   assert.deepEqual(
-    nodeLinks.map((link) => link.href),
+    nodeLinks.map((card) => graphNodeRawLink(card).href),
     [
       "/admin/execution/1/workflow/node/?attempt_number=2&node_id=prepare#bounded-detail",
       "/admin/execution/1/workflow/node/?attempt_number=2&node_id=fanout#bounded-detail",
@@ -1855,7 +1941,7 @@ test("parallel roots and a multi-parent join keep an explicit incoming path", as
     "Incoming from Load accounts (root-a), Load invoices (root-b)",
   );
   assert.deepEqual(
-    graphNodeLinks(app).map((link) => link.href),
+    graphNodeLinks(app).map((card) => graphNodeRawLink(card).href),
     [
       "/admin/execution/1/workflow/node/?node_id=root-a",
       "/admin/execution/1/workflow/node/?node_id=root-b",
@@ -1985,7 +2071,9 @@ test("repeated split and join nodes render in deterministic longest-path stages"
   );
   assert.ok(
     renderedNodes.every((node) =>
-      predecessorIds.has(node.attributes.get("aria-describedby")),
+      predecessorIds.has(
+        graphNodeInspectButton(node).attributes.get("aria-describedby"),
+      ),
     ),
   );
   assert.match(
@@ -2107,7 +2195,7 @@ test("failed paths and malicious graph text stay visible as plain text", async (
     0,
   );
   assert.equal(
-    graphNodeLinks(app)[1].href,
+    graphNodeRawLink(graphNodeLinks(app)[1]).href,
     "/admin/execution/1/workflow/node/?node_id=failed%2Fnode%3F%3Cscript%3Esteal%28%29%3C%2Fscript%3E",
   );
   assert.equal(diagnosticsScript.includes("innerHTML"), false);
@@ -3074,3 +3162,218 @@ for (const kind of ["outer", "current", "archived"]) {
     assert.equal(loader.app.details.textContent.includes("private cancellation failure"), false);
   });
 }
+
+test("in-Admin node inspector modal renders structured node detail and restores focus on Escape", async () => {
+  const nodePayload = {
+    schema: "django-ray.workflow-progress-node",
+    schema_version: 1,
+    found: true,
+    availability: "AVAILABLE",
+    node_id: "prepare",
+    run_identity: {
+      attempt_number: 2,
+      execution_generation: 3,
+      run_id: "run-inspect-001",
+    },
+    item: {
+      node_id: "prepare",
+      state: "FAILED",
+      started_at: "2026-04-01T12:00:00Z",
+      finished_at: "2026-04-01T12:00:05Z",
+      truncated: false,
+      execution: {
+        ray_task_id: "ray-task-abc123",
+        ray_job_id: "02000000",
+      },
+      error: "ValueError: invalid input <script>alert(1)</script>",
+    },
+  };
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(200, validPayload()),
+      response(200, validGraphPayload()),
+      response(200, nodePayload),
+    ],
+  });
+
+  await app.toggle(true);
+  await app.toggleGraph(true);
+
+  const firstCard = graphNodeLinks(app)[0];
+  const inspectButton = graphNodeInspectButton(firstCard);
+  assert.equal(inspectButton.attributes.get("aria-label"), "Inspect node Prepare input");
+  inspectButton.focus();
+  await inspectButton.dispatch("click");
+  await settle();
+
+  const overlay = elementsByClass(app, "django-ray-node-inspector")[0];
+  assert.ok(overlay, "expected in-Admin node inspector overlay");
+  assert.equal(overlay.hidden, false);
+  const dialog = elementsByClass(app, "django-ray-node-inspector__dialog")[0];
+  assert.equal(dialog.attributes.get("role"), "dialog");
+  assert.equal(dialog.attributes.get("aria-modal"), "true");
+  assert.equal(app.fetchCalls.length, 3);
+  assert.equal(
+    app.fetchCalls[2].url,
+    "/admin/execution/1/workflow/node/?node_id=prepare",
+  );
+  assert.match(dialog.textContent, /Node summary/);
+  assert.match(dialog.textContent, /Ray execution IDs/);
+  assert.match(dialog.textContent, /ray-task-abc123/);
+  assert.match(dialog.textContent, /Error details/);
+  assert.match(dialog.textContent, /invalid input <script>alert\(1\)<\/script>/);
+  assert.match(dialog.textContent, /Formatted JSON/);
+  assert.equal(findAll(dialog, (el) => el.tagName === "SCRIPT").length, 0);
+
+  const rawLink = elementsByClass(app, "django-ray-node-inspector__raw-link")[0];
+  assert.equal(rawLink.href, "/admin/execution/1/workflow/node/?node_id=prepare");
+  assert.equal(rawLink.target, "_blank");
+  assert.equal(rawLink.rel, "noopener noreferrer");
+
+  await app.dispatchKeydown("Escape");
+  assert.equal(overlay.hidden, true);
+  assert.equal(app.document.activeElement, inspectButton);
+});
+
+test("node inspector fails closed on auth refusal or malformed schema without leaking secrets", async () => {
+  const secret = "inspector-secret-leak-canary";
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(200, validPayload()),
+      response(200, validGraphPayload()),
+      response(401, { secret }),
+      response(200, { schema: "wrong.schema", secret }),
+    ],
+  });
+
+  await app.toggle(true);
+  await app.toggleGraph(true);
+
+  const inspectButton = graphNodeInspectButton(graphNodeLinks(app)[0]);
+  await inspectButton.dispatch("click");
+  await settle();
+
+  const statusNode = elementsByClass(app, "django-ray-node-inspector__status")[0];
+  const contentNode = elementsByClass(app, "django-ray-node-inspector__content")[0];
+  assert.match(statusNode.textContent, /signing in again/);
+  assert.equal(contentNode.hidden, true);
+  assert.equal(app.details.textContent.includes(secret), false);
+
+  await inspectButton.dispatch("click");
+  await settle();
+  assert.match(statusNode.textContent, /could not be displayed safely/);
+  assert.equal(contentNode.hidden, true);
+  assert.equal(app.details.textContent.includes(secret), false);
+});
+
+test("recoverable NOT_REPORTED graph offers a Refresh graph control that reloads on click", async () => {
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(200, validPayload()),
+      response(200, degradedGraphPayload("NOT_REPORTED", "Waiting for progress.")),
+      response(200, validGraphPayload()),
+    ],
+  });
+
+  await app.toggle(true);
+  await app.toggleGraph(true);
+  assert.equal(graphNodeLinks(app).length, 0);
+
+  const refreshButton = elementsByClass(app, "django-ray-workflow-graph__refresh")[0];
+  assert.ok(refreshButton, "expected Refresh graph button for NOT_REPORTED");
+  await refreshButton.dispatch("click");
+  await settle();
+
+  assert.equal(app.fetchCalls.length, 3);
+  assert.equal(graphNodeLinks(app).length, 3);
+});
+
+test("URL hash #workflow-graph and #workflow-graph-attempt-N auto-open the targeted graph", async () => {
+  const currentApp = loadDiagnostics({
+    hash: "#workflow-graph",
+    fetchResponses: [
+      response(200, validPayload()),
+      response(200, validGraphPayload()),
+    ],
+  });
+  await settle();
+  assert.equal(currentApp.details.open, true);
+  assert.equal(currentApp.fetchCalls.length, 2);
+  assert.equal(graphNodeLinks(currentApp).length, 3);
+
+  const archivedApp = loadDiagnostics({
+    hash: "#workflow-graph-attempt-1",
+    archivedAttempts: [1],
+    fetchResponses: [response(200, validGraphPayload())],
+  });
+  await settle();
+  assert.equal(archivedApp.details.open, true);
+  assert.equal(archivedApp.archivedGraphs[0].open, true);
+  assert.equal(archivedApp.fetchCalls.length, 1);
+  assert.equal(
+    archivedApp.fetchCalls[0].url,
+    "/admin/execution/1/workflow/graph/?attempt_number=1",
+  );
+  assert.equal(graphNodeLinks({ content: archivedApp.archivedGraphs[0] }).length, 3);
+});
+
+test("node inspector registers keydown listener only once on document so Tab and Escape never double-fire", async () => {
+  const nodePayload = {
+    schema: "django-ray.workflow-progress-node",
+    schema_version: 1,
+    found: true,
+    availability: "AVAILABLE",
+    node_id: "prepare",
+    run_identity: {
+      attempt_number: 1,
+      execution_generation: 1,
+      run_id: "run-keydown-001",
+    },
+    item: {
+      node_id: "prepare",
+      state: "SUCCEEDED",
+      truncated: false,
+    },
+  };
+  const app = loadDiagnostics({
+    fetchResponses: [
+      response(200, validPayload()),
+      response(200, validGraphPayload()),
+      response(200, nodePayload),
+    ],
+  });
+
+  await app.toggle(true);
+  await app.toggleGraph(true);
+
+  const inspectButton = graphNodeInspectButton(graphNodeLinks(app)[0]);
+  inspectButton.focus();
+  await inspectButton.dispatch("click");
+  await settle();
+
+  const overlay = elementsByClass(app, "django-ray-node-inspector")[0];
+  assert.ok(overlay);
+  assert.equal(overlay.listeners.get("keydown"), undefined);
+
+  const closeButton = elementsByClass(app, "django-ray-node-inspector__close")[0];
+  const footerClose = elementsByClass(app, "django-ray-workflow__copy").find(
+    (node) => node.dataset.nodeInspectorCloseFooter === "",
+  );
+  assert.ok(closeButton);
+  assert.ok(footerClose);
+
+  footerClose.focus();
+  let prevented = 0;
+  await app.dispatchKeydown("Tab", {
+    shiftKey: false,
+    preventDefault() {
+      prevented += 1;
+    },
+  });
+  assert.equal(prevented, 1);
+  assert.equal(app.document.activeElement, closeButton);
+
+  await app.dispatchKeydown("Escape");
+  assert.equal(overlay.hidden, true);
+  assert.equal(app.document.activeElement, inspectButton);
+});

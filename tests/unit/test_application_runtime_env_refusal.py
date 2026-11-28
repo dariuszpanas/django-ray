@@ -180,7 +180,11 @@ def fake_observer(monkeypatch):
 
 
 def conflict(*args, **kwargs):
-    return 409, b'{"detail":"Persisted RuntimeEnv snapshot failed validation"}'
+    return (
+        409,
+        b'{"code":"RUNTIME_ENV_INVALID",'
+        b'"message":"Persisted RuntimeEnv snapshot failed validation."}',
+    )
 
 
 def test_second_timeout_retains_only_completed_first_case(fake_observer, monkeypatch):
@@ -215,7 +219,7 @@ def test_retry_failure_or_any_history_change_cannot_pass(fake_observer, monkeypa
         if kind == "accepted":
             return 202, b"{}"
         if kind == "other-conflict":
-            return 409, b'{"detail":"different"}'
+            return 409, b'{"code":"OTHER","message":"different"}'
         return conflict()
 
     with pytest.raises(ValueError):

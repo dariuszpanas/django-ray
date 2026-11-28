@@ -248,7 +248,7 @@ def test_purge_alias_refusal_precedes_execution_locks_and_delete(monkeypatch, di
     executions = Mock()
     monkeypatch.setattr(RayTaskExecution, "objects", executions)
     monkeypatch.setattr(payload_registry, "get_settings", lambda: config)
-    monkeypatch.setattr(transaction, "atomic", lambda: nullcontext())
+    monkeypatch.setattr(transaction, "atomic", lambda *_args, **_kwargs: nullcontext())
     deleter = Mock()
     monkeypatch.setattr(input_storage, "delete_input_reference", deleter)
 

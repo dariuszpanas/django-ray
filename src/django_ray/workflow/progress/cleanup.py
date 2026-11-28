@@ -6,16 +6,19 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import Any
 
 from django.db import transaction
-from django.db.models import F, Q
+from django.db.models import Exists, F, OuterRef, Q
 from django.utils import timezone
 
 from django_ray.models import (
     RayTaskExecution,
     TaskState,
+    WorkflowProgressNodeDetail,
     WorkflowProgressRunStorage,
     WorkflowProgressTopologyManifest,
+    WorkflowProgressTopologyManifestPage,
     WorkflowProgressTopologyPage,
     WorkflowProgressTopologySlot,
 )
@@ -24,6 +27,7 @@ WORKFLOW_PROGRESS_ORPHAN_GRACE_PERIOD = timedelta(hours=1)
 WORKFLOW_PROGRESS_CLEANUP_DEFAULT_BATCH_SIZE = 100
 WORKFLOW_PROGRESS_CLEANUP_MAX_BATCH_SIZE = 1000
 _CLEANUP_DIAGNOSTIC_MAX_CHARS = 2000
+_DELETE_CHUNK_SIZE = 500
 _TERMINAL_STATES = frozenset(
     {
         TaskState.SUCCEEDED,
@@ -241,6 +245,41 @@ def _record_manifest_failure(
         return
 
 
+def _delete_queryset_in_chunks(queryset: Any, *, using: str) -> None:
+    """Delete leaf child rows in bounded PK batches without Django ORM cascade fan-out."""
+    model = queryset.model
+    while True:
+        pks = list(queryset.order_by("pk").values_list("pk", flat=True)[:_DELETE_CHUNK_SIZE])
+        if not pks:
+            return
+        model.objects.using(using).filter(pk__in=pks)._raw_delete(using)
+
+
+def _select_clean_then_errored(
+    queryset: Any,
+    *,
+    error_field: str,
+    order_fields: tuple[str, ...],
+    values_fields: tuple[str, ...],
+    batch_size: int,
+) -> tuple[tuple[Any, ...], ...]:
+    """Select clean rows via index-aligned order first, falling back to errored rows."""
+    clean = list(
+        queryset.filter(**{f"{error_field}__isnull": True})
+        .order_by(*order_fields)
+        .values_list(*values_fields)[:batch_size]
+    )
+    remaining = batch_size - len(clean)
+    if remaining <= 0:
+        return tuple(clean)
+    errored = list(
+        queryset.filter(**{f"{error_field}__isnull": False})
+        .order_by(error_field, *order_fields)
+        .values_list(*values_fields)[:remaining]
+    )
+    return tuple(clean + errored)
+
+
 def _process_expired_run(
     execution_id: int,
     run_storage_id: int,
@@ -292,7 +331,8 @@ def _process_expired_run(
                 )
 
             # Lock descendants in the package-wide task -> run -> manifest/page
-            # order before the cascading run deletion.
+            # order, then delete children in bounded SQL batches so removing a
+            # large run does not materialize 25k+ rows in Django's Python Collector.
             tuple(
                 WorkflowProgressTopologyManifest.objects.using(using)
                 .select_for_update()
@@ -306,6 +346,26 @@ def _process_expired_run(
                 .filter(run_storage=run_storage)
                 .order_by("pk")
                 .values_list("pk", flat=True)
+            )
+            _delete_queryset_in_chunks(
+                WorkflowProgressNodeDetail.objects.using(using).filter(run_storage=run_storage),
+                using=using,
+            )
+            _delete_queryset_in_chunks(
+                WorkflowProgressTopologyManifestPage.objects.using(using).filter(
+                    manifest__run_storage=run_storage
+                ),
+                using=using,
+            )
+            _delete_queryset_in_chunks(
+                WorkflowProgressTopologyManifest.objects.using(using).filter(
+                    run_storage=run_storage
+                ),
+                using=using,
+            )
+            _delete_queryset_in_chunks(
+                WorkflowProgressTopologyPage.objects.using(using).filter(run_storage=run_storage),
+                using=using,
             )
             run_storage.delete(using=using)
             return WorkflowProgressCleanupItem(
@@ -590,12 +650,14 @@ def cleanup_workflow_progress_storage(
         execution_generation=F("execution__execution_generation"),
         run_id=F("execution__workflow_run_id"),
     )
-    run_candidates = tuple(
+    run_candidates = _select_clean_then_errored(
         WorkflowProgressRunStorage.objects.using(using)
         .filter(detail_expires_at__lte=observed_at)
-        .filter(~active_current)
-        .order_by(F("cleanup_error").asc(nulls_first=True), "detail_expires_at", "pk")
-        .values_list("execution_id", "pk")[:batch_size]
+        .filter(~active_current),
+        error_field="cleanup_error",
+        order_fields=("detail_expires_at", "pk"),
+        values_fields=("execution_id", "pk"),
+        batch_size=batch_size,
     )
     for execution_id, run_storage_id in run_candidates:
         items.append(
@@ -608,14 +670,15 @@ def cleanup_workflow_progress_storage(
             )
         )
 
-    manifest_candidates = tuple(
-        WorkflowProgressTopologyManifest.objects.using(using)
-        .filter(
+    manifest_candidates = _select_clean_then_errored(
+        WorkflowProgressTopologyManifest.objects.using(using).filter(
             slot=WorkflowProgressTopologySlot.PENDING,
             created_at__lte=pending_cutoff,
-        )
-        .order_by(F("cleanup_error").asc(nulls_first=True), "created_at", "pk")
-        .values_list("run_storage__execution_id", "run_storage_id", "pk")[:batch_size]
+        ),
+        error_field="cleanup_error",
+        order_fields=("created_at", "pk"),
+        values_fields=("run_storage__execution_id", "run_storage_id", "pk"),
+        batch_size=batch_size,
     )
     for execution_id, run_storage_id, manifest_id in manifest_candidates:
         items.append(
@@ -629,15 +692,15 @@ def cleanup_workflow_progress_storage(
             )
         )
 
-    page_candidates = tuple(
-        WorkflowProgressTopologyPage.objects.using(using)
-        .filter(created_at__lte=pending_cutoff, manifest_links__isnull=True)
-        .order_by(
-            F("run_storage__cleanup_error").asc(nulls_first=True),
-            "created_at",
-            "pk",
-        )
-        .values_list("run_storage__execution_id", "run_storage_id", "pk")[:batch_size]
+    page_candidates = _select_clean_then_errored(
+        WorkflowProgressTopologyPage.objects.using(using).filter(
+            created_at__lte=pending_cutoff,
+            manifest_links__isnull=True,
+        ),
+        error_field="run_storage__cleanup_error",
+        order_fields=("created_at", "pk"),
+        values_fields=("run_storage__execution_id", "run_storage_id", "pk"),
+        batch_size=batch_size,
     )
     for execution_id, run_storage_id, page_id in page_candidates:
         items.append(
@@ -651,18 +714,30 @@ def cleanup_workflow_progress_storage(
             )
         )
 
-    empty_run_candidates = tuple(
+    has_manifest = WorkflowProgressTopologyManifest.objects.using(using).filter(
+        run_storage_id=OuterRef("pk")
+    )
+    has_page = WorkflowProgressTopologyPage.objects.using(using).filter(
+        run_storage_id=OuterRef("pk")
+    )
+    has_detail = WorkflowProgressNodeDetail.objects.using(using).filter(
+        run_storage_id=OuterRef("pk")
+    )
+    empty_run_candidates = _select_clean_then_errored(
         WorkflowProgressRunStorage.objects.using(using)
         .filter(
             detail_revision__isnull=True,
-            topology_manifests__isnull=True,
-            topology_pages__isnull=True,
-            node_details__isnull=True,
+            detail_node_count=0,
         )
+        .filter(~Exists(has_manifest))
+        .filter(~Exists(has_page))
+        .filter(~Exists(has_detail))
         .filter(Q(detail_expires_at__isnull=True) | Q(detail_expires_at__gt=observed_at))
-        .filter(~active_current)
-        .order_by(F("cleanup_error").asc(nulls_first=True), "created_at", "pk")
-        .values_list("execution_id", "pk")[:batch_size]
+        .filter(~active_current),
+        error_field="cleanup_error",
+        order_fields=("created_at", "pk"),
+        values_fields=("execution_id", "pk"),
+        batch_size=batch_size,
     )
     for execution_id, run_storage_id in empty_run_candidates:
         items.append(

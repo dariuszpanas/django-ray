@@ -1,5 +1,10 @@
 """Ray-free reference lifecycle for a future Compiled Graph adapter.
 
+.. warning::
+   **Experimental quarantined module**: this Ray-free reference lifecycle is
+   quarantined as experimental and is not wired into the active
+   ``django-ray`` production runtime.
+
 The reducer in this module owns no runtime handles and never reads a clock.  Callers
 provide absolute timestamps on events and execute the returned actions through an
 adapter that keeps beta/runtime-specific objects process-local.
@@ -1061,10 +1066,14 @@ def _owner_lost(
         return _invalid_transition(state, event)
     lost = _supersede_action(state)
     lost = _set_primary(lost, LifecycleOutcome.OWNER_LOST)
-    before_submission = state.invocation_state in {
-        CompiledGraphInvocationState.ADMITTING,
-        CompiledGraphInvocationState.ADMITTED,
-    }
+    before_submission = state.effect_state is LifecycleEffectState.NOT_STARTED and (
+        state.invocation_state
+        in {
+            CompiledGraphInvocationState.ADMITTING,
+            CompiledGraphInvocationState.ADMITTED,
+            CompiledGraphInvocationState.CANCELLING,
+        }
+    )
     return LifecycleTransition(
         replace(
             lost,
@@ -1293,12 +1302,32 @@ def _expire_action(
     )
 
 
+_POST_OUTER_CLEANUP_ACTIONS = frozenset(
+    {
+        LifecycleActionKind.RELEASE_CAPACITY,
+        LifecycleActionKind.DRAIN_INVOCATION,
+        LifecycleActionKind.DRAIN_SESSION,
+        LifecycleActionKind.TEARDOWN,
+    }
+)
+
+
+def _action_deadline(
+    deadlines: LifecycleDeadlines,
+    kind: LifecycleActionKind,
+) -> float:
+    stage_deadline = _stage_deadline(deadlines, kind)
+    if kind in _POST_OUTER_CLEANUP_ACTIONS:
+        return stage_deadline
+    return min(deadlines.outer, stage_deadline)
+
+
 def _deadline_outcome(
     state: CompiledGraphLifecycleState,
     action: LifecycleAction,
 ) -> LifecycleOutcome:
     stage_deadline = _stage_deadline(state.deadlines, action.kind)
-    if state.deadlines.outer <= stage_deadline:
+    if action.kind not in _POST_OUTER_CLEANUP_ACTIONS and state.deadlines.outer <= stage_deadline:
         return LifecycleOutcome.OUTER_DEADLINE
     if action.kind is LifecycleActionKind.ADMIT:
         return LifecycleOutcome.ADMISSION_TIMEOUT
@@ -1352,7 +1381,7 @@ def _issue_action(
         kind=kind,
         session_identity=state.session_identity,
         invocation_identity=invocation_identity,
-        deadline=min(state.deadlines.outer, _stage_deadline(state.deadlines, kind)),
+        deadline=_action_deadline(state.deadlines, kind),
         output_index=output_index,
         declared_outputs=declared_outputs,
     )
@@ -1849,11 +1878,14 @@ def _state_invariant_error(state: object) -> str | None:
             return "non-admit action carries output cardinality"
         if state.pending_action.token == state.last_completed_action_token:
             return "pending and completed action tokens cannot match"
-        if state.pending_action.deadline > state.deadlines.outer:
+        if (
+            state.pending_action.kind not in _POST_OUTER_CLEANUP_ACTIONS
+            and state.pending_action.deadline > state.deadlines.outer
+        ):
             return "pending action exceeds the outer deadline"
-        if state.pending_action.deadline != min(
-            state.deadlines.outer,
-            _stage_deadline(state.deadlines, state.pending_action.kind),
+        if state.pending_action.deadline != _action_deadline(
+            state.deadlines,
+            state.pending_action.kind,
         ):
             return "pending action deadline does not match its absolute phase budget"
 

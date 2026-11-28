@@ -1,119 +1,9 @@
 {% extends "admin/base_site.html" %}
-{% load i18n admin_urls %}
+{% load i18n admin_urls static %}
 
-{% block extrahead %}
+{% block extrastyle %}
   {{ block.super }}
-  <style>
-    .django-ray-retry-card {
-      border: 1px solid var(--border-color, #d1d5db);
-      border-radius: 8px;
-      max-width: 64rem;
-      overflow: hidden;
-    }
-
-    .django-ray-retry-card__warning,
-    .django-ray-retry-card__body,
-    .django-ray-retry-card__actions {
-      padding: 1rem;
-    }
-
-    .django-ray-retry-card__warning {
-      background: rgb(220 38 38 / 10%);
-      border-left: 4px solid #dc2626;
-    }
-
-    .django-ray-retry-card__warning strong {
-      display: block;
-      font-size: 1rem;
-      margin-bottom: .25rem;
-    }
-
-    .django-ray-retry-card__body > :first-child,
-    .django-ray-retry-card__warning > :first-child {
-      margin-top: 0;
-    }
-
-    .django-ray-retry-card__body > :last-child,
-    .django-ray-retry-card__warning > :last-child {
-      margin-bottom: 0;
-    }
-
-    .django-ray-retry-card__metrics {
-      display: grid;
-      gap: .75rem;
-      grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-      margin: 1rem 0;
-    }
-
-    .django-ray-retry-card__metric {
-      background: rgb(127 127 127 / 8%);
-      border: 1px solid var(--border-color, #d1d5db);
-      border-radius: 6px;
-      padding: .75rem;
-    }
-
-    .django-ray-retry-card__metric dt {
-      font-size: .8125rem;
-      line-height: 1.35;
-    }
-
-    .django-ray-retry-card__metric dd {
-      font-size: 1.5rem;
-      font-weight: 700;
-      line-height: 1;
-      margin: .5rem 0 0;
-    }
-
-    .django-ray-retry-card__actions {
-      align-items: center;
-      border-top: 1px solid var(--border-color, #d1d5db);
-      display: flex;
-      flex-wrap: wrap;
-      gap: .75rem;
-    }
-
-    .django-ray-retry-card__confirm,
-    .django-ray-retry-card__cancel {
-      border-radius: 6px;
-      box-sizing: border-box;
-      display: inline-flex;
-      font-weight: 600;
-      justify-content: center;
-      line-height: 1.25;
-      padding: .625rem 1rem;
-      text-decoration: none;
-    }
-
-    .django-ray-retry-card__confirm {
-      background: #dc2626;
-      border: 1px solid #dc2626;
-      color: #fff;
-      cursor: pointer;
-    }
-
-    .django-ray-retry-card__confirm:hover {
-      background: #b91c1c;
-      border-color: #b91c1c;
-    }
-
-    .django-ray-retry-card__cancel {
-      border: 1px solid var(--border-color, #d1d5db);
-      color: inherit;
-    }
-
-    .django-ray-retry-card__confirm:focus-visible,
-    .django-ray-retry-card__cancel:focus-visible {
-      outline: 3px solid var(--primary, #0ea5e9);
-      outline-offset: 2px;
-    }
-
-    @media (max-width: 40rem) {
-      .django-ray-retry-card__confirm,
-      .django-ray-retry-card__cancel {
-        width: 100%;
-      }
-    }
-  </style>
+  <link rel="stylesheet" href="{% static 'django_ray/admin/diagnostics.css' %}">
 {% endblock %}
 
 {% block bodyclass %}{{ block.super }} app-{{ opts.app_label }} model-{{ opts.model_name }} retry-confirmation{% endblock %}
@@ -132,6 +22,8 @@
     &rsaquo; {% translate "Confirm full task retry" %}
   </div>
 {% endblock %}
+
+{% block content_title %}{% endblock %}
 
 {% block content %}
   <section

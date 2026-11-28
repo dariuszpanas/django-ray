@@ -37,12 +37,16 @@ This document describes the runtime architecture of `django-ray` and how work mo
 - Maintains worker lease heartbeats.
 - Maintains task-monitor heartbeats for in-flight work it is actively reconciling.
 - Submits and reconciles execution in sync/Ray Core/Ray Job modes.
-- Applies retry policy and stuck-task/orphan recovery.
+- Applies retry policy, graceful `--drain` quiescing, and stuck-task/orphan recovery.
 
-The command currently orchestrates the existing leasing, runner, reconciliation, and
-cancellation helpers. The runner classes own mode-specific submission and polling, while
-the command coordinates when to claim, reconcile, or hand off work. Broader extraction
-of those orchestration paths into separate services remains future work.
+`django_ray_worker` exposes a thin `Command` entrypoint that delegates orchestration across
+focused submodules under `django_ray.worker` (`loop`, `claimer`, `dispatcher`, `reconciler`,
+`maintenance`, and `shutdown`) and mode-specific runners under `django_ray.runner`
+(`sync`, `ray_core`, and `ray_job`). Admin views follow the same modular split under
+`django_ray.admin_views` (`badges`, `actions`, `diagnostics`, and `sensitive`), while shared
+settings validation (`conf/validation.py`), storage contracts (`_storage_types.py`), and
+workflow types (`workflow/_types.py`) keep package dependencies acyclic and verified by
+architecture conformance tests.
 
 This boundary is explicit for Ray Core tracking:
 `RayCoreRunner.pending_task_handles` returns stable, immutable handles carrying the
@@ -55,12 +59,13 @@ in-memory capability; a reconstructed `ray_core:<pk>` value cannot select whiche
 submission currently occupies the same database row. `clear_pending_tasks()` clears
 local tracking without exposing the private object-reference registry.
 
-When the worker prepares a successful inline or external result, preparation and the
-terminal state transition run while holding the execution row lock. This prevents
-cancellation, retry, or replacement from winning between that worker-owned write and
-reference publication. Ray Job completion envelopes may contain a reference prepared
-remotely before reconciliation; the lock fences adoption of that reference, while
-writer-owned staging and crash-retention cleanup remain separate follow-up work.
+External storage I/O and remote cancellation RPCs run strictly **outside** database
+row locks: oversized result uploads, S3/GCS deduplication checks, and bounded remote
+`ray.cancel` / Ray Job stop RPCs execute outside `transaction.atomic()` and
+`_authoritative_task_owner()`, and the subsequent locked transaction revalidates the
+worker lease and execution generation fence before committing the terminal state
+transition or reference publication. This prevents external network latency from
+holding PostgreSQL row locks or blocking concurrent workers.
 
 ### Ray Runtime
 
@@ -131,7 +136,7 @@ Workflow progress storage has a separate strategy-neutral decision. ADR-0004 rep
 the current complete task-row graph design with an always-bounded summary plus
 database-backed immutable topology pages and normalized latest-state node-detail rows.
 Publication writes and verifies detail before conditionally advancing the summary
-pointer through the exact #81 run fence. Static topology is run-scoped and is not
+pointer through the exact run-identity fence. Static topology is run-scoped and is not
 duplicated for each ADR-0003 invocation. Detail has exact availability, size,
 retention, authorization, cursor, corruption, and cleanup contracts; periodic Admin
 polling defers both durable payload fields and selects progress through one bounded
@@ -229,38 +234,44 @@ Worker coordination record used to detect dead/inactive workers.
 | `worker_id` | Primary key identifier for worker process |
 | `hostname`, `pid` | Worker identity details |
 | `queue_name` | Informational queue assignment |
-| `started_at`, `last_heartbeat_at`, `stopped_at` | Lease timing |
+| `started_at`, `last_heartbeat_at`, `lease_expires_at`, `stopped_at` | DB-clock lease timing (`lease_expires_at` is intentionally unindexed to preserve PostgreSQL HOT heartbeat updates) |
+| `lease_policy_revision` | Immutable `TaskWorkerLeasePolicy` revision validated at lease creation |
 | `is_active` | Active/inactive lease state |
 
 The generated UUID is only a candidate; the lease primary key and retained in-flight
-task claims are the allocation authority. Startup inserts a new row before initializing
-Ray or printing the worker identity, then proves that no `RUNNING` or `CANCELLING` row
-still names that ID. This second fence matters after the supported Admin cleanup has
-deleted an inactive lease whose orphaned work still awaits reconciliation. SQLite and
-PostgreSQL primary-key violations, or an in-flight owner reservation, are retried with
-a fresh candidate a bounded number of times. Any other integrity or database error
-fails startup closed. Existing active or inactive rows are never adopted during initial
+task claims are the allocation authority. Startup validates `WORKER_LEASE_SECONDS`
+against the database `TaskWorkerLeasePolicy` singleton under a startup-only
+`SELECT ... FOR SHARE` guard, inserts a new row stamped with the database clock's
+`lease_expires_at` and `lease_policy_revision` before initializing Ray or printing the
+worker identity, and proves that no `RUNNING` or `CANCELLING` row still names that ID.
+Keeping policy locking at startup (rather than taking a shared policy lock on every
+claim or heartbeat transaction) eliminates hot-path PostgreSQL MultiXact contention and
+SQLite write-lock stalls while still rejecting policy mismatches on every worker start
+and policy transition. Existing active or inactive rows are never adopted during initial
 allocation.
 
 After acquisition, heartbeats, queue expiry, task claims, and graceful release use the
-immutable `(worker_id, hostname, pid, started_at)` snapshot. Renewal also requires the
-exact row to remain active and inside its lease duration. Expired, inactive, deleted,
-or replaced ownership is irrevocably lost; the old process cannot reactivate or
-recreate it. The worker holds that live-row fence across each bounded expiry and claim
-transaction, including a write fence on SQLite where row locking is unavailable.
+immutable `(worker_id, hostname, pid, started_at)` snapshot and compare `lease_expires_at`
+against the database clock (`Now()`) rather than Python process wall clocks, preventing
+clock-skew split brain across nodes. Renewal also requires the exact row to remain active
+and unexpired. Expired, inactive, deleted, or replaced ownership is irrevocably lost; the
+old process cannot reactivate or recreate it. The worker holds that live-row fence across
+each bounded expiry and claim transaction, including a write fence on SQLite where row
+locking is unavailable.
 
-Recovery transactions lock every involved lease in worker-ID order before the durable
-execution. They prove the adopter's complete immutable identity is active and fresh,
-reject a live source owner, mark a stale source inactive, and transfer task ownership.
-Timeout, LOST, and cancellation recovery keep those locks through the corresponding
-archive and any bounded state-changing remote stop, so competing workers cannot issue
-the same recovery effect for one execution identity. Lease cleanup follows the same
-order and skips recovery rows that are already locked on databases that support it.
-The supported Admin bulk deactivation and inactive-lease deletion actions also lock
-their selected rows in worker-ID order before mutation. Generic Admin deletion is
-disabled so it cannot bypass the inactive-only guard or the lock protocol. Both
-controlled actions require the model's change permission; view-only operators cannot
-deactivate or delete leases.
+Recovery transactions lock every involved lease in deterministic worker-ID order in a
+single authoritative query before locking the durable execution. They prove the adopter's
+complete immutable identity is active and unexpired on the database clock, reject a live
+source owner, mark a stale source inactive, and transfer task ownership. Bounded remote
+cancellations execute before acquiring durable locks where safe, while the locked
+transition revalidates the lease and execution generation fence before committing archival
+or ownership changes so competing workers cannot duplicate durable mutations. Lease cleanup
+follows the same order and skips recovery rows that are already locked on databases that
+support it. The supported Admin bulk deactivation and inactive-lease deletion actions also
+lock their selected rows in worker-ID order before mutation. Generic Admin deletion is
+disabled so it cannot bypass the inactive-only guard or the lock protocol. Both controlled
+actions require the model's change permission; view-only operators cannot deactivate or
+delete leases.
 
 Sync and Ray Core terminal writes use the command's captured worker ID rather than a
 freshly loaded task owner, while Ray Core monitor heartbeats include that owner too.
@@ -271,14 +282,11 @@ fails closed and stale in-memory tracking is retired without touching the adopte
 task. This protects coordination from accidental identifier collisions and stale
 owner resumption. Public cancellation remains durable best-effort intent: neither the
 lease protocol nor a remote cancellation response is an exactly-once guarantee.
-Ray Core cancellation waits at most five seconds for graceful `ray.cancel` and
-then records an indeterminate outcome while retiring only the exact tracked
-`ObjectRef`. The cancellation RPC may still finish in its daemon thread, but that
-late return cannot remove or target a replacement attempt. This bounds the worker's
-lease and execution locks without claiming that the remote task has stopped. One
-process-wide cancellation slot prevents a wedged Ray Client from accumulating daemon
-threads across runner reconnects; later exact handles are retired with an indeterminate
-outcome until the in-flight RPC returns.
+Ray Core cancellation waits at most five seconds per handle for graceful `ray.cancel`
+and then records an indeterminate outcome while retiring only the exact tracked
+`ObjectRef`. A bounded per-handle executor isolates slow cancellation RPCs so one
+wedged remote call cannot block unrelated task cancellations or hold database locks;
+any late return cannot target a replacement attempt.
 Application administrators and database writers remain trusted not to forge
 worker-managed state.
 
@@ -302,9 +310,11 @@ whether a reference contains a task-input envelope or a Ray Job execution reques
 the backend, digest, byte size, envelope version, last-use time, cleanup state, and
 cleanup error. Execution rows use separate `input_reference` and
 `ray_job_request_reference` links so retry and retention cannot confuse the callable's
-durable arguments with the latest submitted Ray Job request. An automatic retry retains
-the prior job ID, address, and request reference as one audit/reconciliation tuple until
-the fresh claim clears all three; an explicit retry clears that tuple immediately. Row
+durable arguments with the latest submitted Ray Job request. An automatic retry and an explicit retry both archive the terminal attempt under the
+same row-locked lifecycle transition, increment `execution_generation`, and immediately
+clear `error_message`, `error_traceback`, `ray_job_id`, `ray_address`, and
+`ray_job_request_reference` so the replacement attempt starts cleanly without inheriting
+prior handle metadata. Row
 locks on the registry and both referencing columns prevent cleanup from deleting a
 payload while another writer is registering the same content. A kind mismatch or a
 reference present in both columns is ambiguous and remains retained. Every writer that
@@ -346,8 +356,9 @@ service. Queued work becomes terminal and is archived under that lock. Running w
 moves to `CANCELLING`, after which a worker owns best-effort backend interruption and
 terminal finalization. The caller supplies its observed attempt number and execution
 generation, so an older API or admin request cannot control a replacement attempt.
-Both values matter because automatic retries advance the attempt number without
-replacing the execution generation.
+Both values matter because both automatic and manual retries advance `attempt_number`
+and `execution_generation`, fencing out stale cancellation or retry requests targeting
+an earlier attempt.
 
 Stuck-task recovery also revalidates the observed worker owner, backend handle, last
 task-monitor heartbeat, and absence of a durable completion envelope under that row
@@ -454,10 +465,8 @@ Python `observed_node_ids` (legacy `prepare_workflow_progress_topology()` caps d
 `observed_node_ids` at 25,000 nodes). `SpillCapacityController` in
 `django_ray.workflow.progress.spill_capacity` enforces node-local aggregate byte
 reservations, workspace and per-owner quotas, filesystem free-space headroom checks,
-and PID-reuse-safe janitor cleanup of proven-stale workspaces and quarantines (#156,
-#158). Native Linux 25k/100k/250k-node scale benchmarking remains tracked in
-[#157](https://github.com/dariuszpanas/django-ray/issues/157); the former umbrella
-#142 was closed as superseded.
+and PID-reuse-safe janitor cleanup of proven-stale workspaces and quarantines.
+Large-scale (25k–250k node) native Linux benchmarking remains separate qualification work.
 The default terminal adapter uses the narrower profile of 512 nodes, 2,048 edges,
 2 MiB topology, 1 MiB detail and 4 MiB combined. Lifetime admission and local leaf
 capture bound this path. Higher-scale and live reporting still require the broader
@@ -615,7 +624,7 @@ contain arbitrary application output.
 ### Rolling upgrades
 
 Apply the linear `django_ray` migration sequence through
-`0028_worker_lease_policy` before starting upgraded workers:
+`0029_lease_engine_and_hot_indexes` before starting upgraded workers:
 
 ```bash
 python manage.py migrate django_ray
@@ -644,6 +653,16 @@ Migration `0028` (`0028_worker_lease_policy`) adds the database-scoped common
 Workers, readiness probes, doctor checks, and lease-aware Admin actions require
 `DJANGO_RAY["WORKER_LEASE_SECONDS"]` to match this database authority before
 claiming work or mutating lease-governed state.
+
+Migration `0029` (`0029_lease_engine_and_hot_indexes`) adds database-clock
+`lease_expires_at` and `lease_policy_revision` columns to `TaskWorkerLease` (leaving
+`lease_expires_at` unindexed so PostgreSQL HOT heartbeat updates avoid index bloat),
+widens `TaskWorkerLease.queue_name` to `1024` characters, preserves SQLite triggers
+across forward and reverse table rebuild DDL, drops superseded full-table indexes, and
+adds partial composite hot-path and purge indexes on `RayTaskExecution` (`QUEUED`,
+`RUNNING`/`CANCELLING`, `queue_deadline_at`, terminal `finished_at`, and
+`result_reference`) and `TaskAttempt` (`state` and `result_reference`) so worker claim,
+reconciliation, monitoring, and retention-purge queries avoid sequential table scans.
 
 Migrations `0007` and `0008` add priority with a neutral default and enforce its
 `-100` through `100` range. Migration `0008` is intentionally non-atomic:
@@ -1114,7 +1133,7 @@ retain only canonical proofs that matched the exact policy, including the expect
 membership, and full-attestation digests plus their observation window. The private
 coordination service registers Ray Core targets at policy revision `1` in `draining`,
 permits only revision-checked `draining`/`active` transitions, and does not expose
-`retired`; that transition remains reserved for #368's reviewed doctor, drain, and
+`retired`; that transition remains reserved for a future reviewed doctor, drain, and
 retirement adapter. Ray Job persistence remains blocked on its authenticated pre-Django
 proof channel.
 
@@ -1137,7 +1156,7 @@ evidence that the target was selected when the execution was enqueued. No packag
 reader, Admin or operator surface, enqueue hook, claim or adoption predicate, lifecycle
 path, routing path, reconciliation/cancellation/retry fence, backfill, renewal loop,
 worker target capability, or lease relationship consumes the binding. Legacy adoption
-remains forbidden until #381 supplies exact mapping lineage from the retained 0.4 data.
+remains forbidden until exact mapping lineage from retained 0.4 data is established.
 
 Both binding foreign keys use `PROTECT`, so a retained binding blocks deletion of its
 execution and target-policy revision at both the ORM and database boundaries. Existing
@@ -1169,7 +1188,7 @@ no task or binding writer, reader, enqueue path, Admin or operator surface, clai
 lifecycle path, worker, lease, reconciliation path, or runtime consumer creates or reads a
 selection. Absence therefore means the provenance is unproved and must never infer a default
 backend alias. The `created_at` value records only when provenance was stored, not when a task
-was enqueued. Legacy 0.4 mapping is distinct and remains deferred to #381's exact lineage
+was enqueued. Legacy 0.4 mapping is distinct and remains deferred to an explicit lineage
 rehearsal; neither route history nor missing provenance supplies that mapping.
 
 Both route-selection parents use `PROTECT`; each route revision also protects its route and
@@ -1302,8 +1321,10 @@ and quiescence.
 
 ## Reliability Controls
 
-- Unified retry policy with denylist support (short and fully-qualified exception names).
-- Worker lease heartbeat + cross-worker orphan recovery.
+- Unified retry policy with bounded jitter (`RETRY_BACKOFF_JITTER_RATIO`, default `0.1`)
+  and denylist support (exact dotted and subclass exception matching).
+- DB-clock worker lease heartbeats (`lease_expires_at`), startup-only shared policy checks,
+  and single-query cross-worker orphan recovery.
 - Task monitor heartbeats for active reconciliation paths.
 - Throttled, batched Ray Core task-monitor heartbeat persistence.
 - Bounded terminal graph publication with lifetime admission and final Ray outcome
@@ -1315,8 +1336,18 @@ and quiescence.
 - Versioned workflow graphs with stable node IDs, dependency edges, Ray execution
   identifiers, environment identity, and application-reported leaf progress.
 - Stuck/timeout detection with loss handling and retry path.
-- Startup settings validation fail-fast by default, with migration/bootstrap bypass controls.
-- Result size enforcement with configurable oversized-result backends (`digest`, `filesystem`, `s3`, `gcs`).
+- Startup settings validation fail-fast by default (with lazy Ray-target checks so `--sync`
+  works with empty `DJANGO_RAY = {}`), plus migration/bootstrap bypass controls.
+- Result size enforcement with configurable oversized-result backends (`digest`, `filesystem`,
+  `s3`, `gcs`) backed by a unified internal blob engine (`django_ray._blob_storage`) providing
+  pooled S3/GCS clients, metadata-only 404-idempotent deletion, stale-lock-safe atomic
+  filesystem installs, and canonical namespace containment.
+- Fail-loud result retrieval: `RayTaskBackend.get_result()` returns a `RayTaskResult`
+  whose `.return_value` raises `ResultUnavailableError` (and `.args`/`.kwargs` raise
+  `InputPayloadUnavailableError`) rather than silently fabricating `None` or empty inputs;
+  explicit external storage write failures perform bounded transient retries and then fail
+  non-retryably (`ResultStoragePersistenceError`) instead of silently downgrading to
+  digest-only success.
 - Backend result retrieval rehydrates authorized `result_reference` payloads only after
   provider/stat size, bounded raw-byte, SHA-256, and UTF-8 verification. New references
   are canonical; the legacy reader is limited to v0.2/v0.3 object-key encoding.
@@ -1327,7 +1358,7 @@ and quiescence.
 
 ## Observability Surfaces
 
-- Django admin for task/lease inspection and operations.
+- Django admin for task/lease inspection and operations (modularized under `admin_views/`).
 - Redacted task and attempt details for ordinary operators, plus a separate GET-only,
   non-cacheable allowlist for users who hold both ordinary object view and
   `django_ray.view_sensitive_task_data` on the owning execution. Database byte-length
@@ -1344,15 +1375,22 @@ and quiescence.
   rejected rather than rewritten, so normalization cannot merge distinct nodes.
 - Explicit terminal-only API and Admin summaries that never advertise topology,
   node-detail, or execution-graph surfaces.
-- Package-owned Prometheus rendering with explicit queue-label allowlists and fixed labels.
-- Worker logs for claim/submit/reconcile/retry events.
+- Package-owned Prometheus rendering with explicit queue-label allowlists, TTL-cached
+  metrics snapshots, and indexed query paths.
+- Django 6 lifecycle signals (`django.tasks.signals`): `task_enqueued` dispatched through
+  `transaction.on_commit(..., using="default")` so rolled-back transactions never fire
+  spurious signals, plus post-commit `task_started` and `task_finished` signals with
+  receiver exception isolation.
+- Worker logs for claim/submit/reconcile/retry events via `StructuredLogAdapter` (preserving
+  root-logger propagation and optional `exc_info` for error trackers).
 - Structured workflow-leaf logs correlated by durable task, workflow node, and Ray IDs.
 - Optional Ray State API lookup for live task attempts and bounded stdout/stderr tails.
-- Manually invoked tracing primitives (`django_ray.tracing`) with W3C
-  `traceparent` validation, attribute redaction, caller-supplied
-  `AttemptAuthorityToken` fencing, bounded child span creation, and tracer
-  failure isolation. Automatic task/workflow lifecycle instrumentation and a
-  built-in OpenTelemetry adapter remain pending; see the
+- Opt-in OpenTelemetry lifecycle tracing (`django_ray.tracing`): `emit_task_lifecycle_span`
+  is wired at enqueue, start, and terminal persistence boundaries with a built-in lazy
+  `OpenTelemetryTracer` (install `django-ray[otel]` for `opentelemetry-sdk`), W3C
+  `traceparent` validation, strict attribute redaction, caller-supplied
+  `AttemptAuthorityToken` fencing, bounded child span creation, and tracer failure
+  isolation. See the
   [tracing integration boundary](observability.md#tracing-helpers-and-integration-boundary).
 - Optional authenticated HTTP adapters in the `testproject` example app.
 

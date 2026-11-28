@@ -67,7 +67,10 @@ def test_non_ascii_bearer_is_unauthorized_before_application_work(
         response = getattr(Client(), method)(path, HTTP_AUTHORIZATION=f"Bearer {token}")
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "Unauthorized"}
+    assert response.json() == {
+        "code": "UNAUTHORIZED",
+        "message": "Authentication credentials were not provided or are invalid.",
+    }
     assert marker not in response.content.decode()
     assert "TypeError" not in response.content.decode()
 

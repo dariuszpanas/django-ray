@@ -295,6 +295,8 @@ def _environment(stage: Stage) -> None:
 def commands(stage: Stage) -> list[list[str]]:
     if stage.id == "static":
         return [
+            ["make", "workflow-check"],
+            ["make", "spelling-check"],
             ["make", "commit-policy-test"],
             ["ruff", "format", "--check", "."],
             ["ruff", "check", "."],

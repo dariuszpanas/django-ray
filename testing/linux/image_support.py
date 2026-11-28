@@ -70,6 +70,8 @@ def record_environment(output: Path) -> None:
         ("python", ["--version"]),
         ("uv", ["--version"]),
         ("uvx", ["--version"]),
+        ("node", ["--version"]),
+        ("npm", ["--version"]),
         ("git", ["--version"]),
         ("make", ["--version"]),
         ("kubectl", ["version", "--client", "-o", "json"]),

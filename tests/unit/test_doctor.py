@@ -32,12 +32,14 @@ def test_time_budgets_reject_nonfinite_or_missing_cleanup(total, per_probe):
         contracts.Limits(total, per_probe)
 
 
-def test_reports_remain_incomplete_with_explicit_remote_boundaries():
+def test_reports_exit_zero_when_required_checks_pass_with_explicit_deferred_boundaries():
     sections = contracts.initial_sections()
     for name in contracts.DATABASE_SECTIONS + ("configuration",):
         sections[name] = contracts.observation("observed", "observed")
     report = contracts.result(sections, contracts.Limits(), 0.1, True)
-    assert report["exit_code"] == 2 and not report["complete"]
+    assert report["exit_code"] == 0 and report["complete"] and report["status"] == "ok"
+    assert report["deferred_sections"] == list(contracts.UNAVAILABLE_SECTIONS)
+    assert report["remediations"] == {}
     assert all(
         sections[name]["code"] == "not_implemented" for name in contracts.UNAVAILABLE_SECTIONS
     )
@@ -150,7 +152,7 @@ def test_required_storage_without_active_key_emits_only_fixed_configuration_diag
     name, value = contracts.parse_section(raw)
     assert name == "configuration"
     assert value["outcome"] == "blocker" and value["code"] == "configuration_invalid"
-    assert value["values"] == {}
+    assert value["values"] == {"detail": "invalid_encryption_settings"}
     assert b"private" not in raw and material.encode() not in raw
 
 
@@ -667,8 +669,13 @@ def test_managed_command_does_not_run_checks_or_leak_exception_payload(monkeypat
 
 
 @pytest.mark.parametrize("state", ["RUNNING", "CANCELLING"])
-@pytest.mark.parametrize("field", ["execution_protocol_version", "metadata_schema_version"])
-def test_retired_nonterminal_protocol_or_metadata_is_a_blocker(owned_database, state, field):
+@pytest.mark.parametrize(
+    ("field", "unsupported_value"),
+    [("execution_protocol_version", 0), ("metadata_schema_version", 2)],
+)
+def test_retired_nonterminal_protocol_or_metadata_is_a_blocker(
+    owned_database, state, field, unsupported_value
+):
     alias, path = owned_database
     permit_historical_fixture_rows(alias, "django_ray_raytaskexecution")
     with connections[alias].cursor() as cursor:
@@ -678,7 +685,7 @@ def test_retired_nonterminal_protocol_or_metadata_is_a_blocker(owned_database, s
         callable_path="missing.task",
         state=state,
         last_heartbeat_at=datetime.now(UTC),
-        **{field: 0},
+        **{field: unsupported_value},
     )
     with connections[alias].cursor() as cursor:
         cursor.execute("PRAGMA ignore_check_constraints=OFF")

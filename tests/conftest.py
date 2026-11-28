@@ -46,7 +46,9 @@ MARKER_IMPLICATIONS = {
     "compiled_graph_opt_in": "real_ray",
 }
 TOOLING_TEST_PREFIXES: tuple[str, ...] = (
+    "test_admin_decomposition",
     "test_application_",
+    "test_architecture_conformance",
     "test_audit_runtime_dependencies",
     "test_cancellation_qualification",
     "test_check_commits",
@@ -54,6 +56,7 @@ TOOLING_TEST_PREFIXES: tuple[str, ...] = (
     "test_check_spelling",
     "test_ci_checkpoint",
     "test_ci_workflow_policy",
+    "test_cli_docs_parity",
     "test_coverage_debt",
     "test_distributed_preparation_benchmark",
     "test_docker_qualification",
@@ -63,6 +66,7 @@ TOOLING_TEST_PREFIXES: tuple[str, ...] = (
     "test_http_recycle_probe",
     "test_install_ci_debugger",
     "test_installed_candidate_requirements",
+    "test_k8s_security_manifests",
     "test_kuberay_",
     "test_kubernetes_",
     "test_latency_",
@@ -98,9 +102,71 @@ TOOLING_TEST_PREFIXES: tuple[str, ...] = (
     "test_upgrade_qualification",
     "test_verify_doctor_wheel",
     "test_verify_wheel",
+    "test_worker_drain_and_decomposition",
     "test_worker_image_qualification",
     "test_worker_mode_qualification",
     "test_workflow_preparation_benchmark_platform",
+)
+# Tooling test families that scan repository files via AST, filesystem reads,
+# or subprocesses without statically importing every inspected module. They
+# must never be skipped by symbol-level TIA or replayed from a stale CAS cache.
+REPO_POLICY_TEST_PREFIXES: tuple[str, ...] = (
+    "test_admin_decomposition",
+    "test_application_api_",
+    "test_application_budget_accounting",
+    "test_application_chainsaw",
+    "test_application_execution_witness",
+    "test_application_first_workflows",
+    "test_application_generation",
+    "test_application_generic_nodes",
+    "test_application_landing_asset",
+    "test_application_offline_settings",
+    "test_application_profile",
+    "test_application_protected_database",
+    "test_application_protected_surfaces",
+    "test_application_reporting_benchmark",
+    "test_application_rq2",
+    "test_application_witness_binding",
+    "test_architecture_conformance",
+    "test_audit_runtime_dependencies",
+    "test_cancellation_qualification",
+    "test_check_conventional_commits",
+    "test_ci_workflow_policy",
+    "test_cli_docs_parity",
+    "test_coverage_debt",
+    "test_docker_qualification",
+    "test_docker_quickstart",
+    "test_docs_",
+    "test_grafana_dashboard_importer",
+    "test_http_recycle_probe",
+    "test_k8s_security_manifests",
+    "test_kuberay_",
+    "test_kubernetes_",
+    "test_latency_qualification",
+    "test_linux_test_",
+    "test_live_witness_observation",
+    "test_local_kuberay_gate",
+    "test_local_ray",
+    "test_locustfile",
+    "test_makefile_test_targets",
+    "test_monitoring_",
+    "test_native_exit_investigation",
+    "test_observe_pytest_exit",
+    "test_package_metadata",
+    "test_prometheus_targets",
+    "test_qualification_gate",
+    "test_ray_ecosystem_docs",
+    "test_ray_serve_gateway_docs",
+    "test_release",
+    "test_result_read_qualification",
+    "test_runtime_qualification",
+    "test_stability_contract",
+    "test_test_resource_ownership",
+    "test_test_suite_",
+    "test_transaction_qualification",
+    "test_upgrade_qualification",
+    "test_worker_drain_and_decomposition",
+    "test_worker_image_qualification",
 )
 _EXTERNAL_RESOURCE_MARKERS = ("real_ray", "postgresql", "live_cluster")
 _REAL_RAY_OWNERSHIP_KEY: pytest.StashKey[RealRayOwnershipLock] = pytest.StashKey()
@@ -118,12 +184,21 @@ def _is_tooling_test_item(item: pytest.Item) -> bool:
     return all(item.get_closest_marker(marker) is None for marker in _EXTERNAL_RESOURCE_MARKERS)
 
 
+def _is_repo_policy_test_item(item: pytest.Item) -> bool:
+    if not _is_tooling_test_item(item):
+        return False
+    path = Path(str(getattr(item, "path", "")))
+    return any(path.stem.startswith(prefix) for prefix in REPO_POLICY_TEST_PREFIXES)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Require external-resource fixtures to declare their execution contract."""
     for item in items:
         if _is_tooling_test_item(item) and item.get_closest_marker("tooling") is None:
             item.add_marker(pytest.mark.tooling)
+        if _is_repo_policy_test_item(item) and item.get_closest_marker("repo_policy") is None:
+            item.add_marker(pytest.mark.repo_policy)
         for marker_name, required_marker_name in MARKER_IMPLICATIONS.items():
             if item.get_closest_marker(marker_name) is None:
                 continue
@@ -255,6 +330,7 @@ class _SharedLocalRayOrderingPlugin:
             rel = _item_relative_posix_path(item, rootpath)
             if item.get_closest_marker("real_ray") is not None and (
                 rel in ISOLATED_LOCAL_RAY_TEST_PATHS
+                or rel == "tests/integration/test_ray_job_real_ray.py"
             ):
                 isolated.append(item)
             else:
@@ -269,6 +345,10 @@ def pytest_configure(config: object) -> None:
         config.addinivalue_line(
             "markers",
             "tooling: Repository policy, qualification-harness, KubeRay, packaging, and docs tooling tests",
+        )
+        config.addinivalue_line(
+            "markers",
+            "repo_policy: AST, filesystem, and subprocess repository policy tests exempt from symbol-level TIA",
         )
         if not config.pluginmanager.has_plugin("django_ray_shared_local_ray_ordering"):
             config.pluginmanager.register(
@@ -487,3 +567,24 @@ def _clear_django_ray_remote_caches() -> None:
     django_ray_logger = logging.getLogger("django_ray")
     if not django_ray_logger.propagate:
         django_ray_logger.propagate = True
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_workflow_callables(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow test-module workflow helpers under tests.* without relaxing production defaults."""
+    item_path = getattr(request.node, "path", None)
+    if item_path is not None and Path(str(item_path)).stem == "test_security_boundaries":
+        return
+
+    from django_ray.runtime import import_utils
+
+    original_default = import_utils._default_workflow_allowed_modules
+
+    def _with_tests_prefix() -> tuple[str, ...]:
+        defaults = original_default()
+        return defaults if "tests" in defaults else (*defaults, "tests")
+
+    monkeypatch.setattr(import_utils, "_default_workflow_allowed_modules", _with_tests_prefix)

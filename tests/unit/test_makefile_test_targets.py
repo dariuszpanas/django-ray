@@ -40,16 +40,20 @@ def test_ci_target_remains_serial_and_independent_of_local_xdist() -> None:
     assert "--execution xdist" not in target
 
 
-def test_postgres_target_includes_target_execution_evidence_migration() -> None:
+def test_postgres_target_uses_marker_driven_discovery_for_all_pg_tests() -> None:
     makefile = MAKEFILE.read_text(encoding="utf-8")
     target = _target_body(makefile, "test-postgres")
-    migration_test = "tests/integration/test_ray_task_target_execution_evidence_migration.py"
 
-    assert target.count(migration_test) == 1
-    assert target.index("test_ray_worker_target_capability_migration.py") < target.index(
-        migration_test
-    )
-    assert "-m postgresql" in target
+    assert target.strip("\n").splitlines() == [
+        "\tpython scripts/require_linux.py",
+        "\tpython -m pytest tests -m postgresql -vv --durations=20",
+    ]
+    for migration_test in (
+        "tests/integration/test_ray_task_target_execution_evidence_migration.py",
+        "tests/integration/test_ray_worker_target_capability_migration.py",
+        "tests/integration/test_trigger_retention.py",
+    ):
+        assert "pytest.mark.postgresql" in (ROOT / migration_test).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

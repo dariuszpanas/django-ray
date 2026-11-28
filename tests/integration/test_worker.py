@@ -628,25 +628,33 @@ class TestWorkerSync:
         assert (task.state, task.attempt_number, task.execution_generation) == (
             TaskState.QUEUED,
             2,
-            1,
+            2,
         )
-        assert task.error_message == workflows.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE
+        assert task.error_message is None
+        assert (
+            task.attempts.get(attempt_number=1).error_message
+            == workflows.WORKFLOW_RECOVERY_EARLY_FAILURE_MESSAGE
+        )
 
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
         task.refresh_from_db()
         assert (task.state, task.attempt_number, task.execution_generation) == (
             TaskState.QUEUED,
             3,
-            2,
+            4,
         )
-        assert task.error_message == workflows.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE
+        assert task.error_message is None
+        assert (
+            task.attempts.get(attempt_number=2).error_message
+            == workflows.WORKFLOW_RECOVERY_MID_FAILURE_MESSAGE
+        )
 
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
         task.refresh_from_db()
         assert (task.state, task.attempt_number, task.execution_generation) == (
             TaskState.SUCCEEDED,
             3,
-            3,
+            5,
         )
         assert task.error_message is None
         assert json.loads(task.result_data or "null") == {
@@ -1063,7 +1071,10 @@ class TestWorkerSync:
         assert task.attempt_number == 2  # Incremented
         assert task.run_after is not None  # Scheduled for future
         assert task.priority == 75
-        assert "This task is designed to fail" in task.error_message
+        assert task.error_message is None
+        assert "This task is designed to fail" in (
+            task.attempts.get(attempt_number=1).error_message or ""
+        )
 
     def test_worker_detects_timed_out_task(self, setup_django_env):
         """Test that the worker detects and fails timed-out tasks."""
@@ -1173,9 +1184,11 @@ class TestWorkerSync:
         cmd.worker_id = "test-worker"
         cmd.active_tasks = {}
 
-        # Process with concurrency of 2
+        # --sync mode executes serially and caps claims to 1 per cycle (F-020);
+        # two cycles process the top two priorities in descending order.
         _acquire_test_lease(cmd)
-        cmd.claim_and_process_tasks(queues=["default"], concurrency=2)
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=2) == 1
+        assert cmd.claim_and_process_tasks(queues=["default"], concurrency=2) == 1
 
         # Count processed tasks
         processed_priorities = []
@@ -1260,8 +1273,10 @@ class TestWorkerSync:
         cmd.active_tasks = {}
 
         # Process both "default" and "high-priority" queues, but not "other"
+        # (--sync claims 1 task per cycle to prevent hoarding).
         _acquire_test_lease(cmd, "default,high-priority")
-        cmd.claim_and_process_tasks(queues=["default", "high-priority"], concurrency=10)
+        assert cmd.claim_and_process_tasks(queues=["default", "high-priority"], concurrency=10) == 1
+        assert cmd.claim_and_process_tasks(queues=["default", "high-priority"], concurrency=10) == 1
 
         # Verify tasks from both queues were processed
         task_default.refresh_from_db()
@@ -1583,7 +1598,10 @@ class TestWorkerRayJobFailureHandling:
         assert task.state == TaskState.QUEUED
         assert task.attempt_number == 2
         assert task.run_after is not None
-        assert "Failed to submit to Ray: submission exploded" in task.error_message
+        assert task.error_message is None
+        assert "Failed to submit to Ray: submission exploded" in (
+            task.attempts.get(attempt_number=1).error_message or ""
+        )
         assert task.finished_at is None
         assert task.pk not in cmd.active_tasks
         assert task.ray_target_address == "ray://retry-target:10001"
@@ -1710,8 +1728,11 @@ class TestWorkerRayJobFailureHandling:
         assert task.state == TaskState.QUEUED
         assert task.attempt_number == 2
         assert task.run_after is not None
-        assert task.error_message == "task failed"
-        assert task.error_traceback == "tb"
+        assert task.error_message is None
+        assert task.error_traceback is None
+        archived = task.attempts.get(attempt_number=1)
+        assert archived.error_message == "task failed"
+        assert archived.error_traceback == "tb"
         assert task.pk not in cmd.active_tasks
 
     def test_reconcile_failed_job_is_lost_at_max_attempts(self, monkeypatch):
@@ -2376,7 +2397,7 @@ class TestWorkerResultStorage:
     def test_sync_mode_storage_backend_error_falls_back_to_digest_reference(
         self, monkeypatch
     ) -> None:
-        """Storage backend errors should not fail successful task execution."""
+        """Explicit external storage backend errors fail loud without retry (Decision 4)."""
         import json
 
         monkeypatch.setattr(
@@ -2402,10 +2423,11 @@ class TestWorkerResultStorage:
         cmd.claim_and_process_tasks(queues=["default"], concurrency=1)
 
         task.refresh_from_db()
-        assert task.state == TaskState.SUCCEEDED
+        assert task.state == TaskState.FAILED
+        assert task.attempt_number == 1
         assert task.result_data is None
-        assert task.result_reference is not None
-        assert str(task.result_reference).startswith("oversize://sha256/")
+        assert task.result_reference is None
+        assert "external storage" in (task.error_message or "")
 
     def test_reconcile_succeeded_job_oversized_result_uses_reference(self, monkeypatch):
         """Ray Job reconcile should also enforce result size limits."""

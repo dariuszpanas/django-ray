@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import selectors
 import signal
@@ -63,7 +64,10 @@ def read_frames(
             for key, _events in selector.select(min(0.05, remaining)):
                 name = key.data
                 maximum = STDOUT_BYTES if name == "stdout" else STDERR_BYTES
-                chunk = os.read(key.fd, min(4096, maximum - counts[name] + 1))
+                try:
+                    chunk = os.read(key.fd, min(4096, maximum - counts[name] + 1))
+                except BlockingIOError:
+                    continue
                 if not chunk:
                     selector.unregister(key.fileobj)
                     continue
@@ -227,8 +231,17 @@ def main() -> int:
     if not (
         settings_module_valid(arguments.settings)
         and database_alias_valid(arguments.database)
-        and CLEANUP_SECONDS < remaining <= 20
+        and math.isfinite(remaining)
+        and remaining <= 20
     ):
+        return 2
+
+    def emit(value: dict) -> None:
+        sys.stdout.buffer.write(encode(value))
+        sys.stdout.buffer.flush()
+
+    if remaining <= CLEANUP_SECONDS:
+        emit({"kind": "done", "code": "probe_timeout", "cleanup_confirmed": True})
         return 2
     command = [
         sys.executable,
@@ -242,11 +255,6 @@ def main() -> int:
         "--deadline",
         str(arguments.deadline - CLEANUP_SECONDS),
     ]
-
-    def emit(value: dict) -> None:
-        sys.stdout.buffer.write(encode(value))
-        sys.stdout.buffer.flush()
-
     return supervise(command, probe=arguments.probe, deadline=arguments.deadline, emit=emit)
 
 

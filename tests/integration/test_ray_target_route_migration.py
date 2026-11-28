@@ -47,7 +47,11 @@ from django_ray.target.attestation import (
 
 MIGRATE_FROM = [("django_ray", "0023_ray_task_target_binding")]
 MIGRATE_TO = [("django_ray", "0024_ray_target_routes")]
-LATEST = [("django_ray", "0028_worker_lease_policy")]
+
+
+def _latest_migrations() -> list[tuple[str, str]]:
+    return MigrationExecutor(connection).loader.graph.leaf_nodes("django_ray")
+
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGERS = {
@@ -358,7 +362,13 @@ def _assert_database_constraints_and_fences() -> None:
     assert revision_constraints["ray_troute_revision_valid"]["check"] is True
     assert revision_constraints["ray_troute_id_valid"]["check"] is True
     assert revision_constraints["ray_troute_route_rev_uniq"]["unique"] is True
-    assert revision_constraints["ray_troute_latest_idx"]["index"] is True
+    # 0024 added ray_troute_latest_idx; 0029 drops it as redundant with the
+    # unique (route, revision) index. Verify the live DB matches model Meta.
+    declared_index_names = {index.name for index in RayTargetRouteRevision._meta.indexes}
+    if "ray_troute_latest_idx" in declared_index_names:
+        assert revision_constraints["ray_troute_latest_idx"]["index"] is True
+    else:
+        assert "ray_troute_latest_idx" not in revision_constraints
     assert selection_constraints["ray_trsel_schema_valid"]["check"] is True
     assert sum(bool(item["primary_key"]) for item in selection_constraints.values()) == 1
 
@@ -824,7 +834,7 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
             RayTargetRouteRevision.objects.all().delete()
         if RayTargetRoute._meta.db_table in table_names:
             RayTargetRoute.objects.all().delete()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
 
 
 @pytest.mark.django_db(transaction=True)
@@ -901,7 +911,7 @@ def test_sqlite_active_route_writer_cannot_partially_reverse_schema() -> None:
         assert _SQLITE_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         _clear_route_tables()
 
 
@@ -978,5 +988,5 @@ def test_postgresql_route_writer_serializes_before_reverse_guard() -> None:
         assert _POSTGRESQL_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         _clear_route_tables()

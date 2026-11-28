@@ -35,6 +35,11 @@ METHODS = {
     "running": "detect_stuck_tasks",
     "cancelling": "process_cancellations",
 }
+METHOD_SOURCES = {
+    "orphan": "src/django_ray/worker/reconciler.py",
+    "running": "src/django_ray/worker/maintenance.py",
+    "cancelling": "src/django_ray/worker/maintenance.py",
+}
 LIMITS = {
     "rows": MAX_ROWS,
     "batch_rows": BATCH_ROWS,
@@ -162,31 +167,36 @@ def query_slice(source: str) -> tuple[ast.expr, ast.expr, str]:
         method = ast.parse(textwrap.dedent(source)).body[0]
         if not isinstance(method, ast.FunctionDef):
             raise ValueError
+        statement_blocks: list[list[ast.stmt]] = [method.body]
+        for node in method.body:
+            if isinstance(node, ast.Try):
+                statement_blocks.append(node.body)
         matches = []
-        for index, node in enumerate(method.body):
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Attribute)
-                and node.value.func.attr == "_maintenance_scan_page"
-            ):
-                matches.append((index, node.value))
+        for block in statement_blocks:
+            for index, node in enumerate(block):
+                if (
+                    isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Attribute)
+                    and node.value.func.attr == "_maintenance_scan_page"
+                ):
+                    matches.append((block, index, node.value))
         if len(matches) != 1:
             raise ValueError
-        index, call = matches[0]
+        block, index, call = matches[0]
         if len(call.args) != 4 or not isinstance(call.args[1], ast.Name):
             raise ValueError
         name = call.args[1].id
         assignments = [
             (i, n)
-            for i, n in enumerate(method.body[:index])
+            for i, n in enumerate(block[:index])
             if isinstance(n, ast.Assign)
             and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
         ]
         if len(assignments) != 1:
             raise ValueError
         start, assignment = assignments[0]
-        refinement = method.body[start + 1]
+        refinement = block[start + 1]
         if not (
             isinstance(refinement, ast.If)
             and ast.unparse(refinement.test) == "queues is not None"
@@ -204,7 +214,7 @@ def query_slice(source: str) -> tuple[ast.expr, ast.expr, str]:
             and ast.unparse(refined.value) == f"{name}.filter(queue_name__in=queues)"
         ):
             raise ValueError
-        for intervening in method.body[start + 2 : index]:
+        for intervening in block[start + 2 : index]:
             if not (
                 isinstance(intervening, ast.Assign)
                 and len(intervening.targets) == 1
@@ -217,7 +227,9 @@ def query_slice(source: str) -> tuple[ast.expr, ast.expr, str]:
                 raise ValueError
         allowed_names = {
             "self",
+            "command",
             "RayTaskExecution",
+            "task_cls",
             "TaskState",
             "supported_protocols",
             "reconciled_task_ids",
@@ -265,38 +277,38 @@ def worker_queryset(kind: str, queues, protocols, reconciled_task_ids=()):
         or any(type(pk) is not int or pk <= 0 for pk in reconciled_task_ids)
     ):
         raise PlanRefusalError("SOURCE_QUERY_SHAPE")
-    source_file = (ROOT / "src/django_ray/management/commands/django_ray_worker.py").read_text()
-    worker = next(
-        n
-        for n in ast.parse(source_file).body
-        if isinstance(n, ast.ClassDef) and n.name == "Command"
-    )
+    method_source = (ROOT / METHOD_SOURCES[kind]).read_text()
     method = next(
-        n for n in worker.body if isinstance(n, ast.FunctionDef) and n.name == METHODS[kind]
+        n
+        for n in ast.parse(method_source).body
+        if isinstance(n, ast.FunctionDef) and n.name == METHODS[kind]
     )
     source = ast.unparse(method)
     base, refinement, name = query_slice(source)
+    worker_init_source = (ROOT / "src/django_ray/worker/__init__.py").read_text()
     fields = next(
         n
-        for n in worker.body
+        for n in ast.parse(worker_init_source).body
         if isinstance(n, ast.AnnAssign)
         and isinstance(n.target, ast.Name)
-        and n.target.id == "_DEFERRED_MAINTENANCE_SCAN_FIELDS"
+        and n.target.id == "DEFERRED_MAINTENANCE_SCAN_FIELDS"
     )
+    maintenance_source = (ROOT / "src/django_ray/worker/maintenance.py").read_text()
     helper = next(
         n
-        for n in worker.body
-        if isinstance(n, ast.FunctionDef) and n.name == "_defer_maintenance_scan_fields"
+        for n in ast.parse(maintenance_source).body
+        if isinstance(n, ast.FunctionDef) and n.name == "defer_maintenance_scan_fields"
     )
     # This tiny pure helper is admitted separately; unknown implementation changes
     # must be reviewed rather than importing the worker's authority/Ray graph.
-    expected_helper = """@classmethod
-def _defer_maintenance_scan_fields(cls, queryset: Any) -> Any:
+    expected_helper = '''def defer_maintenance_scan_fields(queryset: Any) -> Any:
+    """Defer heavy JSON/diagnostic columns during bounded maintenance scans."""
     from django.db.models import QuerySet
+
     if isinstance(queryset, QuerySet):
-        return queryset.defer(*cls._DEFERRED_MAINTENANCE_SCAN_FIELDS)
+        return queryset.defer(*DEFERRED_MAINTENANCE_SCAN_FIELDS)
     return queryset
-"""
+'''
     if ast.dump(helper, include_attributes=False) != ast.dump(
         ast.parse(expected_helper).body[0], include_attributes=False
     ):
@@ -309,26 +321,24 @@ def _defer_maintenance_scan_fields(cls, queryset: Any) -> Any:
     ):
         raise PlanRefusalError("SOURCE_QUERY_SHAPE")
     namespace = {"Any": object, "__name__": __name__}
-    factory = ast.ClassDef(
-        name="QueryFactory",
-        bases=[],
-        keywords=[],
-        body=[fields, helper],
-        decorator_list=[],
-        type_params=[],
-    )
     exec(
         compile(
-            ast.fix_missing_locations(ast.Module(body=[factory], type_ignores=[])),
+            ast.fix_missing_locations(ast.Module(body=[fields, helper], type_ignores=[])),
             "<maintenance-helper>",
             "exec",
         ),
         namespace,
     )
+
+    class QueryFactory:
+        _defer_maintenance_scan_fields = staticmethod(namespace["defer_maintenance_scan_fields"])
+
     namespace.update(
         {
-            "self": namespace["QueryFactory"],
+            "self": QueryFactory,
+            "command": QueryFactory,
             "RayTaskExecution": RayTaskExecution,
+            "task_cls": RayTaskExecution,
             "TaskState": TaskState,
             "supported_protocols": protocols,
             "reconciled_task_ids": set(reconciled_task_ids),

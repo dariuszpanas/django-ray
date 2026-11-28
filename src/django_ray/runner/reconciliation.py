@@ -6,11 +6,22 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from django_ray.conf.settings import get_settings
+from django_ray.execution_protocol import (
+    SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+    ExecutionProtocolRange,
+)
 from django_ray.lifecycle import record_failure, record_lost
 from django_ray.models import CancellationStatus
 
 if TYPE_CHECKING:
     from django_ray.models import RayTaskExecution
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    """Normalize naive or aware timestamps to UTC so USE_TZ=False never crashes."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def get_stuck_timeout() -> timedelta:
@@ -44,7 +55,7 @@ def is_task_stuck(task_execution: RayTaskExecution) -> bool:
     if last_activity is None:
         return False
 
-    last_activity_dt: datetime = last_activity  # type: ignore[assignment]
+    last_activity_dt = _ensure_utc(last_activity)  # type: ignore[arg-type]
     return (now - last_activity_dt) > timeout
 
 
@@ -72,13 +83,17 @@ def is_task_timed_out(task_execution: RayTaskExecution) -> bool:
         return False
 
     now = datetime.now(UTC)
-    started_at: datetime = task_execution.started_at  # type: ignore[assignment]
+    started_at = _ensure_utc(task_execution.started_at)  # type: ignore[arg-type]
     elapsed = now - started_at
 
     return elapsed.total_seconds() > task_execution.timeout_seconds
 
 
-def mark_task_lost(task_execution: RayTaskExecution) -> bool:
+def mark_task_lost(
+    task_execution: RayTaskExecution,
+    *,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+) -> bool:
     """Mark a task execution as LOST.
 
     Args:
@@ -89,6 +104,7 @@ def mark_task_lost(task_execution: RayTaskExecution) -> bool:
         error_message="Task marked as LOST due to missing heartbeats",
         expected_attempt_number=task_execution.attempt_number,
         expected_execution_generation=task_execution.execution_generation,
+        supported_protocols=supported_protocols,
     )
 
 
@@ -103,6 +119,7 @@ def mark_task_timed_out(
     expected_execution_generation: int | None = None,
     expected_completion_data: str | None = None,
     require_completion_data_match: bool = False,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
 ) -> bool:
     """Mark a task execution as FAILED due to timeout.
 
@@ -128,4 +145,5 @@ def mark_task_timed_out(
         require_completion_data_match=require_completion_data_match,
         cancellation_status=cancellation_status,
         cancellation_error=cancellation_error,
+        supported_protocols=supported_protocols,
     )

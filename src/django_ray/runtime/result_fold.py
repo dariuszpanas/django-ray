@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from contextlib import nullcontext
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any
 
-from django_ray.runtime.import_utils import import_callable
+from django_ray.runtime import import_utils
 from django_ray.runtime.result_buffer import (
     RESULT_BUFFER_ACTOR_MAX_CONCURRENCY,
     RESULT_BUFFER_CODEC,
@@ -278,8 +278,114 @@ def _decode_result_fold_request(
     return request
 
 
+_IMMUTABLE_ACCUMULATOR_TYPES = frozenset(
+    {
+        type(None),
+        bool,
+        int,
+        float,
+        str,
+        bytes,
+    }
+)
+_FAST_BOUND_MAX_NODES = 2048
+
+
+def _inspect_serialized_upper_bound(
+    value: Any,
+    *,
+    max_nodes: int = _FAST_BOUND_MAX_NODES,
+    max_bytes: int | None = None,
+) -> tuple[int | None, bool]:
+    """Return ``(pickle_upper_bound_or_none, elements_deeply_immutable)`` in one scan.
+
+    Always inspects every element without prefix-immutability assumptions so
+    in-place element overwrites cannot bypass ``max_serialized_bytes`` or
+    shallow-copy rollback safety. Returns ``(None, False)`` when ``value``
+    contains custom types, cycles/shared containers, exceeds ``max_nodes``, or
+    exceeds ``max_bytes``, signaling callers to run exact ``cloudpickle.dumps``.
+    """
+    if max_bytes is not None and max_bytes < 16:
+        return None, False
+
+    value_type = type(value)
+    remaining = max_nodes
+    total = 16  # framing overhead (PROTO + STOP + memo headroom)
+    elements_immutable = value_type in _IMMUTABLE_ACCUMULATOR_TYPES or value_type in (
+        list,
+        dict,
+        tuple,
+        frozenset,
+    )
+    stack: list[Any] = [value]
+    seen_containers: set[int] = set()
+    is_root = True
+
+    while stack:
+        current = stack.pop()
+        remaining -= 1
+        if remaining < 0:
+            return None, False
+        current_type = type(current)
+        if current_type is type(None) or current_type is bool:
+            total += 8
+        elif current_type is int:
+            total += 16 + (current.bit_length() + 7) // 8
+        elif current_type is float:
+            total += 16
+        elif current_type is str:
+            total += 16 + (len(current) if current.isascii() else 4 * len(current))
+        elif current_type is bytes:
+            total += 16 + len(current)
+        elif current_type is bytearray:
+            elements_immutable = False
+            total += 16 + len(current)
+        elif current_type in (list, tuple, set, frozenset):
+            if not is_root and current_type in (list, set):
+                elements_immutable = False
+            obj_id = id(current)
+            if obj_id in seen_containers:
+                return None, False
+            seen_containers.add(obj_id)
+            length = len(current)
+            if length > remaining:
+                return None, False
+            total += 16 + 4 * length
+            stack.extend(current)
+        elif current_type is dict:
+            if not is_root:
+                elements_immutable = False
+            obj_id = id(current)
+            if obj_id in seen_containers:
+                return None, False
+            seen_containers.add(obj_id)
+            length = len(current)
+            if 2 * length > remaining:
+                return None, False
+            total += 16 + 8 * length
+            for key, item in current.items():
+                stack.append(key)
+                stack.append(item)
+        else:
+            return None, False
+        is_root = False
+        if max_bytes is not None and total > max_bytes:
+            return None, False
+    return total, elements_immutable
+
+
+def _estimate_serialized_upper_bound(
+    value: Any,
+    *,
+    max_nodes: int = _FAST_BOUND_MAX_NODES,
+) -> int | None:
+    """Return a strict upper bound on pickle-protocol-5 byte length in bounded work."""
+    bound, _ = _inspect_serialized_upper_bound(value, max_nodes=max_nodes)
+    return bound
+
+
 class WorkflowMapResultFold:
-    """One non-detached actor retaining a serialized ordered-fold accumulator."""
+    """One non-detached actor retaining a bounded ordered-fold accumulator."""
 
     def __init__(
         self,
@@ -302,9 +408,11 @@ class WorkflowMapResultFold:
         expected_node_id: str | None = None,
         expected_runtime_env_plan_digest: str | None = None,
         expected_runtime_env_transport_digest: str | None = None,
+        allowed_callable_modules: Sequence[str] | None = None,
     ) -> None:
         self._nested_request = None
         self._nested_rejection = None
+        self._allowed_callable_modules: tuple[str, ...] | None = None
         try:
             self._nested_request = _decode_result_fold_request(
                 nested_execution_request,
@@ -328,6 +436,11 @@ class WorkflowMapResultFold:
             # trusted rejection from ready() before it admits any mapper effects.
             self._nested_rejection = error
             self._finalized = True
+            self._accumulator = None
+            self._accumulator_bytes = 0
+            self._accumulator_exact = True
+            self._accumulator_measured_bytes = 0
+            self._accumulator_unverified_bytes = 0
             self._serialized_accumulator = b""
             self._out_of_order = {}
             self._out_of_order_bytes = 0
@@ -357,6 +470,15 @@ class WorkflowMapResultFold:
         if not isinstance(reducer_bound_kwargs, Mapping):
             raise TypeError("reducer_bound_kwargs must be a mapping")
 
+        normalized_allowed: tuple[str, ...] | None = None
+        if allowed_callable_modules is not None:
+            if isinstance(allowed_callable_modules, str | bytes) or not isinstance(
+                allowed_callable_modules, Sequence
+            ):
+                raise TypeError("allowed_callable_modules must be a sequence of strings")
+            normalized_allowed = tuple(str(entry) for entry in allowed_callable_modules)
+        self._allowed_callable_modules = normalized_allowed
+
         with self._execution_context():
             if reducer_bootstrap_django:
                 from django_ray.runtime.entrypoint import bootstrap_django
@@ -371,8 +493,25 @@ class WorkflowMapResultFold:
                     "Result-fold initial accumulator serialization exceeds "
                     f"max_serialized_bytes={max_serialized_bytes}"
                 )
+            cloned_initial = cloudpickle.loads(serialized_initial)
 
-            reducer = import_callable(reducer_callable_path)
+            resolver: Any = getattr(
+                import_utils,
+                "resolve_workflow_callable",
+                import_utils.import_callable,
+            )
+            if normalized_allowed is not None:
+                import inspect as _inspect
+
+                if "allowed_modules" in _inspect.signature(resolver).parameters:
+                    reducer = resolver(
+                        reducer_callable_path,
+                        allowed_modules=normalized_allowed,
+                    )
+                else:
+                    reducer = resolver(reducer_callable_path)
+            else:
+                reducer = resolver(reducer_callable_path)
             import inspect
 
             if (
@@ -390,7 +529,13 @@ class WorkflowMapResultFold:
         self._reducer = reducer
         self._reducer_bound_args = reducer_bound_args
         self._reducer_bound_kwargs = dict(reducer_bound_kwargs)
-        self._serialized_accumulator = serialized_initial
+        self._accumulator: Any = cloned_initial
+        self._accumulator_bytes = len(serialized_initial)
+        self._accumulator_exact = True
+        self._accumulator_measured_bytes = len(serialized_initial)
+        self._accumulator_unverified_bytes = 0
+        _, self._accumulator_elements_immutable = _inspect_serialized_upper_bound(cloned_initial)
+        self._serialized_accumulator: bytes | None = serialized_initial
         self._out_of_order: dict[int, bytes] = {}
         self._out_of_order_bytes = 0
         self._next_index = 0
@@ -398,36 +543,63 @@ class WorkflowMapResultFold:
         self.peak_retained_bytes = len(serialized_initial)
         self.peak_out_of_order_items = 0
 
-    def _execution_context(self) -> Any:
+    @contextmanager
+    def _execution_context(self) -> Generator[None, None, None]:
         request = self._nested_request
-        if request is None:
-            return nullcontext()
-        from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
-        from django_ray.runtime.context import durable_task_execution
+        allowed_modules = self._allowed_callable_modules
+        with ExitStack() as stack:
+            if allowed_modules is not None:
+                stack.enter_context(import_utils.active_allowed_callable_modules(allowed_modules))
+            if request is not None:
+                from django_ray.runtime.compiled_graph import CompiledGraphSubmissionTransport
+                from django_ray.runtime.context import durable_task_execution
 
-        profile = request.runtime_env_plan_identity.get("profile")
-        return durable_task_execution(
-            request.outer_identity.task_execution_pk,
-            task_id=request.outer_identity.task_id,
-            execution_protocol_version=request.execution_protocol_version,
-            attempt_number=request.outer_identity.attempt_number,
-            execution_generation=request.outer_identity.execution_generation,
-            runtime_env_profile=profile if isinstance(profile, str) else None,
-            runtime_env_hash="",
-            runtime_env_plan_identity=request.runtime_env_plan_identity,
-            compiled_graph_submission_transport=(
-                CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
-            ),
-            strict_execution_request=True,
-        )
+                profile = request.runtime_env_plan_identity.get("profile")
+                stack.enter_context(
+                    durable_task_execution(
+                        request.outer_identity.task_execution_pk,
+                        task_id=request.outer_identity.task_id,
+                        execution_protocol_version=request.execution_protocol_version,
+                        attempt_number=request.outer_identity.attempt_number,
+                        execution_generation=request.outer_identity.execution_generation,
+                        runtime_env_profile=profile if isinstance(profile, str) else None,
+                        runtime_env_hash="",
+                        runtime_env_plan_identity=request.runtime_env_plan_identity,
+                        compiled_graph_submission_transport=(
+                            CompiledGraphSubmissionTransport.DIRECT_RAY_CORE.value
+                        ),
+                        strict_execution_request=True,
+                    )
+                )
+            else:
+                stack.enter_context(nullcontext())
+            yield
 
     @property
     def retained_bytes(self) -> int:
-        return len(self._serialized_accumulator) + self._out_of_order_bytes
+        return self._accumulator_bytes + self._out_of_order_bytes
 
     @property
     def folded_items(self) -> int:
         return self._next_index
+
+    def _measure_accumulator_exact_in_context(self, value: Any) -> bytes:
+        import ray.cloudpickle as cloudpickle
+
+        return cloudpickle.dumps(value, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
+
+    def _ensure_exact_accumulator_bytes(self) -> int:
+        if self._accumulator_exact:
+            return self._accumulator_bytes
+        with self._execution_context():
+            serialized = self._measure_accumulator_exact_in_context(self._accumulator)
+        measured = len(serialized)
+        self._accumulator_bytes = measured
+        self._accumulator_measured_bytes = measured
+        self._accumulator_unverified_bytes = 0
+        self._accumulator_exact = True
+        self._serialized_accumulator = serialized
+        return measured
 
     def ready(self) -> dict[str, Any]:
         """Confirm initial serialization and actor scheduling before leaf effects."""
@@ -450,21 +622,23 @@ class WorkflowMapResultFold:
 
         import ray.cloudpickle as cloudpickle
 
-        with self._execution_context():
-            serialized_item = cloudpickle.dumps(value, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
-        if len(serialized_item) > self.max_serialized_bytes:
-            raise ResultFoldOverflowError(
-                f"Result-fold item serialization at index {index} exceeds "
-                f"max_serialized_bytes={self.max_serialized_bytes}"
-            )
-
         previous_folded = self._next_index
         if index > self._next_index:
+            with self._execution_context():
+                serialized_item = cloudpickle.dumps(value, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
+            if len(serialized_item) > self.max_serialized_bytes:
+                raise ResultFoldOverflowError(
+                    f"Result-fold item serialization at index {index} exceeds "
+                    f"max_serialized_bytes={self.max_serialized_bytes}"
+                )
             if len(self._out_of_order) >= self.max_concurrency - 1:
                 raise ResultFoldProtocolError(
                     "Result-fold out-of-order retention exceeded the admission window"
                 )
             next_bytes = self.retained_bytes + len(serialized_item)
+            if next_bytes > self.max_serialized_bytes and not self._accumulator_exact:
+                self._ensure_exact_accumulator_bytes()
+                next_bytes = self.retained_bytes + len(serialized_item)
             if next_bytes > self.max_serialized_bytes:
                 raise ResultFoldOverflowError(
                     "Result-fold combined retained serialization exceeds "
@@ -473,7 +647,19 @@ class WorkflowMapResultFold:
             self._out_of_order[index] = serialized_item
             self._out_of_order_bytes += len(serialized_item)
         else:
-            self._fold_contiguous(index, serialized_item)
+            item_bound = _estimate_serialized_upper_bound(value)
+            if item_bound is None or item_bound > self.max_serialized_bytes:
+                with self._execution_context():
+                    serialized_item = cloudpickle.dumps(value, protocol=RESULT_FOLD_PICKLE_PROTOCOL)
+                item_size = len(serialized_item)
+                if item_size > self.max_serialized_bytes:
+                    raise ResultFoldOverflowError(
+                        f"Result-fold item serialization at index {index} exceeds "
+                        f"max_serialized_bytes={self.max_serialized_bytes}"
+                    )
+            else:
+                item_size = item_bound
+            self._fold_contiguous(index, value, item_size)
 
         self.peak_retained_bytes = max(self.peak_retained_bytes, self.retained_bytes)
         self.peak_out_of_order_items = max(
@@ -486,56 +672,174 @@ class WorkflowMapResultFold:
             "released_credits": self._next_index - previous_folded,
         }
 
-    def _fold_contiguous(self, index: int, serialized_item: bytes) -> None:
-        with self._execution_context():
-            self._fold_contiguous_in_context(index, serialized_item)
+    def append_batch(self, items: Sequence[tuple[int, Any]]) -> list[dict[str, Any]]:
+        """Fold or buffer a batch of ``(index, value)`` pairs in one actor call."""
+        if self._finalized:
+            raise ResultFoldProtocolError("Cannot append after result-fold finalization")
+        if isinstance(items, str | bytes | bytearray) or not isinstance(items, Sequence):
+            raise ResultFoldProtocolError("Result-fold batch must be a sequence of pairs")
+        acks: list[dict[str, Any]] = []
+        for entry in items:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ResultFoldProtocolError(
+                    "Result-fold batch entries must be (index, value) tuples"
+                )
+            index, value = entry
+            acks.append(self.append(index, value))
+        return acks
 
-    def _fold_contiguous_in_context(self, index: int, serialized_item: bytes) -> None:
+    def append_batch_values(
+        self,
+        indices: Sequence[int],
+        *values: Any,
+    ) -> list[dict[str, Any]]:
+        """Fold or buffer items passed as top-level Ray arguments.
+
+        Receiving ``*values`` as top-level positional arguments ensures Ray
+        auto-dereferences leaf ``ObjectRef`` arguments directly on the fold
+        actor instead of passing unresolved ``ObjectRef`` objects inside a list.
+        """
+        if isinstance(indices, str | bytes | bytearray) or not isinstance(indices, Sequence):
+            raise ResultFoldProtocolError("Result-fold batch indices must be a sequence")
+        if len(indices) != len(values):
+            raise ResultFoldProtocolError("Result-fold batch index and value counts do not match")
+        return self.append_batch(list(zip(indices, values, strict=True)))
+
+    def _fold_contiguous(self, index: int, value: Any, item_size: int) -> None:
+        with self._execution_context():
+            self._fold_contiguous_in_context(index, value, item_size)
+
+    def _size_reduced_in_context(
+        self,
+        *,
+        reduced: Any,
+        last_measured_bytes: int,
+        remaining_out_of_order_bytes: int,
+    ) -> tuple[int, bool, int, int, bytes | None, bool]:
+        """Return ``(acc_bytes, exact, measured_bytes, unverified_bytes, serialized, elems_immut)``.
+
+        Uses a single full-container upper-bound scan (with no prefix skipping)
+        up to ``_FAST_BOUND_MAX_NODES`` and falls back to exact
+        ``cloudpickle.dumps`` measurement whenever the bound exceeds the
+        remaining byte budget, the container exceeds ``_FAST_BOUND_MAX_NODES``,
+        or custom/aliased objects are present.
+        """
+        remaining_budget = self.max_serialized_bytes - remaining_out_of_order_bytes
+        reduced_bound, elements_immutable = _inspect_serialized_upper_bound(
+            reduced,
+            max_bytes=remaining_budget,
+        )
+        if reduced_bound is not None:
+            return reduced_bound, False, last_measured_bytes, 0, None, elements_immutable
+
+        serialized = self._measure_accumulator_exact_in_context(reduced)
+        exact_len = len(serialized)
+        if exact_len > self.max_serialized_bytes:
+            raise ResultFoldOverflowError(
+                "Result-fold accumulator serialization exceeds "
+                f"max_serialized_bytes={self.max_serialized_bytes}"
+            )
+        if exact_len + remaining_out_of_order_bytes > self.max_serialized_bytes:
+            raise ResultFoldOverflowError(
+                "Result-fold combined retained serialization exceeds "
+                f"max_serialized_bytes={self.max_serialized_bytes}"
+            )
+        return exact_len, True, exact_len, 0, serialized, elements_immutable
+
+    def _fold_contiguous_in_context(
+        self,
+        index: int,
+        first_item: Any,
+        first_item_size: int,
+    ) -> None:
         import ray.cloudpickle as cloudpickle
 
-        candidate_accumulator = self._serialized_accumulator
-        candidate_out_of_order = dict(self._out_of_order)
+        candidate_out_of_order = dict(self._out_of_order) if self._out_of_order else {}
         candidate_out_of_order_bytes = self._out_of_order_bytes
         candidate_index = index
-        current_item = serialized_item
-        accumulator = cloudpickle.loads(candidate_accumulator)
+        accumulator = self._accumulator
+        candidate_acc_bytes = self._accumulator_bytes
+        candidate_exact = self._accumulator_exact
+        candidate_measured_bytes = self._accumulator_measured_bytes
+        candidate_unverified_bytes = self._accumulator_unverified_bytes
+        candidate_serialized = self._serialized_accumulator
 
-        while True:
-            item = cloudpickle.loads(current_item)
-            reduced = self._reducer(
-                accumulator,
-                item,
-                *self._reducer_bound_args,
-                **self._reducer_bound_kwargs,
+        # Preserve transactional rollback for all mutable accumulators (including
+        # in-place dict mutations, list element overwrites/pops, and nested
+        # mutable containers) without sacrificing O(1) amortized append speed.
+        rollback_snapshot: bytes | None = None
+        rollback_shallow_list: list[Any] | None = None
+        rollback_shallow_dict: dict[Any, Any] | None = None
+        acc_type = type(accumulator)
+        is_mutable_acc = acc_type not in _IMMUTABLE_ACCUMULATOR_TYPES
+        elements_immutable = getattr(self, "_accumulator_elements_immutable", False)
+        if is_mutable_acc:
+            needs_full_snapshot = (
+                bool(candidate_out_of_order)
+                or not elements_immutable
+                or acc_type not in {list, dict}
+                or candidate_acc_bytes + first_item_size + 256 > self.max_serialized_bytes
             )
-            reduced = validate_result_fold_value(reduced)
-            next_accumulator = cloudpickle.dumps(
-                reduced,
-                protocol=RESULT_FOLD_PICKLE_PROTOCOL,
-            )
-            if len(next_accumulator) > self.max_serialized_bytes:
-                raise ResultFoldOverflowError(
-                    "Result-fold accumulator serialization exceeds "
-                    f"max_serialized_bytes={self.max_serialized_bytes}"
+            if needs_full_snapshot:
+                rollback_snapshot = (
+                    candidate_serialized
+                    if candidate_serialized is not None
+                    else self._measure_accumulator_exact_in_context(accumulator)
                 )
+            elif acc_type is list:
+                rollback_shallow_list = list(accumulator)
+            elif acc_type is dict:
+                rollback_shallow_dict = dict(accumulator)
 
-            candidate_accumulator = next_accumulator
-            accumulator = reduced
-            candidate_index += 1
-            next_item = candidate_out_of_order.pop(candidate_index, None)
-            if next_item is not None:
-                candidate_out_of_order_bytes -= len(next_item)
-            next_retained_bytes = len(candidate_accumulator) + candidate_out_of_order_bytes
-            if next_retained_bytes > self.max_serialized_bytes:
-                raise ResultFoldOverflowError(
-                    "Result-fold combined retained serialization exceeds "
-                    f"max_serialized_bytes={self.max_serialized_bytes}"
+        candidate_elements_immutable = elements_immutable
+        current_item = first_item
+        try:
+            while True:
+                reduced = self._reducer(
+                    accumulator,
+                    current_item,
+                    *self._reducer_bound_args,
+                    **self._reducer_bound_kwargs,
                 )
-            if next_item is None:
-                break
-            current_item = next_item
+                reduced = validate_result_fold_value(reduced)
 
-        self._serialized_accumulator = candidate_accumulator
+                candidate_index += 1
+                next_serialized = candidate_out_of_order.pop(candidate_index, None)
+                if next_serialized is not None:
+                    candidate_out_of_order_bytes -= len(next_serialized)
+
+                (
+                    candidate_acc_bytes,
+                    candidate_exact,
+                    candidate_measured_bytes,
+                    candidate_unverified_bytes,
+                    candidate_serialized,
+                    candidate_elements_immutable,
+                ) = self._size_reduced_in_context(
+                    reduced=reduced,
+                    last_measured_bytes=candidate_measured_bytes,
+                    remaining_out_of_order_bytes=candidate_out_of_order_bytes,
+                )
+                accumulator = reduced
+                if next_serialized is None:
+                    break
+                current_item = cloudpickle.loads(next_serialized)
+        except Exception:
+            if rollback_snapshot is not None:
+                self._accumulator = cloudpickle.loads(rollback_snapshot)
+            elif rollback_shallow_list is not None:
+                self._accumulator = rollback_shallow_list
+            elif rollback_shallow_dict is not None:
+                self._accumulator = rollback_shallow_dict
+            raise
+
+        self._accumulator = accumulator
+        self._accumulator_bytes = candidate_acc_bytes
+        self._accumulator_exact = candidate_exact
+        self._accumulator_measured_bytes = candidate_measured_bytes
+        self._accumulator_unverified_bytes = candidate_unverified_bytes
+        self._accumulator_elements_immutable = candidate_elements_immutable
+        self._serialized_accumulator = candidate_serialized
         self._out_of_order = candidate_out_of_order
         self._out_of_order_bytes = candidate_out_of_order_bytes
         self._next_index = candidate_index
@@ -556,12 +860,23 @@ class WorkflowMapResultFold:
                 "Result-fold finalization found missing or unexpected item indices"
             )
 
-        import ray.cloudpickle as cloudpickle
+        if not self._accumulator_exact:
+            measured = self._ensure_exact_accumulator_bytes()
+            if measured > self.max_serialized_bytes:
+                raise ResultFoldOverflowError(
+                    "Result-fold accumulator serialization exceeds "
+                    f"max_serialized_bytes={self.max_serialized_bytes}"
+                )
+            self.peak_retained_bytes = max(self.peak_retained_bytes, self.retained_bytes)
 
         retained_bytes = self.retained_bytes
-        with self._execution_context():
-            accumulator = cloudpickle.loads(self._serialized_accumulator)
-        self._serialized_accumulator = b""
+        accumulator = self._accumulator
+        self._accumulator = None
+        self._accumulator_bytes = 0
+        self._accumulator_exact = True
+        self._accumulator_measured_bytes = 0
+        self._accumulator_unverified_bytes = 0
+        self._serialized_accumulator = None
         self._out_of_order.clear()
         self._out_of_order_bytes = 0
         self._finalized = True
@@ -577,7 +892,12 @@ class WorkflowMapResultFold:
         folded_items = self._next_index
         out_of_order_items = len(self._out_of_order)
         retained_bytes = self.retained_bytes
-        self._serialized_accumulator = b""
+        self._accumulator = None
+        self._accumulator_bytes = 0
+        self._accumulator_exact = True
+        self._accumulator_measured_bytes = 0
+        self._accumulator_unverified_bytes = 0
+        self._serialized_accumulator = None
         self._out_of_order.clear()
         self._out_of_order_bytes = 0
         self._finalized = True

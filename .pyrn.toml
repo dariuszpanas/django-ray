@@ -11,8 +11,14 @@ unknown_path_policy = "full"
 env_allowlist_prefixes = ["DJANGO_", "RAY_"]
 extra_full_triggers = [
   ".pyrn.toml",
+  ".yaga.toml",
   ".github/test-suite-taxonomy.json",
+  "Makefile",
+  "mk/k8s.mk",
   "scripts/pytest_taxonomy.py",
+  "scripts/qualification_gate.py",
+  "scripts/qualification_policy.json",
+  "testing/linux/Dockerfile",
 ]
 
 [runner]

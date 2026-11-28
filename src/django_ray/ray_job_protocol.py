@@ -17,14 +17,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Never
 
+from django_ray._storage_types import (
+    RAY_JOB_REQUEST_LOCATOR_MAX_CHARS,
+    RAY_JOB_REQUEST_REFERENCE_MAX_BYTES,
+)
 from django_ray.execution_codec import (
     EXECUTION_REQUEST_MAX_BYTES,
     ExecutionIdentity,
     ExecutionRequest,
-)
-from django_ray.ray_job_request_storage import (
-    RAY_JOB_REQUEST_LOCATOR_MAX_CHARS,
-    RAY_JOB_REQUEST_REFERENCE_MAX_BYTES,
 )
 
 RAY_JOB_CONFIG_JSON_ENV_VAR = "RAY_JOB_CONFIG_JSON_ENV_VAR"

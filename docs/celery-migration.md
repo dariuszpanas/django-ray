@@ -261,7 +261,7 @@ The classifications mean:
 | [Celery beat and periodic schedules](https://docs.celeryq.dev/en/stable/userguide/periodic-tasks.html) | **Unsupported / no equivalent** | `run_after` schedules one enqueue once. Keep Celery beat for remaining periodic workloads or use another scheduler that calls `.enqueue()` after your authorization and overlap policy run. Do not remove beat while any schedule still targets Celery. See [Deferred enqueue](#deferred-enqueue). |
 | [Exchanges, routing keys, topic/fanout, and broadcast routing](https://docs.celeryq.dev/en/stable/userguide/routing.html) | **Unsupported / no equivalent** | django-ray queues are database-backed workload partitions consumed by named task managers. They do not implement broker exchange or binding semantics. See [Working with Queues](queues.md). |
 | [Task rate limits](https://docs.celeryq.dev/en/stable/userguide/workers.html) | **Unsupported / no equivalent** | Task-manager concurrency and Ray resource requests bound concurrency, not requests per second. Keep an application/client token bucket or external service quota, or retain Celery when Celery's rate-limit behavior is required. See [Performance](performance.md). |
-| [Signals and custom `Task` bases](https://docs.celeryq.dev/en/stable/userguide/signals.html) | **Unsupported / no equivalent** | Move behavior into explicit callable wrappers, domain services, Django signals where appropriate, and observability adapters. django-ray does not invoke Celery lifecycle signals or custom task hooks. See [Defining Tasks](tasks.md). |
+| [Signals and custom `Task` bases](https://docs.celeryq.dev/en/stable/userguide/signals.html) | **Partial** | django-ray emits Django 6's native `django.tasks.signals` (`task_enqueued` via `transaction.on_commit()`, plus `task_started` and `task_finished` via `send_robust`), which cover common observability and audit hooks. Celery-specific lifecycle signals and custom `Task` base hooks have no equivalent; move those into explicit callable wrappers or domain services. See [Defining Tasks](tasks.md). |
 | Worker pool selection and [prefetch behavior](https://docs.celeryq.dev/en/stable/userguide/workers.html) | **Semantic rewrite** | Size django-ray task-manager concurrency and Ray resources for the workload. There is no broker prefetch multiplier or Celery pool selection to copy. See [Worker Modes](worker-modes.md) and [Performance](performance.md). |
 | [JSON, pickle, YAML, or custom serializers](https://docs.celeryq.dev/en/stable/userguide/calling.html) | **Unsupported / no equivalent** beyond JSON | Durable django-ray task arguments and final results must be JSON-compatible. Pass stable IDs or application-owned object-storage references for other data. Do not replace this boundary with pickle. See [Arguments and Results](tasks.md#arguments-and-results). |
 | [Celery events, inspect/control, and Flower](https://docs.celeryq.dev/en/stable/userguide/monitoring.html) | **Semantic rewrite** | Use durable task/attempt rows, Django admin, versioned observability services, bounded Prometheus metrics, and optional Ray live state/logs. There is no Celery event stream, worker broadcast control, or Flower protocol. See [Observability Services](observability.md). |
@@ -640,8 +640,10 @@ DJANGO_RAY = {
 The task manager and every process that refreshes results need compatible storage
 configuration and credentials. A successful result larger than the threshold is
 stored externally; `TaskResult.refresh()` or `get_result()` rehydrates it when storage
-is reachable. A storage write failure falls back to digest metadata, while a later
-read failure leaves the task successful but its return value unavailable.
+is reachable. An explicit retrievable storage write failure retries transiently and
+then fails non-retryably (`ResultStoragePersistenceError`) rather than silently
+downgrading to a digest stub, while a later read failure leaves the task `SUCCESSFUL`
+and raises `ResultUnavailableError` when accessing `.return_value`.
 
 For a single host, or for a deployment with an explicitly shared volume, the
 filesystem backend is also retrievable. See [Result Storage Reference](reference/result-storage.md)

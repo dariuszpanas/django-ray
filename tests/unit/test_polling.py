@@ -8,9 +8,9 @@ from django_ray.conf.defaults import DEFAULTS
 from django_ray.runner.polling import AdaptivePollingPolicy
 
 
-def test_compatibility_defaults_keep_adaptive_backoff_opt_in() -> None:
+def test_defaults_enable_adaptive_idle_backoff() -> None:
     assert DEFAULTS["WORKER_POLL_INTERVAL_SECONDS"] == 0.1
-    assert DEFAULTS["WORKER_POLL_MAX_INTERVAL_SECONDS"] == 0.1
+    assert DEFAULTS["WORKER_POLL_MAX_INTERVAL_SECONDS"] == 1.0
 
 
 def test_compatibility_mode_preserves_exact_fixed_cadence_without_jitter() -> None:

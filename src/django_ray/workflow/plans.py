@@ -18,6 +18,7 @@ import math
 import os
 import re
 import sys
+import threading
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -42,7 +43,6 @@ from django_ray.runtime.compiled_graph import (
 from django_ray.runtime.compiled_graph_lifecycle import (
     COMPILED_GRAPH_LIFECYCLE_PROTOCOL_VERSION,
 )
-from django_ray.runtime.import_utils import import_callable
 from django_ray.runtime.runtime_env import (
     ResolvedRuntimeEnv,
     _ray_runtime_env_default_excludes,
@@ -2583,12 +2583,42 @@ def _code_location_identity(
     return {"identity": "unresolved"}, {path}
 
 
+_LOCAL_FILE_HASH_CACHE_MAX = 4096
+_LOCAL_FILE_HASH_CACHE: dict[tuple[int, int, int, int], str] = {}
+_LOCAL_FILE_HASH_CACHE_LOCK = threading.Lock()
+
+
+def _cached_file_sha256(candidate: Path, stat_result: os.stat_result) -> str:
+    """Hash one local file, reusing cached SHA-256 when stat identity is unchanged."""
+    cache_key = (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_mtime_ns,
+        stat_result.st_size,
+    )
+    with _LOCAL_FILE_HASH_CACHE_LOCK:
+        cached = _LOCAL_FILE_HASH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    content_digest = hashlib.sha256()
+    with candidate.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            content_digest.update(chunk)
+    digest_hex = content_digest.hexdigest()
+    with _LOCAL_FILE_HASH_CACHE_LOCK:
+        if len(_LOCAL_FILE_HASH_CACHE) >= _LOCAL_FILE_HASH_CACHE_MAX:
+            _LOCAL_FILE_HASH_CACHE.clear()
+        _LOCAL_FILE_HASH_CACHE[cache_key] = digest_hex
+    return digest_hex
+
+
 def _local_path_identity(path: Path, *, excludes: list[str]) -> dict[str, Any]:
     resolved = path.resolve()
     if resolved.is_file():
-        if resolved.stat().st_size > MAX_CODE_TREE_BYTES:
+        file_stat = resolved.stat()
+        if file_stat.st_size > MAX_CODE_TREE_BYTES:
             raise _IdentityBudgetExceededError
-        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        digest = _cached_file_sha256(resolved, file_stat)
         return {"kind": "local_file_snapshot", "sha256": digest}
     if not resolved.is_dir():
         raise WorkflowPlanValidationError("RuntimeEnv code path does not exist")
@@ -2617,14 +2647,11 @@ def _local_path_identity(path: Path, *, excludes: list[str]) -> dict[str, Any]:
             return
         if candidate.is_file():
             file_count += 1
-            byte_count += candidate.stat().st_size
+            file_stat = candidate.stat()
+            byte_count += file_stat.st_size
             if file_count > MAX_CODE_TREE_FILES or byte_count > MAX_CODE_TREE_BYTES:
                 raise _IdentityBudgetExceededError
-            content_digest = hashlib.sha256()
-            with candidate.open("rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    content_digest.update(chunk)
-            records.append(("file", relative, content_digest.hexdigest()))
+            records.append(("file", relative, _cached_file_sha256(candidate, file_stat)))
             return
         raise WorkflowPlanValidationError("RuntimeEnv code trees contain a special file")
 
@@ -2899,9 +2926,16 @@ def _callable_code_identity(
     *,
     module_cache: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    from django_ray.runtime import import_utils
+
     owner_module_name = callable_path.rsplit(".", 1)[0]
+    workflow_resolver = getattr(
+        import_utils,
+        "resolve_workflow_callable",
+        import_utils.import_callable,
+    )
     try:
-        callable_obj = import_callable(callable_path)
+        callable_obj = workflow_resolver(callable_path)
     except Exception:  # noqa: BLE001 - submitter inspection cannot block worker-only code
         return {
             "module": owner_module_name,

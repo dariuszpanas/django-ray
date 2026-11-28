@@ -13,6 +13,7 @@ DJANGO_RAY = {
     "RAY_ADDRESS": "auto",
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 60,
+    "RETRY_BACKOFF_JITTER_RATIO": 0.1,  # Default: downward [-10%, 0%] jitter
     "RETRY_EXCEPTION_DENYLIST": [
         "builtins.ValueError",
         "myapp.tasks.PermanentTaskError",
@@ -20,11 +21,16 @@ DJANGO_RAY = {
 }
 ```
 
-`MAX_TASK_ATTEMPTS` includes the first attempt. With a 60-second base, retry delays are
-60 seconds before attempt two, 120 before attempt three, and 240 before attempt four.
+`MAX_TASK_ATTEMPTS` includes the first attempt. With a 60-second base, exponential
+backoff delays are 60 seconds before attempt two, 120 before attempt three, and 240
+before attempt four, perturbed downward uniformly by `RETRY_BACKOFF_JITTER_RATIO`
+(default `0.1`, sampling `[(1 - ratio) * backoff, backoff]`, or `[-10%, 0%]`, never
+exceeding the computed exponential backoff) to spread out synchronized retry storms.
+Set `RETRY_BACKOFF_JITTER_RATIO` to `0.0` when deterministic delays are required.
 
-The denylist accepts short built-in names or fully qualified exception paths. Use it
-only for failures that cannot improve when repeated.
+`RETRY_EXCEPTION_DENYLIST` accepts fully qualified dotted exception paths (exact
+module-and-class matching plus subclass matching when importable) and short names (class
+name and subclass matching). Use it only for failures that cannot improve when repeated.
 
 ## A Complete Retry Example
 

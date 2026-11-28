@@ -24,6 +24,8 @@ from django_ray.doctor.contracts import (
 )
 from django_ray.doctor.supervisor import peek_status, read_frames, signal_group
 
+STARTUP_MARGIN_SECONDS = 0.5
+
 
 class DoctorInterrupted(BaseException):
     """Private interruption signal with no caller or application text."""
@@ -206,7 +208,7 @@ def diagnose(
             if interrupted:
                 raise DoctorInterrupted(cleanup)
             available = deadline - time.monotonic() - CLEANUP_SECONDS
-            if available <= CLEANUP_SECONDS:
+            if available <= CLEANUP_SECONDS + STARTUP_MARGIN_SECONDS:
                 for name, value in sections.items():
                     if value["code"] == "not_observed":
                         sections[name] = observation("budget_exhausted", "total_budget_exhausted")

@@ -7,10 +7,13 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
-from django.db import transaction
+from django.db import DEFAULT_DB_ALIAS, transaction
+from django.tasks.signals import task_finished, task_started
 
+from django_ray import __version__ as django_ray_version
 from django_ray.execution_protocol import (
     SUPPORTED_EXECUTION_PROTOCOL_RANGE,
     ExecutionProtocolRange,
@@ -18,6 +21,7 @@ from django_ray.execution_protocol import (
 from django_ray.models import RayTaskExecution, TaskAttempt, TaskState
 from django_ray.runtime.context import WorkflowRunIdentity
 from django_ray.runtime.runtime_env import runtime_env_for_execution
+from django_ray.tracing import LifecycleTraceEvent, emit_task_lifecycle_span
 from django_ray.workflow.progress.summary import (
     WORKFLOW_PROGRESS_TERMINAL_STATES,
     WorkflowProgressDetailAvailability,
@@ -92,6 +96,274 @@ class _ExecutorDjangoRayVersionUnset:
 
 
 _EXECUTOR_DJANGO_RAY_VERSION_UNSET = _ExecutorDjangoRayVersionUnset()
+
+_NOTIFICATION_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "id",
+    "task_id",
+    "callable_path",
+    "queue_name",
+    "priority",
+    "run_after",
+    "state",
+    "attempt_number",
+    "execution_generation",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "claimed_by_worker",
+    "args_json",
+    "kwargs_json",
+    "input_reference",
+    "result_data",
+    "result_reference",
+    "error_message",
+    "error_traceback",
+    "cancellation_status",
+    "cancellation_error",
+)
+_QUEUED_CANCEL_METADATA_READ_FIELDS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        (
+            *_ATTEMPT_ARCHIVE_READ_FIELDS,
+            "task_id",
+            "callable_path",
+            "queue_name",
+            "priority",
+            "run_after",
+            "created_at",
+            "claimed_by_worker",
+            "cancellation_status",
+        )
+    )
+)
+_QUEUED_CANCEL_READ_FIELDS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        (
+            *_ATTEMPT_ARCHIVE_READ_FIELDS,
+            *(field for field in _NOTIFICATION_SNAPSHOT_FIELDS if field != "id"),
+        )
+    )
+)
+
+
+def _has_custom_task_finished_listeners() -> bool:
+    """Return whether any receiver beyond Django's built-in logger listens to ``task_finished``."""
+    if not task_finished.receivers:
+        return False
+    from django.tasks.signals import log_task_finished
+
+    from django_ray.backends import RayTaskBackend
+
+    live_receivers = getattr(task_finished, "_live_receivers", None)
+    if callable(live_receivers):
+        sync_receivers, async_receivers = cast(
+            tuple[list[Any], list[Any]],
+            live_receivers(RayTaskBackend),
+        )
+        return bool(async_receivers) or any(
+            receiver is not log_task_finished for receiver in sync_receivers
+        )
+    return bool(task_finished.has_listeners(sender=RayTaskBackend))
+
+
+def _is_lifecycle_tracing_enabled() -> bool:
+    """Return whether opt-in lifecycle tracing is active without touching the DB."""
+    from django_ray.tracing import _resolve_lifecycle_coordinator
+
+    coordinator = _resolve_lifecycle_coordinator()
+    return bool(coordinator is not None and coordinator.config.enabled)
+
+
+def _queued_cancel_read_fields() -> tuple[str, ...]:
+    """Select the narrowest DB projection required for a ``QUEUED`` cancellation.
+
+    Keep the ``FOR UPDATE`` lock projection minimal; scalar notification
+    metadata is hydrated post-commit outside the row lock when needed.
+    """
+    if _has_custom_task_finished_listeners():
+        return _QUEUED_CANCEL_READ_FIELDS
+    if _is_lifecycle_tracing_enabled():
+        return _QUEUED_CANCEL_METADATA_READ_FIELDS
+    return _ATTEMPT_ARCHIVE_READ_FIELDS
+
+
+def _capture_notification_snapshot(execution: RayTaskExecution) -> dict[str, Any]:
+    """Capture already-loaded fields without triggering deferred DB queries."""
+    raw = execution.__dict__
+    snapshot: dict[str, Any] = {}
+    for field_name in _NOTIFICATION_SNAPSHOT_FIELDS:
+        if field_name in raw:
+            snapshot[field_name] = raw[field_name]
+    if "id" not in snapshot and execution.pk is not None:
+        snapshot["id"] = execution.pk
+    return snapshot
+
+
+def _schedule_lifecycle_notification(
+    event: LifecycleTraceEvent,
+    execution: RayTaskExecution,
+    *,
+    using: str | None = None,
+) -> None:
+    """Schedule post-commit Django 6 task signal and optional tracing span."""
+    db_alias = using or execution._state.db or DEFAULT_DB_ALIAS
+    snapshot = _capture_notification_snapshot(execution)
+
+    def _post_commit() -> None:
+        needs_hydration = (
+            snapshot.get("task_id") is None
+            and snapshot.get("id") is not None
+            and (
+                (event == "started" and bool(task_started.receivers))
+                or (event == "finished" and _has_custom_task_finished_listeners())
+                or _is_lifecycle_tracing_enabled()
+            )
+        )
+        if needs_hydration:
+            try:
+                scalar_meta = (
+                    RayTaskExecution.objects.using(db_alias)
+                    .filter(pk=snapshot["id"])
+                    .values(
+                        "task_id",
+                        "callable_path",
+                        "queue_name",
+                        "priority",
+                        "run_after",
+                        "created_at",
+                        "claimed_by_worker",
+                        "cancellation_status",
+                    )
+                    .first()
+                )
+                if scalar_meta is not None:
+                    for key, value in scalar_meta.items():
+                        snapshot.setdefault(key, value)
+            except Exception:
+                pass
+        try:
+            from django_ray.backends import (
+                RayTaskBackend,
+                _build_signal_task_result,
+                _emit_task_signal,
+            )
+
+            task_result = _build_signal_task_result(snapshot)
+            signal = task_started if event == "started" else task_finished
+            _emit_task_signal(
+                signal,
+                sender=RayTaskBackend,
+                task_result=task_result,
+                event_name=event,
+            )
+        except Exception:
+            pass
+        try:
+            trace_obj = SimpleNamespace(
+                pk=snapshot.get("id"),
+                id=snapshot.get("id"),
+                task_id=snapshot.get("task_id"),
+                queue_name=snapshot.get("queue_name"),
+                state=snapshot.get("state"),
+                attempt_number=snapshot.get("attempt_number", 1),
+                execution_generation=snapshot.get("execution_generation", 0),
+                cancellation_status=snapshot.get("cancellation_status"),
+            )
+            emit_task_lifecycle_span(event, trace_obj)
+        except Exception:
+            pass
+
+    transaction.on_commit(_post_commit, using=db_alias)
+
+
+def notify_task_started(
+    execution: RayTaskExecution,
+    *,
+    using: str | None = None,
+) -> None:
+    """Schedule post-commit ``task_started`` signal and ``started`` trace span."""
+    _schedule_lifecycle_notification("started", execution, using=using)
+
+
+def notify_task_finished(
+    execution: RayTaskExecution,
+    *,
+    using: str | None = None,
+) -> None:
+    """Schedule post-commit ``task_finished`` signal and ``finished`` trace span."""
+    _schedule_lifecycle_notification("finished", execution, using=using)
+
+
+def start_task(
+    execution: RayTaskExecution | int,
+    *,
+    worker_id: str,
+    started_at: datetime | None = None,
+    expected_attempt_number: int | None = None,
+    expected_execution_generation: int | None = None,
+    supported_protocols: ExecutionProtocolRange = SUPPORTED_EXECUTION_PROTOCOL_RANGE,
+) -> bool:
+    """Atomically transition a ``QUEUED`` task to ``RUNNING`` and emit ``task_started``."""
+    execution_id = execution.pk if isinstance(execution, RayTaskExecution) else execution
+    claim_now = started_at or datetime.now(UTC)
+    filters: dict[str, Any] = {"pk": execution_id, "state": TaskState.QUEUED}
+    if expected_attempt_number is not None:
+        filters["attempt_number"] = expected_attempt_number
+    if expected_execution_generation is not None:
+        filters["execution_generation"] = expected_execution_generation
+
+    with transaction.atomic():
+        current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
+        if current is None:
+            return False
+        if not supported_protocols.supports(int(current.execution_protocol_version)):
+            return False
+        current.state = TaskState.RUNNING
+        current.started_at = claim_now
+        current.last_heartbeat_at = claim_now
+        current.claimed_by_worker = worker_id
+        current.managed_with_django_ray_version = django_ray_version
+        current.execution_generation = int(current.execution_generation) + 1
+        current.error_message = None
+        current.error_traceback = None
+        current.cancellation_status = None
+        current.cancellation_error = None
+        current.completion_data = None
+        current.progress_data = None
+        current.workflow_progress_summary_json = None
+        current.workflow_run_id = None
+        current.workflow_plan_selection = None
+        promote_legacy_ray_target(current)
+        current.ray_job_id = None
+        current.ray_job_request_reference = None
+        current.ray_address = None
+        current.save(
+            update_fields=[
+                "state",
+                "started_at",
+                "last_heartbeat_at",
+                "claimed_by_worker",
+                "managed_with_django_ray_version",
+                "execution_generation",
+                "error_message",
+                "error_traceback",
+                "cancellation_status",
+                "cancellation_error",
+                "completion_data",
+                "progress_data",
+                "workflow_progress_summary_json",
+                "workflow_run_id",
+                "workflow_plan_selection",
+                "ray_job_id",
+                "ray_job_request_reference",
+                "ray_target_address",
+                "ray_address",
+            ]
+        )
+        if isinstance(execution, RayTaskExecution):
+            execution.__dict__.update(current.__dict__)
+        notify_task_started(current)
+        return True
 
 
 def _locked_execution(
@@ -546,11 +818,12 @@ def _request_task_cancellation(
             )
 
         if current.state == TaskState.QUEUED:
-            _load_locked_execution_fields(current, fields=_ATTEMPT_ARCHIVE_READ_FIELDS)
+            _load_locked_execution_fields(current, fields=_queued_cancel_read_fields())
             current.state = TaskState.CANCELLED
             current.finished_at = datetime.now(UTC)
             _record_attempt(current)
             current.save(update_fields=["state", "finished_at"])
+            notify_task_finished(current)
             return TaskCancellationRequestResult(
                 status=TaskCancellationRequestStatus.ACCEPTED,
                 execution_id=execution_id,
@@ -926,23 +1199,32 @@ def record_failure(
         if retry:
             current.state = TaskState.QUEUED
             current.attempt_number = int(current.attempt_number) + 1
+            current.execution_generation = int(current.execution_generation) + 1
             current.run_after = next_attempt_at
             _refresh_queue_deadline(
                 current,
                 queued_at=datetime.now(UTC),
                 run_after=next_attempt_at,
             )
+            promote_legacy_ray_target(current)
             current.started_at = None
             current.finished_at = None
             current.last_heartbeat_at = None
             current.claimed_by_worker = None
             current.managed_with_django_ray_version = None
             current.executor_django_ray_version = None
+            current.ray_job_id = None
+            current.ray_job_request_reference = None
+            current.ray_address = None
+            current.result_data = None
+            current.result_reference = None
             current.progress_data = None
             current.workflow_progress_summary_json = None
             current.workflow_run_id = None
             current.workflow_plan_selection = None
             current.completion_data = None
+            current.error_message = None
+            current.error_traceback = None
             current.cancellation_status = None
             current.cancellation_error = None
         else:
@@ -951,6 +1233,7 @@ def record_failure(
             update_fields=[
                 "state",
                 "attempt_number",
+                "execution_generation",
                 "run_after",
                 "queue_deadline_at",
                 "error_message",
@@ -963,6 +1246,12 @@ def record_failure(
                 "claimed_by_worker",
                 "managed_with_django_ray_version",
                 "executor_django_ray_version",
+                "ray_job_id",
+                "ray_job_request_reference",
+                "ray_target_address",
+                "ray_address",
+                "result_data",
+                "result_reference",
                 "progress_data",
                 "workflow_progress_summary_json",
                 "workflow_run_id",
@@ -981,6 +1270,8 @@ def record_failure(
                 retain_as_current=not retry,
             )
         execution.__dict__.update(current.__dict__)
+        if not retry:
+            notify_task_finished(current)
         return True
 
 
@@ -1011,9 +1302,17 @@ def expire_queued_tasks(
             current.error_message = QUEUE_EXPIRED_ERROR
             current.error_traceback = None
             _record_attempt(current)
-            current.save(update_fields=["state", "finished_at", "error_message", "error_traceback"])
             if current.pk is not None:
                 expired.append(current.pk)
+        if len(rows) == 1:
+            rows[0].save(update_fields=["state", "finished_at", "error_message", "error_traceback"])
+        elif rows:
+            RayTaskExecution.objects.bulk_update(
+                rows,
+                ["state", "finished_at", "error_message", "error_traceback"],
+            )
+        for current in rows:
+            notify_task_finished(current)
         return tuple(expired)
 
 
@@ -1054,7 +1353,52 @@ def record_lost(
         _record_attempt(current)
         current.save(update_fields=["state", "finished_at", "error_message"])
         execution.__dict__.update(current.__dict__)
+        notify_task_finished(current)
         return True
+
+
+def result_reference_fence(
+    reference: str,
+    *,
+    using: str = DEFAULT_DB_ALIAS,
+):
+    """Coordinate concurrent result publication and retention purge per reference.
+
+    Holds a process-local re-entrant lock and, on PostgreSQL, a database
+    advisory lock keyed by the canonical reference so workers publishing a
+    deduplicated blob and purgers reclaiming aged blobs cannot interleave
+    deletion with live row persistence.
+    """
+    from contextlib import contextmanager
+
+    from django.db import connections
+
+    from django_ray.result_storage import _in_process_result_reference_lock
+
+    @contextmanager
+    def _fence():
+        with _in_process_result_reference_lock(reference) as (key1, key2):
+            conn = connections[using]
+            if getattr(conn, "vendor", None) == "postgresql":
+                if not conn.in_atomic_block:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT pg_advisory_lock(%s, %s)", [key1, key2])
+                    try:
+                        yield
+                    finally:
+                        try:
+                            with conn.cursor() as cursor:
+                                cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [key1, key2])
+                        except Exception:
+                            pass
+                else:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [key1, key2])
+                    yield
+            else:
+                yield
+
+    return _fence()
 
 
 def succeed_task(
@@ -1085,8 +1429,20 @@ def succeed_task(
         filters["execution_generation"] = expected_execution_generation
     if require_completion_data_match:
         filters["completion_data"] = expected_completion_data
-    with transaction.atomic():
-        current = RayTaskExecution.objects.select_for_update().filter(**filters).first()
+    from contextlib import nullcontext
+
+    from django_ray.result_storage import is_external_result_reference
+
+    db_alias = execution._state.db or DEFAULT_DB_ALIAS
+    fence_ctx = (
+        result_reference_fence(result_reference, using=db_alias)
+        if isinstance(result_reference, str) and is_external_result_reference(result_reference)
+        else nullcontext()
+    )
+    with fence_ctx, transaction.atomic(using=db_alias):
+        current = (
+            RayTaskExecution.objects.using(db_alias).select_for_update().filter(**filters).first()
+        )
         if current is None:
             return False
         if not supported_protocols.supports(int(current.execution_protocol_version)):
@@ -1127,6 +1483,7 @@ def succeed_task(
                 retain_as_current=True,
             )
         execution.__dict__.update(current.__dict__)
+        notify_task_finished(current)
         return True
 
 
@@ -1181,4 +1538,5 @@ def cancel_task(
             ]
         )
         execution.__dict__.update(current.__dict__)
+        notify_task_finished(current)
         return True

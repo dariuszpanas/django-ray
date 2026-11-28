@@ -152,8 +152,9 @@ The sample remains intentionally unsuitable for production even after replacing 
   local capacity and integration profiles;
 - the setup Job offers opt-in sample superuser creation and the dashboard uses one sample operator-token
   path rather than an application identity model;
-- component-scoped credentials reduce accidental delivery, but Ray execution still shares the
-  application's database and Django signing authority in this evaluation topology; and
+- component-scoped credentials reduce accidental delivery and withhold `DJANGO_SECRET_KEY`
+  from Ray head/worker pods, but Ray execution still shares the application's database
+  credentials in this evaluation topology; and
 - local volumes, resource settings, and lifecycle operations are validation
   conveniences rather than a reviewed availability, isolation, or recovery design.
 
@@ -243,11 +244,14 @@ Ray's content-addressed GCS package store, allowing durable retries on the same
 generic Ray images without treating a mutable dependency spec as immutable.
 
 The evaluation topology also creates a separate `payload-storage-pvc` and configures
-filesystem `INPUT_STORAGE_BACKEND` at `/payload-storage/inputs`. Django web, the
-base/default task manager, and the dedicated Ray Job task manager mount it read/write;
-static and KubeRay Ray head/worker containers mount it read-only so an rq2 Ray Job
-driver can retrieve and validate its content-addressed execution request before Django
-setup. The sample leaves inline-input spillover disabled; a deployment that enables it
+filesystem `INPUT_STORAGE_BACKEND` at `/payload-storage/inputs` and oversized
+`RESULT_STORAGE_FILESYSTEM_PATH` at `/payload-storage/results`. Django web, the
+base/default task manager, and the dedicated Ray Job task manager mount the payload
+volume read/write; static and KubeRay Ray head/worker containers mount
+`/payload-storage/inputs` read-only (so an rq2 Ray Job driver can retrieve and validate
+its content-addressed execution request without modifying inputs) and mount
+`/payload-storage/results` read/write (so executors can spill oversized results cleanly).
+The sample leaves inline-input spillover disabled; a deployment that enables it
 must additionally give every local/synchronous executor read access. This volume is
 intentionally separate from `runtime-env-pvc`: request storage has its own writer,
 retention, purge, and credential boundary. A production design may instead use a
@@ -538,8 +542,9 @@ topology is production-ready.
 Use the [local credential preparation helper](local-credentials.md). No Secret resource or reusable
 credential is checked in. Eight separately provisioned Secrets deliver explicit keys to their
 consumers. The web-only operator token, web-only demo token, setup-only bootstrap, and monitoring
-credentials are absent from Ray pods. Generic execution still needs application database and
-Django signing credentials in this evaluation topology. A production design requires independently
+credentials are absent from Ray pods, and `DJANGO_SECRET_KEY` is withheld from both
+static and KubeRay Ray head/worker containers. Generic execution still needs application
+database credentials in this evaluation topology. A production design requires independently
 reviewed service identities, delivery, rotation, and task isolation.
 
 For durable RuntimeEnv snapshot encryption, use a dedicated key stored through the external secret
@@ -556,11 +561,11 @@ The local `kuberay-kind` overlay deliberately exercises the lower-configuration
 Those selectors are not placed in the shared ConfigMap or Ray pod specifications.
 The base and other overlays therefore keep plaintext writes unless they opt in
 explicitly.
-This local fallback validates encryption behavior, not key isolation: the generic upstream KubeRay
-head and worker pods still receive the Django signing key from `django-ray-runtime`, from
-which the fallback key is derived. A production deployment gets the read-only database separation
-described by the threat model only when a dedicated RuntimeEnv key is delivered exclusively to the
-Django application processes that need it.
+This local fallback validates encryption behavior on Django web and task-manager pods
+without delivering `DJANGO_SECRET_KEY` to Ray head or worker pods. Even so, a production
+deployment gets the cleanest separation between Django signing-key rotation and durable
+task retention when a dedicated RuntimeEnv key is delivered exclusively to the Django
+application processes that need it.
 See [Runtime Environments](../runtime-environments.md#encrypt-durable-snapshots) for
 the reader-first rollout, key-retention requirements, and downgrade boundary.
 
@@ -632,7 +637,7 @@ managers and Ray execution pods use that component name.
 
 ```bash
 kubectl exec -n django-ray deployment/django-web -- \
-  python manage.py shell -c "
+  python testproject/manage.py shell -c "
 from django_ray.models import RayTaskExecution, TaskState
 for state in TaskState:
     count = RayTaskExecution.objects.filter(state=state).count()
@@ -768,6 +773,93 @@ kubectl exec -n django-ray deployment/django-ray-worker -c django-ray-worker -- 
 The older `Deployment/ray-head` troubleshooting form applies only to the
 legacy static manifests; the KubeRay path owns the head through
 `RayCluster/ray`.
+
+## Reference Architecture: KubeRay + S3/GCS External Storage
+
+The checked-in overlays use `ReadWriteMany` (RWX) PVCs (`runtime-env-pvc` and
+`payload-storage-pvc`) purely for single-cluster local evaluation. On cloud Kubernetes
+clusters (EKS, GKE, Azure Kubernetes Service) where default StorageClasses support only
+`ReadWriteOnce` (RWO), RWX PVCs stay `Pending` indefinitely and create an unnecessary
+shared-filesystem blast radius across pods.
+
+When designing your own independently operated KubeRay deployment, replace shared RWX
+volumes with immutable artifacts and cloud object storage:
+
+### 1. Storage namespace and credential separation
+
+Use **two disjoint prefixes** (or separate buckets) with least-privilege workload
+identities (IRSA / GKE Workload Identity / Azure Workload Identity):
+
+| Workload | `inputs` prefix (`INPUT_STORAGE_*`) | `results` prefix (`RESULT_STORAGE_*`) | Django signing & DB encryption secrets |
+|---|---|---|---|
+| **Django Web** | Read / Write (spillover inputs) | Read (rehydrate `TaskResult.return_value`) | `DJANGO_SECRET_KEY`, `RUNTIME_ENV_ENCRYPTION_KEYS` |
+| **Django-Ray Worker** (`django_ray_worker`) | Read / Write (rq2 request storage) | Read / Write (worker-side result offload) | `RUNTIME_ENV_ENCRYPTION_KEYS` (and app DB credentials) |
+| **Scheduled Purge Jobs** (`django_ray_purge_*`) | Read / List / Delete (`inputs` only) | Read / Delete (`results` only) | App DB credentials only |
+| **Ray Head & Worker Pods** (KubeRay `RayCluster`) | **Read-only** (`GetObject` / `HeadObject` only) | **Read / Write** (no delete required) | **None** — never mount `DJANGO_SECRET_KEY` or `RUNTIME_ENV_ENCRYPTION_KEYS` onto Ray compute pods |
+
+!!! warning "Keep inputs read-only on Ray pods and never share one prefix"
+
+    `INPUT_STORAGE_*` and `RESULT_STORAGE_*` MUST use distinct prefixes (validated at
+    Django startup) because input retention may delete aged input objects independently of
+    retained results. Granting Ray pods read-only access on `inputs` prevents compute
+    tasks from modifying or deleting queued requests, while granting write access only on
+    `results` avoids the read-only mount errors that occur when Ray executors spill results
+    larger than `MAX_RESULT_SIZE_BYTES`.
+
+### 2. Example Django configuration (S3 or GCS)
+
+Install `django-ray[s3]` or `django-ray[gcs]` in your application and Ray images, deliver
+application code through an immutable container image or content-addressed HTTPS/S3/GCS
+`working_dir` archive, and configure disjoint prefixes:
+
+```python
+# Example S3 configuration (uses ambient IAM / IRSA credentials; never embed keys in URIs)
+DJANGO_RAY = {
+    "RAY_ADDRESS": "http://raycluster-head-svc.ray.svc.cluster.local:8265",
+    "RUNNER": "ray_job",
+    "DEFAULT_CONCURRENCY": 20,
+    "WORKER_POLL_INTERVAL_SECONDS": 0.1,
+    "WORKER_POLL_MAX_INTERVAL_SECONDS": 1.0,
+    "INPUT_STORAGE_BACKEND": "s3",
+    "INPUT_STORAGE_S3_BUCKET": "my-org-django-ray-prod",
+    "INPUT_STORAGE_S3_PREFIX": "django-ray/inputs",
+    "INPUT_STORAGE_S3_REGION": "us-east-1",
+    "RESULT_STORAGE_BACKEND": "s3",
+    "RESULT_STORAGE_S3_BUCKET": "my-org-django-ray-prod",
+    "RESULT_STORAGE_S3_PREFIX": "django-ray/results",
+    "RESULT_STORAGE_S3_REGION": "us-east-1",
+    "RUNTIME_ENV_PROFILES": {
+        "app": {
+            "working_dir": "https://artifacts.example.com/myapp/releases/2026-11-27-abc123.zip",
+            "env_vars": {
+                "DJANGO_SETTINGS_MODULE": "myproject.settings.worker",
+            },
+        },
+    },
+    "DEFAULT_RUNTIME_ENV_PROFILE": "app",
+}
+```
+
+For Google Cloud Storage, swap the storage keys to `"INPUT_STORAGE_BACKEND": "gcs"` /
+`"RESULT_STORAGE_BACKEND": "gcs"` with `INPUT_STORAGE_GCS_BUCKET`,
+`INPUT_STORAGE_GCS_PREFIX="django-ray/inputs"`, `RESULT_STORAGE_GCS_BUCKET`, and
+`RESULT_STORAGE_GCS_PREFIX="django-ray/results"` using GKE Workload Identity.
+
+### 3. Probes, graceful drain, and scheduled retention
+
+- **Readiness probe**: run `django_ray_worker_ready --database default --queue <queue> --hostname $(POD_NAME) --json`
+  on task-manager pods (never use it as a `livenessProbe`, so transient DB blips do not
+  restart live managers).
+- **Graceful shutdown & upgrades**: set `terminationGracePeriodSeconds` comfortably above
+  your shutdown handoff budget. During coordinated maintenance windows, pause external
+  producers and run `django_ray_worker --drain --drain-timeout-seconds 120` while existing
+  workers are still running: `--drain` acts as a passive observer (it does not claim new
+  tasks or block producers) and exits `0` once no `QUEUED`, `RUNNING`, or `CANCELLING`
+  work remains across the deployment for the targeted queues.
+- **Scheduled CronJobs**: run bounded retention passes outside active request paths:
+  - `python manage.py django_ray_purge_executions --older-than-days 30 --delete --until-empty --format json`
+  - `python manage.py django_ray_purge_inputs --retention-days 30 --delete --until-empty --format json`
+  - `python manage.py django_ray_cleanup_workflow_progress --delete --format json`
 
 ## Production Architecture Checklist
 

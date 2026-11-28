@@ -1,14 +1,20 @@
 # Bounded read-only doctor
 
 `django_ray_doctor` collects dated configuration and database observations on
-Linux. This first slice deliberately returns **exit 2 (incomplete)** even when
-its available observations show no blockers: Ray reachability, target
-attestation, queue capacity, artifact availability and orphan inventory remain
-unavailable. An observed blocker produces exit 1. The command does not authorize
-an upgrade, rollback, deletion, drain or quarantine.
+Linux using an isolated, time-bounded child process. When all seven required
+configuration and database checks pass and owned probe cleanup is confirmed, the
+command exits **`0`** (`status="ok"`, `complete=true`) while explicitly listing
+out-of-scope remote-inventory checks (`target`, `queue_capacity`,
+`artifact_availability`, and `orphan_inventory`) under `deferred_sections`
+(`[SKIPPED]` in text output). An observed blocker exits **`1`** (`status="blocker"`),
+and incomplete, unsupported, budget-exhausted required probes or unconfirmed cleanup
+exit **`2`** (`status="incomplete"`). The command is strictly read-only and does not
+authorize an upgrade, rollback, deletion, drain, or quarantine.
 
 ```bash
 python manage.py django_ray_doctor --database default --format json
+# Shorthand for JSON output:
+python manage.py django_ray_doctor --database default --json
 ```
 
 The management command's budget begins after Django has initialized the caller.
@@ -71,8 +77,11 @@ sections receive `cleanup_unconfirmed`, and the top-level
 
 Schema `django-ray.doctor`, version 1, uses only fixed diagnostic codes and a
 closed vocabulary of scalar values. Each section has `outcome`, `code`,
-`observed_at` and `values`; the report includes limits, elapsed time,
-`cleanup_confirmed`, `complete` and `exit_code`.
+`observed_at`, and `values` (including structured `detail` codes when configuration
+or database checks fail); the top-level report includes `status` (`ok`, `blocker`,
+or `incomplete`), `limits`, elapsed time, `deferred_sections`, secret-free
+`remediations` for non-passing checks, `cleanup_confirmed`, `complete`, and
+`exit_code`.
 
 | Limit | Default / maximum |
 | --- | --- |
@@ -139,13 +148,13 @@ dedicated supervisor sets its own `SIGCHLD` default before spawning a probe.
 
 ## Exit codes and next steps
 
-| Exit | Meaning | Operator action |
-| --- | --- | --- |
-| 0 | Reserved for a future complete report with every section observed | Still a dated observation, never maintenance authorization |
-| 1 | At least one observed blocker, with confirmed owned cleanup | Inspect the named migration, protocol, lease, work or registered-cleanup condition using its existing supported interface |
-| 2 | Incomplete/unsupported/budget-exhausted evidence or unconfirmed cleanup | Read section codes; correct the supported settings selection or investigate the bounded dependency separately. Do not infer health from omitted evidence |
+| Exit | Status | Meaning | Operator action |
+| --- | --- | --- | --- |
+| `0` | `ok` | All seven required configuration and database observations passed with confirmed owned cleanup (`complete=true`); optional remote-inventory checks appear in `deferred_sections` | Dated local/database health check; verify Ray/storage capacity separately and never treat exit `0` alone as maintenance authorization |
+| `1` | `blocker` | At least one observed blocker, with confirmed owned cleanup | Follow the per-section `remediations` hint and inspect the named migration, protocol, lease, work, or registered-cleanup condition using its supported interface |
+| `2` | `incomplete` | Incomplete, unsupported, or budget-exhausted required evidence, or `cleanup_confirmed=false` | Read section `code` and `values.detail` fields plus `remediations`; correct settings/database support or investigate the bounded dependency separately |
 
-For this first slice, exit 2 is the expected result for an otherwise clear
-database. Avoid putting the command directly into a readiness probe that treats
-only exit 0 as ready. Existing exact-worker readiness and protocol-status
-commands retain their own narrower contracts.
+For Kubernetes worker `readinessProbe` checks, prefer the narrower
+[`django_ray_worker_ready`](cli.md#django_ray_worker_ready) command, which probes one
+exact worker lease without running full database diagnostic sweeps. Existing
+protocol-status commands retain their own narrower contracts.

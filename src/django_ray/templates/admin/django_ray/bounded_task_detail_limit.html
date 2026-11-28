@@ -7,11 +7,12 @@
       <h2>{% translate "Task detail response limit reached" %}</h2>
       <p>
         This ordinary Admin detail could not be rendered within its fixed
-        {{ django_ray_detail_response_limit_bytes }}-byte response limit.
+        {{ django_ray_detail_response_limit_bytes|filesizeformat }}
+        ({{ django_ray_detail_response_limit_bytes }}-byte) response limit.
         No stored diagnostic value is included in this fallback.
       </p>
       <p>
-        <a href="{{ django_ray_detail_back_url }}">Return to the bounded task list.</a>
+        <a href="{{ django_ray_detail_back_url }}">{% translate "Return to the bounded task list." %}</a>
       </p>
     </section>
   </div>

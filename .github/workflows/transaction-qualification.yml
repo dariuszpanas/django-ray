@@ -1,17 +1,7 @@
 name: Transaction Qualification
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/transaction-qualification.yml
-      - qualification/transactions/**
-      - qualification/docker/**
-      - tests/integration/test_transactional_enqueue.py
-      - src/django_ray/backends.py
-      - src/django_ray/input_storage.py
-      - pyproject.toml
-      - uv.lock
+  workflow_call:
   workflow_dispatch:
 
 permissions:

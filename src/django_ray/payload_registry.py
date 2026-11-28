@@ -10,23 +10,29 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from django_ray._storage_types import (
+    RAY_JOB_REQUEST_REFERENCE_PREFIX,
+    RayJobRequestStorageError,
+    _native_request_reference,
+    _PayloadRegistryReferences,
+    _wrap_request_reference,
+)
+from django_ray._storage_types import (
+    _has_other_payload_registry_reference as _has_other_payload_registry_reference,
+)
+from django_ray._storage_types import (
+    _payload_registry_references as _storage_payload_registry_references,
+)
 from django_ray.conf.settings import get_settings
 from django_ray.execution_codec import (
     EXECUTION_REQUEST_SCHEMA_VERSION,
     ExecutionRequestDecodeError,
     decode_execution_request,
-)
-from django_ray.ray_job_request_storage import (
-    RAY_JOB_REQUEST_REFERENCE_PREFIX,
-    RayJobRequestStorageError,
-    _native_request_reference,
-    _wrap_request_reference,
 )
 from django_ray.result_storage import (
     _MAX_REFERENCE_BYTE_COUNT,
@@ -34,11 +40,8 @@ from django_ray.result_storage import (
     GCSResultStorage,
     ResultStorageError,
     S3ResultStorage,
-    _configured_prefix,
     _object_key_digest,
     _object_reference,
-    _parse_result_reference,
-    _validate_object_reference,
 )
 
 DEFAULT_UNREGISTERED_GRACE_SECONDS = 3600
@@ -49,12 +52,6 @@ MAX_INVENTORY_MAX_OBJECTS = 1000
 DEFAULT_INVENTORY_MAX_PAGES = 10
 MAX_INVENTORY_MAX_PAGES = 100
 INVENTORY_DETAIL_MAX_BYTES = 4096
-
-
-@dataclass(frozen=True)
-class _PayloadRegistryReferences:
-    canonical: str
-    aliases: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -109,87 +106,17 @@ def _normalize_timestamp(value: Any) -> datetime | None:
 def _payload_registry_references(
     reference: str, config: dict[str, Any] | None = None
 ) -> _PayloadRegistryReferences:
-    """Enumerate at most four spellings in the exact authorized namespace.
-
-    A key has only its raw historical spelling and its exact quoted spelling.
-    Each may also have a request discriminator if the request grammar permits
-    it. This does not authorize deletion or broaden any payload reader.
-    """
-    wrapped = reference.startswith(RAY_JOB_REQUEST_REFERENCE_PREFIX)
-    try:
-        native = _native_request_reference(reference) if wrapped else reference
-    except RayJobRequestStorageError:
-        raise ResultStorageError("Payload registry reference is invalid") from None
-    metadata = _parse_result_reference(native, allow_encoding_legacy=True)
-    if metadata.scheme == "resultfs":
-        canonical = native
-        candidates = {native}
-    elif metadata.scheme in {"s3", "gs"}:
-        resolved_config = config if config is not None else get_settings()
-        backend = "S3" if metadata.scheme == "s3" else "GCS"
-        bucket = resolved_config.get(f"INPUT_STORAGE_{backend}_BUCKET")
-        if not isinstance(bucket, str):
-            raise ResultStorageError("Payload registry namespace is unavailable")
-        prefix = _configured_prefix(
-            resolved_config, f"INPUT_STORAGE_{backend}_PREFIX", "django-ray/inputs"
-        )
-        bucket, key = _validate_object_reference(
-            metadata, scheme=metadata.scheme, bucket=bucket, prefix=prefix
-        )
-        canonical = (
-            f"{metadata.scheme}://{bucket}/{quote(key, safe='/-._~')}?bytes={metadata.size_bytes}"
-        )
-        raw = f"{metadata.scheme}://{bucket}/{key}?bytes={metadata.size_bytes}"
-        candidates = {canonical, raw}
-    else:
-        raise ResultStorageError("Payload registry reference is invalid")
-
-    aliases: set[str] = set()
-    for candidate in candidates:
-        try:
-            _parse_result_reference(candidate, allow_encoding_legacy=True)
-        except ResultStorageError:
-            # A raw '?'/'#' spelling or an oversized canonical encoding is
-            # not a supported registry identity, even for a valid object key.
-            continue
-        aliases.add(candidate)
-        try:
-            aliases.add(_wrap_request_reference(candidate))
-        except RayJobRequestStorageError:
-            pass
-    if wrapped:
-        canonical = RAY_JOB_REQUEST_REFERENCE_PREFIX + canonical
-    return _PayloadRegistryReferences(canonical, tuple(sorted(aliases)))
-
-
-def _has_other_payload_registry_reference(
-    reference: str,
-    references: _PayloadRegistryReferences,
-    *,
-    using: str | None = None,
-    lock: bool = False,
-) -> bool:
-    """Refuse one existing alias without taking a second registry row lock."""
-    from django_ray.models import TaskInputPayload
-
-    aliases = tuple(alias for alias in references.aliases if alias != reference)
-    if not aliases:
-        return False
-    query = TaskInputPayload.objects.using(using).filter(reference__in=aliases)
-    if not lock:
-        return query.exists()
-    # Writers call this before locking their own row. One existing alias is
-    # enough to refuse, including a tombstone; never acquire another row lock.
-    return (
-        query.select_for_update().order_by("reference").values_list("reference", flat=True).first()
-        is not None
-    )
+    return _storage_payload_registry_references(reference, config, _get_settings=get_settings)
 
 
 def _is_temporary_filesystem_entry(name: str, *, is_dir: bool) -> bool:
     if is_dir:
         return name.startswith(".") and name.endswith(".install-lock")
-    return name.startswith(".django-ray-result-") and name.endswith(".tmp")
+    return (
+        (name.startswith(".django-ray-result-") and name.endswith(".tmp"))
+        or (name.startswith(".") and name.endswith(".install.lock"))
+        or name == ".django-ray-install.lock"
+    )
 
 
 def _discover_filesystem_objects(
@@ -431,11 +358,15 @@ def _discover_gcs_objects(
     pages = getattr(iterator, "pages", None)
     if pages is not None:
         pages_read = 0
+        pages_iter = iter(pages)
+        has_token_attr = hasattr(iterator, "next_page_token")
         try:
-            for page in pages:
+            while pages_read < max_pages:
+                try:
+                    page = next(pages_iter)
+                except StopIteration:
+                    return items[:max_objects], False
                 pages_read += 1
-                if pages_read > max_pages:
-                    return items[:max_objects], True
                 for blob in page:
                     items.append(_classify_gcs_blob(storage, blob))
                     if len(items) > max_objects:
@@ -444,8 +375,17 @@ def _discover_gcs_objects(
             raise
         except Exception as error:
             raise ResultStorageError("Failed to iterate GCS payload inventory pages") from error
-        next_token = getattr(iterator, "next_page_token", None)
-        return items[:max_objects], bool(next_token)
+        if has_token_attr:
+            next_token = getattr(iterator, "next_page_token", None)
+            return items[:max_objects], bool(next_token)
+        # Synthetic page iterables without next_page_token: peek conservatively
+        # only when the iterator does not expose page-token state.
+        sentinel = object()
+        try:
+            has_more_pages = next(pages_iter, sentinel) is not sentinel
+        except Exception as error:
+            raise ResultStorageError("Failed to iterate GCS payload inventory pages") from error
+        return items[:max_objects], has_more_pages
 
     try:
         for blob in iterator:
@@ -654,15 +594,15 @@ def _reap_unregistered_object(
                 return "skipped"
 
             final_modified_at = _current_object_modified_at(storage, item)
-            if final_modified_at is None or final_modified_at > cutoff:
+            if final_modified_at is not None and final_modified_at > cutoff:
                 raise ResultStorageError("Payload object changed during unregistered reap")
             if use_default_delete:
                 delete_input_reference(item.native_reference, config=config)
             else:
                 storage.delete(reference=item.native_reference)
+            return "purged"
     except Exception:
         return "failed"
-    return "purged"
 
 
 def discover_and_reap_unregistered_payloads(
@@ -754,27 +694,110 @@ def discover_and_reap_unregistered_payloads(
             details.append(entry)
             detail_bytes += encoded_len
 
-    for item in raw_items:
-        counts["scanned"] += 1
-        if item.malformed or item.native_reference is None:
-            counts["malformed_key"] += 1
-            record_detail(item.fingerprint_sha256, "malformed_key")
-            continue
+    _inventory_batch_size = 250
+    resolved_items: list[tuple[_RawDiscoveredObject, _PayloadRegistryReferences | None]] = []
+    all_aliases: list[str] = []
+    seen_aliases: set[str] = set()
 
+    for item in raw_items:
+        if item.malformed or item.native_reference is None:
+            resolved_items.append((item, None))
+            continue
         try:
             references = _payload_registry_references(item.native_reference, resolved_config)
         except ResultStorageError:
+            resolved_items.append((item, None))
+            continue
+        resolved_items.append((item, references))
+        for alias in references.aliases:
+            if alias not in seen_aliases:
+                seen_aliases.add(alias)
+                all_aliases.append(alias)
+
+    use_batched_lookups = isinstance(TaskInputPayload.objects, models.Manager) and isinstance(
+        RayTaskExecution.objects, models.Manager
+    )
+    payload_rows_by_reference: dict[str, tuple[str, str, str, int]] = {}
+    attached_references: set[str] = set()
+    if use_batched_lookups:
+        for start in range(0, len(all_aliases), _inventory_batch_size):
+            chunk = all_aliases[start : start + _inventory_batch_size]
+            for row in (
+                TaskInputPayload.objects.using(using)
+                .filter(reference__in=chunk)
+                .values_list("reference", "state", "digest", "size_bytes")
+            ):
+                payload_rows_by_reference[str(row[0])] = (
+                    str(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    int(row[3]),
+                )
+
+        unmatched_aliases: list[str] = []
+        seen_unmatched: set[str] = set()
+        for _item, references in resolved_items:
+            if references is None:
+                continue
+            if any(alias in payload_rows_by_reference for alias in references.aliases):
+                continue
+            for alias in references.aliases:
+                if alias not in seen_unmatched:
+                    seen_unmatched.add(alias)
+                    unmatched_aliases.append(alias)
+
+        for start in range(0, len(unmatched_aliases), _inventory_batch_size):
+            chunk = unmatched_aliases[start : start + _inventory_batch_size]
+            for input_ref, request_ref in (
+                RayTaskExecution.objects.using(using)
+                .filter(Q(input_reference__in=chunk) | Q(ray_job_request_reference__in=chunk))
+                .values_list("input_reference", "ray_job_request_reference")
+            ):
+                if isinstance(input_ref, str) and input_ref:
+                    attached_references.add(input_ref)
+                if isinstance(request_ref, str) and request_ref:
+                    attached_references.add(request_ref)
+    else:
+        for _item, references in resolved_items:
+            if references is None:
+                continue
+            matched = False
+            for row in (
+                TaskInputPayload.objects.using(using)
+                .filter(reference__in=references.aliases)
+                .values_list("reference", "state", "digest", "size_bytes")
+            ):
+                payload_rows_by_reference[str(row[0])] = (
+                    str(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    int(row[3]),
+                )
+                matched = True
+            if not matched:
+                if (
+                    RayTaskExecution.objects.using(using)
+                    .filter(
+                        Q(input_reference__in=references.aliases)
+                        | Q(ray_job_request_reference__in=references.aliases)
+                    )
+                    .exists()
+                ):
+                    attached_references.update(references.aliases)
+
+    for item, references in resolved_items:
+        counts["scanned"] += 1
+        if references is None or item.malformed or item.native_reference is None:
             counts["malformed_key"] += 1
             record_detail(item.fingerprint_sha256, "malformed_key")
             continue
 
         discovered_native_references.add(references.canonical)
-        rows = list(
-            TaskInputPayload.objects.using(using)
-            .filter(reference__in=references.aliases)
-            .order_by("reference")
-            .values_list("reference", "state", "digest", "size_bytes")[:2]
-        )
+        rows = [
+            payload_rows_by_reference[alias]
+            for alias in sorted(references.aliases)
+            if alias in payload_rows_by_reference
+        ]
         if len(rows) > 1:
             counts["ambiguous"] += 1
             record_detail(item.fingerprint_sha256, "ambiguous")
@@ -795,15 +818,7 @@ def discover_and_reap_unregistered_payloads(
                 record_detail(item.fingerprint_sha256, "ambiguous")
             continue
 
-        attached = (
-            RayTaskExecution.objects.using(using)
-            .filter(
-                Q(input_reference__in=references.aliases)
-                | Q(ray_job_request_reference__in=references.aliases)
-            )
-            .exists()
-        )
-        if attached:
+        if any(alias in attached_references for alias in references.aliases):
             counts["ambiguous"] += 1
             record_detail(item.fingerprint_sha256, "ambiguous")
             continue

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -47,16 +50,34 @@ def _async_execution_request(pk, callable_path, args, transport="direct-ray-core
     )
 
 
-async def _async_job_context_probe():
-    """Assert context inside the rq2 Job without printing its return value."""
-    from django_ray.runtime.context import get_current_task_context, get_current_task_execution_pk
-
-    for _ in range(2):
-        context = get_current_task_context()
-        assert context is not None and context.ray_job_driver is True
-        assert get_current_task_execution_pk() == 4245
-        await asyncio.sleep(0)
-    return 42
+def _prepare_migrated_sqlite_db(db_path: Path, python_path: str) -> Path:
+    """Create and migrate a disposable SQLite database for Ray Job subprocesses."""
+    env = {
+        **os.environ,
+        "DJANGO_SETTINGS_MODULE": "testproject.settings",
+        "DATABASE_ENGINE": "django.db.backends.sqlite3",
+        "DATABASE_NAME": str(db_path),
+        "PYTHONPATH": python_path,
+    }
+    subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "testproject" / "manage.py"),
+            "migrate",
+            "--no-input",
+            "--verbosity",
+            "0",
+        ],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    with contextlib.closing(sqlite3.connect(db_path)) as sqlite_conn:
+        sqlite_conn.execute("PRAGMA journal_mode=WAL")
+        sqlite_conn.execute("PRAGMA busy_timeout=30000")
+    return db_path
 
 
 def _ray_worker_execution_metadata_probe() -> dict[str, object]:
@@ -184,11 +205,12 @@ class TestEntrypointExecution:
             await asyncio.sleep(0)
             raise asyncio.CancelledError
 
-        monkeypatch.setattr(import_utils, "import_callable", lambda _path: cancelled_parent)
+        monkeypatch.setattr(import_utils, "resolve_task_callable", lambda _path: cancelled_parent)
 
-        with pytest.raises(asyncio.CancelledError):
-            execute_task("testproject.tasks.cancelled_parent", "[]", "{}")
+        result = json.loads(execute_task("testproject.tasks.cancelled_parent", "[]", "{}"))
 
+        assert result["success"] is False
+        assert result["exception_type"] == "asyncio.exceptions.CancelledError"
         assert events == ["child-started", "child-cleaned"]
         with pytest.raises(RuntimeError, match="no running event loop"):
             asyncio.get_running_loop()
@@ -706,7 +728,7 @@ class TestRayRemoteExecution:
         callable_path, args = {
             "success": ("testproject.tasks.async_add_numbers", "[20, 22]"),
             "failure": ("testproject.tasks.async_failing_task", "[]"),
-            "context": ("tests.integration.test_task_execution._async_job_context_probe", "[]"),
+            "context": ("testproject.tasks._async_job_context_probe", "[]"),
         }[outcome]
         request = _async_execution_request(4245, callable_path, args, "ray-job")
         request = replace(
@@ -729,7 +751,25 @@ class TestRayRemoteExecution:
             )
             if path
         )
-        client = JobSubmissionClient("http://127.0.0.1:8265")
+        address_info = getattr(
+            getattr(getattr(ray, "_private", None), "worker", None),
+            "global_worker",
+            None,
+        )
+        node = getattr(address_info, "node", None)
+        info = getattr(node, "address_info", None)
+        webui_url = info.get("webui_url") if isinstance(info, dict) else None
+        if isinstance(webui_url, str) and webui_url.strip():
+            dashboard_url = webui_url.strip().rstrip("/")
+            if "://" not in dashboard_url:
+                dashboard_url = f"http://{dashboard_url}"
+        else:
+            dashboard_url = "http://127.0.0.1:8265"
+        migrated_db = _prepare_migrated_sqlite_db(
+            tmp_path / f"ray_job_async_{outcome}.sqlite3",
+            python_path,
+        )
+        client = JobSubmissionClient(dashboard_url)
         job_id = client.submit_job(
             submission_id=(
                 f"{STRICT_RAY_JOB_REQUEST_REFERENCE_SUBMISSION_ID_PREFIX}"
@@ -745,6 +785,8 @@ class TestRayRemoteExecution:
             runtime_env={
                 "env_vars": {
                     "DJANGO_SETTINGS_MODULE": "testproject.settings",
+                    "DATABASE_ENGINE": "django.db.backends.sqlite3",
+                    "DATABASE_NAME": str(migrated_db),
                     "PYTHONPATH": python_path,
                 }
             },

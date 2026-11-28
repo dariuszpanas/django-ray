@@ -3,10 +3,14 @@
 The pytest suite is classified by the resources and isolation each case requires. The checked-in
 [manifest](https://github.com/dariuszpanas/django-ray/blob/main/.github/test-suite-taxonomy.json)
 is the shared selection contract for source-fenced serial inventory evidence. Its current callers
-are the blocking Python 3.12 `supported-python` job, `make test-suite-inventory`, and deliberate
-serial resource-lane observations. It does not schedule ordinary pytest runs, control `test-xdist`,
-or define marker-derived CI shards. Directory names still describe test intent, but they do not
-determine whether a case can run concurrently.
+are the collection-only `Validate suite taxonomy inventory` step in the blocking
+`Testproject & Tooling` job (`scripts/test_suite_inventory.py collect`), `make test-suite-inventory`,
+and deliberate local serial resource-lane observations. Ordinary CI test execution in the blocking
+`Test (Python 3.12–3.14)` jobs runs portable tests directly through `pyrn` and required `real_ray`
+tests through `scripts/observe_pytest_exit.py` rather than the retired manifest runner. The manifest
+does not schedule ordinary pytest runs, control `test-xdist`, or define marker-derived CI shards.
+Directory names still describe test intent, but they do not determine whether a case can run
+concurrently.
 
 The dated generated [baseline](../investigations/test-suite-baseline-2026-07-22.md) records exact
 counts, large files and parameterized families, fixture usage, CI repetition, and candidate overlap
@@ -186,18 +190,23 @@ Two Linux GitHub Actions observations show why queue delay must not be attribute
 | [PR #163 during the hosted-runner incident](https://github.com/dariuszpanas/django-ray/actions/runs/29960404522) | 301 s | 11 s | 248 s | 2 s |
 
 Those older Actions observations deliberately preserve their coarse step boundary instead of
-inventing unavailable precision. The blocking Python 3.12 job now uses the manifest runner, validates
-its source digest, selected count, completed outcomes, pytest status, and skip policy, then uploads
-any emitted timing diagnostics when the test step fails. Queue and environment setup remain unset
-in that JSON because Actions metadata owns those intervals. The dated baseline records source-fenced
-local observations and merges hosted Linux observations from exact-branch CI artifacts when
-available. The absence of a hosted record explicitly means that evidence is pending. Merging it does
-not change the source digest because dated baseline files are excluded from it.
+inventing unavailable precision. The blocking Python 3.12–3.14 `Test` jobs execute portable tests
+through `pyrn` and required `real_ray` tests through `scripts/observe_pytest_exit.py` rather than
+running tests through the retired manifest runner. The blocking `Testproject & Tooling` job runs
+collection-only `scripts/test_suite_inventory.py collect` to validate the checked-in taxonomy and
+uploads the resulting `test-suite-inventory-python-3.12` artifact. `scripts/test_suite_inventory.py
+run` remains available for deliberate local serial timing baselines; queue and environment setup
+remain unset unless measured externally. The dated baseline records source-fenced local observations
+and merges hosted Linux observations from exact-branch CI artifacts when available. The absence of a
+hosted record explicitly means that evidence is pending. Merging it does not change the source
+digest because dated baseline files are excluded from it.
 
 The estimated CI total is selected pytest case slots multiplied by current lane variants. Selected
 cases may later skip, so it is not labeled completed execution. The JavaScript subtests launched
-from the bundled API suite are real gate work, but they are outside that selected-slot count rather
-than disguised as additional pytest cases. Public CI does not run native Compiled Graph probes.
+from the bundled API suite and from `tests/unit/test_admin_live_polling.py`
+(`tests/javascript/task_live.test.mjs`) are real gate work, but they are outside that selected-slot
+count rather than disguised as additional pytest cases. Public CI does not run native Compiled Graph
+probes.
 
 ## Ownership and overlap review
 
@@ -214,8 +223,10 @@ Issue #171 should be split into three focused domain reviews:
 3. share one immutable KubeRay overlay render while retaining separate source-binding and topology
    assertions.
 
-The bundled dashboard's nested Node suite remains a distinct boundary. One pytest case launches
-multiple JavaScript subtests, so collected pytest cases alone understate its repeated CI work.
+The bundled dashboard's nested Node suite and the live Admin task-polling Node contract in
+`tests/unit/test_admin_live_polling.py` (`tests/javascript/task_live.test.mjs`) remain distinct
+boundaries. Each pytest wrapper launches multiple JavaScript subtests, so collected pytest cases
+alone understate their repeated CI work.
 Preparation prototype and production subprocess tests look similar but prove different topologies;
 do not consolidate them without a scheduled benchmark or replacement harness. Commit-policy
 parameter tables are fast and preserve useful failure ownership, so they do not justify a cleanup

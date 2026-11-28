@@ -373,13 +373,14 @@ def test_commit_unknown_retains_resume_boundary_and_survives_rollback_failure(
 
 
 def test_total_byte_budget_prevents_snapshot_hydration(owned_database, monkeypatch):
-    owned_database.add()
+    pk = owned_database.add()
     monkeypatch.setattr(
         maintenance, "_inspect", lambda *args: pytest.fail("snapshot must not be hydrated")
     )
     report = run(limits=maintenance.MaintenanceLimits(total_bytes=10))
-    assert report["processed"] == report["processed_bytes"] == 0
-    assert report["budget_exhausted"] == "total_bytes" and report["next_cursor"]
+    assert report["processed"] == 1 and report["processed_bytes"] == 0
+    assert report["counts"]["row_too_large"] == 1 and report["exit_code"] == 1
+    assert report["after"] == pk and report["next_cursor"] is None
 
 
 def test_output_and_details_remain_bounded(owned_database):
@@ -586,7 +587,8 @@ def test_unsupported_key_configuration_is_refused_before_connecting(
     )
     with pytest.raises(maintenance.MaintenanceError) as error:
         run(config={**configuration(), **changes})
-    assert str(error.value) == "Invalid RuntimeEnv maintenance encryption configuration."
+    assert str(error.value).startswith("Invalid RuntimeEnv maintenance encryption configuration:")
+    assert _SECRET not in str(error.value) and "private" not in str(error.value)
     assert owned_database.read(pk) == before
 
 
@@ -619,7 +621,8 @@ def test_unsupported_database_configuration_never_opens_a_connection(
     )
     with pytest.raises(maintenance.MaintenanceError) as error:
         run()
-    assert str(error.value) == "Unsupported RuntimeEnv maintenance database."
+    assert str(error.value).startswith("Unsupported RuntimeEnv maintenance database:")
+    assert _SECRET not in str(error.value) and "private" not in str(error.value)
     assert owned_database.read(pk) == before
 
 
@@ -627,7 +630,7 @@ def test_unsupported_database_configuration_never_opens_a_connection(
 def test_invalid_database_alias_is_a_fixed_refusal(using):
     with pytest.raises(maintenance.MaintenanceError) as error:
         maintenance.maintain_runtime_env(using=using, config=configuration())
-    assert str(error.value) == "Unsupported RuntimeEnv maintenance database."
+    assert str(error.value).startswith("Unsupported RuntimeEnv maintenance database:")
 
 
 @pytest.mark.parametrize("directory", [False, True])
@@ -812,14 +815,36 @@ def test_expired_budget_before_connecting_reports_no_known_range(owned_database,
 
 
 def test_total_bytes_reserves_encryption_work_before_mutation(owned_database):
-    pk = owned_database.add()
-    before = owned_database.read(pk)
-    read_size = run(mode="check")["processed_bytes"]
-    report = run(limits=maintenance.MaintenanceLimits(total_bytes=read_size + 1))
-    assert report["budget_exhausted"] == "total_bytes" and report["exit_code"] == 2
-    assert report["processed_bytes"] == read_size and report["processed"] == report["after"] == 0
-    assert owned_database.read(pk) == before
-    assert run(cursor=report["next_cursor"])["counts"]["rewritten"] == 1
+    first = owned_database.add()
+    second = owned_database.add()
+    third = owned_database.add()
+    before_first = owned_database.read(first)
+    before_third = owned_database.read(third)
+    single_check = run(mode="check", limits=maintenance.MaintenanceLimits(rows=1))
+    read_size = single_check["processed_bytes"]
+    # First row alone with a budget too tight for encryption estimate is marked
+    # row_too_large without mutating the row or emitting an infinite cursor.
+    single_tight = run(limits=maintenance.MaintenanceLimits(rows=1, total_bytes=read_size + 1))
+    assert single_tight["counts"]["row_too_large"] == 1 and single_tight["exit_code"] == 1
+    assert single_tight["after"] == first
+    assert owned_database.read(first) == before_first
+    # When earlier rows succeed and a later row's encryption reserve exceeds remaining
+    # budget, the batch pauses cleanly with a strictly advancing cursor.
+    one_rewrite = run(limits=maintenance.MaintenanceLimits(rows=1))
+    assert one_rewrite["counts"]["rewritten"] == 1
+    row_budget = one_rewrite["processed_bytes"]
+    reserve_estimate = (len(before_third["runtime_env_json"].encode()) + 16) * 4 // 3 + 512
+    paused = run(
+        cursor=one_rewrite["next_cursor"],
+        limits=maintenance.MaintenanceLimits(
+            total_bytes=row_budget + read_size + reserve_estimate - 1
+        ),
+    )
+    assert paused["counts"]["rewritten"] == 1 and paused["after"] == second
+    assert paused["budget_exhausted"] == "total_bytes" and paused["exit_code"] == 2
+    assert paused["next_cursor"] is not None
+    assert owned_database.read(third) == before_third
+    assert run(cursor=paused["next_cursor"])["counts"]["rewritten"] == 1
 
 
 def test_envelope_expansion_cannot_exceed_snapshot_cap(owned_database):

@@ -31,7 +31,7 @@ tuple returns `CANDIDATE_REQUIRES_SMOKE`.
 
 Those hosted observations are historical provenance. Repository-managed public
 workflows no longer invoke native Compiled Graph APIs; current native validation is
-performed only through the guarded local KubeRay pilot owned by issue #102. Ordinary
+performed only through the guarded local KubeRay pilot. Ordinary
 CI still covers the default-off decision policy, probe parsing and containment, and
 the pilot evidence validator without enabling native execution.
 
@@ -55,7 +55,7 @@ The general django-ray dependency is `ray[default]>=2.60.0`. That broader range
 does not imply Compiled Graph eligibility. Ray 2.60 is not a native candidate or a
 verified capability. The retained policy-v4 candidates and pinned pilot below are
 historical investigation tools, not supported current-package installation targets.
-The package-floor update neither re-runs nor promotes their evidence. Issue #154's
+The package-floor update neither re-runs nor promotes their evidence. The native
 reclamation boundary still needs a fix-containing build and independent qualification.
 
 Ray 2.53.0 remains named only in the retained 2026-07-19 and 2026-07-20
@@ -65,7 +65,7 @@ does not make it eligible for a future capability promotion.
 
 ### Pinned Linux/KubeRay pilot profile
 
-Issue #102 defines one promotion-grade evidence profile named
+The promotion-grade evidence profile is named
 `django-ray-cgraph-kuberay-cpu-v1`. It is intentionally narrower than ordinary
 django-ray support:
 
@@ -349,7 +349,7 @@ This retained record is explicitly incomplete: the original Windows pass did not
 raw stdout/stderr, an exact dependency inventory, or the policy-v2 Python ABI, libc,
 specific container, immutable deployment/image, shared-memory, and object-store
 profiles. It cannot support a Windows capability promotion or an upstream report by
-itself. [Issue #100 was closed as not planned](https://github.com/dariuszpanas/django-ray/issues/100#issuecomment-5130506246)
+itself. Windows Compiled Graph support was closed as not planned
 under the current supported-product boundary. The reproducer and draft remain historical
 references; no fresh Windows or nightly investigation is scheduled. Reopen that work
 only if Windows Compiled Graph support becomes an explicit project target or an upstream
@@ -359,8 +359,8 @@ closure promotes no capability. Guarded Linux/KubeRay work does not depend on th
 No nightly wheel was run. Nightly wheel URLs and ABIs rotate, while this pass was
 designed to classify the three exact published candidates. A nightly result would be
 a separate tuple: it would neither verify these releases nor safely widen the policy.
-This is not evidence that nightly passes or fails. If issue #100 tests a nightly, its
-record must name the resolved wheel identity rather than treating it as a release
+This is not evidence that nightly passes or fails. Any future nightly evaluation
+must name the resolved wheel identity rather than treating it as a release
 neighbor; a nightly run is not a Linux/Kubernetes merge gate.
 
 ### Reviewed Linux promotion decision
@@ -391,7 +391,7 @@ it. The earlier policy-v2 and policy-v3 reviews remain immutable historical prov
 GitHub expires these candidate artifacts on 2026-10-18. Expiry does not invalidate the
 safe no-promotion decision: an unavailable discovery artifact cannot make an empty
 verified set less fail-closed. It does mean the evidence must be collected again before
-any later promotion. Issue #102 owns a pinned Linux/KubeRay pilot with all four explicit
+any later promotion under a pinned Linux/KubeRay pilot with all four explicit
 policy profiles and immutable image identity.
 
 ### Retained Linux/KubeRay blocker evidence
@@ -414,10 +414,9 @@ mutable-object semaphore pairs, with no unpaired or unrelated shared-memory entr
 The selector-bound pilot namespace was subsequently proven absent, and no unrelated
 namespace was touched.
 
-This is candidate-native failure evidence for the reclamation blocker tracked in
-[issue #154](https://github.com/dariuszpanas/django-ray/issues/154). It does not satisfy
-issue #102, make product execution eligible, trigger a capability-promotion review, or
-add a verified capability row.
+This is candidate-native failure evidence for the residual-resource reclamation blocker.
+It does not satisfy promotion-grade pilot criteria, make product execution eligible,
+trigger a capability-promotion review, or add a verified capability row.
 
 ## Evidence promotion and maintenance
 
@@ -444,12 +443,12 @@ following evidence:
    quarantine policy before a reviewer adds only the passing exact capability tuple to
    the verified set. No row may inherit an image, deployment, shared-memory, or
    object-store profile from a near neighbor. Changes to compatibility meaning bump the
-   policy version. Issue #99 completed the first review with `no_promotion`; issue #102
-   owns the missing promotion-grade KubeRay evidence.
+   policy version. The initial capability review concluded with `no_promotion`; promotion
+   remains blocked on passing pinned Linux/KubeRay evidence.
 
 Public CI exercises only the hermetic policy, guard, parsing, containment, lifecycle,
 and evidence-validation contracts. Native candidate execution is an explicit guarded
-local KubeRay action under issue #102. An unknown stable, upstream, or nightly build
+local KubeRay action. An unknown stable, upstream, or nightly build
 requires a separately reviewed immutable local profile; a future self-hosted or EKS
 path likewise requires its own issue and may not inherit support from generic hosted
 runner observations.

@@ -263,7 +263,10 @@ class TestExecutionsAPI:
         response = client.get("/api/executions", {filter_name: "NUL_CANARY\x00"})
 
         assert response.status_code == 422
-        assert response.json() == {"detail": "Invalid execution-list filter."}
+        assert response.json() == {
+            "code": "INVALID_FILTER",
+            "message": "Invalid execution-list filter.",
+        }
         assert b"NUL_CANARY" not in response.content
 
     def test_list_executions_preserves_unicode_historical_filters(self, client) -> None:
@@ -1713,7 +1716,10 @@ class TestExecutionsAPI:
         response = client.post(f"/api/executions/{task.pk}/retry")
 
         assert response.status_code == 409
-        assert response.json() == {"detail": "Persisted RuntimeEnv snapshot failed validation"}
+        assert response.json() == {
+            "code": "RUNTIME_ENV_INVALID",
+            "message": "Persisted RuntimeEnv snapshot failed validation.",
+        }
         assert "arbitrary-customer-marker-7cf3" not in response.content.decode()
         task.refresh_from_db()
         assert task.state == TaskState.FAILED

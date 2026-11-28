@@ -461,6 +461,8 @@ testproject bearer-protected `/api/metrics` endpoint demonstrates an application
 
 ## Live Django Admin Updates
 
+![django-ray Django Admin live task status and workflow DAG](assets/images/admin-workflow-dag.png)
+
 The package admin task detail page polls a staff-only, object-permission-checked endpoint
 for durable task state and workflow progress. Polling uses ordinary same-origin GET
 requests, pauses while the tab is hidden, and stops when the task reaches a terminal
@@ -591,30 +593,82 @@ backends independently. Never expose live log access by default.
 
 ## Tracing Helpers and Integration Boundary
 
-`django_ray.tracing` provides manually invoked tracing primitives
-(`TaskTracingCoordinator`, `TraceContextEnvelope`, `AttemptAuthorityToken`).
-Applications must supply a `TracerProtocol` adapter, propagate context, and call
-the helpers at the relevant lifecycle boundaries. Automatic instrumentation of
-enqueue, worker claim, Ray submission and execution, workflow execution, retry
-reconciliation, and terminal persistence remains pending. The package includes
-no built-in OpenTelemetry adapter or exporter configuration; installing an
-OpenTelemetry exporter does not connect these helpers to task execution.
+`django_ray.tracing` provides opt-in lifecycle tracing wired into task enqueue,
+worker execution start, and terminal persistence via `emit_task_lifecycle_span()`,
+alongside lower-level coordination primitives (`TaskTracingCoordinator`,
+`TraceContextEnvelope`, `AttemptAuthorityToken`, and `OpenTelemetryTracer`).
 
-The helpers use the standard library, while the package's runtime dependencies
-already include `opentelemetry-api`. Their current unit-tested behavior covers:
+Core `django-ray` pins `opentelemetry-api>=1.45.1` solely as a transitive dependency
+security floor for `ray[default]>=2.60.0` (which bundles OpenTelemetry instrumentation).
+Install the optional `django-ray[otel]` extra (`opentelemetry-sdk>=1.45.1`) to export
+spans with your application's configured OpenTelemetry `TracerProvider`:
 
+```bash
+pip install "django-ray[otel]"
+```
+
+Enable lifecycle tracing explicitly in `DJANGO_RAY` (tracing is off by default):
+
+```python
+# settings.py
+DJANGO_RAY = {
+    "RAY_ADDRESS": "auto",
+    "TRACING_ENABLED": True,
+    "TRACING_SAMPLE_RATE": 1.0,  # 0.0 to 1.0 (default: 1.0)
+    "TRACING_MAX_WORKFLOW_NODE_SPANS": 100,  # Cap child workflow node spans (default: 100)
+}
+```
+
+Configure your application's OpenTelemetry `TracerProvider` (or register a custom
+`TracerProtocol` adapter via `django_ray.tracing.configure_task_tracing(...)`).
+`django_ray.tracing` imports only the standard library at import time: its built-in
+`OpenTelemetryTracer` lazily imports `opentelemetry.trace` and degrades to a strict
+no-op when OpenTelemetry is unconfigured or absent.
+
+### W3C Trace Context Propagation & Guarantees
+
+- **W3C `traceparent` / `tracestate` correlation**: `TraceContextEnvelope` strictly
+  validates W3C `traceparent` headers and bounded `tracestate` values (at most 512 bytes
+  and 32 members). In 0.8.x, lifecycle trace carriers are correlated **in-process** (plus
+  any caller-provided `execution.trace_context`): `--sync` and single-process runs link
+  `django_ray.task.enqueue`, `django_ray.task.remote_execute`, and
+  `django_ray.task.terminal_persist` under one trace, and a standalone worker links its
+  own `django_ray.task.remote_execute` (`started`) and `django_ray.task.terminal_persist`
+  (`finished`) spans within the same worker process. Persisted database trace-carrier
+  propagation across separate web-producer and worker OS processes is a post-0.8 boundary.
 - **Redaction and cardinality bounds**: The attribute allowlist excludes task
   arguments, results, serialized payloads, `RuntimeEnv` contents, credentials,
-  raw error messages, and tracebacks from helper-emitted spans.
+  raw error messages, and tracebacks from emitted spans.
 - **Stale-attempt fencing**: `record_terminal_persist()` compares caller-supplied
-  authority tokens and lease ownership before emitting a terminal span. The
-  caller is responsible for obtaining the current database authority.
+  authority tokens and lease ownership before emitting a terminal span.
 - **Bounded workflow fan-out**: Each `trace_workflow_execution()` call caps child
-  node spans at `max_workflow_node_spans_per_run` (default 32). It immediately
-  ends the generated spans; it does not measure actual node execution durations.
+  node spans at `TRACING_MAX_WORKFLOW_NODE_SPANS` (default `100`, ceiling `256`) and
+  ends them immediately without retaining unbounded span state.
 - **Tracer failure isolation**: Exceptions while starting, updating, or ending
-  spans are caught by the helper. Runtime integration and distributed propagation
-  still need their own qualification.
+  spans are caught so exporter or instrumentation errors never disrupt task
+  execution or durable persistence.
+
+## Structured Logging, Signals, and Error Tracking
+
+- **Structured logging (`django_ray.logging`)**: `get_logger()` returns a
+  `StructuredLogAdapter` that accepts both `extra={...}` mappings and call-time
+  keyword arguments (for example, `logger.info("Claimed", task_id=task.pk)`),
+  redacts sensitive values once before formatting, and prefixes reserved
+  `LogRecord` keys as `ray_<key>`. `configure_default_logging()` installs a
+  fallback `StreamHandler` only when neither `django_ray` nor the root logger
+  already has handlers and preserves `propagate = True` by default so your
+  project's Django `LOGGING` configuration (JSON formatters, structlog, Datadog,
+  or Sentry) receives records unchanged. Pass `preserve_exc_info=True` to
+  `get_logger()` when a downstream error-tracking handler needs normalized
+  `exc_info` tuples in addition to redacted exception summaries.
+- **Lifecycle signals (`django.tasks.signals`)**: Connect receivers to
+  `task_enqueued` (fired via `transaction.on_commit`), `task_started`, and
+  `task_finished` to integrate Sentry breadcrumbs, custom metrics, or audit
+  hooks without monkey-patching worker internals.
+- **Bounded Prometheus queries (`django_ray.metrics`)**: Queue and state gauges
+  use bounded TTL caching (`METRICS_CACHE_TTL_SECONDS`, default `5.0` seconds; set `0.0`
+  to disable) and targeted indexed queries so frequent scrapes do not trigger repeated
+  full-table scans on large execution tables.
 
 ## See Also
 

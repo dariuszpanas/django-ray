@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -255,6 +255,32 @@ def _valid_protocol_policy(*, using: str, legacy_open: bool | None = None) -> Qu
     return policy
 
 
+def _lease_freshness_predicates(
+    *,
+    observed_at: datetime | None,
+    duration: timedelta,
+) -> tuple[Q, Q]:
+    """Return ``(live_q, stale_q)`` using DB-clock ``Now()`` unless observed_at is pinned."""
+    from django_ray.runner.leasing import expired_lease_q, live_lease_freshness_q
+
+    if observed_at is None:
+        return live_lease_freshness_q(duration), expired_lease_q(duration)
+    observed = _utc_datetime(observed_at)
+    cutoff = observed - duration
+    live_q = Q(
+        lease_expires_at__isnull=False,
+        lease_expires_at__gte=observed,
+        last_heartbeat_at__gte=cutoff,
+    ) | Q(
+        lease_expires_at__isnull=True,
+        last_heartbeat_at__gte=cutoff,
+    )
+    stale_q = Q(lease_expires_at__isnull=False, lease_expires_at__lt=observed) | Q(
+        last_heartbeat_at__lt=cutoff
+    )
+    return live_q, stale_q
+
+
 def annotate_execution_protocol_availability(
     queryset: QuerySet,
     *,
@@ -267,53 +293,80 @@ def annotate_execution_protocol_availability(
     recognized shape. Package versions and informational worker queues do not
     participate in this compatibility decision.
     """
-    from django.db.models import BooleanField, Case, When
+    from django.db.models import BooleanField, Case, IntegerField, When
 
     from django_ray.lease_policy import policy_rows
 
-    observed = _utc_datetime(observed_at or datetime.now(UTC))
-    cutoff = observed - get_lease_duration()
     using = queryset.db
-
-    valid_policy = _valid_protocol_policy(using=using)
-    invalid_lease = TaskWorkerLease.objects.using(using).exclude(_valid_worker_lease_shape())
-    explicit_capacity = Q(
-        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
-        legacy_admission_token__isnull=True,
-        min_supported_execution_protocol_version__isnull=False,
-        max_supported_execution_protocol_version__isnull=False,
-        min_supported_execution_protocol_version__gte=1,
-        max_supported_execution_protocol_version__gte=F("min_supported_execution_protocol_version"),
-        min_supported_execution_protocol_version__lte=OuterRef("execution_protocol_version"),
-    ) & Q(max_supported_execution_protocol_version__gte=OuterRef("execution_protocol_version"))
-    legacy_capacity = Q(
-        capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
-        django_ray_version__isnull=True,
-        min_supported_execution_protocol_version__isnull=True,
-        max_supported_execution_protocol_version__isnull=True,
-        legacy_admission_token_id=_LEGACY_TOKEN_KEY,
-        _legacy_admission_open=True,
-        _legacy_execution_protocol=OuterRef("execution_protocol_version"),
+    live_q, _stale_q = _lease_freshness_predicates(
+        observed_at=observed_at,
+        duration=get_lease_duration(),
     )
-    live_capacity = (
-        TaskWorkerLease.objects.using(using)
-        .filter(is_active=True, last_heartbeat_at__gte=cutoff)
-        .alias(
-            _policy_valid=Exists(valid_policy),
-            _lease_shapes_valid=~Exists(invalid_lease),
-            _legacy_admission_open=Exists(_valid_protocol_policy(using=using, legacy_open=True)),
-            _legacy_execution_protocol=Value(LEGACY_EXECUTION_PROTOCOL_VERSION),
+
+    tokens = LegacyWorkerAdmissionToken.objects.using(using)
+    policies = TaskExecutionProtocolPolicy.objects.using(using)
+    valid_singleton_policy = policies.filter(
+        singleton_key=_POLICY_KEY,
+        schema_version=PROTOCOL_POLICY_SCHEMA_VERSION,
+        active_write_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION,
+        revision__gte=1,
+        revision__lte=_MAX_POLICY_REVISION,
+        legacy_worker_admission_enabled=Exists(tokens.filter(singleton_key=_LEGACY_TOKEN_KEY)),
+    )
+    unexpected_policy_or_token = Q(
+        Exists(policies.exclude(singleton_key=_POLICY_KEY))
+        | Exists(tokens.exclude(singleton_key=_LEGACY_TOKEN_KEY))
+    )
+    invalid_lease = TaskWorkerLease.objects.using(using).exclude(_valid_worker_lease_shape())
+    live_leases = TaskWorkerLease.objects.using(using).filter(Q(is_active=True) & live_q)
+    # Cluster-wide guards live at the top level so PostgreSQL evaluates them
+    # once per statement as uncorrelated InitPlans. Legacy and explicit live
+    # capacity share one EXISTS scan of TaskWorkerLease; under
+    # valid_singleton_policy, joining legacy_admission_token proves legacy
+    # admission is open without an extra policy EXISTS subquery.
+    live_compatible_lease = live_leases.annotate(
+        _legacy_protocol=Value(LEGACY_EXECUTION_PROTOCOL_VERSION, output_field=IntegerField()),
+    ).filter(
+        Q(
+            _legacy_protocol=OuterRef("execution_protocol_version"),
+            capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
+            django_ray_version__isnull=True,
+            min_supported_execution_protocol_version__isnull=True,
+            max_supported_execution_protocol_version__isnull=True,
+            legacy_admission_token__singleton_key=_LEGACY_TOKEN_KEY,
         )
-        .filter(_lease_shapes_valid=True, _policy_valid=True)
-        .filter(explicit_capacity | legacy_capacity)
+        | (
+            Q(
+                capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
+                legacy_admission_token__isnull=True,
+                min_supported_execution_protocol_version__isnull=False,
+                max_supported_execution_protocol_version__isnull=False,
+                min_supported_execution_protocol_version__gte=1,
+                max_supported_execution_protocol_version__gte=F(
+                    "min_supported_execution_protocol_version"
+                ),
+                min_supported_execution_protocol_version__lte=OuterRef(
+                    "execution_protocol_version"
+                ),
+            )
+            & Q(
+                max_supported_execution_protocol_version__gte=OuterRef("execution_protocol_version")
+            )
+        )
     )
     # Evaluate the policy in the same statement, including for a QuerySet built
     # before an operator transition. Unknown authority is not zero capacity.
     return queryset.annotate(
         **{
             field_name: Case(
-                When(Exists(policy_rows(using=using)), then=Exists(live_capacity)),
-                default=Value(None),
+                When(~Exists(policy_rows(using=using)), then=Value(None)),
+                When(
+                    unexpected_policy_or_token
+                    | ~Exists(valid_singleton_policy)
+                    | Exists(invalid_lease),
+                    then=Value(False),
+                ),
+                default=Exists(live_compatible_lease),
                 output_field=BooleanField(),
             )
         }
@@ -376,18 +429,14 @@ def _validate_lease_shapes(*, using: str) -> None:
         raise ProtocolStatusError("a worker capability advertisement is invalid")
 
 
-def _lease_counts(*, using: str, cutoff: datetime) -> ProtocolLeaseCounts:
+def _lease_counts(*, using: str, live_q: Q, stale_q: Q) -> ProtocolLeaseCounts:
+    live_active = Q(is_active=True) & live_q
+    stale_active = Q(is_active=True) & stale_q
     counts = TaskWorkerLease.objects.using(using).aggregate(
         total=Count("pk"),
         active=Count("pk", filter=Q(is_active=True)),
-        heartbeat_live=Count(
-            "pk",
-            filter=Q(is_active=True, last_heartbeat_at__gte=cutoff),
-        ),
-        stale_active=Count(
-            "pk",
-            filter=Q(is_active=True, last_heartbeat_at__lt=cutoff),
-        ),
+        heartbeat_live=Count("pk", filter=live_active),
+        stale_active=Count("pk", filter=stale_active),
         inactive=Count("pk", filter=Q(is_active=False)),
         active_legacy=Count(
             "pk",
@@ -398,19 +447,13 @@ def _lease_counts(*, using: str, cutoff: datetime) -> ProtocolLeaseCounts:
         ),
         heartbeat_live_legacy=Count(
             "pk",
-            filter=Q(
-                is_active=True,
-                last_heartbeat_at__gte=cutoff,
-                capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
-            ),
+            filter=live_active
+            & Q(capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION),
         ),
         stale_active_legacy=Count(
             "pk",
-            filter=Q(
-                is_active=True,
-                last_heartbeat_at__lt=cutoff,
-                capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION,
-            ),
+            filter=stale_active
+            & Q(capability_schema_version=LEGACY_WORKER_CAPABILITY_SCHEMA_VERSION),
         ),
         active_explicit=Count(
             "pk",
@@ -421,19 +464,11 @@ def _lease_counts(*, using: str, cutoff: datetime) -> ProtocolLeaseCounts:
         ),
         heartbeat_live_explicit=Count(
             "pk",
-            filter=Q(
-                is_active=True,
-                last_heartbeat_at__gte=cutoff,
-                capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
-            ),
+            filter=live_active & Q(capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION),
         ),
         stale_active_explicit=Count(
             "pk",
-            filter=Q(
-                is_active=True,
-                last_heartbeat_at__lt=cutoff,
-                capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
-            ),
+            filter=stale_active & Q(capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION),
         ),
     )
     return ProtocolLeaseCounts(**{key: _safe_int(value) for key, value in counts.items()})
@@ -442,17 +477,21 @@ def _lease_counts(*, using: str, cutoff: datetime) -> ProtocolLeaseCounts:
 def _capability_section(
     *,
     using: str,
-    cutoff: datetime,
+    cutoff: datetime | None = None,
+    live_q: Q | None = None,
     policy: ProtocolPolicyStatus,
     leases: ProtocolLeaseCounts,
 ) -> ProtocolCapabilitySection:
+    freshness_q = live_q if live_q is not None else Q(last_heartbeat_at__gte=cutoff)
     explicit = TaskWorkerLease.objects.using(using).filter(
-        is_active=True,
-        last_heartbeat_at__gte=cutoff,
-        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
-        legacy_admission_token__isnull=True,
-        min_supported_execution_protocol_version__isnull=False,
-        max_supported_execution_protocol_version__isnull=False,
+        Q(
+            is_active=True,
+            capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
+            legacy_admission_token__isnull=True,
+            min_supported_execution_protocol_version__isnull=False,
+            max_supported_execution_protocol_version__isnull=False,
+        )
+        & freshness_q
     )
     explicit_total_groups = (
         explicit.values(
@@ -741,67 +780,87 @@ def _render_protocol_status_text_unchecked(report: ProtocolStatusReport) -> str:
         f"schema={report.schema} schema_version={report.schema_version}",
         f"observed_at={_iso_datetime(report.observed_at)}",
         f"lease_heartbeat_cutoff={_iso_datetime(report.lease_heartbeat_cutoff)}",
+        f"queue_capacity_attested={str(report.queue_capacity_attested).lower()}",
+        "",
+        "[policy]",
         (
-            "policy "
-            f"schema={report.policy.schema_version} "
+            f"  schema={report.policy.schema_version} "
             f"active_write_protocol={report.policy.active_write_protocol_version} "
-            f"legacy_admission={str(report.policy.legacy_worker_admission_enabled).lower()} "
+            f"revision={report.policy.revision}"
+        ),
+        (
+            f"  legacy_admission={str(report.policy.legacy_worker_admission_enabled).lower()} "
             f"token_present={str(report.policy.legacy_admission_token_present).lower()} "
-            f"revision={report.policy.revision} "
             f"updated_at={_iso_datetime(report.policy.updated_at)}"
         ),
+        "",
+        "[leases]",
         (
-            "leases "
-            f"total={report.leases.total} active={report.leases.active} "
+            f"  all: total={report.leases.total} active={report.leases.active} "
             f"heartbeat_live={report.leases.heartbeat_live} "
-            f"stale_active={report.leases.stale_active} inactive={report.leases.inactive} "
-            f"active_legacy={report.leases.active_legacy} "
-            f"heartbeat_live_legacy={report.leases.heartbeat_live_legacy} "
-            f"stale_active_legacy={report.leases.stale_active_legacy} "
-            f"active_explicit={report.leases.active_explicit} "
-            f"heartbeat_live_explicit={report.leases.heartbeat_live_explicit} "
-            f"stale_active_explicit={report.leases.stale_active_explicit}"
+            f"stale_active={report.leases.stale_active} "
+            f"inactive={report.leases.inactive}"
         ),
-        f"queue_capacity_attested={str(report.queue_capacity_attested).lower()}",
+        (
+            f"  legacy: active={report.leases.active_legacy} "
+            f"heartbeat_live={report.leases.heartbeat_live_legacy} "
+            f"stale_active={report.leases.stale_active_legacy}"
+        ),
+        (
+            f"  explicit: active={report.leases.active_explicit} "
+            f"heartbeat_live={report.leases.heartbeat_live_explicit} "
+            f"stale_active={report.leases.stale_active_explicit}"
+        ),
+        "",
+        (
+            "[capabilities] "
+            f"total_groups={report.capabilities.total_groups} "
+            f"total_leases={report.capabilities.total_leases} "
+            f"omitted_groups={report.capabilities.omitted_groups} "
+            f"omitted_leases={report.capabilities.omitted_leases}"
+        ),
     ]
     for group in report.capabilities.groups:
         lines.append(
-            "capability "
-            f"kind={group.kind} minimum={group.minimum} maximum={group.maximum} "
+            f"  kind={group.kind} protocol={group.minimum}..{group.maximum} "
             f"heartbeat_live_leases={group.heartbeat_live_leases}"
         )
-    lines.append(
-        "capabilities "
-        f"total_groups={report.capabilities.total_groups} "
-        f"total_leases={report.capabilities.total_leases} "
-        f"omitted_groups={report.capabilities.omitted_groups} "
-        f"omitted_leases={report.capabilities.omitted_leases}"
-    )
     for section_name, section in (
-        ("nonterminal", report.nonterminal_work),
-        ("unsupported", report.unsupported_work),
+        ("nonterminal_work", report.nonterminal_work),
+        ("unsupported_work", report.unsupported_work),
     ):
+        lines.extend(
+            (
+                "",
+                (
+                    f"[{section_name}] "
+                    f"total_groups={section.total_groups} "
+                    f"total_tasks={section.total_tasks} "
+                    f"omitted_groups={section.omitted_groups} "
+                    f"omitted_tasks={section.omitted_tasks}"
+                ),
+            )
+        )
         for group in section.groups:
             queue = json.dumps(group.queue, ensure_ascii=False)
             lines.append(
-                f"{section_name}_work queue={queue} state={group.state} "
+                f"  queue={queue} state={group.state} "
                 f"protocol={group.execution_protocol_version} count={group.count}"
             )
-        lines.append(
-            f"{section_name}_work_totals total_groups={section.total_groups} "
-            f"total_tasks={section.total_tasks} omitted_groups={section.omitted_groups} "
-            f"omitted_tasks={section.omitted_tasks}"
-        )
     lines.extend(
         (
-            f"legacy_metadata_nonterminal_count={report.legacy_metadata_nonterminal_count}",
-            f"non_v1_nonterminal_count={report.non_v1_nonterminal_count}",
-            (f"no_upgraded_reader_nonterminal_count={report.no_upgraded_reader_nonterminal_count}"),
+            "",
+            "[counters]",
+            f"  legacy_metadata_nonterminal={report.legacy_metadata_nonterminal_count}",
+            f"  non_v1_nonterminal={report.non_v1_nonterminal_count}",
+            f"  no_upgraded_reader_nonterminal={report.no_upgraded_reader_nonterminal_count}",
+            "",
+            f"[blockers] count={len(report.blockers)}",
         )
     )
     for blocker in report.blockers:
         count = "unknown" if blocker.count is None else str(blocker.count)
-        lines.append(f"blocker code={blocker.code.value} scope={blocker.scope} count={count}")
+        lines.append(f"  code={blocker.code.value} scope={blocker.scope} count={count}")
     return "\n".join(lines)
 
 
@@ -888,13 +947,16 @@ def _build_protocol_status_observation(
     using: str,
     observed: datetime,
     cutoff: datetime,
+    live_q: Q,
+    stale_q: Q,
 ) -> ProtocolStatusReport:
     policy = _load_policy(using=using)
     _validate_lease_shapes(using=using)
-    leases = _lease_counts(using=using, cutoff=cutoff)
+    leases = _lease_counts(using=using, live_q=live_q, stale_q=stale_q)
     capabilities = _capability_section(
         using=using,
         cutoff=cutoff,
+        live_q=live_q,
         policy=policy,
         leases=leases,
     )
@@ -914,22 +976,28 @@ def _build_protocol_status_observation(
     non_v1_count = _safe_int(nonterminal_counts["non_v1"])
 
     explicit_capacity = TaskWorkerLease.objects.using(using).filter(
-        is_active=True,
-        last_heartbeat_at__gte=cutoff,
-        capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
-        legacy_admission_token__isnull=True,
-        min_supported_execution_protocol_version__lte=OuterRef("execution_protocol_version"),
-        max_supported_execution_protocol_version__gte=OuterRef("execution_protocol_version"),
+        Q(
+            is_active=True,
+            capability_schema_version=WORKER_CAPABILITY_SCHEMA_VERSION,
+            legacy_admission_token__isnull=True,
+            min_supported_execution_protocol_version__lte=OuterRef("execution_protocol_version"),
+            max_supported_execution_protocol_version__gte=OuterRef("execution_protocol_version"),
+        )
+        & live_q
     )
     no_explicit_capacity = nonterminal.annotate(
         _has_explicit_protocol_capacity=Exists(explicit_capacity)
     ).filter(_has_explicit_protocol_capacity=False)
     no_upgraded_reader_count = no_explicit_capacity.count()
-    unsupported = annotate_execution_protocol_availability(
-        no_explicit_capacity,
-        observed_at=observed,
-        field_name="_protocol_compatible_worker_available",
-    ).filter(_protocol_compatible_worker_available=False)
+    # Policy validity, lease shapes, and live legacy lease counts were already
+    # verified in this REPEATABLE READ snapshot, so avoid re-evaluating nested
+    # cluster-wide availability subqueries per execution row.
+    if policy.legacy_worker_admission_enabled and leases.heartbeat_live_legacy > 0:
+        unsupported = no_explicit_capacity.exclude(
+            execution_protocol_version=LEGACY_EXECUTION_PROTOCOL_VERSION
+        )
+    else:
+        unsupported = no_explicit_capacity
 
     nonterminal_section = _work_section(nonterminal)
     unsupported_section = _work_section(unsupported)
@@ -983,10 +1051,16 @@ def build_protocol_status(
                 with connection.cursor() as cursor:
                     cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             policy = read_lease_policy(using=using)
+            live_q, stale_q = _lease_freshness_predicates(
+                observed_at=observed_at,
+                duration=policy.duration,
+            )
             return _build_protocol_status_observation(
                 using=using,
                 observed=observed,
                 cutoff=observed - policy.duration,
+                live_q=live_q,
+                stale_q=stale_q,
             )
     except LeasePolicyError as error:
         raise ProtocolStatusError(error.reason) from None

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from django.apps import apps as django_apps
@@ -46,7 +46,11 @@ from django_ray.target.attestation import (
 
 MIGRATE_FROM = [("django_ray", "0024_ray_target_routes")]
 MIGRATE_TO = [("django_ray", "0025_ray_worker_target_capabilities")]
-LATEST = [("django_ray", "0028_worker_lease_policy")]
+
+
+def _latest_migrations() -> list[tuple[str, str]]:
+    return MigrationExecutor(connection).loader.graph.leaf_nodes("django_ray")
+
 
 _DIGEST = f"sha256:{'a' * 64}"
 _POSTGRESQL_TRIGGERS = {
@@ -101,9 +105,13 @@ class _RollbackGuardApps:
         )
 
 
-def _create_lease(*, worker_id: str = "target-capability-worker") -> TaskWorkerLease:
+def _create_lease(
+    *,
+    worker_id: str = "target-capability-worker",
+    lease_model: Any = TaskWorkerLease,
+) -> Any:
     now = timezone.now()
-    return TaskWorkerLease.objects.create(
+    return lease_model.objects.create(
         worker_id=worker_id,
         hostname="worker.example",
         pid=1234,
@@ -195,7 +203,7 @@ def _append_policy_attestation(
 
 
 def _create_capability(
-    lease: TaskWorkerLease,
+    lease: Any,
     target: RayTarget,
     policy: RayTargetPolicyRevision,
     attestation: RayTargetAttestationRevision,
@@ -205,7 +213,7 @@ def _create_capability(
 ) -> RayWorkerTargetCapability:
     now = advertised_at or timezone.now()
     return RayWorkerTargetCapability.objects.create(
-        lease=lease,
+        lease_id=lease.pk,
         lease_hostname=lease.hostname,
         lease_pid=lease.pid,
         lease_started_at=lease.started_at,
@@ -1039,7 +1047,7 @@ def _assert_migration_round_trip_and_reverse_guard() -> None:
             == 3
         )
     finally:
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         _clear_capability_tables()
 
 
@@ -1064,11 +1072,12 @@ def _create_held_capability(
     target_id: str,
     writer_inserted: Event,
     release_writer: Event,
+    lease_model: Any = TaskWorkerLease,
 ) -> None:
     close_old_connections()
     try:
         with transaction.atomic():
-            lease = TaskWorkerLease.objects.get(pk=lease_id)
+            lease = lease_model.objects.get(pk=lease_id)
             target = RayTarget.objects.get(pk=target_id)
             policy = RayTargetPolicyRevision.objects.get(target=target)
             attestation = RayTargetAttestationRevision.objects.get(policy=policy)
@@ -1110,8 +1119,15 @@ def test_sqlite_active_capability_writer_cannot_partially_reverse_schema() -> No
     try:
         # Exercise 0025 directly, before active fixtures could trigger the
         # independent latest-schema 0028 rollback refusal.
-        MigrationExecutor(connection).migrate(MIGRATE_TO)
-        lease = _create_lease(worker_id="capacity-concurrent-writer")
+        executor = MigrationExecutor(connection)
+        executor.migrate(MIGRATE_TO)
+        historical_lease_model = executor.loader.project_state(MIGRATE_TO).apps.get_model(
+            "django_ray", "TaskWorkerLease"
+        )
+        lease = _create_lease(
+            worker_id="capacity-concurrent-writer",
+            lease_model=historical_lease_model,
+        )
         target, _policy, _attestation = _create_target_history(
             target_key="capacity-concurrent-writer"
         )
@@ -1124,6 +1140,7 @@ def test_sqlite_active_capability_writer_cannot_partially_reverse_schema() -> No
                 target_id=target.pk,
                 writer_inserted=writer_inserted,
                 release_writer=release_writer,
+                lease_model=historical_lease_model,
             )
             assert writer_inserted.wait(timeout=20)
             reverse = pool.submit(
@@ -1147,7 +1164,7 @@ def test_sqlite_active_capability_writer_cannot_partially_reverse_schema() -> No
         assert _SQLITE_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         _clear_capability_tables()
 
 
@@ -1208,8 +1225,15 @@ def test_postgresql_capability_writer_serializes_before_reverse_guard() -> None:
     try:
         # Isolate 0025's writer/reverse fence before creating active leases;
         # latest-schema rollback must instead refuse them at migration 0028.
-        MigrationExecutor(connection).migrate(MIGRATE_TO)
-        lease = _create_lease(worker_id="capacity-concurrent-writer")
+        executor = MigrationExecutor(connection)
+        executor.migrate(MIGRATE_TO)
+        historical_lease_model = executor.loader.project_state(MIGRATE_TO).apps.get_model(
+            "django_ray", "TaskWorkerLease"
+        )
+        lease = _create_lease(
+            worker_id="capacity-concurrent-writer",
+            lease_model=historical_lease_model,
+        )
         target, _policy, _attestation = _create_target_history(
             target_key="capacity-concurrent-writer"
         )
@@ -1220,6 +1244,7 @@ def test_postgresql_capability_writer_serializes_before_reverse_guard() -> None:
                 target_id=target.pk,
                 writer_inserted=writer_inserted,
                 release_writer=release_writer,
+                lease_model=historical_lease_model,
             )
             assert writer_inserted.wait(timeout=10)
             reverse = pool.submit(
@@ -1243,5 +1268,5 @@ def test_postgresql_capability_writer_serializes_before_reverse_guard() -> None:
         assert _POSTGRESQL_TRIGGERS <= _database_trigger_names()
     finally:
         release_writer.set()
-        MigrationExecutor(connection).migrate(LATEST)
+        MigrationExecutor(connection).migrate(_latest_migrations())
         _clear_capability_tables()

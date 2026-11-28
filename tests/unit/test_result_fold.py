@@ -372,8 +372,9 @@ def test_contiguous_fold_unpickles_accumulator_once_per_batch(
     monkeypatch.setattr(cloudpickle, "loads", counting_loads)
     ack = fold.append(0, 10)
     assert ack["released_credits"] == 4
-    # 1 initial accumulator unpickle + 4 contiguous item unpickles = 5 total calls.
-    assert loads_calls == 5
+    # Live accumulator and in-order item avoid unpickling; only the 3 buffered
+    # out-of-order items are deserialized when draining the contiguous window.
+    assert loads_calls == 3
     value, final_ack = fold.finalize(4)
     assert value == 100
     assert final_ack["folded_items"] == 4
@@ -725,6 +726,26 @@ def test_strict_fold_installs_context_for_later_reducer_and_finalize_calls(
         "runtime_env_hash": "",
         "runtime_env_plan_identity": runtime_identity,
     }
+
+    # Verify out-of-order item deserialization also runs inside the strict context.
+    sum_path = f"{__name__}.sum_items"
+    _, _, sum_request_kwargs = _strict_fold_request(callable_path=sum_path)
+    out_of_order_actor = WorkflowMapResultFold(
+        2,
+        2,
+        4096,
+        sum_path,
+        False,
+        (),
+        {},
+        0,
+        **sum_request_kwargs,
+    )
+    assert out_of_order_actor.append(1, 2)["folded_items"] == 0
+    assert out_of_order_actor.append(0, 1)["folded_items"] == 2
+    sum_result, sum_final = out_of_order_actor.finalize(2)
+    assert sum_result == 3
+    assert validate_result_fold_ack(sum_final, state="finalized", expected_items=2)
     assert observed_unpickle_contexts
     assert all(observed_unpickle_contexts)
 
@@ -744,7 +765,7 @@ def test_strict_fold_reports_fixed_ready_rejection_before_initialization(
         lambda: bootstrapped.append(True),
     )
     monkeypatch.setattr(
-        "django_ray.runtime.result_fold.import_callable",
+        "django_ray.runtime.import_utils.resolve_workflow_callable",
         lambda _path: pytest.fail("reducer imported before strict ready rejection"),
     )
 

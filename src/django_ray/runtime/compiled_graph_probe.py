@@ -1,5 +1,10 @@
 """Subprocess-isolated smoke probe for Ray Compiled Graph.
 
+.. warning::
+   **Experimental quarantined module**: Ray Compiled Graph probing is
+   quarantined as experimental and is not wired into the active
+   ``django-ray`` production runtime.
+
 After timeout validation, the parent evaluates :mod:`django_ray.runtime.compiled_graph`.
 Unsupported combinations return a structured guard result without starting a child.
 Native compilation is only attempted in a disposable subprocess with a hard timeout.
@@ -10,6 +15,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import math
 import os
 import signal
@@ -424,7 +430,7 @@ def _execute_child_request(request: CompiledGraphProbeRequest) -> dict[str, Any]
     }
 
 
-def _run_native_probe(topology: CompiledGraphTopology) -> dict[str, Any]:  # pragma: no cover
+def _run_native_probe(topology: CompiledGraphTopology) -> dict[str, Any]:
     if topology is CompiledGraphTopology.NESTED_RAY_TASK:
         return _run_nested_ray_task_probe()
     if topology in {
@@ -435,15 +441,15 @@ def _run_native_probe(topology: CompiledGraphTopology) -> dict[str, Any]:  # pra
     raise ValueError(f"Native probe does not implement topology {topology.value!r}")
 
 
-def _run_driver_probe(topology: CompiledGraphTopology) -> dict[str, Any]:  # pragma: no cover
+def _run_driver_probe(topology: CompiledGraphTopology) -> dict[str, Any]:
     import ray
 
     started_ray = not ray.is_initialized()
     if started_ray:
         if topology is CompiledGraphTopology.RAY_JOB_DRIVER:
-            ray.init(address="auto", include_dashboard=False, logging_level="ERROR")
+            ray.init(address="auto", include_dashboard=False, logging_level=logging.ERROR)
         else:
-            ray.init(num_cpus=2, include_dashboard=False, logging_level="ERROR")
+            ray.init(num_cpus=2, include_dashboard=False, logging_level=logging.ERROR)
     try:
         return _execute_compiled_graph_once()
     finally:
@@ -451,13 +457,13 @@ def _run_driver_probe(topology: CompiledGraphTopology) -> dict[str, Any]:  # pra
             ray.shutdown()
 
 
-def _run_nested_ray_task_probe() -> dict[str, Any]:  # pragma: no cover
+def _run_nested_ray_task_probe() -> dict[str, Any]:
     import ray
 
     started_ray = not ray.is_initialized()
     if started_ray:
-        ray.init(num_cpus=2, include_dashboard=False, logging_level="ERROR")
-    owner = ray.remote(max_retries=0)(_nested_compiler_owner)
+        ray.init(num_cpus=2, include_dashboard=False, logging_level=logging.ERROR)
+    owner: Any = ray.remote(max_retries=0)(_nested_compiler_owner)
     try:
         return ray.get(owner.remote(), timeout=30)
     finally:
@@ -465,11 +471,11 @@ def _run_nested_ray_task_probe() -> dict[str, Any]:  # pragma: no cover
             ray.shutdown()
 
 
-def _nested_compiler_owner() -> dict[str, Any]:  # pragma: no cover
+def _nested_compiler_owner() -> dict[str, Any]:
     return _execute_compiled_graph_once()
 
 
-def _execute_compiled_graph_once() -> dict[str, Any]:  # pragma: no cover
+def _execute_compiled_graph_once() -> dict[str, Any]:
     import ray
     from ray.dag import InputNode
 
@@ -477,7 +483,7 @@ def _execute_compiled_graph_once() -> dict[str, Any]:  # pragma: no cover
         def echo(self, value: str) -> str:
             return value
 
-    actor = ray.remote(ProbeEchoActor).remote()
+    actor: Any = ray.remote(ProbeEchoActor).remote()
     compiled = None
     try:
         with InputNode() as graph_input:
@@ -632,10 +638,13 @@ def _wait_for_parent_start_gate(
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    killpg = getattr(os, "killpg", None)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if killpg is not None and sigkill is not None:
+        try:
+            killpg(process.pid, sigkill)
+        except (ProcessLookupError, PermissionError):
+            pass
     if process.poll() is None:
         try:
             process.kill()

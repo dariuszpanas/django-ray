@@ -121,6 +121,19 @@ async def async_context_probe(
 
 
 @task
+async def _async_job_context_probe() -> int:
+    """Assert Ray Job driver context across awaits without printing its return value."""
+    from django_ray.runtime.context import get_current_task_context, get_current_task_execution_pk
+
+    for _ in range(2):
+        context = get_current_task_context()
+        assert context is not None and context.ray_job_driver is True
+        assert get_current_task_execution_pk() == 4245
+        await asyncio.sleep(0)
+    return 42
+
+
+@task
 @bounded_sample_task
 async def async_failing_task(*, no_retry: bool = False) -> None:
     """Raise a retryable or denylisted exception from inside a coroutine."""

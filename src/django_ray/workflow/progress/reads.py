@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import math
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -14,7 +15,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core import signing
-from django.db import transaction
+from django.db import connections, transaction
 from django.db.models import BinaryField, Case, Exists, F, OuterRef, Q, TextField, Value, When
 from django.utils.crypto import constant_time_compare, salted_hmac
 
@@ -67,7 +68,7 @@ from django_ray.workflow.progress.summary import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Generator, Mapping
 
 
 WORKFLOW_PROGRESS_READ_SCHEMA_VERSION = 1
@@ -383,7 +384,7 @@ def _effective_v3_summary(
         }
     ):
         availability = WorkflowProgressDetailAvailability.EXPIRED.value
-        public = copy.deepcopy(public)
+        public = dict(public)
         public["detail"] = {
             "availability": availability,
             "complete": False,
@@ -1004,10 +1005,12 @@ def _ensure_readable(context: _SummaryContext) -> bool:
 
 
 def _public_node_detail(value: dict[str, Any]) -> dict[str, Any]:
-    public = copy.deepcopy(value)
+    public = dict(value)
     invocation = public.get("invocation_identity")
     if isinstance(invocation, dict):
-        invocation.pop("task_execution_pk", None)
+        public["invocation_identity"] = {
+            key: item for key, item in invocation.items() if key != "task_execution_pk"
+        }
     return public
 
 
@@ -1017,20 +1020,41 @@ def _bounded_response(
     items: list[dict[str, Any]],
     cursor_for_count: Callable[[int], str | None],
 ) -> dict[str, Any]:
-    selected = list(items)
-    while True:
-        next_cursor = cursor_for_count(len(selected))
-        response = {
+    def build(count: int) -> dict[str, Any]:
+        return {
             **base,
-            "returned_count": len(selected),
-            "items": selected,
-            "next_cursor": next_cursor,
+            "returned_count": count,
+            "items": items[:count],
+            "next_cursor": cursor_for_count(count),
         }
-        if len(_wire_bytes(response)) <= WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES:
-            return response
-        if not selected:
-            _raise(WorkflowProgressReadErrorCode.CORRUPT)
-        selected.pop()
+
+    total = len(items)
+    full_response = build(total)
+    if len(_wire_bytes(full_response)) <= WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES:
+        return full_response
+    if total == 0:
+        _raise(WorkflowProgressReadErrorCode.CORRUPT)
+
+    # Wire byte size is monotonically increasing across counts 1..total-1
+    # (all of which include a fixed-shape continuation cursor), so binary
+    # search finds the largest fitting prefix in O(log K) serializations.
+    low = 1
+    high = total - 1
+    best_response: dict[str, Any] | None = None
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = build(mid)
+        if len(_wire_bytes(candidate)) <= WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES:
+            best_response = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    if best_response is not None:
+        return best_response
+    empty_response = build(0)
+    if len(_wire_bytes(empty_response)) <= WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES:
+        return empty_response
+    _raise(WorkflowProgressReadErrorCode.CORRUPT)
 
 
 def get_workflow_progress_summary(
@@ -1076,23 +1100,48 @@ def get_workflow_progress_summary(
     return response
 
 
-def _locked_context(
+@contextmanager
+def _read_snapshot(*, using: str) -> Generator[None]:
+    """Open a lock-free consistent snapshot transaction for control-plane reads.
+
+    On PostgreSQL outermost transactions, ``REPEATABLE READ, READ ONLY``
+    provides a point-in-time snapshot across execution, manifest, page, and
+    detail reads without acquiring exclusive ``FOR UPDATE`` row locks that
+    would contend with worker heartbeats and progress publications.
+    """
+    conn = connections[using]
+    use_pg_repeatable_read = (
+        conn.vendor == "postgresql" and not conn.in_atomic_block and conn.get_autocommit()
+    )
+    with transaction.atomic(using=using):
+        if use_pg_repeatable_read:
+            with conn.cursor() as cursor:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        yield
+
+
+def _snapshot_context(
     execution: Any,
     *,
     authorize: Callable[[RayTaskExecution], bool],
     attempt_number: int | None,
     generated_at: datetime,
+    include_legacy: bool = False,
+    infer_current_reporting_policy: bool = True,
 ) -> _SummaryContext:
-    fresh = _load_authorized_execution(execution, authorize=authorize, lock=True)
+    fresh = _load_authorized_execution(execution, authorize=authorize, lock=False)
     selected = _selected_attempt(attempt_number, fresh)
     return _summary_context(
         fresh,
         selected_attempt_number=selected,
-        include_legacy=False,
-        infer_current_reporting_policy=True,
+        include_legacy=include_legacy,
+        infer_current_reporting_policy=infer_current_reporting_policy,
         generated_at=generated_at,
         using=_database_for(fresh),
     )
+
+
+_locked_context = _snapshot_context
 
 
 def _manifest_row(context: _SummaryContext, *, using: str) -> dict[str, Any] | None:
@@ -1217,6 +1266,234 @@ def _stable_key_not_after(left: str | list[str], right: Any) -> bool:
     return True
 
 
+def _load_verified_manifest_in_snapshot(
+    context: _SummaryContext,
+    *,
+    using: str,
+) -> tuple[dict[str, Any], Any]:
+    if context.summary is None or context.summary["topology_version"] is None:
+        _raise(WorkflowProgressReadErrorCode.MISSING)
+    summary = context.summary
+    manifest_row = _manifest_row(context, using=using)
+    if manifest_row is None:
+        _raise(WorkflowProgressReadErrorCode.MISSING)
+    try:
+        manifest = verify_workflow_progress_topology_manifest_record(
+            manifest_row,
+            expected_identity=context.identity,
+        )
+    except WorkflowProgressStorageIntegrityError as error:
+        _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
+    summary_reasons = set(summary["detail"]["truncation_reasons"])
+    manifest_reasons = set(manifest.truncation_reasons)
+    try:
+        run_detail_reasons = set(
+            _decode_truncation_reasons(
+                manifest_row["run_storage__detail_truncation_reasons"],
+                stored=True,
+            )
+        )
+    except WorkflowProgressStorageIntegrityError as error:
+        _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
+    expected_summary_reasons = manifest_reasons | run_detail_reasons
+    if workflow_progress_detail_is_last_observed(summary):
+        expected_summary_reasons.add(
+            WorkflowProgressTruncationReason.TERMINAL_STATE_UNREPORTED.value
+        )
+    if (
+        manifest.node_count != summary["node_counts"]["retained_topology"]
+        or manifest.edge_count != summary["edge_counts"]["retained_topology"]
+        or manifest.expected_link_count != len(manifest.page_descriptors)
+        or manifest_row["_unexpected_link"] is not False
+        or not manifest_reasons.issubset(_TOPOLOGY_TRUNCATION_REASONS)
+        or not run_detail_reasons.issubset(_DETAIL_TRUNCATION_REASONS)
+        or expected_summary_reasons != summary_reasons
+        or (
+            summary_reasons
+            and context.availability != WorkflowProgressDetailAvailability.TRUNCATED.value
+        )
+    ):
+        _raise(WorkflowProgressReadErrorCode.CORRUPT)
+    return manifest_row, manifest
+
+
+def _list_topology_in_snapshot(
+    context: _SummaryContext,
+    *,
+    using: str,
+    observed_at: datetime,
+    cursor: str | None,
+    limit: int,
+    public_collection: str,
+    stored_collection: str,
+    order: str,
+    verified_manifest: tuple[dict[str, Any], Any] | None = None,
+) -> dict[str, Any]:
+    applied = _applied_limit(limit)
+    if not _cursor_length_is_valid(cursor):
+        _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
+    decoded_cursor, expired = _decode_cursor(
+        cursor,
+        context=context,
+        collection=public_collection,
+        filters=[],
+        order=order,
+        limit=applied,
+    )
+    if expired:
+        if decoded_cursor is None:
+            _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
+        return _expired_page(
+            context,
+            decoded_cursor,
+            collection=public_collection,
+            generated_at=observed_at,
+        )
+    if (
+        decoded_cursor is not None
+        and context.availability == WorkflowProgressDetailAvailability.EXPIRED.value
+    ):
+        return _expired_page(
+            context,
+            decoded_cursor,
+            collection=public_collection,
+            generated_at=observed_at,
+        )
+    if not _ensure_readable(context):
+        return _empty_page(
+            context,
+            collection=public_collection,
+            generated_at=observed_at,
+        )
+    manifest_row, manifest = (
+        verified_manifest
+        if verified_manifest is not None
+        else _load_verified_manifest_in_snapshot(context, using=using)
+    )
+
+    descriptors = [
+        descriptor
+        for descriptor in manifest.page_descriptors
+        if descriptor["collection"] == stored_collection
+    ]
+    page_index = 0
+    offset = 0
+    prior_seen = 0
+    after: str | list[str] | None = None
+    if decoded_cursor is not None:
+        position = decoded_cursor["position"]
+        after = decoded_cursor["after"]
+        prior_seen = decoded_cursor["seen"]
+        if (
+            not isinstance(position, list)
+            or len(position) != 2
+            or any(type(item) is not int or item < 0 for item in position)
+        ):
+            _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
+        page_index, offset = position
+    if not descriptors:
+        if decoded_cursor is not None:
+            _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
+        return _empty_page(
+            context,
+            collection=public_collection,
+            generated_at=observed_at,
+        )
+    descriptor_by_index = {item["page_index"]: item for item in descriptors}
+    descriptor = descriptor_by_index.get(page_index)
+    if descriptor is None:
+        _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
+    expected_before = (
+        sum(item["item_count"] for item in descriptors if item["page_index"] < page_index) + offset
+    )
+    if prior_seen != expected_before:
+        _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
+    page_row = _topology_page_row(
+        manifest_row["pk"],
+        collection=stored_collection,
+        page_index=page_index,
+        using=using,
+    )
+    if page_row is None:
+        _raise(WorkflowProgressReadErrorCode.MISSING)
+    try:
+        records = list(
+            verify_workflow_progress_topology_page_record(
+                page_row,
+                descriptor=descriptor,
+                expected_run_storage_id=manifest_row["run_storage_id"],
+            )
+        )
+    except WorkflowProgressStorageIntegrityError as error:
+        _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
+    if offset > len(records):
+        _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
+    if offset and _topology_stable_key(public_collection, records[offset - 1]) != after:
+        _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
+    if (
+        decoded_cursor is not None
+        and offset == 0
+        and records
+        and _stable_key_not_after(
+            _topology_stable_key(public_collection, records[0]),
+            after,
+        )
+    ):
+        _raise(WorkflowProgressReadErrorCode.CORRUPT)
+    candidates: list[dict[str, Any]] = []
+    decoded_bytes = 0
+    for item in records[offset : offset + applied]:
+        item_bytes = len(_canonical_bytes(item))
+        if decoded_bytes + item_bytes > WORKFLOW_PROGRESS_READ_MAX_DECODED_RECORD_BYTES:
+            if not candidates:
+                _raise(WorkflowProgressReadErrorCode.CORRUPT)
+            break
+        candidates.append(item)
+        decoded_bytes += item_bytes
+    later_page_indexes = sorted(index for index in descriptor_by_index if index > page_index)
+    has_later_page = bool(later_page_indexes)
+    next_page_index = later_page_indexes[0] if later_page_indexes else None
+    expected_total = sum(item["item_count"] for item in descriptors)
+
+    base = {
+        **_common_envelope(
+            context,
+            schema="workflow-progress-page",
+            generated_at=observed_at,
+        ),
+        "collection": public_collection,
+    }
+
+    def cursor_for_count(count: int) -> str | None:
+        next_offset = offset + count
+        more_here = next_offset < len(records)
+        emitted = prior_seen + count
+        if not more_here and not has_later_page:
+            if emitted < expected_total:
+                _raise(WorkflowProgressReadErrorCode.MISSING)
+            if emitted > expected_total:
+                _raise(WorkflowProgressReadErrorCode.CORRUPT)
+            return None
+        if count <= 0:
+            _raise(WorkflowProgressReadErrorCode.CORRUPT)
+        if emitted >= expected_total:
+            _raise(WorkflowProgressReadErrorCode.CORRUPT)
+        next_position = [page_index, next_offset] if more_here else [cast(int, next_page_index), 0]
+        payload = _cursor_payload(
+            context,
+            collection=public_collection,
+            filters=[],
+            order=order,
+            after=_topology_stable_key(public_collection, candidates[count - 1]),
+            position=next_position,
+            limit=applied,
+            seen=emitted,
+        )
+        return _encode_cursor(payload)
+
+    return _bounded_response(base, items=candidates, cursor_for_count=cursor_for_count)
+
+
 def _list_topology(
     execution: Any,
     *,
@@ -1230,217 +1507,23 @@ def _list_topology(
 ) -> dict[str, Any]:
     observed_at = datetime.now(UTC)
     using = _database_for(execution)
-    with transaction.atomic(using=using):
-        context = _locked_context(
+    with _read_snapshot(using=using):
+        context = _snapshot_context(
             execution,
             authorize=authorize,
             attempt_number=attempt_number,
             generated_at=observed_at,
         )
-        applied = _applied_limit(limit)
-        if not _cursor_length_is_valid(cursor):
-            _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
-        decoded_cursor, expired = _decode_cursor(
-            cursor,
-            context=context,
-            collection=public_collection,
-            filters=[],
-            order=order,
-            limit=applied,
-        )
-        if expired:
-            if decoded_cursor is None:
-                _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
-            return _expired_page(
-                context,
-                decoded_cursor,
-                collection=public_collection,
-                generated_at=observed_at,
-            )
-        if (
-            decoded_cursor is not None
-            and context.availability == WorkflowProgressDetailAvailability.EXPIRED.value
-        ):
-            return _expired_page(
-                context,
-                decoded_cursor,
-                collection=public_collection,
-                generated_at=observed_at,
-            )
-        if not _ensure_readable(context):
-            return _empty_page(
-                context,
-                collection=public_collection,
-                generated_at=observed_at,
-            )
-        if context.summary is None or context.summary["topology_version"] is None:
-            _raise(WorkflowProgressReadErrorCode.MISSING)
-        summary = context.summary
-        manifest_row = _manifest_row(context, using=using)
-        if manifest_row is None:
-            _raise(WorkflowProgressReadErrorCode.MISSING)
-        try:
-            manifest = verify_workflow_progress_topology_manifest_record(
-                manifest_row,
-                expected_identity=context.identity,
-            )
-        except WorkflowProgressStorageIntegrityError as error:
-            _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
-        summary_reasons = set(summary["detail"]["truncation_reasons"])
-        manifest_reasons = set(manifest.truncation_reasons)
-        try:
-            run_detail_reasons = set(
-                _decode_truncation_reasons(
-                    manifest_row["run_storage__detail_truncation_reasons"],
-                    stored=True,
-                )
-            )
-        except WorkflowProgressStorageIntegrityError as error:
-            _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
-        expected_summary_reasons = manifest_reasons | run_detail_reasons
-        if workflow_progress_detail_is_last_observed(summary):
-            expected_summary_reasons.add(
-                WorkflowProgressTruncationReason.TERMINAL_STATE_UNREPORTED.value
-            )
-        if (
-            manifest.node_count != summary["node_counts"]["retained_topology"]
-            or manifest.edge_count != summary["edge_counts"]["retained_topology"]
-            or manifest.expected_link_count != len(manifest.page_descriptors)
-            or manifest_row["_unexpected_link"] is not False
-            or not manifest_reasons.issubset(_TOPOLOGY_TRUNCATION_REASONS)
-            or not run_detail_reasons.issubset(_DETAIL_TRUNCATION_REASONS)
-            or expected_summary_reasons != summary_reasons
-            or (
-                summary_reasons
-                and context.availability != WorkflowProgressDetailAvailability.TRUNCATED.value
-            )
-        ):
-            _raise(WorkflowProgressReadErrorCode.CORRUPT)
-
-        descriptors = [
-            descriptor
-            for descriptor in manifest.page_descriptors
-            if descriptor["collection"] == stored_collection
-        ]
-        page_index = 0
-        offset = 0
-        prior_seen = 0
-        after: str | list[str] | None = None
-        if decoded_cursor is not None:
-            position = decoded_cursor["position"]
-            after = decoded_cursor["after"]
-            prior_seen = decoded_cursor["seen"]
-            if (
-                not isinstance(position, list)
-                or len(position) != 2
-                or any(type(item) is not int or item < 0 for item in position)
-            ):
-                _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
-            page_index, offset = position
-        if not descriptors:
-            if decoded_cursor is not None:
-                _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
-            return _empty_page(
-                context,
-                collection=public_collection,
-                generated_at=observed_at,
-            )
-        descriptor_by_index = {item["page_index"]: item for item in descriptors}
-        descriptor = descriptor_by_index.get(page_index)
-        if descriptor is None:
-            _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
-        expected_before = (
-            sum(item["item_count"] for item in descriptors if item["page_index"] < page_index)
-            + offset
-        )
-        if prior_seen != expected_before:
-            _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
-        page_row = _topology_page_row(
-            manifest_row["pk"],
-            collection=stored_collection,
-            page_index=page_index,
+        return _list_topology_in_snapshot(
+            context,
             using=using,
+            observed_at=observed_at,
+            cursor=cursor,
+            limit=limit,
+            public_collection=public_collection,
+            stored_collection=stored_collection,
+            order=order,
         )
-        if page_row is None:
-            _raise(WorkflowProgressReadErrorCode.MISSING)
-        try:
-            records = list(
-                verify_workflow_progress_topology_page_record(
-                    page_row,
-                    descriptor=descriptor,
-                    expected_run_storage_id=manifest_row["run_storage_id"],
-                )
-            )
-        except WorkflowProgressStorageIntegrityError as error:
-            _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
-        if offset > len(records):
-            _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
-        if offset and _topology_stable_key(public_collection, records[offset - 1]) != after:
-            _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
-        if (
-            decoded_cursor is not None
-            and offset == 0
-            and records
-            and _stable_key_not_after(
-                _topology_stable_key(public_collection, records[0]),
-                after,
-            )
-        ):
-            _raise(WorkflowProgressReadErrorCode.CORRUPT)
-        candidates: list[dict[str, Any]] = []
-        decoded_bytes = 0
-        for item in records[offset : offset + applied]:
-            item_bytes = len(_canonical_bytes(item))
-            if decoded_bytes + item_bytes > WORKFLOW_PROGRESS_READ_MAX_DECODED_RECORD_BYTES:
-                if not candidates:
-                    _raise(WorkflowProgressReadErrorCode.CORRUPT)
-                break
-            candidates.append(copy.deepcopy(item))
-            decoded_bytes += item_bytes
-        later_page_indexes = sorted(index for index in descriptor_by_index if index > page_index)
-        has_later_page = bool(later_page_indexes)
-        next_page_index = later_page_indexes[0] if later_page_indexes else None
-        expected_total = sum(item["item_count"] for item in descriptors)
-
-        base = {
-            **_common_envelope(
-                context,
-                schema="workflow-progress-page",
-                generated_at=observed_at,
-            ),
-            "collection": public_collection,
-        }
-
-        def cursor_for_count(count: int) -> str | None:
-            next_offset = offset + count
-            more_here = next_offset < len(records)
-            emitted = prior_seen + count
-            if not more_here and not has_later_page:
-                if emitted < expected_total:
-                    _raise(WorkflowProgressReadErrorCode.MISSING)
-                if emitted > expected_total:
-                    _raise(WorkflowProgressReadErrorCode.CORRUPT)
-                return None
-            if count <= 0:
-                _raise(WorkflowProgressReadErrorCode.CORRUPT)
-            if emitted >= expected_total:
-                _raise(WorkflowProgressReadErrorCode.CORRUPT)
-            next_position = (
-                [page_index, next_offset] if more_here else [cast(int, next_page_index), 0]
-            )
-            payload = _cursor_payload(
-                context,
-                collection=public_collection,
-                filters=[],
-                order=order,
-                after=_topology_stable_key(public_collection, candidates[count - 1]),
-                position=next_position,
-                limit=applied,
-                seen=emitted,
-            )
-            return _encode_cursor(payload)
-
-        return _bounded_response(base, items=candidates, cursor_for_count=cursor_for_count)
 
 
 def list_workflow_topology_nodes(
@@ -1642,6 +1725,177 @@ def _detail_payload_rows(queryset: Any, keys: list[str]) -> list[dict[str, Any]]
     )
 
 
+def _list_node_details_in_snapshot(
+    context: _SummaryContext,
+    *,
+    using: str,
+    observed_at: datetime,
+    state: str | None,
+    cursor: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    applied = _applied_limit(limit)
+    normalized_state = _normalized_state(state)
+    filters = [["state", normalized_state]] if normalized_state is not None else []
+    if not _cursor_length_is_valid(cursor):
+        _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
+    decoded_cursor, expired = _decode_cursor(
+        cursor,
+        context=context,
+        collection="node_details",
+        filters=filters,
+        order="stable_node_key_asc",
+        limit=applied,
+    )
+    if expired:
+        if decoded_cursor is None:
+            _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
+        return _expired_page(
+            context,
+            decoded_cursor,
+            collection="node_details",
+            generated_at=observed_at,
+        )
+    if (
+        decoded_cursor is not None
+        and context.availability == WorkflowProgressDetailAvailability.EXPIRED.value
+    ):
+        return _expired_page(
+            context,
+            decoded_cursor,
+            collection="node_details",
+            generated_at=observed_at,
+        )
+    if not _ensure_readable(context):
+        return _empty_page(
+            context,
+            collection="node_details",
+            generated_at=observed_at,
+        )
+    if (
+        context.summary is None
+        or context.summary["topology_version"] is None
+        or context.summary["detail_revision"] is None
+    ):
+        _raise(WorkflowProgressReadErrorCode.MISSING)
+    summary = context.summary
+    identity = context.identity
+    after = None
+    prior_seen = 0
+    if decoded_cursor is not None:
+        if decoded_cursor["position"] is not None:
+            _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
+        after = decoded_cursor["after"]
+        if not _is_lower_hex(after, length=64):
+            _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
+        prior_seen = decoded_cursor["seen"]
+    query = _detail_epoch_query(context, using=using)
+    if normalized_state is not None:
+        query = query.filter(state=normalized_state)
+    if after is not None:
+        query = query.filter(node_key__gt=after)
+    metadata = list(
+        query.order_by("node_key").values(
+            "node_key",
+            "encoded_bytes",
+            "decoded_bytes",
+            *(f"run_storage__{field}" for field in _DETAIL_EPOCH_FIELDS),
+            f"run_storage__{_DETAIL_TOPOLOGY_REASONS_FIELD}",
+        )[: applied + 1]
+    )
+    epoch_record = (
+        _related_detail_epoch_record(metadata[0])
+        if metadata
+        else _detail_epoch_record(context, using=using)
+    )
+    if epoch_record is None:
+        _raise(WorkflowProgressReadErrorCode.MISSING)
+    expected_count = _expected_detail_count(
+        context,
+        epoch_record,
+        state=normalized_state,
+    )
+    if prior_seen > expected_count:
+        _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
+    if not metadata and prior_seen < expected_count:
+        _raise(WorkflowProgressReadErrorCode.MISSING)
+    selected_keys: list[str] = []
+    decoded_bytes = 0
+    conservative_wire_bytes = 0
+    for row in metadata[:applied]:
+        encoded = row["encoded_bytes"]
+        decoded = row["decoded_bytes"]
+        key = row["node_key"]
+        if (
+            type(encoded) is not int
+            or type(decoded) is not int
+            or not 1 <= encoded <= WORKFLOW_PROGRESS_RECORD_MAX_ENCODED_BYTES
+            or decoded != encoded
+            or not isinstance(key, str)
+            or len(key) != 64
+        ):
+            _raise(WorkflowProgressReadErrorCode.CORRUPT)
+        if selected_keys and (
+            decoded_bytes + decoded > WORKFLOW_PROGRESS_READ_MAX_DECODED_RECORD_BYTES
+            or conservative_wire_bytes + encoded
+            > WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES - 32 * 1024
+        ):
+            break
+        selected_keys.append(key)
+        decoded_bytes += decoded
+        conservative_wire_bytes += encoded
+    rows = _detail_payload_rows(query, selected_keys) if selected_keys else []
+    if len(rows) != len(selected_keys):
+        _raise(WorkflowProgressReadErrorCode.MISSING)
+    items: list[dict[str, Any]] = []
+    try:
+        for row in rows:
+            value = verify_workflow_progress_node_detail_record(
+                row,
+                identity=identity,
+                maximum_topology_version=summary["topology_version"],
+                maximum_detail_revision=summary["detail_revision"],
+            )
+            items.append(_public_node_detail(value))
+    except WorkflowProgressStorageIntegrityError as error:
+        _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
+    more_metadata = len(metadata) > len(selected_keys)
+    base = {
+        **_common_envelope(
+            context,
+            schema="workflow-progress-page",
+            generated_at=observed_at,
+        ),
+        "collection": "node_details",
+    }
+
+    def cursor_for_count(count: int) -> str | None:
+        emitted = prior_seen + count
+        if count == len(items) and not more_metadata:
+            if emitted < expected_count:
+                _raise(WorkflowProgressReadErrorCode.MISSING)
+            if emitted > expected_count:
+                _raise(WorkflowProgressReadErrorCode.CORRUPT)
+            return None
+        if count <= 0:
+            _raise(WorkflowProgressReadErrorCode.CORRUPT)
+        if emitted >= expected_count:
+            _raise(WorkflowProgressReadErrorCode.CORRUPT)
+        payload = _cursor_payload(
+            context,
+            collection="node_details",
+            filters=filters,
+            order="stable_node_key_asc",
+            after=selected_keys[count - 1],
+            position=None,
+            limit=applied,
+            seen=emitted,
+        )
+        return _encode_cursor(payload)
+
+    return _bounded_response(base, items=items, cursor_for_count=cursor_for_count)
+
+
 def list_workflow_node_details(
     execution: Any,
     *,
@@ -1654,173 +1908,131 @@ def list_workflow_node_details(
     """Return one bounded keyset page of normalized latest-state detail."""
     observed_at = datetime.now(UTC)
     using = _database_for(execution)
-    with transaction.atomic(using=using):
-        context = _locked_context(
+    with _read_snapshot(using=using):
+        context = _snapshot_context(
             execution,
             authorize=authorize,
             attempt_number=attempt_number,
             generated_at=observed_at,
         )
-        applied = _applied_limit(limit)
-        normalized_state = _normalized_state(state)
-        filters = [["state", normalized_state]] if normalized_state is not None else []
-        if not _cursor_length_is_valid(cursor):
-            _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
-        decoded_cursor, expired = _decode_cursor(
-            cursor,
-            context=context,
-            collection="node_details",
-            filters=filters,
-            order="stable_node_key_asc",
-            limit=applied,
-        )
-        if expired:
-            if decoded_cursor is None:
-                _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
-            return _expired_page(
-                context,
-                decoded_cursor,
-                collection="node_details",
-                generated_at=observed_at,
-            )
-        if (
-            decoded_cursor is not None
-            and context.availability == WorkflowProgressDetailAvailability.EXPIRED.value
-        ):
-            return _expired_page(
-                context,
-                decoded_cursor,
-                collection="node_details",
-                generated_at=observed_at,
-            )
-        if not _ensure_readable(context):
-            return _empty_page(
-                context,
-                collection="node_details",
-                generated_at=observed_at,
-            )
-        if (
-            context.summary is None
-            or context.summary["topology_version"] is None
-            or context.summary["detail_revision"] is None
-        ):
-            _raise(WorkflowProgressReadErrorCode.MISSING)
-        summary = context.summary
-        identity = context.identity
-        after = None
-        prior_seen = 0
-        if decoded_cursor is not None:
-            if decoded_cursor["position"] is not None:
-                _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
-            after = decoded_cursor["after"]
-            if not _is_lower_hex(after, length=64):
-                _raise(WorkflowProgressReadErrorCode.INVALID_CURSOR)
-            prior_seen = decoded_cursor["seen"]
-        query = _detail_epoch_query(context, using=using)
-        if normalized_state is not None:
-            query = query.filter(state=normalized_state)
-        if after is not None:
-            query = query.filter(node_key__gt=after)
-        metadata = list(
-            query.order_by("node_key").values(
-                "node_key",
-                "encoded_bytes",
-                "decoded_bytes",
-                *(f"run_storage__{field}" for field in _DETAIL_EPOCH_FIELDS),
-                f"run_storage__{_DETAIL_TOPOLOGY_REASONS_FIELD}",
-            )[: applied + 1]
-        )
-        epoch_record = (
-            _related_detail_epoch_record(metadata[0])
-            if metadata
-            else _detail_epoch_record(context, using=using)
-        )
-        if epoch_record is None:
-            _raise(WorkflowProgressReadErrorCode.MISSING)
-        expected_count = _expected_detail_count(
+        return _list_node_details_in_snapshot(
             context,
-            epoch_record,
-            state=normalized_state,
+            using=using,
+            observed_at=observed_at,
+            state=state,
+            cursor=cursor,
+            limit=limit,
         )
-        if prior_seen > expected_count:
-            _raise(WorkflowProgressReadErrorCode.CURSOR_MISMATCH)
-        if not metadata and prior_seen < expected_count:
-            _raise(WorkflowProgressReadErrorCode.MISSING)
-        selected_keys: list[str] = []
-        decoded_bytes = 0
-        conservative_wire_bytes = 0
-        for row in metadata[:applied]:
-            encoded = row["encoded_bytes"]
-            decoded = row["decoded_bytes"]
-            key = row["node_key"]
-            if (
-                type(encoded) is not int
-                or type(decoded) is not int
-                or not 1 <= encoded <= WORKFLOW_PROGRESS_RECORD_MAX_ENCODED_BYTES
-                or decoded != encoded
-                or not isinstance(key, str)
-                or len(key) != 64
-            ):
-                _raise(WorkflowProgressReadErrorCode.CORRUPT)
-            if selected_keys and (
-                decoded_bytes + decoded > WORKFLOW_PROGRESS_READ_MAX_DECODED_RECORD_BYTES
-                or conservative_wire_bytes + encoded
-                > WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES - 32 * 1024
-            ):
-                break
-            selected_keys.append(key)
-            decoded_bytes += decoded
-            conservative_wire_bytes += encoded
-        rows = _detail_payload_rows(query, selected_keys) if selected_keys else []
-        if len(rows) != len(selected_keys):
-            _raise(WorkflowProgressReadErrorCode.MISSING)
-        items: list[dict[str, Any]] = []
-        try:
-            for row in rows:
-                value = verify_workflow_progress_node_detail_record(
-                    row,
-                    identity=identity,
-                    maximum_topology_version=summary["topology_version"],
-                    maximum_detail_revision=summary["detail_revision"],
-                )
-                items.append(_public_node_detail(value))
-        except WorkflowProgressStorageIntegrityError as error:
-            _raise(WorkflowProgressReadErrorCode.CORRUPT, error)
-        more_metadata = len(metadata) > len(selected_keys)
-        base = {
+
+
+def read_workflow_progress_collections(
+    execution: Any,
+    *,
+    authorize: Callable[[RayTaskExecution], bool],
+    attempt_number: int | None = None,
+    include_topology_nodes: bool = True,
+    include_topology_edges: bool = True,
+    include_node_details: bool = True,
+    node_detail_state: str | None = None,
+    limit: int = WORKFLOW_PROGRESS_READ_DEFAULT_LIMIT,
+    topology_nodes_limit: int | None = None,
+    topology_edges_limit: int | None = None,
+    node_details_limit: int | None = None,
+    should_load_collections: Callable[[dict[str, Any]], bool] | None = None,
+    include_legacy: bool = False,
+    infer_current_reporting_policy: bool = True,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Read summary and requested first-page collections in one lock-free snapshot.
+
+    Coalesces execution authorization, summary validation, and manifest
+    verification across summary, topology nodes, topology edges, and node
+    details so control-plane callers do not open redundant transactions or
+    re-verify the same manifest multiple times.
+    """
+    if (
+        type(include_topology_nodes) is not bool
+        or type(include_topology_edges) is not bool
+        or type(include_node_details) is not bool
+        or type(include_legacy) is not bool
+        or type(infer_current_reporting_policy) is not bool
+        or (should_load_collections is not None and not callable(should_load_collections))
+    ):
+        _raise(WorkflowProgressReadErrorCode.INVALID_ARGUMENT)
+    observed_at = _normalized_observed_at(
+        datetime.now(UTC) if generated_at is None else generated_at
+    )
+    using = _database_for(execution)
+    with _read_snapshot(using=using):
+        context = _snapshot_context(
+            execution,
+            authorize=authorize,
+            attempt_number=attempt_number,
+            generated_at=observed_at,
+            include_legacy=include_legacy,
+            infer_current_reporting_policy=infer_current_reporting_policy,
+        )
+        summary_response = {
             **_common_envelope(
                 context,
-                schema="workflow-progress-page",
+                schema="workflow-progress-summary",
                 generated_at=observed_at,
             ),
-            "collection": "node_details",
+            "source_schema_version": context.source_schema_version,
+            "summary": context.public_summary,
         }
+        if len(_wire_bytes(summary_response)) > WORKFLOW_PROGRESS_READ_MAX_RESPONSE_BYTES:
+            _raise(WorkflowProgressReadErrorCode.CORRUPT)
 
-        def cursor_for_count(count: int) -> str | None:
-            emitted = prior_seen + count
-            if count == len(items) and not more_metadata:
-                if emitted < expected_count:
-                    _raise(WorkflowProgressReadErrorCode.MISSING)
-                if emitted > expected_count:
-                    _raise(WorkflowProgressReadErrorCode.CORRUPT)
-                return None
-            if count <= 0:
-                _raise(WorkflowProgressReadErrorCode.CORRUPT)
-            if emitted >= expected_count:
-                _raise(WorkflowProgressReadErrorCode.CORRUPT)
-            payload = _cursor_payload(
+        result: dict[str, Any] = {"summary": summary_response}
+        if should_load_collections is not None and not should_load_collections(summary_response):
+            return result
+
+        verified_manifest: tuple[dict[str, Any], Any] | None = None
+        if (include_topology_nodes or include_topology_edges) and context.availability in {
+            WorkflowProgressDetailAvailability.AVAILABLE.value,
+            WorkflowProgressDetailAvailability.TRUNCATED.value,
+        }:
+            verified_manifest = _load_verified_manifest_in_snapshot(context, using=using)
+
+        nodes_limit = limit if topology_nodes_limit is None else topology_nodes_limit
+        edges_limit = limit if topology_edges_limit is None else topology_edges_limit
+        details_limit = limit if node_details_limit is None else node_details_limit
+
+        if include_topology_nodes:
+            result["topology_nodes"] = _list_topology_in_snapshot(
                 context,
-                collection="node_details",
-                filters=filters,
-                order="stable_node_key_asc",
-                after=selected_keys[count - 1],
-                position=None,
-                limit=applied,
-                seen=emitted,
+                using=using,
+                observed_at=observed_at,
+                cursor=None,
+                limit=nodes_limit,
+                public_collection="topology_nodes",
+                stored_collection=WorkflowProgressTopologyCollection.NODE.value,
+                order="node_id_asc",
+                verified_manifest=verified_manifest,
             )
-            return _encode_cursor(payload)
-
-        return _bounded_response(base, items=items, cursor_for_count=cursor_for_count)
+        if include_topology_edges:
+            result["topology_edges"] = _list_topology_in_snapshot(
+                context,
+                using=using,
+                observed_at=observed_at,
+                cursor=None,
+                limit=edges_limit,
+                public_collection="topology_edges",
+                stored_collection=WorkflowProgressTopologyCollection.EDGE.value,
+                order="source_target_asc",
+                verified_manifest=verified_manifest,
+            )
+        if include_node_details:
+            result["node_details"] = _list_node_details_in_snapshot(
+                context,
+                using=using,
+                observed_at=observed_at,
+                state=node_detail_state,
+                cursor=None,
+                limit=details_limit,
+            )
+        return result
 
 
 def get_workflow_node_detail(
@@ -1833,8 +2045,8 @@ def get_workflow_node_detail(
     """Return one normalized latest-state node record through its indexed key."""
     observed_at = datetime.now(UTC)
     using = _database_for(execution)
-    with transaction.atomic(using=using):
-        context = _locked_context(
+    with _read_snapshot(using=using):
+        context = _snapshot_context(
             execution,
             authorize=authorize,
             attempt_number=attempt_number,
@@ -1914,4 +2126,5 @@ __all__ = [
     "list_workflow_node_details",
     "list_workflow_topology_edges",
     "list_workflow_topology_nodes",
+    "read_workflow_progress_collections",
 ]

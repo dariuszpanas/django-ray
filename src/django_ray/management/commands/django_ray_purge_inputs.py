@@ -9,9 +9,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
-from django.db import transaction
+from django.db import DEFAULT_DB_ALIAS, connections, transaction
 from django.db.models import Case, F, Q, When
 from django.db.models.functions import Substr
+from django.db.utils import ConnectionDoesNotExist
 from django.utils import timezone
 
 from django_ray.management.diagnostics import render_exception_type_label
@@ -60,9 +61,14 @@ DEFAULT_ATTACHMENTS = 100
 MAX_ATTACHMENTS = 1000
 DEFAULT_DETAILS = 20
 MAX_DETAILS = 100
+DEFAULT_UNTIL_EMPTY_MAX_BATCHES = 100
+MAX_BATCHES = 1000
 OUTPUT_MAX_BYTES = 16384
 # Reserve space for the bounded encrypted cursor, counters, and fixed diagnostics.
 DETAIL_MAX_BYTES = 8192
+# Minimum grace floor protecting freshly registered inputs between split enqueue
+# transactions when operators pass --retention-days 0 (R3-007).
+UNATTACHED_ENQUEUE_GRACE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,13 @@ class _PurgeExecution:
     input_reference: str | None
     ray_job_request_reference: str | None
     references_complete: bool
+
+
+def _manager_for_database(model: Any, using: str) -> Any:
+    manager = model.objects
+    if using != DEFAULT_DB_ALIAS or hasattr(manager, "using"):
+        return manager.using(using)
+    return manager
 
 
 class Command(BaseCommand):
@@ -96,10 +109,55 @@ class Command(BaseCommand):
             action="store_true",
             help="Delete eligible objects. Without this flag the command is a dry run.",
         )
-        parser.add_argument("--max-candidates", type=int, default=DEFAULT_CANDIDATES)
-        parser.add_argument("--max-attachments", type=int, default=DEFAULT_ATTACHMENTS)
-        parser.add_argument("--max-details", type=int, default=DEFAULT_DETAILS)
-        parser.add_argument("--cursor", help="Continue a report with its fixed cutoff and mode.")
+        parser.add_argument(
+            "--max-candidates",
+            type=int,
+            default=DEFAULT_CANDIDATES,
+            help=(
+                "Maximum registered payload candidates to inspect per batch "
+                f"(default: {DEFAULT_CANDIDATES}; maximum: {MAX_CANDIDATES})."
+            ),
+        )
+        parser.add_argument(
+            "--max-attachments",
+            type=int,
+            default=DEFAULT_ATTACHMENTS,
+            help=(
+                "Maximum attached executions inspected per payload before marking "
+                f"incomplete (default: {DEFAULT_ATTACHMENTS}; maximum: {MAX_ATTACHMENTS})."
+            ),
+        )
+        parser.add_argument(
+            "--max-details",
+            type=int,
+            default=DEFAULT_DETAILS,
+            help=(
+                "Maximum per-payload detail lines included in the bounded report "
+                f"(default: {DEFAULT_DETAILS}; maximum: {MAX_DETAILS})."
+            ),
+        )
+        parser.add_argument(
+            "--cursor",
+            help="Continue a report with its fixed cutoff and mode.",
+        )
+        parser.add_argument(
+            "--until-empty",
+            action="store_true",
+            help=(
+                "Continue across candidate batches until no more eligible rows remain "
+                "or --max-batches is reached (avoids shell --cursor passing in cron)."
+            ),
+        )
+        parser.add_argument(
+            "--max-batches",
+            type=int,
+            default=None,
+            help=(
+                "Maximum candidate batches to process in one invocation "
+                f"(default: 1; default with --until-empty: {DEFAULT_UNTIL_EMPTY_MAX_BATCHES}; "
+                f"maximum: {MAX_BATCHES})."
+            ),
+        )
         parser.add_argument(
             "--discover-unregistered",
             action="store_true",
@@ -108,25 +166,56 @@ class Command(BaseCommand):
         parser.add_argument(
             "--delete-unregistered",
             action="store_true",
-            help="Revalidate and delete eligible unregistered objects (requires --discover-unregistered and --delete).",
+            help=(
+                "Revalidate and delete eligible unregistered objects "
+                "(requires --discover-unregistered and --delete)."
+            ),
         )
         parser.add_argument(
             "--grace-seconds",
             type=int,
             default=DEFAULT_UNREGISTERED_GRACE_SECONDS,
-            help=f"Grace period in seconds before an unregistered object is eligible (default: {DEFAULT_UNREGISTERED_GRACE_SECONDS}).",
+            help=(
+                "Grace period in seconds before an unregistered object is eligible "
+                f"(default: {DEFAULT_UNREGISTERED_GRACE_SECONDS})."
+            ),
         )
         parser.add_argument(
             "--max-inventory-objects",
             type=int,
             default=DEFAULT_INVENTORY_MAX_OBJECTS,
+            help=(
+                "Maximum storage objects scanned during unregistered inventory "
+                f"(default: {DEFAULT_INVENTORY_MAX_OBJECTS}; "
+                f"maximum: {MAX_INVENTORY_MAX_OBJECTS})."
+            ),
         )
         parser.add_argument(
             "--max-inventory-pages",
             type=int,
             default=DEFAULT_INVENTORY_MAX_PAGES,
+            help=(
+                "Maximum backend listing pages scanned during unregistered inventory "
+                f"(default: {DEFAULT_INVENTORY_MAX_PAGES}; maximum: {MAX_INVENTORY_MAX_PAGES})."
+            ),
         )
-        parser.add_argument("--format", choices=("text", "json"), default="text")
+        parser.add_argument(
+            "--database",
+            default=DEFAULT_DB_ALIAS,
+            help=f"Django database alias to purge (default: {DEFAULT_DB_ALIAS}).",
+        )
+        parser.add_argument(
+            "--format",
+            choices=("text", "json"),
+            default="text",
+            help="Output format: text or json (default: text).",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            dest="json_output",
+            help="Emit structured JSON output (shorthand for --format=json).",
+        )
 
     @staticmethod
     def _budget(options: dict[str, Any], name: str, maximum: int, *, minimum: int = 1) -> int:
@@ -136,7 +225,18 @@ class Command(BaseCommand):
             raise CommandError(f"--{option} must be between {minimum} and {maximum}")
         return value
 
+    @staticmethod
+    def _validate_database(alias: Any) -> str:
+        if type(alias) is not str or not alias:
+            raise CommandError("--database must be a non-empty database alias.")
+        try:
+            connections[alias]
+        except ConnectionDoesNotExist:
+            raise CommandError(f"Unknown database alias: {alias}") from None
+        return alias
+
     def handle(self, *args: Any, **options: Any) -> None:
+        del args
         candidate_limit = self._budget(options, "max_candidates", MAX_CANDIDATES)
         attachment_limit = self._budget(options, "max_attachments", MAX_ATTACHMENTS)
         detail_limit = self._budget(options, "max_details", MAX_DETAILS, minimum=0)
@@ -148,6 +248,15 @@ class Command(BaseCommand):
                 f"--retention-days must be zero or greater, at most {RETENTION_MAX_DAYS}"
             )
         delete = bool(options["delete"])
+        until_empty = bool(options.get("until_empty"))
+        raw_max_batches = options.get("max_batches")
+        if raw_max_batches is not None:
+            if type(raw_max_batches) is not int or not 1 <= raw_max_batches <= MAX_BATCHES:
+                raise CommandError(f"--max-batches must be between 1 and {MAX_BATCHES}")
+            max_batches = raw_max_batches
+        else:
+            max_batches = DEFAULT_UNTIL_EMPTY_MAX_BATCHES if until_empty else 1
+
         discover_unregistered = bool(options.get("discover_unregistered"))
         delete_unregistered = bool(options.get("delete_unregistered"))
         if delete_unregistered and (not discover_unregistered or not delete):
@@ -170,92 +279,128 @@ class Command(BaseCommand):
             "max_inventory_pages",
             MAX_INVENTORY_MAX_PAGES,
         )
+        database = self._validate_database(options.get("database", DEFAULT_DB_ALIAS))
+        output_format = "json" if options.get("json_output") else str(options["format"])
+
         after = ""
         if options["cursor"] is not None:
             try:
                 cursor = decode_purge_cursor(options["cursor"])
             except InvalidPurgeCursorError:
                 raise CommandError("Invalid purge cursor; start a fresh pass.") from None
-            if delete != cursor.delete or (
-                retention_days is not None and retention_days != cursor.retention_days
+            if (
+                delete != cursor.delete
+                or database != cursor.database
+                or (retention_days is not None and retention_days != cursor.retention_days)
             ):
-                raise CommandError("Purge cursor conflicts with deletion mode or retention days.")
+                raise CommandError(
+                    "Purge cursor conflicts with deletion mode, retention days, or database."
+                )
             after, cutoff, retention_days = cursor.after, cursor.cutoff, cursor.retention_days
         else:
             retention_days = 30 if retention_days is None else retention_days
-            cutoff = timezone.now() - timedelta(days=retention_days)
-
-        # One extra PK proves overflow without materializing the registry. A
-        # continuation retains the PK itself even if that row later disappears.
-        candidate_keys = list(
-            TaskInputPayload.objects.filter(
-                state=InputPayloadState.ACTIVE,
-                last_used_at__lte=cutoff,
-                pk__gt=after,
+            now = timezone.now()
+            cutoff = min(
+                now - timedelta(days=retention_days),
+                now - timedelta(seconds=UNATTACHED_ENQUEUE_GRACE_SECONDS),
             )
-            .order_by("pk")
-            .annotate(bounded_key=Substr("pk", 1, 501))
-            .annotate(key_complete=Case(When(pk=F("bounded_key"), then=True), default=False))
-            .values_list("bounded_key", "key_complete")[: candidate_limit + 1]
-        )
-        # SQLite does not enforce CharField lengths. Reject a corrupt key before
-        # loading it in full, advancing a cursor past truncated text, or deleting
-        # any object from this batch. SQLite substr also truncates at NUL.
-        if any(not complete or len(reference) > 500 for reference, complete in candidate_keys):
-            raise CommandError("Cannot continue this registry; invalid primary key.")
-        references = [reference for reference, _ in candidate_keys]
-        has_more = len(references) > candidate_limit
-        references = references[:candidate_limit]
-        # Prepare the continuation before mutations, so a malformed persisted PK
-        # cannot cause a late reporting failure after some objects were deleted.
-        next_cursor = None
-        if has_more:
-            try:
-                next_cursor = encode_purge_cursor(
-                    PurgeCursor(references[-1], cutoff, retention_days, delete)
-                )
-            except InvalidPurgeCursorError:
-                raise CommandError("Cannot continue this registry; invalid primary key.") from None
+
         counts = dict.fromkeys(
             ("processed", "eligible", "purged", "retained", "failed", "incomplete"), 0
         )
         details: list[dict[str, str]] = []
         detail_bytes = 0
-        for reference in references:
-            outcome = self._process_reference(
-                reference,
-                cutoff=cutoff,
-                delete=delete,
-                max_attachments=attachment_limit,
+        has_more = False
+        next_cursor: str | None = None
+
+        for _batch_index in range(max_batches):
+            # One extra PK proves overflow without materializing the registry. A
+            # continuation retains the PK itself even if that row later disappears.
+            candidate_keys = list(
+                _manager_for_database(TaskInputPayload, database)
+                .filter(
+                    state=InputPayloadState.ACTIVE,
+                    last_used_at__lte=cutoff,
+                    pk__gt=after,
+                )
+                .order_by("pk")
+                .annotate(bounded_key=Substr("pk", 1, 501))
+                .annotate(key_complete=Case(When(pk=F("bounded_key"), then=True), default=False))
+                .values_list("bounded_key", "key_complete")[: candidate_limit + 1]
             )
-            counts["processed"] += 1
-            if outcome in {"eligible", "purged", "failed"}:
-                counts["eligible"] += 1
-            if outcome in {"purged", "failed", "incomplete"}:
-                counts[outcome] += 1
-            if outcome != "purged":
-                counts["retained"] += 1
-            if len(details) < detail_limit:
-                detail = {
-                    "reference_sha256": self._reference_fingerprint(reference),
-                    "outcome": outcome,
+            # SQLite does not enforce CharField lengths. Reject a corrupt key before
+            # loading it in full, advancing a cursor past truncated text, or deleting
+            # any object from this batch. SQLite substr also truncates at NUL.
+            if any(not complete or len(reference) > 500 for reference, complete in candidate_keys):
+                raise CommandError("Cannot continue this registry; invalid primary key.")
+            references = [reference for reference, _ in candidate_keys]
+            batch_has_more = len(references) > candidate_limit
+            references = references[:candidate_limit]
+            # Prepare the continuation before mutations, so a malformed persisted PK
+            # cannot cause a late reporting failure after some objects were deleted.
+            batch_next_cursor: str | None = None
+            if batch_has_more:
+                try:
+                    batch_next_cursor = encode_purge_cursor(
+                        PurgeCursor(
+                            references[-1],
+                            cutoff,
+                            retention_days,
+                            delete,
+                            database=database,
+                        )
+                    )
+                except InvalidPurgeCursorError:
+                    raise CommandError(
+                        "Cannot continue this registry; invalid primary key."
+                    ) from None
+
+            for reference in references:
+                process_kwargs: dict[str, Any] = {
+                    "cutoff": cutoff,
+                    "delete": delete,
+                    "max_attachments": attachment_limit,
                 }
-                size = len(json.dumps(detail, separators=(",", ":")).encode("utf-8")) + 2
-                if detail_bytes + size <= DETAIL_MAX_BYTES:
-                    details.append(detail)
-                    detail_bytes += size
+                if database != DEFAULT_DB_ALIAS:
+                    process_kwargs["using"] = database
+                outcome = self._process_reference(reference, **process_kwargs)
+                counts["processed"] += 1
+                if outcome in {"eligible", "purged", "failed"}:
+                    counts["eligible"] += 1
+                if outcome in {"purged", "failed", "incomplete"}:
+                    counts[outcome] += 1
+                if outcome != "purged":
+                    counts["retained"] += 1
+                if len(details) < detail_limit:
+                    detail = {
+                        "reference_sha256": self._reference_fingerprint(reference),
+                        "outcome": outcome,
+                    }
+                    size = len(json.dumps(detail, separators=(",", ":")).encode("utf-8")) + 2
+                    if detail_bytes + size <= DETAIL_MAX_BYTES:
+                        details.append(detail)
+                        detail_bytes += size
+
+            has_more = batch_has_more
+            next_cursor = batch_next_cursor
+            if not batch_has_more or not references:
+                break
+            after = references[-1]
 
         inventory_report = None
         inventory_error = None
         if discover_unregistered:
             try:
-                inventory_report = discover_and_reap_unregistered_payloads(
-                    grace_seconds=grace_seconds,
-                    max_objects=max_inventory_objects,
-                    max_pages=max_inventory_pages,
-                    max_details=detail_limit,
-                    delete_unregistered=delete_unregistered,
-                )
+                inventory_kwargs: dict[str, Any] = {
+                    "grace_seconds": grace_seconds,
+                    "max_objects": max_inventory_objects,
+                    "max_pages": max_inventory_pages,
+                    "max_details": detail_limit,
+                    "delete_unregistered": delete_unregistered,
+                }
+                if database != DEFAULT_DB_ALIAS:
+                    inventory_kwargs["using"] = database
+                inventory_report = discover_and_reap_unregistered_payloads(**inventory_kwargs)
             except Exception:
                 # Registered mutations have already committed independently.
                 # Preserve their report without inventing unknown inventory counts.
@@ -283,7 +428,7 @@ class Command(BaseCommand):
             report["unregistered_inventory"] = inventory_report.as_dict()
         if inventory_error is not None:
             report["inventory_error"] = inventory_error
-        if options["format"] == "json":
+        if output_format == "json":
             rendered = json.dumps(report, ensure_ascii=True, separators=(",", ":"))
         else:
             lines = [
@@ -345,17 +490,24 @@ class Command(BaseCommand):
         cutoff: Any,
         delete: bool,
         max_attachments: int = DEFAULT_ATTACHMENTS,
+        using: str = DEFAULT_DB_ALIAS,
     ) -> str:
         if type(max_attachments) is not int or not 1 <= max_attachments <= MAX_ATTACHMENTS:
             raise CommandError(f"--max-attachments must be between 1 and {MAX_ATTACHMENTS}")
-        with transaction.atomic():
+        with transaction.atomic(using=using):
             payload = (
-                TaskInputPayload.objects.select_for_update()
+                TaskInputPayload.objects.using(using)
+                .select_for_update()
                 .filter(reference=reference, state=InputPayloadState.ACTIVE)
                 .only("reference", "state", "last_used_at", "payload_kind")
                 .first()
             )
-            if payload is None or payload.last_used_at > cutoff:
+            grace_cutoff = timezone.now() - timedelta(seconds=UNATTACHED_ENQUEUE_GRACE_SECONDS)
+            if (
+                payload is None
+                or payload.last_used_at > cutoff
+                or payload.last_used_at > grace_cutoff
+            ):
                 return "skipped"
 
             try:
@@ -367,12 +519,13 @@ class Command(BaseCommand):
             # Every kind/state can own the same physical object through a
             # different supported spelling. Producers lock existing aliases
             # before insertion; this check takes no second row lock.
-            if _has_other_payload_registry_reference(reference, references):
+            if _has_other_payload_registry_reference(reference, references, using=using):
                 return "incomplete"
 
             executions = [
                 _PurgeExecution(*row)
-                for row in RayTaskExecution.objects.select_for_update()
+                for row in RayTaskExecution.objects.using(using)
+                .select_for_update()
                 .filter(Q(input_reference=reference) | Q(ray_job_request_reference=reference))
                 .annotate(
                     state_is_terminal=Case(
@@ -430,13 +583,13 @@ class Command(BaseCommand):
                     delete_input_reference(reference)
             except Exception as error:
                 payload.cleanup_error = self._format_cleanup_error(error)
-                payload.save(update_fields=["cleanup_error"])
+                payload.save(using=using, update_fields=["cleanup_error"])
                 return "failed"
 
             payload.state = InputPayloadState.PURGED
             payload.purged_at = timezone.now()
             payload.cleanup_error = ""
-            payload.save(update_fields=["state", "purged_at", "cleanup_error"])
+            payload.save(using=using, update_fields=["state", "purged_at", "cleanup_error"])
             return "purged"
 
     @staticmethod

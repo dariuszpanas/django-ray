@@ -1,9 +1,11 @@
-"""Manually invoked task and workflow tracing primitives (#369).
+"""Task and workflow tracing primitives and optional OpenTelemetry adapter (#369, #826).
 
-Callers supply a ``TracerProtocol`` adapter, propagate context, and invoke these
-helpers at lifecycle boundaries. Automatic Django/Ray instrumentation and a
-built-in OpenTelemetry adapter remain pending. This module uses only the standard
-library; the package itself already declares an ``opentelemetry-api`` dependency.
+Callers may supply any ``TracerProtocol`` adapter (including the built-in
+lazy-importing ``OpenTelemetryTracer``) or invoke ``emit_task_lifecycle_span``
+at lifecycle boundaries. This module imports only the standard library at module
+import time; ``OpenTelemetryTracer`` lazily imports ``opentelemetry.trace`` and
+degrades to a strict no-op when OpenTelemetry is unavailable. Install the
+optional ``django-ray[otel]`` extra for the OpenTelemetry SDK.
 
 Helper contracts:
 - Tracer failure isolation: exceptions during span start, update, and end are
@@ -12,15 +14,20 @@ Helper contracts:
   ``RuntimeEnv`` contents, credentials, raw error messages, and tracebacks.
 - Stale-attempt fencing: terminal span emission compares caller-supplied authority
   tokens and lease ownership; the helper does not fetch database state.
-- Bounded workflow span creation: each helper call caps child spans and ends them
-  immediately, so these spans do not measure actual workflow execution durations.
+- Bounded workflow span creation: each helper call caps child spans, links them as
+  children of the workflow span, and ends them immediately.
 """
 
 from __future__ import annotations
 
 import re
+import sys
+import threading
+from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from types import MappingProxyType
+from typing import Any, Literal, Protocol
 
 W3C_TRACEPARENT_RE = re.compile(
     r"^(?P<version>[0-9a-f]{2})-(?P<trace_id>[0-9a-f]{32})-"
@@ -29,7 +36,7 @@ W3C_TRACEPARENT_RE = re.compile(
 MAX_TRACESTATE_BYTES = 512
 MAX_TRACESTATE_MEMBERS = 32
 MAX_BOUNDED_STRING_ATTR_LEN = 128
-DEFAULT_MAX_WORKFLOW_NODE_SPANS = 32
+DEFAULT_MAX_WORKFLOW_NODE_SPANS = 100
 MAX_WORKFLOW_NODE_SPANS_CEILING = 256
 
 SPAN_TASK_ENQUEUE = "django_ray.task.enqueue"
@@ -51,6 +58,16 @@ ALLOWED_SPAN_NAMES: frozenset[str] = frozenset(
         SPAN_WORKFLOW_EXECUTE,
         SPAN_WORKFLOW_NODE,
         SPAN_TASK_TERMINAL_PERSIST,
+    }
+)
+
+LifecycleTraceEvent = Literal["enqueued", "started", "finished"]
+
+LIFECYCLE_EVENT_SPAN_NAMES: Mapping[LifecycleTraceEvent, str] = MappingProxyType(
+    {
+        "enqueued": SPAN_TASK_ENQUEUE,
+        "started": SPAN_TASK_REMOTE_EXECUTE,
+        "finished": SPAN_TASK_TERMINAL_PERSIST,
     }
 )
 
@@ -242,9 +259,12 @@ def parse_trace_context(carrier: dict[str, Any] | None) -> TraceContextParseResu
     raw_tp = carrier.get("traceparent")
     if raw_tp is None:
         return TraceContextParseResult(envelope=None, status="missing_context")
-    if not isinstance(raw_tp, str) or len(raw_tp) != 55:
+    if not isinstance(raw_tp, str):
         return TraceContextParseResult(envelope=None, status="malformed_traceparent")
-    match = W3C_TRACEPARENT_RE.match(raw_tp.strip().lower())
+    normalized_tp = raw_tp.strip().lower()
+    if len(normalized_tp) != 55:
+        return TraceContextParseResult(envelope=None, status="malformed_traceparent")
+    match = W3C_TRACEPARENT_RE.match(normalized_tp)
     if match is None:
         return TraceContextParseResult(envelope=None, status="malformed_traceparent")
     version = match.group("version")
@@ -324,6 +344,10 @@ class RecordedSpan:
     status_code: str = "UNSET"
     status_description: str = ""
     ended: bool = False
+    trace_id: str = ""
+    span_id: str = ""
+    trace_flags: str = "01"
+    tracestate: str = ""
 
     def set_attribute(self, key: str, value: str | int | float | bool) -> None:
         self.attributes[key] = value
@@ -335,12 +359,25 @@ class RecordedSpan:
     def end(self) -> None:
         self.ended = True
 
+    def trace_context(self) -> TraceContextEnvelope | None:
+        if len(self.trace_id) == 32 and len(self.span_id) == 16:
+            return TraceContextEnvelope(
+                traceparent=f"00-{self.trace_id}-{self.span_id}-{self.trace_flags}",
+                trace_id=self.trace_id,
+                span_id=self.span_id,
+                trace_flags=self.trace_flags,
+                tracestate=self.tracestate,
+            )
+        return None
+
 
 class InMemoryTracer:
     """Deterministic in-memory tracer implementation for verification."""
 
     def __init__(self) -> None:
         self.spans: list[RecordedSpan] = []
+        self._trace_seq = 0
+        self._span_seq = 0
 
     def start_span(
         self,
@@ -349,10 +386,25 @@ class InMemoryTracer:
         parent_context: TraceContextEnvelope | None = None,
         attributes: dict[str, str | int | float | bool] | None = None,
     ) -> RecordedSpan:
+        self._span_seq += 1
+        span_id = f"{self._span_seq:016x}"
+        if parent_context is not None:
+            trace_id = parent_context.trace_id
+            trace_flags = parent_context.trace_flags
+            tracestate = parent_context.tracestate
+        else:
+            self._trace_seq += 1
+            trace_id = f"{self._trace_seq:032x}"
+            trace_flags = "01"
+            tracestate = ""
         span = RecordedSpan(
             name=name,
             parent_context=parent_context,
             attributes=dict(attributes or {}),
+            trace_id=trace_id,
+            span_id=span_id,
+            trace_flags=trace_flags,
+            tracestate=tracestate,
         )
         self.spans.append(span)
         return span
@@ -372,6 +424,181 @@ class _NoOpSpan:
 
 
 _NOOP_SPAN = _NoOpSpan()
+
+
+def _load_otel_trace_module() -> Any | None:
+    """Lazily import ``opentelemetry.trace`` without failing when absent."""
+    try:
+        from opentelemetry import trace as otel_trace
+    except Exception:
+        return None
+    return otel_trace
+
+
+def _parse_otel_tracestate(otel_trace: Any, raw_tracestate: str) -> Any:
+    trace_state_cls = getattr(otel_trace, "TraceState", None)
+    if trace_state_cls is None:
+        return None
+    if not raw_tracestate:
+        return trace_state_cls()
+    entries: list[tuple[str, str]] = []
+    for part in raw_tracestate.split(","):
+        item = part.strip()
+        if "=" in item:
+            key, val = item.split("=", 1)
+            if key and val:
+                entries.append((key, val))
+    try:
+        return trace_state_cls(entries)
+    except Exception:
+        return trace_state_cls()
+
+
+class _OpenTelemetrySpan:
+    """Adapter wrapping an ``opentelemetry.trace.Span`` for ``SpanProtocol``."""
+
+    def __init__(self, otel_span: Any, otel_trace: Any, *, tracestate: str = "") -> None:
+        self._span = otel_span
+        self._otel_trace = otel_trace
+        self._tracestate = tracestate
+
+    def set_attribute(self, key: str, value: str | int | float | bool) -> None:
+        self._span.set_attribute(key, value)
+
+    def set_status(self, status_code: str, description: str = "") -> None:
+        status_code_enum = getattr(self._otel_trace, "StatusCode", None)
+        status_cls = getattr(self._otel_trace, "Status", None)
+        if status_code_enum is None:
+            return
+        if status_code == "ERROR":
+            code = status_code_enum.ERROR
+            bounded = description[:MAX_BOUNDED_STRING_ATTR_LEN]
+            if status_cls is not None:
+                self._span.set_status(status_cls(code, bounded))
+            else:
+                self._span.set_status(code, bounded)
+        elif status_code == "OK":
+            code = status_code_enum.OK
+            if status_cls is not None:
+                self._span.set_status(status_cls(code))
+            else:
+                self._span.set_status(code)
+        else:
+            code = status_code_enum.UNSET
+            if status_cls is not None:
+                self._span.set_status(status_cls(code))
+            else:
+                self._span.set_status(code)
+
+    def end(self) -> None:
+        self._span.end()
+
+    def trace_context(self) -> TraceContextEnvelope | None:
+        try:
+            ctx = self._span.get_span_context()
+        except Exception:
+            return None
+        if ctx is None:
+            return None
+        trace_id_int = getattr(ctx, "trace_id", 0)
+        span_id_int = getattr(ctx, "span_id", 0)
+        if not trace_id_int or not span_id_int:
+            return None
+        trace_id = f"{trace_id_int:032x}"
+        span_id = f"{span_id_int:016x}"
+        raw_flags = int(getattr(ctx, "trace_flags", 0)) & 0xFF
+        flags = f"{raw_flags:02x}"
+        tracestate = self._tracestate
+        if not tracestate:
+            ctx_ts = getattr(ctx, "trace_state", None)
+            if ctx_ts is not None and hasattr(ctx_ts, "to_header"):
+                try:
+                    tracestate = str(ctx_ts.to_header() or "")
+                except Exception:
+                    tracestate = ""
+        return TraceContextEnvelope(
+            traceparent=f"00-{trace_id}-{span_id}-{flags}",
+            trace_id=trace_id,
+            span_id=span_id,
+            trace_flags=flags,
+            tracestate=tracestate,
+        )
+
+
+class OpenTelemetryTracer:
+    """Lazy-importing OpenTelemetry ``TracerProtocol`` adapter.
+
+    Degrades to a strict no-op when ``opentelemetry`` is not installed. Install
+    ``django-ray[otel]`` to configure an OpenTelemetry SDK ``TracerProvider``.
+    """
+
+    def __init__(
+        self,
+        *,
+        tracer_provider: Any | None = None,
+        instrumentation_name: str = "django_ray",
+        instrumentation_version: str | None = None,
+    ) -> None:
+        self._tracer_provider = tracer_provider
+        self._instrumentation_name = instrumentation_name
+        self._instrumentation_version = instrumentation_version
+
+    @property
+    def available(self) -> bool:
+        """Return whether ``opentelemetry.trace`` can be imported."""
+        return _load_otel_trace_module() is not None
+
+    def _resolve_tracer(self, otel_trace: Any) -> Any:
+        provider = self._tracer_provider if self._tracer_provider is not None else otel_trace
+        if self._instrumentation_version is None:
+            return provider.get_tracer(self._instrumentation_name)
+        return provider.get_tracer(
+            self._instrumentation_name,
+            self._instrumentation_version,
+        )
+
+    def start_span(
+        self,
+        name: str,
+        *,
+        parent_context: TraceContextEnvelope | None = None,
+        attributes: dict[str, str | int | float | bool] | None = None,
+    ) -> SpanProtocol:
+        otel_trace = _load_otel_trace_module()
+        if otel_trace is None:
+            return _NOOP_SPAN
+        tracer = self._resolve_tracer(otel_trace)
+        otel_ctx: Any = None
+        tracestate_str = ""
+        if parent_context is not None:
+            tracestate_str = parent_context.tracestate
+            trace_state = _parse_otel_tracestate(otel_trace, tracestate_str)
+            span_ctx = otel_trace.SpanContext(
+                trace_id=int(parent_context.trace_id, 16),
+                span_id=int(parent_context.span_id, 16),
+                is_remote=True,
+                trace_flags=otel_trace.TraceFlags(int(parent_context.trace_flags, 16)),
+                trace_state=trace_state,
+            )
+            otel_ctx = otel_trace.set_span_in_context(otel_trace.NonRecordingSpan(span_ctx))
+        otel_span = tracer.start_span(
+            name,
+            context=otel_ctx,
+            attributes=dict(attributes) if attributes else None,
+        )
+        return _OpenTelemetrySpan(otel_span, otel_trace, tracestate=tracestate_str)
+
+
+def _span_trace_context(span: SpanProtocol) -> TraceContextEnvelope | None:
+    getter = getattr(span, "trace_context", None)
+    if callable(getter):
+        try:
+            ctx = getter()
+            if isinstance(ctx, TraceContextEnvelope):
+                return ctx
+        except Exception:
+            return None
+    return None
 
 
 class TaskTracingCoordinator:
@@ -584,11 +811,13 @@ class TaskTracingCoordinator:
             },
         )
         child_spans: list[SpanProtocol] = []
-        parse_res = parse_trace_context(carrier)
+        child_parent_context = _span_trace_context(parent_span)
+        if child_parent_context is None and carrier is not None:
+            child_parent_context = parse_trace_context(carrier).envelope
         for node_id in sampled_ids:
             child_span = self._safe_start_span(
                 SPAN_WORKFLOW_NODE,
-                parent_context=parse_res.envelope,
+                parent_context=child_parent_context,
                 raw_attributes={
                     "django_ray.task.execution_pk": authority.task_execution_pk,
                     "django_ray.task.attempt_number": authority.attempt_number,
@@ -605,10 +834,227 @@ class TaskTracingCoordinator:
         return parent_span, child_spans
 
 
+_TASK_TRACING_COORDINATOR: TaskTracingCoordinator | None = None
+_CACHED_COORDINATOR_LOCK = threading.Lock()
+_CACHED_SETTINGS_COORDINATOR_KEY: tuple[float, int] | None = None
+_CACHED_SETTINGS_COORDINATOR: TaskTracingCoordinator | None = None
+_LIFECYCLE_TRACE_CARRIER_LOCK = threading.Lock()
+_LIFECYCLE_TRACE_CARRIERS: OrderedDict[int, dict[str, str]] = OrderedDict()
+_LIFECYCLE_TRACE_CARRIER_MAX_ENTRIES = 1024
+_ERROR_TERMINAL_STATES: frozenset[str] = frozenset({"FAILED", "LOST", "EXPIRED"})
+
+
+def clear_tracing_caches() -> None:
+    """Clear cached settings-resolved coordinator and lifecycle carrier links."""
+    global _CACHED_SETTINGS_COORDINATOR, _CACHED_SETTINGS_COORDINATOR_KEY
+    with _CACHED_COORDINATOR_LOCK:
+        _CACHED_SETTINGS_COORDINATOR = None
+        _CACHED_SETTINGS_COORDINATOR_KEY = None
+    with _LIFECYCLE_TRACE_CARRIER_LOCK:
+        _LIFECYCLE_TRACE_CARRIERS.clear()
+
+
+def configure_task_tracing(coordinator: TaskTracingCoordinator | None) -> None:
+    """Register or clear the process-wide coordinator used by ``emit_task_lifecycle_span``."""
+    global _TASK_TRACING_COORDINATOR, _CACHED_SETTINGS_COORDINATOR, _CACHED_SETTINGS_COORDINATOR_KEY
+    _TASK_TRACING_COORDINATOR = coordinator
+    with _CACHED_COORDINATOR_LOCK:
+        _CACHED_SETTINGS_COORDINATOR = None
+        _CACHED_SETTINGS_COORDINATOR_KEY = None
+
+
+def get_task_tracing_coordinator() -> TaskTracingCoordinator | None:
+    """Return the explicitly registered task tracing coordinator, if any."""
+    return _TASK_TRACING_COORDINATOR
+
+
+def _resolve_lifecycle_coordinator() -> TaskTracingCoordinator | None:
+    global _CACHED_SETTINGS_COORDINATOR, _CACHED_SETTINGS_COORDINATOR_KEY
+    if _TASK_TRACING_COORDINATOR is not None:
+        return _TASK_TRACING_COORDINATOR
+    django_conf = sys.modules.get("django.conf")
+    if django_conf is None:
+        return None
+    settings_obj = getattr(django_conf, "settings", None)
+    if settings_obj is None or not getattr(settings_obj, "configured", False):
+        return None
+    ray_settings = getattr(settings_obj, "DJANGO_RAY", None)
+    if not isinstance(ray_settings, Mapping) or ray_settings.get("TRACING_ENABLED") is not True:
+        return None
+    sample_rate = ray_settings.get("TRACING_SAMPLE_RATE", 1.0)
+    max_nodes = ray_settings.get("TRACING_MAX_WORKFLOW_NODE_SPANS", DEFAULT_MAX_WORKFLOW_NODE_SPANS)
+    config = TracingConfig(
+        enabled=True,
+        sample_rate=sample_rate,
+        max_workflow_node_spans_per_run=max_nodes,
+    ).validated()
+    cache_key = (config.sample_rate, config.max_workflow_node_spans_per_run)
+    with _CACHED_COORDINATOR_LOCK:
+        if (
+            _CACHED_SETTINGS_COORDINATOR is not None
+            and _CACHED_SETTINGS_COORDINATOR_KEY == cache_key
+        ):
+            return _CACHED_SETTINGS_COORDINATOR
+        coordinator = TaskTracingCoordinator(config, tracer=OpenTelemetryTracer())
+        _CACHED_SETTINGS_COORDINATOR = coordinator
+        _CACHED_SETTINGS_COORDINATOR_KEY = cache_key
+        return coordinator
+
+
+def _extract_active_otel_carrier() -> dict[str, str] | None:
+    """Extract a W3C traceparent carrier from the active OTel span if loaded."""
+    otel_trace = sys.modules.get("opentelemetry.trace")
+    if otel_trace is None:
+        return None
+    get_current_span = getattr(otel_trace, "get_current_span", None)
+    if not callable(get_current_span):
+        return None
+    try:
+        current = get_current_span()
+        ctx = current.get_span_context() if current is not None else None
+        if ctx is None or not getattr(ctx, "is_valid", False):
+            return None
+        trace_id = int(ctx.trace_id)
+        span_id = int(ctx.span_id)
+        if trace_id <= 0 or span_id <= 0:
+            return None
+        flags = int(getattr(ctx, "trace_flags", 1)) & 0xFF
+        return {"traceparent": f"00-{trace_id:032x}-{span_id:016x}-{flags:02x}"}
+    except Exception:
+        return None
+
+
+def _remember_lifecycle_carrier(execution_pk: int, carrier: dict[str, str]) -> None:
+    with _LIFECYCLE_TRACE_CARRIER_LOCK:
+        _LIFECYCLE_TRACE_CARRIERS[execution_pk] = dict(carrier)
+        _LIFECYCLE_TRACE_CARRIERS.move_to_end(execution_pk)
+        while len(_LIFECYCLE_TRACE_CARRIERS) > _LIFECYCLE_TRACE_CARRIER_MAX_ENTRIES:
+            _LIFECYCLE_TRACE_CARRIERS.popitem(last=False)
+
+
+def _lookup_lifecycle_carrier(execution_pk: int) -> dict[str, str] | None:
+    with _LIFECYCLE_TRACE_CARRIER_LOCK:
+        stored = _LIFECYCLE_TRACE_CARRIERS.get(execution_pk)
+        if stored is not None:
+            _LIFECYCLE_TRACE_CARRIERS.move_to_end(execution_pk)
+            return dict(stored)
+        return None
+
+
+def _forget_lifecycle_carrier(execution_pk: int) -> None:
+    with _LIFECYCLE_TRACE_CARRIER_LOCK:
+        _LIFECYCLE_TRACE_CARRIERS.pop(execution_pk, None)
+
+
+def emit_task_lifecycle_span(
+    event: LifecycleTraceEvent,
+    execution: Any,
+) -> None:
+    """Emit one bounded, exception-isolated task lifecycle span if tracing is enabled.
+
+    Designed for opt-in runtime wiring at task enqueue, start, and terminal
+    boundaries. Always degrades to a strict no-op when tracing is disabled, when
+    ``opentelemetry`` is uninstalled, or if extraction or export raises.
+    """
+    try:
+        span_name = LIFECYCLE_EVENT_SPAN_NAMES.get(event)
+        if span_name is None or execution is None:
+            return
+        coordinator = _resolve_lifecycle_coordinator()
+        if coordinator is None or not coordinator.config.enabled:
+            return
+
+        raw_pk = getattr(execution, "pk", None)
+        if raw_pk is None:
+            raw_pk = getattr(execution, "id", None)
+        if type(raw_pk) is not int or raw_pk <= 0:
+            return
+
+        raw_attempt = getattr(execution, "attempt_number", 1)
+        attempt_number = raw_attempt if type(raw_attempt) is int and raw_attempt > 0 else 1
+        raw_generation = getattr(execution, "execution_generation", 0)
+        execution_generation = (
+            raw_generation if type(raw_generation) is int and raw_generation >= 0 else 0
+        )
+        authority = AttemptAuthorityToken(
+            task_execution_pk=raw_pk,
+            attempt_number=attempt_number,
+            execution_generation=execution_generation,
+        )
+
+        raw_task_id = getattr(execution, "task_id", None)
+        task_id = str(raw_task_id) if raw_task_id is not None else None
+        raw_queue = getattr(execution, "queue_name", None)
+        queue_name = raw_queue if isinstance(raw_queue, str) else None
+        raw_state = getattr(execution, "state", None)
+        state = str(raw_state) if raw_state is not None else None
+        raw_runner_mode = getattr(execution, "runner_mode", None)
+        runner_mode = str(raw_runner_mode) if raw_runner_mode is not None else None
+
+        raw_carrier = getattr(execution, "trace_context", None)
+        carrier: dict[str, str] | None = (
+            dict(raw_carrier) if isinstance(raw_carrier, Mapping) else None
+        )
+        if carrier is None:
+            if event in ("started", "finished"):
+                carrier = _lookup_lifecycle_carrier(raw_pk)
+            if carrier is None:
+                carrier = _extract_active_otel_carrier()
+
+        extra_attrs: dict[str, Any] = {}
+        if event == "finished":
+            extra_attrs["django_ray.attempt.authoritative"] = True
+            raw_cancel = getattr(execution, "cancellation_status", None)
+            if isinstance(raw_cancel, str) and raw_cancel:
+                extra_attrs["django_ray.task.cancellation_status"] = raw_cancel
+
+        span = coordinator.trace_lifecycle_stage(
+            span_name,
+            authority=authority,
+            carrier=carrier,
+            task_id=task_id,
+            queue_name=queue_name,
+            state=state,
+            runner_mode=runner_mode,
+            extra_attributes=extra_attrs or None,
+        )
+        if event == "enqueued":
+            emitted_ctx = _span_trace_context(span)
+            if emitted_ctx is not None:
+                _remember_lifecycle_carrier(raw_pk, emitted_ctx.to_carrier())
+        elif event == "started":
+            if _lookup_lifecycle_carrier(raw_pk) is None:
+                emitted_ctx = _span_trace_context(span)
+                if emitted_ctx is not None:
+                    _remember_lifecycle_carrier(raw_pk, emitted_ctx.to_carrier())
+        elif event == "finished":
+            _forget_lifecycle_carrier(raw_pk)
+        if event == "finished" and state in _ERROR_TERMINAL_STATES:
+            error_type = getattr(execution, "error_type", None)
+            error_label = (
+                error_type[:MAX_BOUNDED_STRING_ATTR_LEN]
+                if isinstance(error_type, str) and error_type
+                else state
+            )
+            if span is not _NOOP_SPAN:
+                try:
+                    span.set_attribute("django_ray.error.type", error_label)
+                    span.set_status("ERROR", error_label)
+                    span.end()
+                    coordinator.diagnostics.spans_ended += 1
+                except Exception:
+                    coordinator.diagnostics.exporter_error_count += 1
+            return
+        coordinator.safe_end_span(span, status_code="OK")
+    except Exception:
+        return
+
+
 __all__ = [
     "ALLOWED_ATTRIBUTE_KEYS",
     "ALLOWED_SPAN_NAMES",
     "DEFAULT_MAX_WORKFLOW_NODE_SPANS",
+    "LIFECYCLE_EVENT_SPAN_NAMES",
     "MAX_WORKFLOW_NODE_SPANS_CEILING",
     "SPAN_TASK_CLAIM",
     "SPAN_TASK_ENQUEUE",
@@ -620,6 +1066,8 @@ __all__ = [
     "SPAN_WORKFLOW_NODE",
     "AttemptAuthorityToken",
     "InMemoryTracer",
+    "LifecycleTraceEvent",
+    "OpenTelemetryTracer",
     "RecordedSpan",
     "SpanProtocol",
     "TaskTracingCoordinator",
@@ -628,6 +1076,10 @@ __all__ = [
     "TraceContextParseResult",
     "TracerProtocol",
     "TracingConfig",
+    "clear_tracing_caches",
+    "configure_task_tracing",
+    "emit_task_lifecycle_span",
+    "get_task_tracing_coordinator",
     "parse_trace_context",
     "sanitize_span_attributes",
 ]

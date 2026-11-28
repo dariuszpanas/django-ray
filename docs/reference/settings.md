@@ -12,7 +12,7 @@ All settings are configured under the `DJANGO_RAY` dictionary in your Django set
 
 ```python
 DJANGO_RAY = {
-    "RAY_ADDRESS": "ray://localhost:10001",
+    "RAY_ADDRESS": "auto",
     "DEFAULT_CONCURRENCY": 10,
     # ... other settings
 }
@@ -35,12 +35,12 @@ Validation is skipped only when:
 ### RAY_ADDRESS
 
 - **Type**: `str | None`
-- **Default**: `None`
-- **Required**: Yes at runtime unless startup validation is explicitly skipped
+- **Default**: `"auto"`
+- **Required**: Validated lazily when connecting to Ray (not required for `--sync`)
 
-Ray cluster address. Use `"auto"` for local development or `"ray://host:port"` for an explicit
-cluster address. Sync mode does not submit work to Ray, but application startup validation still
-requires this setting unless `DJANGO_RAY_SKIP_VALIDATION` is used for a maintenance/bootstrap flow.
+Ray cluster address. Defaults to `"auto"` for local Ray discovery, or set an explicit
+cluster or Ray Jobs HTTP(S) address. Sync mode does not submit work to Ray and no longer
+requires a Ray address during Django startup.
 
 ```python
 # Local Ray (auto-detect)
@@ -285,6 +285,57 @@ placement constraints. An environment revision does not cover scheduling.
 }
 ```
 
+### ALLOWED_RAY_ADDRESSES
+
+- **Type**: `list[str] | tuple[str, ...] | None`
+- **Default**: `None`
+
+Optional explicit allowlist of trusted Ray cluster or Jobs HTTP(S) addresses permitted
+for remote Ray Job submissions and live dashboard/log queries. When `None`, the active
+`RAY_ADDRESS` and task-backend alias addresses remain permitted. Configure an explicit
+allowlist in multi-cluster or restricted environments to pin allowed remote targets:
+
+```python
+"ALLOWED_RAY_ADDRESSES": [
+    "http://ray-head-svc:8265",
+]
+```
+
+### ALLOWED_CALLABLE_MODULES
+
+- **Type**: `list[str] | tuple[str, ...] | None`
+- **Default**: `None`
+
+Optional sequence of dotted Python module prefixes allowed when resolving task or
+workflow callables (for example, `["myproject.workflows", "myorg.shared_tasks"]`).
+When `None`, django-ray derives allowed module prefixes from your project's installed
+applications in `INSTALLED_APPS`. Configure explicit prefixes when task or workflow
+callables live outside `INSTALLED_APPS`:
+
+```python
+"ALLOWED_CALLABLE_MODULES": [
+    "myproject.tasks",
+    "myproject.workflows",
+]
+```
+
+### REQUIRE_STRICT_NESTED_REQUEST
+
+- **Type**: `bool`
+- **Default**: `False`
+
+Forces strict versioned nested-execution request verification for distributed workflow and
+`distributed_map` leaf invocations even when no Ray Job strict-request configuration
+(`RAY_JOB_CONFIG_JSON_ENV_VAR`) or `DJANGO_RAY_REQUIRE_STRICT_NESTED_REQUEST` environment
+override is present. When `False`, strict verification is still enforced automatically
+inside durable task execution contexts, under strict Ray Job configurations, or when
+`DJANGO_RAY_ALLOW_LEGACY_NESTED_CALLABLES` is explicitly disabled (`0`, `false`, `no`,
+`off`).
+
+```python
+"REQUIRE_STRICT_NESTED_REQUEST": True
+```
+
 ## Concurrency
 
 ### DEFAULT_CONCURRENCY
@@ -311,18 +362,31 @@ Base claim-query interval. Activity resets adaptive backoff to this value.
 ### WORKER_POLL_MAX_INTERVAL_SECONDS
 
 - **Type**: `int | float` (booleans are rejected)
-- **Default**: `0.1`
+- **Default**: `1.0`
 - **Allowed**: `0.01` to `60`, and greater than or equal to the base interval
 
 Maximum delay between claim queries after consecutive empty polls. Bounded jitter can
 shorten a particular delay but never extends it beyond this maximum. This setting does
 not change Ray completion polling, heartbeat, reconciliation, timeout, or cancellation
-schedules. The default equals the base interval, so increasing it is an explicit
-idle-backoff tuning choice.
+schedules. Adaptive idle backoff is enabled by default (`0.1s` up to `1.0s`).
 
 ```python
 "WORKER_POLL_INTERVAL_SECONDS": 0.1,
-"WORKER_POLL_MAX_INTERVAL_SECONDS": 0.5,
+"WORKER_POLL_MAX_INTERVAL_SECONDS": 1.0,
+```
+
+### WORKER_CANCELLATION_INTERVAL_SECONDS
+
+- **Type**: `int | float` (booleans are rejected)
+- **Default**: `5.0`
+- **Allowed**: `0.1` to `300`
+
+Minimum interval in seconds between worker cancellation-sweep passes that pick up
+`CANCELLING` executions for best-effort backend interruption. Lower values shorten
+cancellation response latency; higher values reduce periodic database polling overhead.
+
+```python
+"WORKER_CANCELLATION_INTERVAL_SECONDS": 5.0
 ```
 
 ## Runner Selection
@@ -330,17 +394,17 @@ idle-backoff tuning choice.
 ### RUNNER
 
 - **Type**: `str`
-- **Default**: `"ray_job"`
-- **Allowed**: `"ray_job"`, `"ray_core"`
+- **Default**: `"ray_core"`
+- **Allowed**: `"ray_core"`, `"ray_job"`
 
 Default runner selection when no execution mode CLI flag is provided:
 
-- `ray_job`: use Ray Job Submission API mode.
-- `ray_core`: use Ray Core mode:
+- `ray_core`: use Ray Core mode (default):
   - if `RAY_ADDRESS == "auto"` -> local mode
   - otherwise -> cluster mode using `RAY_ADDRESS`
+- `ray_job`: use Ray Job Submission API mode.
 
-CLI flags (`--sync`, `--local`, `--cluster`) always take precedence.
+CLI flags (`--sync`, `--local`, `--cluster=ADDRESS`, `--ray-job`) always take precedence.
 
 ## Retry Policy
 
@@ -370,13 +434,31 @@ Base delay in seconds between retry attempts. Uses exponential backoff:
 "RETRY_BACKOFF_SECONDS": 120  # 2 minutes base delay
 ```
 
+### RETRY_BACKOFF_JITTER_RATIO
+
+- **Type**: `int | float` (booleans are rejected)
+- **Default**: `0.1`
+- **Allowed**: `0.0` to `1.0`
+
+Bounded random downward jitter ratio applied to exponential retry delays to prevent
+synchronized retry storms. At `0.0`, retry delays are deterministic; at the default
+`0.1`, delays are sampled uniformly from `[(1 - ratio) * backoff, backoff]` (`-10%` to
+`0%`; for example, `0.25` samples within `[-25%, 0%]`, never exceeding the computed
+exponential backoff).
+
+```python
+"RETRY_BACKOFF_JITTER_RATIO": 0.25
+```
+
 ### RETRY_EXCEPTION_DENYLIST
 
 - **Type**: `list[str]`
 - **Default**: `[]`
 
-List of exception class names that should not be retried. Supports short names
-and fully qualified names.
+List of exception class names that should not be retried. Fully qualified dotted entries
+(for example, `myapp.exceptions.PermanentError`) use exact module-and-name matching as
+well as subclass matching when the exception class is importable; short names (for
+example, `ValueError`) match by class name and subclasses.
 
 ```python
 "RETRY_EXCEPTION_DENYLIST": [
@@ -834,7 +916,8 @@ Backend used when result payload exceeds `MAX_RESULT_SIZE_BYTES`.
 
 `RayTaskBackend.get_result()` can rehydrate oversized results from `filesystem`, `s3`,
 and `gcs` references when the reading process has matching storage configuration and
-credentials. `digest` references remain retrieval metadata only.
+credentials. `digest` references remain retrieval metadata only: accessing
+`TaskResult.return_value` raises `ResultUnavailableError` instead of returning `None`.
 
 Install extras:
 
@@ -982,9 +1065,69 @@ the database channel and is not printed to Ray stdout. Redaction does not encryp
 task data or protect direct application `print()` calls; secure the database,
 result backend, admin, API, and Ray dashboard separately.
 
+## Observability & Tracing
+
+### METRICS_CACHE_TTL_SECONDS
+
+- **Type**: `int | float` (booleans are rejected)
+- **Default**: `5.0`
+- **Allowed**: `0.0` to `300.0` (`0.0` disables caching)
+
+Time-to-live in seconds for the in-process snapshot cache used by
+`django_ray.metrics.render_prometheus_metrics()`. Caching avoids repeating aggregate
+database queries when Prometheus scrapes at short intervals. Set to `0.0` to bypass
+caching (for example, in deterministic unit tests).
+
+```python
+"METRICS_CACHE_TTL_SECONDS": 5.0
+```
+
+### TRACING_ENABLED
+
+- **Type**: `bool`
+- **Default**: `False`
+
+Opt-in switch enabling `django_ray.tracing.emit_task_lifecycle_span()` at task enqueue,
+execution start, and terminal persistence boundaries. Install `django-ray[otel]` (or
+register a custom `TracerProtocol` via `configure_task_tracing()`) and configure an
+OpenTelemetry `TracerProvider` to export spans. See
+[Observability — Tracing](../observability.md#tracing-helpers-and-integration-boundary).
+
+```python
+"TRACING_ENABLED": True
+```
+
+### TRACING_SAMPLE_RATE
+
+- **Type**: `int | float` (booleans are rejected)
+- **Default**: `1.0`
+- **Allowed**: `0.0` to `1.0`
+
+Sampling ratio applied by `TaskTracingCoordinator` when `TRACING_ENABLED` is `True`.
+`1.0` records every eligible task lifecycle span; `0.0` drops all spans.
+
+```python
+"TRACING_SAMPLE_RATE": 0.25
+```
+
+### TRACING_MAX_WORKFLOW_NODE_SPANS
+
+- **Type**: `int` (booleans are rejected)
+- **Default**: `100`
+- **Allowed**: `0` to `256`
+
+Maximum number of child workflow node spans emitted per `trace_workflow_execution()`
+call. Bounds trace cardinality on large workflow fan-outs while preserving outer
+workflow spans.
+
+```python
+"TRACING_MAX_WORKFLOW_NODE_SPANS": 100
+```
+
 ## Django Settings
 
-These settings are configured directly in Django settings, not in `DJANGO_RAY`:
+These settings are configured directly in Django settings, not in `DJANGO_RAY`
+(`RAY_DASHBOARD_URL` also falls back to `DJANGO_RAY["RAY_DASHBOARD_URL"]` if set there):
 
 ### RAY_DASHBOARD_URL
 
@@ -1012,34 +1155,57 @@ Upgrading from 0.5.0: the implicit localhost fallback has been removed. Set this
 value explicitly to retain local links; the bundled sample already supplies it.
 See [Kubernetes dashboard access](../deployment/kubernetes.md#ray-dashboard-links-from-django-admin).
 
-In the sample Kubernetes manifests this is set explicitly via environment/config:
+In the sample Kubernetes evaluation manifests every Service is `ClusterIP`, accessed through
+explicit loopback port-forwards:
 
-- base NodePort manifests: `http://localhost:30265`
-- Kong local overlay: `http://ray.localhost:30080`
+- `make k8s-forward-ray` (sample helper): `http://localhost:30265`
+- manual `kubectl port-forward service/<ray-head-service> 8265:8265`: `http://localhost:8265`
 
 ```python
 # settings.py
-RAY_DASHBOARD_URL = "http://ray-dashboard.example.com:8265"
+RAY_DASHBOARD_URL = "https://ray-dashboard.example.com"
 ```
 
 ## Example Configurations
 
+All examples below use the package default `RUNNER="ray_core"` unless `RUNNER="ray_job"` is
+explicitly configured.
+
 ### Minimal (Development)
 
 ```python
+# Works with --local, --sync, or bare django_ray_worker (defaults: RAY_ADDRESS="auto", RUNNER="ray_core")
 DJANGO_RAY = {
     "RAY_ADDRESS": "auto",
 }
 ```
 
-### Standard (Production)
+### Isolated Ray Job + S3 External Storage
+
+```python
+DJANGO_RAY = {
+    "RAY_ADDRESS": "http://ray-head-svc:8265",
+    "RUNNER": "ray_job",
+    "DEFAULT_CONCURRENCY": 20,
+    "INPUT_STORAGE_BACKEND": "s3",
+    "INPUT_STORAGE_S3_BUCKET": "my-django-ray-artifacts",
+    "INPUT_STORAGE_S3_PREFIX": "prod/inputs",
+    "RESULT_STORAGE_BACKEND": "s3",
+    "RESULT_STORAGE_S3_BUCKET": "my-django-ray-artifacts",
+    "RESULT_STORAGE_S3_PREFIX": "prod/results",
+}
+```
+
+### Standard Cluster Ray Core
 
 ```python
 DJANGO_RAY = {
     "RAY_ADDRESS": "ray://ray-head-svc:10001",
+    "RUNNER": "ray_core",
     "DEFAULT_CONCURRENCY": 50,
     "MAX_TASK_ATTEMPTS": 3,
     "RETRY_BACKOFF_SECONDS": 60,
+    "RETRY_BACKOFF_JITTER_RATIO": 0.1,
     "QUEUE_TIMEOUT_SECONDS": 86400,
     "STUCK_TASK_TIMEOUT_SECONDS": 300,
     "WORKER_LEASE_SECONDS": 60,
