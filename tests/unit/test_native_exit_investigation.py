@@ -489,12 +489,21 @@ def test_real_ray_stress_command_and_environment_mirror_ci(tmp_path):
     assert cmd[7:10] == files
     assert cmd[-3:] == ["-m", "real_ray and not live_cluster", "-v"]
 
-    env_shared = investigation.real_ray_stress_environment(tmp_path / "ray", shared_local_ray=True)
+    venv_python = str(tmp_path / ".venv" / "bin" / "python")
+    env_shared = investigation.real_ray_stress_environment(
+        tmp_path / "ray",
+        python_executable=venv_python,
+        shared_local_ray=True,
+    )
     assert env_shared["DJANGO_RAY_SHARED_LOCAL_RAY"] == "1"
     assert env_shared["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] == "0"
     assert env_shared["RAY_TMPDIR"] == str(tmp_path / "ray")
+    assert env_shared["PATH"].split(os.pathsep)[0] == str(tmp_path / ".venv" / "bin")
+    assert env_shared["VIRTUAL_ENV"] == str(tmp_path / ".venv")
     env_isolated = investigation.real_ray_stress_environment(
-        tmp_path / "ray", shared_local_ray=False
+        tmp_path / "ray",
+        python_executable=venv_python,
+        shared_local_ray=False,
     )
     assert "DJANGO_RAY_SHARED_LOCAL_RAY" not in env_isolated
 
